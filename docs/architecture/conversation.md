@@ -1,0 +1,145 @@
+# 对话持久化（store-protocol-decoupling 重写）
+
+> §1.3 —— `MessageWriter` + `ThreadDirectory` + `IndexHook` 三协议分离；默认 JSONL 主存 + stdlib SQLite 索引 + Noop 事件钩子。
+
+## 设计目标
+
+- **JSONL 主存 = source-of-truth**（R5 强制）：append-only，进程崩溃后可 resume
+- **索引可重建（derived）**：SQLite 丢失 / 损坏 / schema 升级均能从 JSONL 自愈
+- **业务可正交替换**：换索引（Redis / PG）不影响主存；接事件订阅（审计 / ES）不影响索引
+- **零配置开箱即用**（避免库变 framework）：传 `storage_dir` 一个参数即拿到完整能力
+- **不引第三方 DB 依赖**（R1 强制）：src 内仅允许 stdlib `sqlite3`
+
+## 三协议总览
+
+```
+                  ┌─────────────────────────────────────────┐
+                  │            EnginePool / Engine          │
+                  └─────────────────────────────────────────┘
+                       │              │              │
+              ┌────────▼─────┐  ┌─────▼──────┐  ┌────▼──────┐
+              │ MessageWriter│  │ThreadDirectory│ │ IndexHook │
+              │ (主存写读)   │  │  (元数据)    │  │ (事件订阅)│
+              └────────┬─────┘  └─────┬──────┘  └────┬──────┘
+                       │              │              │
+              ┌────────▼─────┐  ┌─────▼──────────┐ ┌▼──────────┐
+              │JsonlMessage  │  │SqliteThread    │ │NoopIndex  │
+              │Writer (默认) │  │Directory (默认)│ │Hook (默认)│
+              └──────────────┘  └────────────────┘ └───────────┘
+                                          ↑              ↑
+                                          │              │
+                                可替换：业务侧实现协议即注入
+                                Redis / PG / ES / Audit / Kafka
+```
+
+## 数据布局
+
+```
+<storage_dir>/
+├── threads/
+│   ├── thr_abc123...jsonl          # 一个 thread 一个 JSONL 文件（flat 布局）
+│   │   ├── 首行 {"__meta__": true, thread_id, created_at, ...}
+│   │   ├── {"kind": "user_message", ...}
+│   │   ├── {"kind": "assistant_message", ...}
+│   │   └── ...
+│   └── thr_def456...jsonl
+└── taifeng-index.db                # SQLite 索引（derived，可重建）
+```
+
+**主存**：每行单 ResponseItem 的 JSON 序列化 + 单次 `write()`（POSIX 4KB 原子）。
+**索引**：`thread` 表存 ThreadMetadata 行；`schema_meta` 表存版本号；WAL + `synchronous=NORMAL`。
+
+## MessageWriter 协议
+
+```python
+class MessageWriter(Protocol):
+    async def create_thread(*, entry_skill_id, source="user", tags=(), extra=None) -> str: ...
+    async def append(thread_id, items: list[ResponseItem]) -> None: ...
+    async def load_history(thread_id) -> list[ResponseItem]: ...
+```
+
+默认 `JsonlMessageWriter`：
+
+- 首行写 `__meta__` 行让 thread 自包含元数据（`rebuild_index` 复原源头）
+- append 不加跨进程锁，依赖 POSIX 4KB 原子保证；并发不撕裂
+- load_history 跳过首行 metadata + 跳过损坏行（发 `transcript_skipped_corrupt_line` 事件）
+
+## ThreadDirectory 协议
+
+```python
+class ThreadDirectory(Protocol):
+    async def list_threads(*, limit=50, cursor=None, filter=None) -> ThreadPage: ...
+    async def get_metadata(thread_id) -> ThreadMetadata | None: ...
+    async def update_metadata(thread_id, patch) -> None: ...
+    async def upsert_metadata(meta) -> None: ...
+```
+
+默认 `SqliteThreadDirectory`（src 内**唯一** `import sqlite3`）：
+
+- 启动期 `schema_meta` 版本不匹配 → drop 所有表 + 调 `rebuild_index` + 发 `sqlite_schema_rebuilt`
+- 启动期 `PRAGMA integrity_check` 损坏 → rename 备份 + 重建 + 发 `sqlite_db_corrupt_rebuilt`
+- 所有 async 方法通过 `anyio.to_thread.run_sync` 派发，不阻塞 event loop
+- 单 connection + `anyio.Lock` 串行化所有调用
+- 复合 cursor `(updated_at, thread_id)` base64 编码；损坏 → 重置 + `directory_cursor_reset` 事件
+- list_threads 时 `<threads_dir>/<thread_id>.jsonl` 不存在 → 跳过 + `thread_indexed_orphan` 事件
+
+可替换实现：
+
+- `NullThreadDirectory` —— 嵌入式场景显式关索引
+- `RedisThreadDirectory` —— `examples/persistence/redis_thread_directory.py` 骨架
+- `PostgresThreadDirectory` —— `examples/persistence/postgres_thread_directory.py` 骨架
+
+## IndexHook 协议
+
+```python
+class IndexHook(Protocol):
+    async def on_thread_created(meta) -> None: ...
+    async def on_message_appended(thread_id, items) -> None: ...
+    async def on_metadata_updated(thread_id, patch) -> None: ...
+```
+
+调用模型：
+
+- 主路径写完成 → spawn background task 调 hook，不阻塞 turn
+- hook 抛异常 → 发 `index_hook_failed`（含 method / thread_id / cause），主路径不受影响
+- engine.shutdown → await pending hooks 最多 5s grace → 超时 cancel + 发 `index_hook_abandoned`
+- 构造期 Protocol 校验：缺方法 → raise `TypeError`
+
+业务用途：审计日志 / metrics / 异步投递 ES / Kafka。**与 ThreadDirectory 正交**：业务可同时换索引 + 加事件钩子。
+
+## rebuild_index 工具
+
+```python
+report = await rebuild_index(writer, directory, *, dry_run=False, sink=None)
+# RebuildReport(scanned_count, indexed_count, orphan_count, error_count, elapsed_ms)
+```
+
+> `orphan_count` 在 rebuild 路径恒为 0 —— rebuild 以 JSONL 为源逐文件重建，不存在"索引有、文件无"的孤儿；
+> 孤儿检测发生在 `SqliteThreadDirectory.list_threads`（JSONL 缺失时跳过 + 发 `thread_indexed_orphan`），不在此。
+
+用途：
+
+- SqliteThreadDirectory schema 升级内部调（自动从 JSONL 重建索引）
+- 业务侧 Redis / PG 索引丢失后从 JSONL 恢复
+- 数据迁移：换 ThreadDirectory 实现时初次填充
+
+损坏首行 → 计入 error_count + 发 `rebuild_skipped_corrupt`。
+
+## 何时换什么
+
+| 业务需求 | 实现什么 | 估计 LOC |
+| --- | --- | --- |
+| 单机 / 中小规模 | 用默认 | 0 |
+| 加速 list / 多机共享元数据 | `ThreadDirectory` (Redis/PG) | ~30-80 |
+| 审计 / 投递 ES / Kafka / 异步 metric | `IndexHook` | ~10-50 |
+| 主存必须落 PG / 合规要求 | `MessageWriter` + `ThreadDirectory` | ~150-300 |
+
+## 关键决策与备选方案
+
+详见 ADR `docs/decisions/0008-store-protocol-decoupling.md`。
+
+## 红线影响
+
+- **R1 业务零侵入**：放宽允许 `import sqlite3`，限定唯一文件；继续禁第三方 DB 客户端
+- **R3 可观测**：新增 8 个 EventMsg variants（`transcript_skipped_corrupt_line / sqlite_schema_rebuilt / sqlite_db_corrupt_rebuilt / thread_indexed_orphan / directory_cursor_reset / index_hook_failed / index_hook_abandoned / rebuild_skipped_corrupt`）
+- **R5 可 resume**：JSONL 永远是 source-of-truth；任意 directory 实现丢失数据均能从 JSONL 恢复

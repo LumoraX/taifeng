@@ -1,0 +1,28 @@
+Taifeng (泰逢)
+Copyright 2026 Taifeng Contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+------------------------------------------------------------------------------
+Design-paradigm attribution
+------------------------------------------------------------------------------
+
+Taifeng is an independent, from-scratch Python implementation. It does NOT copy
+source code from any other project. Its design paradigms (cache-aware
+compaction, the Submission/EventMsg dual-bus actor loop, skill-as-context,
+RwLock parallel/exclusive tool dispatch, parent/child cancellation tokens) were
+informed by studying the following open-source projects. We gratefully credit
+them as conceptual references only:
+
+  - codex            (Rust, Apache-2.0)  — cache-aware compaction & handoff,
+                                            ModelClient session/turn split
+  - claw-code         (Rust, MIT)         — tool pairing-boundary protection,
+                                            hooks, permission model
+  - openclaw          (TypeScript, MIT)   — actor + session patterns,
+                                            context-engine
+  - hermes-agent      (Python, MIT)       — compaction quality auditing,
+                                            memory-provider protocol shape
+
+These projects are the property of their respective owners. Their names are
+used only to describe the origin of design ideas and do not imply endorsement.
+No code from these projects is included in Taifeng.

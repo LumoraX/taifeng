@@ -1,0 +1,1269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Taifeng Web UI Demo</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --accent: #2f81f7;
+    --user: #1f6feb;
+    --asst: #238636;
+    --tool-in: #d29922;
+    --tool-out: #db6d28;
+    --skill: #8957e5;
+    --evt-bg: #0d1117;
+    --danger: #f85149;
+    --warn: #d29922;
+    --ok: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100vh; margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+                 "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    /* 整页用 flex column 自适应：header / policy-bar / policy-detail / main
+       各自吃一部分；main 是唯一 flex:1 的 item，吃剩余空间 + min-height:0
+       确保内部 chat-log / events-list 的 overflow-y:auto 真的生效，
+       而不是被内容撑破整页。 */
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+    /* 高度由内容决定，不参与 flex 分配；窄屏时 wrap 而不是硬挤 */
+    flex: 0 0 auto; flex-wrap: wrap; row-gap: 6px;
+  }
+  header h1 {
+    margin: 0; font-size: 14px; font-weight: 600;
+  }
+  header .badge {
+    color: var(--dim); font-size: 11px;
+    background: var(--panel); padding: 2px 8px; border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  header .sess { color: var(--dim); }
+  header .sess input,
+  header .sess select {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 3px 6px; border-radius: 4px; width: 220px; font-family: inherit;
+    font-size: 12px;
+  }
+  header .sess select { cursor: pointer; }
+  header button.ghost {
+    background: transparent; border: 1px solid var(--border); color: var(--dim);
+    border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px;
+    font-family: inherit;
+  }
+  header button.ghost:hover { color: var(--text); border-color: var(--accent); }
+  header .demo-desc {
+    color: var(--dim); font-size: 11px; max-width: 360px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  header .conn { font-size: 11px; }
+  header .conn.ok { color: var(--ok); }
+  header .conn.bad { color: var(--danger); }
+
+  /* 权限策略 bar —— 切换 demo 时刷新；折叠看徽章，展开看完整规则 */
+  #policy-bar {
+    padding: 6px 16px; border-bottom: 1px solid var(--border);
+    background: #0b1019;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    font-size: 11px;
+    flex: 0 0 auto;   /* 不参与 flex 分配 */
+  }
+  #policy-bar .label {
+    color: var(--dim); font-weight: 600; letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  #policy-bar .chip {
+    padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--panel); display: inline-flex; gap: 4px; align-items: center;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  /* 三态颜色：allow=绿、deny=红、ask=黄、hitl-off=灰 */
+  #policy-bar .chip.allow { border-color: var(--ok);     color: var(--ok); }
+  #policy-bar .chip.deny  { border-color: var(--danger); color: var(--danger); }
+  #policy-bar .chip.ask   { border-color: var(--warn);   color: var(--warn); }
+  #policy-bar .chip.dim   { color: var(--dim); }
+  #policy-bar .toggle {
+    margin-left: auto; cursor: pointer; color: var(--dim);
+    background: transparent; border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 8px; font-family: inherit; font-size: 11px;
+  }
+  #policy-bar .toggle:hover { color: var(--text); border-color: var(--accent); }
+
+  #policy-detail {
+    display: none; padding: 8px 16px 12px; border-bottom: 1px solid var(--border);
+    background: #0b1019;
+    flex: 0 0 auto;
+    /* 展开内容多时自带滚动，但限高 30vh 避免吃掉聊天区 */
+    max-height: 30vh; overflow-y: auto;
+  }
+  #policy-detail.open { display: block; }
+  #policy-detail .group {
+    margin-top: 4px; display: flex; gap: 6px; align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  #policy-detail .group-label {
+    min-width: 64px; color: var(--dim); font-size: 11px; padding-top: 2px;
+    font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;
+  }
+  #policy-detail .rule {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px; padding: 2px 8px; border-radius: 4px;
+    border: 1px solid var(--border); background: var(--panel);
+  }
+  #policy-detail .rule.allow { border-left: 3px solid var(--ok); }
+  #policy-detail .rule.deny  { border-left: 3px solid var(--danger); }
+  #policy-detail .rule.ask   { border-left: 3px solid var(--warn); }
+  #policy-detail .empty { color: var(--dim); font-style: italic; font-size: 11px; }
+  #policy-detail .desc {
+    color: var(--dim); font-size: 11px; margin-bottom: 6px;
+    font-style: italic;
+  }
+
+  /* loop 状态胶丸 —— 实时显示 LLM 循环进度 */
+  #loop-pill {
+    margin-left: auto; font-size: 11px; padding: 4px 10px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--border);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    /* flex-wrap 让内容多时整体段间换行，row-gap 给换行后留点空隙；
+       flex-shrink: 0 防止 header 拥挤时把胶丸压扁导致段内文字断行 */
+    display: flex; gap: 10px; align-items: center;
+    flex-wrap: wrap; row-gap: 2px; flex-shrink: 0;
+  }
+  #loop-pill.running { border-color: var(--accent); background: #0d2a4d; }
+  #loop-pill.done { border-color: var(--ok); }
+  #loop-pill.failed { border-color: var(--danger); background: #2d1414; }
+  /* 每个段（iter / tok / ctx 等）保持完整一行；只允许段与段之间断 */
+  #loop-pill .seg { color: var(--dim); white-space: nowrap; }
+  #loop-pill .seg b { color: var(--text); font-weight: 600; }
+  #loop-pill .spin {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent); animation: pulse 1s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  main {
+    display: grid; grid-template-columns: 1fr 420px;
+    /* 关键修复：之前用 calc(100% - 49px) 写死 header 高度，加了 policy-bar
+       后实际占用更高，main 被算多 30~50px 撑破页面。改成 flex:1+min-height:0
+       由父 body flex 自动分配剩余空间。 */
+    flex: 1 1 auto; min-height: 0;
+  }
+
+  /* 左：聊天 */
+  #chat {
+    display: flex; flex-direction: column; border-right: 1px solid var(--border);
+    /* grid item 默认 min-* = auto 会被内容撑高，必须显式置 0 才能让内部
+       flex:1 + overflow-y:auto 真正生效（内容多时自带滚动而不是撑破）。 */
+    min-width: 0; min-height: 0;
+  }
+  #chat-log {
+    /* 底部留 40px 空气：最后一条消息和输入框之间留呼吸感，
+       同时形成"还能继续滚"的视觉暗示，避免内容贴边收边的窒息感 */
+    flex: 1; overflow-y: auto; padding: 16px 16px 40px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .msg {
+    max-width: 88%; padding: 8px 12px; border-radius: 8px;
+    line-height: 1.5; word-break: break-word; white-space: pre-wrap;
+  }
+  .msg.user { align-self: flex-end; background: var(--user); color: white; }
+  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .msg.tool {
+    align-self: flex-start; background: #1c1f26; border: 1px solid var(--border);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px; max-width: 95%;
+  }
+  .msg .label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--dim); margin-bottom: 4px; display: block;
+  }
+  .msg.tool .name { color: var(--tool-in); font-weight: 600; }
+  .msg.tool pre {
+    margin: 4px 0 0; padding: 6px 8px; background: #0a0d12;
+    border-radius: 4px; overflow-x: auto; font-size: 11px;
+  }
+  .msg.tool .status.ok { color: var(--ok); }
+  .msg.tool .status.err { color: var(--danger); }
+  .msg.tool .iter {
+    color: var(--accent); font-weight: 600; margin-right: 6px;
+    padding: 1px 5px; border: 1px solid var(--accent); border-radius: 3px;
+    font-size: 10px;
+  }
+  /* numeric_loop 轨迹 chip —— old +delta = new + gap */
+  .traj-chip {
+    margin: 4px 0 0; padding: 6px 10px; border-radius: 4px;
+    background: #0a0d12; font-family: ui-monospace, monospace;
+    font-size: 11.5px; display: flex; gap: 8px; align-items: center;
+  }
+  .traj-chip .arrow { color: var(--dim); }
+  .traj-chip .delta.pos { color: var(--ok); }
+  .traj-chip .delta.neg { color: var(--warn); }
+  .traj-chip .new { color: var(--text); font-weight: 600; }
+  .traj-chip .gap { color: var(--dim); margin-left: auto; }
+  .traj-chip .gap.converged { color: var(--ok); font-weight: 600; }
+
+  /* 输入栏 */
+  #input-row {
+    border-top: 1px solid var(--border); padding: 10px 12px;
+    display: flex; gap: 8px; background: var(--panel);
+  }
+  #input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; color: var(--text);
+    font-family: inherit; font-size: 13px; resize: none; outline: none;
+    line-height: 1.4;
+  }
+  #input:focus { border-color: var(--accent); }
+  #send {
+    background: var(--accent); color: white; border: 0; border-radius: 6px;
+    padding: 0 16px; cursor: pointer; font-weight: 500;
+  }
+  #send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* 右：事件时间轴 */
+  #events {
+    display: flex; flex-direction: column;
+    background: var(--evt-bg);
+    /* 同 #chat：grid item 必须 min-height:0 才能让 events-list 自带滚动。
+       这是用户报告的"右侧 EventMsg 内容过多撑破页面"的根因。 */
+    min-width: 0; min-height: 0;
+  }
+  #events-head {
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    color: var(--dim); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.05em; display: flex; gap: 12px; align-items: center;
+  }
+  #events-head .count { color: var(--text); }
+  #events-head button {
+    margin-left: auto; background: transparent; border: 1px solid var(--border);
+    color: var(--dim); border-radius: 4px; padding: 2px 8px;
+    cursor: pointer; font-size: 10px;
+  }
+  /* 会话级可观测面板（聚合指标仪表盘）—— 固定在事件流上方，不随列表滚动 */
+  #obs-panel {
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr));
+    gap: 6px; flex-shrink: 0;
+  }
+  #obs-panel .tile {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 7px; min-width: 0; overflow: hidden;
+  }
+  #obs-panel .tile .lbl {
+    color: var(--dim); font-size: 9px; text-transform: uppercase;
+    letter-spacing: 0.04em; white-space: nowrap;
+  }
+  #obs-panel .tile .val {
+    color: var(--text); font-size: 15px; font-weight: 600; margin-top: 2px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: nowrap;
+  }
+  #obs-panel .tile .val .sub { font-size: 10px; color: var(--dim); font-weight: 400; }
+  #obs-panel .tile.alert { border-color: var(--danger); }
+  #obs-panel .tile.alert .val { color: var(--danger); }
+  #obs-panel .tile.warn  { border-color: var(--warn); }
+  #obs-panel .tile.warn  .val { color: var(--warn); }
+  #events-list {
+    /* 底部留 32px：同 chat-log 的呼吸感处理；事件流字号小，给一点更友好 */
+    flex: 1; overflow-y: auto; padding: 8px 8px 32px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px; line-height: 1.5;
+  }
+  .evt {
+    padding: 4px 8px; border-left: 3px solid var(--border);
+    margin-bottom: 4px; background: var(--panel); border-radius: 0 4px 4px 0;
+  }
+  .evt .ts { color: var(--dim); margin-right: 6px; }
+  .evt .kind { font-weight: 600; }
+  .evt .data { color: var(--dim); margin-top: 2px; white-space: pre-wrap; word-break: break-all; }
+
+  .evt.k-turn_started { border-left-color: var(--dim); }
+  .evt.k-turn_completed { border-left-color: var(--ok); }
+  .evt.k-turn_failed { border-left-color: var(--danger); }
+  .evt.k-assistant_text { border-left-color: var(--asst); }
+  .evt.k-tool_call_started { border-left-color: var(--tool-in); }
+  .evt.k-tool_call_started .kind { color: var(--tool-in); }
+  .evt.k-tool_call_completed { border-left-color: var(--tool-out); }
+  .evt.k-tool_call_completed .kind { color: var(--tool-out); }
+  .evt.k-skill_dispatched { border-left-color: var(--skill); }
+  .evt.k-skill_dispatched .kind { color: var(--skill); }
+  .evt.k-skill_returned { border-left-color: var(--skill); }
+  .evt.k-skill_returned .kind { color: var(--skill); }
+  .evt.k-hitl_required { border-left-color: var(--danger); background: #2d1414; }
+  .evt.k-hitl_required .kind { color: var(--danger); }
+  .evt.k-subagent_policy_overridden { border-left-color: var(--warn); }
+  .evt.k-pre_turn_hook_denied,
+  .evt.k-skill_dispatch_hook_denied,
+  .evt.k-skill_dispatch_permission_denied { border-left-color: var(--danger); }
+
+  /* HITL 弹窗 */
+  #modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 100;
+  }
+  #modal-bg.show { display: flex; }
+  #modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 20px; min-width: 420px; max-width: 600px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  #modal h2 {
+    margin: 0 0 12px; font-size: 15px; color: var(--danger);
+    display: flex; align-items: center; gap: 8px;
+  }
+  #modal h2::before {
+    content: "🔒"; font-size: 18px;
+  }
+  #modal .row { margin: 8px 0; display: flex; gap: 8px; font-size: 12px; }
+  #modal .row .k { color: var(--dim); min-width: 90px; }
+  #modal .row .v {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    word-break: break-all;
+  }
+  #modal .actions {
+    margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end;
+  }
+  #modal button {
+    border: 0; border-radius: 6px; padding: 8px 16px; cursor: pointer;
+    font-weight: 500; font-family: inherit;
+  }
+  #modal .allow { background: var(--ok); color: white; }
+  #modal .deny { background: var(--danger); color: white; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🪶 Taifeng Web UI</h1>
+  <span class="sess">demo
+    <select id="demo-id"></select>
+  </span>
+  <span class="sess">session
+    <input id="session-id" value="s1" style="width:70px" />
+  </span>
+  <span class="sess">历史
+    <select id="thread-list" title="续接已持久化的历史会话（R5 resume）——选中后载入其对话并继续；选「🆕 新会话」回到全新对话"><option value="">🆕 新会话</option></select>
+  </span>
+  <button id="fill-sample" class="ghost" title="把当前 demo 的示例输入填进输入框">填入示例</button>
+  <span id="demo-desc" class="demo-desc"></span>
+  <span id="loop-pill"><span class="seg">idle</span></span>
+  <span id="conn" class="conn">connecting…</span>
+</header>
+
+<!-- 权限策略 bar：切换 demo 时刷新；展示 default_mode + deny 数 + HITL 状态 -->
+<div id="policy-bar">
+  <span class="label">PERMISSION</span>
+  <span id="policy-summary"><span class="chip dim">loading…</span></span>
+  <button id="policy-toggle" class="toggle" type="button">展开 ▾</button>
+</div>
+<div id="policy-detail"></div>
+
+<main>
+  <section id="chat">
+    <div id="chat-log"></div>
+    <div id="input-row">
+      <textarea id="input" rows="2"
+        placeholder="选择上方 demo，点 “填入示例” 一键写入示例请求，或自己写。"></textarea>
+      <button id="send">发送</button>
+    </div>
+  </section>
+
+  <aside id="events">
+    <div id="events-head">
+      <span>EventMsg 时间轴</span>
+      <span class="count" id="evt-count">0</span>
+      <button id="clear-events">clear</button>
+    </div>
+    <div id="obs-panel"
+      title="本 session 累计可观测指标 —— 聚合自下方事件流（每条 EventMsg 实时归类计数）。区别于顶部 loop-pill：后者每个 turn 重置、只反映“这一轮”。"></div>
+    <div id="events-list"></div>
+  </aside>
+</main>
+
+<div id="modal-bg">
+  <div id="modal">
+    <h2>需要您的授权</h2>
+    <div class="row"><span class="k">scope</span><span class="v" id="m-scope"></span></div>
+    <div class="row"><span class="k">target</span><span class="v" id="m-target"></span></div>
+    <div class="row"><span class="k">context</span><span class="v" id="m-context"></span></div>
+    <div class="row"><span class="k">reason</span><span class="v" id="m-reason"></span></div>
+    <div class="row"><span class="k">entry_skill</span><span class="v" id="m-entry"></span></div>
+    <div class="row"><span class="k">call_chain</span><span class="v" id="m-chain"></span></div>
+    <div class="row"><span class="k">metadata</span><span class="v" id="m-meta"></span></div>
+    <div class="actions">
+      <button class="deny" id="btn-deny">拒绝</button>
+      <button class="allow" id="btn-allow">允许</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = $("chat-log");
+const evList = $("events-list");
+const evCount = $("evt-count");
+const sessInput = $("session-id");
+const demoSelect = $("demo-id");
+const threadSelect = $("thread-list");
+const demoDesc = $("demo-desc");
+const conn = $("conn");
+
+let es = null;
+// R5 resume：非 null 时当前处于「续接历史会话」态 —— SSE / chat 都改用
+// session=`resume:<tid>` 并在发送时带 resume_thread_id，让后端从持久化 thread
+// 物化历史续聊；null = 普通新会话（用 session 输入框的值）。见 activeSession()。
+let resumeThreadId = null;
+// HITL 待审批队列：连续多次 hitl_required（如 fan-out 三路 reviewer 时）必须
+// 排队依次弹窗，否则旧 request_id 会被新事件覆盖，旧 future 在后端 hang 到 timeout
+// auto-deny，导致 turn 走异常分支、综合 assistant_text 流不出来。
+// 队首正在弹窗时新请求 push 到尾；用户决议 + POST 完成后 shift 出下一个继续弹。
+let hitlQueue = [];
+let pendingRequestId = null;  // 当前正在弹窗的 request_id（队首）
+let currentAssistantBubble = null;
+let count = 0;
+let demos = {};  // demo_id → meta
+// LLM 全局元信息（/api/demos 返回的 llm 字段）：provider / model / context_window。
+// context_window 用于 pill 渲染 ctx 占比；缺失时只显示绝对 tokens 数。
+let llmInfo = { provider: null, model: null, context_window: null };
+
+// LLM loop 状态机：从 turn_started 累计到 turn_completed/failed
+const loop = {
+  state: "idle",   // idle | running | done | failed
+  iter: 0,         // 累计 tool call 数（≈ 迭代数）
+  tools: 0,
+  skills: 0,
+  hitl: 0,
+  turnStartedAt: 0,
+  // token usage 两个维度（清屏 / 切换 demo / 切 session 才 reset）：
+  //   subInTokens / subOutTokens：本次 submit 提交内所有 turn（含 sub）累加
+  //     —— 反映"这一轮 user 输入真实烧了多少 token"
+  //   ctxTokens：最后一次 is_root=True 的 turn_completed 的 input_tokens
+  //     —— 反映"当前 session context 已积累多大；下一次提问会带这么多进去"
+  // sub* 每次 send 点击时重置，ctx 跨提交保留（session 维度直觉）
+  subInTokens: 0,
+  subOutTokens: 0,
+  ctxTokens: 0,
+};
+const loopPill = $("loop-pill");
+
+function renderLoopPill() {
+  loopPill.className = loop.state;
+  if (loop.state === "idle") {
+    loopPill.innerHTML = '<span class="seg">idle</span>';
+    return;
+  }
+  const dur = loop.turnStartedAt
+    ? ((Date.now() - loop.turnStartedAt) / 1000).toFixed(1) + "s"
+    : "—";
+  const segs = [];
+  if (loop.state === "running") {
+    segs.push(`<span class="spin"></span>`);
+  }
+  segs.push(`<span class="seg">iter <b>${loop.iter}</b></span>`);
+  segs.push(`<span class="seg">tools <b>${loop.tools}</b></span>`);
+  if (loop.skills) segs.push(`<span class="seg">skills <b>${loop.skills}</b></span>`);
+  if (loop.hitl) segs.push(`<span class="seg">hitl <b>${loop.hitl}</b></span>`);
+  // 本次提交内累计的 token（in 含子 turn / out 含子 turn）。两者都为 0 时
+  // 不渲染（避免 idle / 刚 reset 后空段）。
+  if (loop.subInTokens || loop.subOutTokens) {
+    segs.push(
+      `<span class="seg">tok ` +
+      `↓<b>${fmtTokens(loop.subInTokens)}</b> ` +
+      `↑<b>${fmtTokens(loop.subOutTokens)}</b></span>`,
+    );
+  }
+  // 当前 session context 占用（最后一次 root turn 的 input_tokens）。这是
+  // "下次提问会带进去的上下文"的最准代理 —— 跨多次提交持续累积。
+  if (loop.ctxTokens) {
+    const cw = llmInfo.context_window;
+    if (cw) {
+      // 已知 context window：渲染 N.Nk / M.Mk (X%) 三段；颜色按用量分档：
+      //   < 60%  绿（健康）
+      //   60–85% 橙（提醒）
+      //   ≥ 85%  红（接近上限，应清场或换模型）
+      const pct = (loop.ctxTokens / cw) * 100;
+      let color = "var(--ok)";
+      if (pct >= 85) color = "var(--danger)";
+      else if (pct >= 60) color = "var(--warn, #f5a623)";
+      segs.push(
+        `<span class="seg" title="当前 session context = 最后一次 root turn 的 input_tokens；上限来自 LLM model 的 context window">` +
+        `ctx <b>${fmtTokens(loop.ctxTokens)}</b>` +
+        ` / ${fmtTokens(cw)}` +
+        ` <span style="color:${color}">(${pct.toFixed(pct < 10 ? 1 : 0)}%)</span>` +
+        `</span>`,
+      );
+    } else {
+      // 未知 context window：只显示绝对数
+      segs.push(`<span class="seg">ctx <b>${fmtTokens(loop.ctxTokens)}</b></span>`);
+    }
+  }
+  segs.push(`<span class="seg">${dur}</span>`);
+  if (loop.state === "done") segs.unshift(`<span class="seg" style="color:var(--ok)">✓</span>`);
+  if (loop.state === "failed") segs.unshift(`<span class="seg" style="color:var(--danger)">✗</span>`);
+  loopPill.innerHTML = segs.join("");
+}
+
+// ── 会话级可观测聚合（obs 仪表盘）──────────────────────────────
+// 区别于 loop pill（后者每 turn 重置、反映“这一轮”）：obs 跨整个 session 累计，
+// 把流经 pushEvent 的每条 EventMsg 按类别计数 —— web_ui 已把内核全部 EventMsg
+// 透到浏览器（subscribe_all），这里就地聚合成一个轻量遥测面板。
+// clear / 切 demo / 切 session 时归零（见 resetObs 调用点）。
+const obs = {
+  events: 0,        // 总事件数（最原始的可观测信号）
+  turns: 0,         // 根 turn 完成数
+  subTurns: 0,      // 子 turn（call_skill 派发出的 sub TurnRunner）完成数
+  tools: 0,         // tool_call 发起数
+  toolErrors: 0,    // tool 结果 is_error 数
+  skills: 0,        // skill_dispatched 数
+  hitl: 0,          // hitl_required 数
+  denials: 0,       // hook / permission 各类拦截数（R3 关键路径事件）
+  compactions: 0,   // 压缩成功完成数
+  removed: 0,       // 压缩累计丢弃的 history 消息数
+  failures: 0,      // 根 turn 失败数
+  inTok: 0,         // 会话累计 input tokens（含子 turn）
+  outTok: 0,        // 会话累计 output tokens
+  cacheReadTok: 0,  // 会话累计命中 prompt cache 的 input tokens
+};
+
+function resetObs() {
+  Object.keys(obs).forEach((k) => { obs[k] = 0; });
+  renderObsPanel();
+}
+
+// 把单条事件归类累加进 obs。由 pushEvent 在每条真实事件上调用一次。
+function accumulateObs(kind, data) {
+  obs.events += 1;
+  switch (kind) {
+    case "tool_call_started": obs.tools += 1; break;
+    case "tool_call_completed": if (data.is_error) obs.toolErrors += 1; break;
+    case "skill_dispatched": obs.skills += 1; break;
+    case "hitl_required": obs.hitl += 1; break;
+    // 四类拦截事件（CSS / 时间轴文案已分别处理；这里只统一计数）
+    case "skill_dispatch_hook_denied":
+    case "skill_dispatch_permission_denied":
+    case "pre_turn_hook_denied":
+    case "pre_compact_hook_skipped": obs.denials += 1; break;
+    case "compaction_completed":
+      if (data.success) {
+        obs.compactions += 1;
+        obs.removed += data.removed_count || 0;
+      }
+      break;
+    case "turn_completed": {
+      const u = data.usage || {};
+      obs.inTok += u.input_tokens || 0;
+      obs.outTok += u.output_tokens || 0;
+      obs.cacheReadTok += u.cache_read_input_tokens || 0;
+      // 根 / 子 turn 分开计数 —— fan-out 时一条 user 输入会派生多个子 turn
+      if (data.is_root) obs.turns += 1; else obs.subTurns += 1;
+      break;
+    }
+    case "turn_failed": if (data.is_root) obs.failures += 1; break;
+  }
+  renderObsPanel();
+}
+
+// 渲染指标网格。每个 tile = 标签 + 主值（可带次级 sub 注记）；告警/提醒着色。
+function renderObsPanel() {
+  // cache 命中率：会话累计 cache_read / 累计 input；MockClient 无缓存恒为 0（符合预期）。
+  const cacheRate = obs.inTok ? (obs.cacheReadTok / obs.inTok) * 100 : 0;
+  const tiles = [
+    { lbl: "events", val: obs.events },
+    { lbl: "turns", val: `${obs.turns}<span class="sub"> +${obs.subTurns}子</span>` },
+    { lbl: "tools",
+      val: obs.toolErrors
+        ? `${obs.tools}<span class="sub"> ✗${obs.toolErrors}</span>` : `${obs.tools}`,
+      cls: obs.toolErrors ? "warn" : "" },
+    { lbl: "skills", val: obs.skills },
+    { lbl: "hitl", val: obs.hitl },
+    { lbl: "拦截", val: obs.denials, cls: obs.denials ? "alert" : "" },
+    { lbl: "压缩",
+      val: obs.compactions
+        ? `${obs.compactions}<span class="sub"> -${obs.removed}</span>` : "0" },
+    { lbl: "失败", val: obs.failures, cls: obs.failures ? "alert" : "" },
+    { lbl: "tok ↓/↑",
+      val: `${fmtTokens(obs.inTok)}<span class="sub">/${fmtTokens(obs.outTok)}</span>` },
+    { lbl: "cache", val: `${cacheRate.toFixed(cacheRate < 10 ? 1 : 0)}%` },
+  ];
+  $("obs-panel").innerHTML = tiles.map((t) =>
+    `<div class="tile ${t.cls || ""}">` +
+    `<div class="lbl">${t.lbl}</div><div class="val">${t.val}</div></div>`,
+  ).join("");
+}
+
+// 格式化 token 数：>= 1000 显示 N.Nk，< 1000 显示原值。简洁紧凑。
+function fmtTokens(n) {
+  if (!n) return "0";
+  if (n < 1000) return String(n);
+  return (n / 1000).toFixed(n < 10000 ? 1 : 0) + "k";
+}
+
+let loopTimer = null;
+function startLoopTicker() {
+  if (loopTimer) clearInterval(loopTimer);
+  loopTimer = setInterval(renderLoopPill, 200);
+}
+function stopLoopTicker() {
+  if (loopTimer) { clearInterval(loopTimer); loopTimer = null; }
+}
+
+function fmtData(d) {
+  if (!d || (typeof d === "object" && Object.keys(d).length === 0)) return "";
+  try { return JSON.stringify(d, null, 2); }
+  catch { return String(d); }
+}
+
+function nowTs() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,"0")}`;
+}
+
+function pushEvent(payload) {
+  const { kind, data = {} } = payload;
+  if (kind === "_connected") {
+    conn.textContent = "connected"; conn.className = "conn ok";
+    return;
+  }
+  count++;
+  evCount.textContent = count;
+  // 会话级聚合：每条真实事件都归类计数（_connected 已在上面 return，不计入）
+  accumulateObs(kind, data);
+  const el = document.createElement("div");
+  el.className = `evt k-${kind}`;
+  const summary = summarize(kind, data, payload);
+  el.innerHTML =
+    `<span class="ts">${nowTs()}</span><span class="kind">${kind}</span>` +
+    (summary ? `<div class="data">${escapeHtml(summary)}</div>` : "");
+  evList.appendChild(el);
+  evList.scrollTop = evList.scrollHeight;
+
+  // 关键 kind 在 chat panel 也展示
+  routeToChat(kind, data, payload);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+
+function summarize(kind, data, payload) {
+  switch (kind) {
+    case "turn_started": return `entry=${data.entry_skill_id}`;
+    case "turn_completed": {
+      // is_root 区分根 turn 与子 turn —— 子 turn (call_skill 派发出的子 skill)
+      // 完成时只是父 turn 执行窗口内的中间事件，UI 用 [sub] 弱化提示，避免
+      // 用户误以为整个对话已结束。
+      const tag = data.is_root ? "[root]" : "[sub] ";
+      return `${tag} iter=${data.iterations} dur=${data.duration_ms}ms in=${data.usage?.input_tokens||0} out=${data.usage?.output_tokens||0}`;
+    }
+    case "turn_failed": {
+      const tag = data.is_root ? "[root]" : "[sub] ";
+      return `${tag} ${JSON.stringify(data)}`;
+    }
+    case "tool_call_started":
+      return `${data.name}  ${truncate(data.arguments || "", 160)}`;
+    case "tool_call_completed":
+      return `${data.name}  ${data.is_error?"✗":"✓"}  ${data.duration_ms||0}ms  ${truncate(data.output||"", 200)}`;
+    case "skill_dispatched":
+      // event.py:87 -- data 字段是 skill_id（不是 target_skill_id；后者用于
+      // hitl_required / subagent_policy_overridden 等其他事件）
+      return `→ ${data.skill_id}  depth=${data.depth}`;
+    case "skill_returned":
+      // event.py:92 -- 同上，data 字段是 skill_id；success 而非 is_error
+      return `← ${data.skill_id}  ${data.success?"✓":"✗"}`;
+    case "assistant_text":
+      return truncate(data.delta || "", 80);
+    case "hitl_required":
+      return `${payload.scope}: ${payload.target}`;
+    case "subagent_policy_overridden":
+      return `${data.target_skill_id}  mode=${data.mode}`;
+    case "skill_dispatch_hook_denied":
+      // pre_skill_dispatch 钩子按入参拦截：展示被拦的子 skill + 业务理由
+      return `🪝✗ ${data.caller_skill_id}→${data.target_skill_id}  ${truncate(data.hook_reason||"", 120)}`;
+    case "skill_dispatch_permission_denied":
+      return `🔒✗ ${data.caller_skill_id}→${data.target_skill_id}  ${truncate(data.reason||"", 120)}`;
+    case "pre_turn_hook_denied":
+      return `🪝✗ turn 启动被拒  ${truncate(data.reason||"", 120)}`;
+    case "pre_compact_hook_skipped":
+      return `🪝⏭ 跳过压缩 phase=${data.phase}  ${truncate(data.reason||"", 120)}`;
+    case "compaction_started":
+      return `phase=${data.phase} strategy=${data.strategy} tokens=${data.token_estimate}`;
+    case "compaction_completed":
+      return `${data.success?"✓":"✗"} removed=${data.removed_count||0}` +
+             ` cache_invalidated=${data.cache_invalidated}` +
+             (data.reason?` reason=${data.reason}`:"");
+    default:
+      return fmtData(data);
+  }
+}
+
+function truncate(s, n) {
+  s = String(s).replace(/\n/g, " ⏎ ");
+  return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+function routeToChat(kind, data, payload) {
+  // ── LLM loop 状态机 ─────────────────────────────────────────
+  if (kind === "turn_started") {
+    loop.state = "running";
+    loop.iter = 0; loop.tools = 0; loop.skills = 0; loop.hitl = 0;
+    loop.turnStartedAt = Date.now();
+    startLoopTicker();
+  }
+  if (kind === "tool_call_started") {
+    loop.iter += 1; loop.tools += 1;
+    renderLoopPill();
+  }
+  if (kind === "skill_dispatched") {
+    loop.skills += 1; renderLoopPill();
+  }
+  if (kind === "hitl_required") {
+    loop.hitl += 1; renderLoopPill();
+  }
+  if (kind === "turn_completed") {
+    // token 用量先累计，再决定是否切根 loop 状态。子 turn 也要累 ——
+    // 不然 fan-out 多个 sub 时只算 root turn 会漏 80% token 消耗。
+    const usage = data.usage || {};
+    loop.subInTokens += usage.input_tokens || 0;
+    loop.subOutTokens += usage.output_tokens || 0;
+    if (data.is_root) {
+      // root turn 的 input_tokens 代表"完整 prompt + 历史"，是最贴近
+      // 当前 session context 占用的指标（下次提问会带进去）
+      loop.ctxTokens = usage.input_tokens || loop.ctxTokens;
+    }
+    renderLoopPill();
+    // 子 turn (call_skill 派发出的 sub TurnRunner) 完成仅是父 turn 执行
+    // 窗口内的中间事件 —— 不切根 loop 状态，否则用户会误以为整个对话结束。
+    if (!data.is_root) return;
+    loop.state = "done";
+    if (data.iterations) loop.iter = data.iterations;
+    renderLoopPill(); stopLoopTicker();
+  }
+  if (kind === "turn_failed") {
+    if (!data.is_root) return;
+    loop.state = "failed";
+    renderLoopPill(); stopLoopTicker();
+  }
+
+  // ── chat 面板渲染 ──────────────────────────────────────────
+  if (kind === "assistant_text" && data.delta) {
+    if (!currentAssistantBubble) {
+      currentAssistantBubble = document.createElement("div");
+      currentAssistantBubble.className = "msg assistant";
+      currentAssistantBubble.innerHTML = `<span class="label">assistant</span><span class="text"></span>`;
+      log.appendChild(currentAssistantBubble);
+    }
+    currentAssistantBubble.querySelector(".text").textContent += data.delta;
+    log.scrollTop = log.scrollHeight;
+  }
+  if (kind === "tool_call_started") {
+    currentAssistantBubble = null;
+    const iterTag = `<span class="iter">iter #${loop.iter}</span>`;
+    const el = document.createElement("div");
+    el.className = "msg tool";
+    el.innerHTML =
+      `<span class="label">${iterTag} tool call</span>` +
+      `<div class="name">${escapeHtml(data.name)}</div>` +
+      `<pre>${escapeHtml(truncate(data.arguments || "{}", 600))}</pre>`;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+  }
+  if (kind === "tool_call_completed") {
+    const el = document.createElement("div");
+    el.className = "msg tool";
+    const statusCls = data.is_error ? "err" : "ok";
+    const trajChip = renderTrajChip(data);
+    el.innerHTML =
+      `<span class="label">tool result <span class="status ${statusCls}">${data.is_error?"✗ error":"✓ ok"} · ${data.duration_ms||0}ms</span></span>` +
+      `<div class="name">${escapeHtml(data.name)}</div>` +
+      (trajChip ? trajChip : `<pre>${escapeHtml(truncate(data.output||"", 1500))}</pre>`);
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+  }
+  if ((kind === "turn_completed" || kind === "turn_failed") && data.is_root) {
+    // 输入框只在根 turn 真正收尾时解锁 —— 子 turn 完成不解锁，否则
+    // 用户可能在父 turn 还在跑时误以为可以输入下一条消息。
+    currentAssistantBubble = null;
+    $("send").disabled = false;
+    // 根 turn 收尾后刷新历史列表：新会话首轮完成后该 thread 即可被续接，
+    // 续聊也会更新其消息数。保留当前选中项（resumeThreadId）。
+    loadThreads();
+  }
+  if (kind === "hitl_required") {
+    enqueueHitl(payload);
+  }
+}
+
+/**
+ * 解析 numeric_loop 的 apply_delta JSON 输出，渲染轨迹胶丸：
+ *   old --(+delta)--> new   gap=...
+ * 收敛 (gap<0.5) 时高亮。其他工具输出原样 pre。
+ */
+function renderTrajChip(data) {
+  try {
+    const p = JSON.parse(data.output || "");
+    if (typeof p.old !== "number" || typeof p.new !== "number"
+        || typeof p.delta !== "number" || typeof p.gap !== "number") {
+      return null;
+    }
+    const cls = p.delta >= 0 ? "pos" : "neg";
+    const sign = p.delta >= 0 ? "+" : "";
+    const converged = p.gap < 0.5;
+    return (
+      `<div class="traj-chip">` +
+      `<span>${p.old.toFixed(3)}</span>` +
+      `<span class="arrow">─(</span>` +
+      `<span class="delta ${cls}">${sign}${p.delta.toFixed(3)}</span>` +
+      `<span class="arrow">)→</span>` +
+      `<span class="new">${p.new.toFixed(3)}</span>` +
+      `<span class="gap ${converged?"converged":""}">${converged?"★ converged · ":""}gap=${p.gap.toFixed(3)}</span>` +
+      `</div>`
+    );
+  } catch { return null; }
+}
+
+// 把新 HITL 请求入队；若队列空则立即弹窗，否则等队首决议完再弹下一个。
+function enqueueHitl(p) {
+  hitlQueue.push(p);
+  if (pendingRequestId === null) {
+    showNextHitl();
+  }
+}
+
+// 弹队首请求；空队列则关闭 modal。供 enqueueHitl + decideHitl 链式调用。
+function showNextHitl() {
+  if (hitlQueue.length === 0) {
+    pendingRequestId = null;
+    $("modal-bg").classList.remove("show");
+    return;
+  }
+  const p = hitlQueue.shift();
+  pendingRequestId = p.request_id;
+  // 队列里还有 N 个等待时在标题角标显示 "(还有 N 个待审批)"
+  const remaining = hitlQueue.length;
+  $("m-scope").textContent =
+    (p.scope || "") + (remaining ? `  (还有 ${remaining} 个待审批)` : "");
+  $("m-target").textContent = p.target || "";
+  $("m-context").textContent = p.synthesized_reason || "—";
+  // p.reason 是 LLM 自陈的派发原因；空时显式标 "(本次 LLM 未填)"，不再
+  // 误导地说 schema 不支持（schema 现已支持，只是 LLM 这次没填）
+  $("m-reason").textContent = p.reason || "(本次 LLM 未填 reason)";
+  $("m-entry").textContent = p.entry_skill_id || "";
+  $("m-chain").textContent = (p.call_chain || []).join(" → ");
+  const md = p.metadata || {};
+  const mdKeys = Object.keys(md);
+  $("m-meta").textContent = mdKeys.length
+    ? mdKeys.map(k => `${k}=${JSON.stringify(md[k])}`).join("  ")
+    : "(empty)";
+  $("modal-bg").classList.add("show");
+}
+
+async function decideHitl(granted) {
+  if (!pendingRequestId) return;
+  const rid = pendingRequestId;
+  pendingRequestId = null;
+  try {
+    await fetch(`/api/hitl/${rid}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ granted, reason: granted?"user_allow":"user_deny" }),
+    });
+  } catch (e) {
+    console.error(e);
+  }
+  // 决议完成后弹下一个队列项；空队列时关闭 modal
+  showNextHitl();
+}
+
+$("btn-allow").onclick = () => decideHitl(true);
+$("btn-deny").onclick = () => decideHitl(false);
+
+// 当前生效的 session 标识：续接态用 `resume:<tid>`（与新会话隔离，且续聊命中
+// 同一缓存 engine）；否则用 session 输入框的值。SSE 订阅 + chat 提交都走它。
+function activeSession() {
+  return resumeThreadId ? `resume:${resumeThreadId}` : (sessInput.value || "default");
+}
+
+function connectSSE() {
+  if (es) es.close();
+  conn.textContent = "connecting…"; conn.className = "conn";
+  const did = demoSelect.value;
+  const sid = activeSession();
+  if (!did) return;
+  es = new EventSource(
+    `/api/events/${encodeURIComponent(did)}/${encodeURIComponent(sid)}`,
+  );
+  es.onmessage = (e) => {
+    try { pushEvent(JSON.parse(e.data)); } catch (err) { console.error(err); }
+  };
+  es.onerror = () => {
+    conn.textContent = "disconnected"; conn.className = "conn bad";
+  };
+}
+
+function applyDemoMeta() {
+  const m = demos[demoSelect.value];
+  if (!m) return;
+  demoDesc.textContent = m.description;
+  $("input").placeholder = m.sample_prompt
+    ? `示例：${m.sample_prompt.slice(0, 80).replace(/\n/g, " ⏎ ")}…`
+    : "";
+  renderPolicy(m);
+}
+
+/* === R5 历史会话（resume）=== */
+
+// 拉取当前 demo 的持久化 thread 列表，填充「历史」下拉。保留当前选中项。
+async function loadThreads() {
+  const did = demoSelect.value;
+  if (!did) return;
+  let threads = [];
+  try {
+    const r = await fetch(`/api/threads/${encodeURIComponent(did)}`);
+    if (r.ok) threads = (await r.json()).threads || [];
+  } catch (e) { console.error(e); return; }
+  // 重建 options：首项恒为「新会话」(value="")，其余按返回顺序（已倒序）
+  const keep = threadSelect.value;
+  threadSelect.innerHTML = '<option value="">🆕 新会话</option>';
+  for (const t of threads) {
+    const opt = document.createElement("option");
+    opt.value = t.thread_id;
+    const when = t.created_at ? t.created_at.slice(5, 16).replace("T", " ") : "";
+    const title = t.title || `(${t.entry_skill_id || "?"})`;
+    opt.textContent = `${title} · ${t.item_count}条 · ${when}`;
+    threadSelect.appendChild(opt);
+  }
+  // 续接态下保持选中被续接的 thread；否则尽量恢复之前的选中
+  threadSelect.value = resumeThreadId || keep || "";
+  if (threadSelect.value !== (resumeThreadId || keep || "")) threadSelect.value = "";
+}
+
+// 把历史消息渲染进聊天区（与实时渲染同样的 .msg user/assistant 结构）
+function renderHistoryMessages(msgs) {
+  log.innerHTML = "";
+  for (const m of msgs) {
+    const el = document.createElement("div");
+    if (m.role === "user") {
+      el.className = "msg user";
+      el.textContent = m.text;
+    } else {
+      el.className = "msg assistant";
+      el.innerHTML = `<span class="label">assistant</span><span class="text"></span>`;
+      el.querySelector(".text").textContent = m.text;
+    }
+    log.appendChild(el);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+// 「历史」下拉切换：空值=退出续接回到新会话；否则载入该 thread 并进入续接态。
+async function onThreadSelect() {
+  const tid = threadSelect.value;
+  if (!tid) { exitResume(); return; }
+  let data;
+  try {
+    const r = await fetch(
+      `/api/threads/${encodeURIComponent(demoSelect.value)}/${encodeURIComponent(tid)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+  } catch (e) {
+    demoDesc.textContent = "❌ 载入历史失败：" + e.message;
+    threadSelect.value = resumeThreadId || "";
+    return;
+  }
+  // 进入续接态：渲染历史 + 切 session 到 resume:<tid> + 重连 SSE
+  resumeThreadId = tid;
+  renderHistoryMessages(data.messages);
+  currentAssistantBubble = null;
+  // 续接是换会话视角：loop / obs 归零（历史 token 不在本次累计内）
+  loop.state = "idle"; loop.iter = loop.tools = loop.skills = loop.hitl = 0;
+  loop.subInTokens = loop.subOutTokens = loop.ctxTokens = 0;
+  stopLoopTicker(); renderLoopPill(); resetObs();
+  count = 0; evList.innerHTML = ""; evCount.textContent = "0";
+  $("send").disabled = false;
+  sessInput.disabled = true;   // 续接态锁定 session 输入（由 resume:<tid> 决定）
+  connectSSE();
+}
+
+// 退出续接态：恢复新会话（清空聊天 / 解锁 session / 重连 SSE）
+function exitResume() {
+  resumeThreadId = null;
+  threadSelect.value = "";
+  sessInput.disabled = false;
+  log.innerHTML = "";
+  currentAssistantBubble = null;
+  loop.state = "idle"; loop.iter = loop.tools = loop.skills = loop.hitl = 0;
+  loop.subInTokens = loop.subOutTokens = loop.ctxTokens = 0;
+  stopLoopTicker(); renderLoopPill(); resetObs();
+  count = 0; evList.innerHTML = ""; evCount.textContent = "0";
+  $("send").disabled = false;
+  connectSSE();
+}
+
+/* === 权限策略渲染 === */
+/* m.policy_preview = {default_mode, deny[], allow[], ask[]} （Style A 配置）
+   每条规则形如 "Bash(re:^rm\\s+-rf\\b)" / "Skill(read_*)"。
+
+   徽章设计：按 scope 分组（Bash / Skill / File / Script / ApplyPatch）每组一个 chip，
+   颜色取该 scope 内最严重的 mode（deny > ask > allow）；文字写"通/问/拒×N"组合，
+   一眼看懂"哪类动作通过、哪类被拦"。再附 [默认 X] 大徽章 + [HITL] 状态。
+*/
+
+// 把 "Bash(re:...)" 这种 Style A alias 名归一化成 UI 分组名
+const POLICY_ALIAS_GROUP = {
+  Bash: "Bash", ShellExec: "Bash",
+  Skill: "Skill",
+  FileRead: "File", FileWrite: "File",
+  Script: "Script",
+  ApplyPatch: "ApplyPatch",
+};
+
+function parseRuleAlias(ruleStr) {
+  // 解析 "Bash(payload)" → "Bash"；解析失败返回 "Other"
+  const m = /^(\w+)\(/.exec(ruleStr);
+  if (!m) return "Other";
+  return POLICY_ALIAS_GROUP[m[1]] || "Other";
+}
+
+function groupRulesByAlias(deny, allow, ask) {
+  // 返回 {Bash: {deny: 3, allow: 0, ask: 0}, Skill: {...}, ...}
+  const groups = {};
+  const add = (rule, mode) => {
+    const g = parseRuleAlias(rule);
+    if (!groups[g]) groups[g] = { deny: 0, allow: 0, ask: 0 };
+    groups[g][mode] += 1;
+  };
+  deny.forEach(r => add(r, "deny"));
+  allow.forEach(r => add(r, "allow"));
+  ask.forEach(r => add(r, "ask"));
+  return groups;
+}
+
+function groupChipClass(counts) {
+  // 取最严重的 mode 决定颜色：deny > ask > allow
+  if (counts.deny  > 0) return "deny";
+  if (counts.ask   > 0) return "ask";
+  if (counts.allow > 0) return "allow";
+  return "dim";
+}
+
+function groupChipText(name, counts) {
+  // 文字：Bash 拒×3 / Skill 通×1·问×1 / File 通×2
+  const parts = [];
+  if (counts.allow > 0) parts.push(`通×${counts.allow}`);
+  if (counts.ask   > 0) parts.push(`问×${counts.ask}`);
+  if (counts.deny  > 0) parts.push(`拒×${counts.deny}`);
+  return `${name} ${parts.join("·")}`;
+}
+
+function renderPolicy(m) {
+  const summary = $("policy-summary");
+  const detail  = $("policy-detail");
+  const policy  = m.policy_preview || {};
+  const mode    = policy.default_mode || "ask";
+  const deny    = policy.deny  || [];
+  const allow   = policy.allow || [];
+  const ask     = policy.ask   || [];
+  const hitl    = !!m.hitl_on_skill_dispatch;
+
+  // 三态色：allow=绿、deny=红、ask=黄
+  const modeClass = mode === "allow" ? "allow" : mode === "deny" ? "deny" : "ask";
+  const hitlClass = hitl ? "ask" : "dim";
+  const hitlText  = hitl ? "HITL 弹窗开" : "HITL 关";
+
+  summary.innerHTML = "";
+  // chip 1：默认 mode 大徽章
+  const chips = [{ cls: modeClass, text: `未匹配 → ${mode}` }];
+  // chip 2..N：按 scope 分组
+  const groups = groupRulesByAlias(deny, allow, ask);
+  // 固定顺序展示，避免每次切 demo 抖动
+  for (const name of ["Bash", "Skill", "File", "Script", "ApplyPatch", "Other"]) {
+    if (!groups[name]) continue;
+    chips.push({ cls: groupChipClass(groups[name]), text: groupChipText(name, groups[name]) });
+  }
+  // 最后：HITL 状态
+  chips.push({ cls: hitlClass, text: hitlText });
+
+  for (const c of chips) {
+    const el = document.createElement("span");
+    el.className = `chip ${c.cls}`;
+    el.textContent = c.text;
+    summary.appendChild(el);
+  }
+
+  // 详情面板：deny / allow / ask 三组
+  detail.innerHTML = "";
+  const desc = document.createElement("div");
+  desc.className = "desc";
+  desc.textContent = `match 顺序：deny → allow → ask；未命中走 default_mode=${mode}。`;
+  detail.appendChild(desc);
+
+  const detailGroups = [
+    ["DENY",  "deny",  deny],
+    ["ALLOW", "allow", allow],
+    ["ASK",   "ask",   ask],
+  ];
+  for (const [label, cls, rules] of detailGroups) {
+    const row = document.createElement("div");
+    row.className = "group";
+    const lab = document.createElement("span");
+    lab.className = "group-label";
+    lab.textContent = label;
+    row.appendChild(lab);
+    if (rules.length === 0) {
+      const empty = document.createElement("span");
+      empty.className = "empty";
+      empty.textContent = "(无)";
+      row.appendChild(empty);
+    } else {
+      for (const r of rules) {
+        const span = document.createElement("span");
+        span.className = `rule ${cls}`;
+        span.textContent = r;
+        row.appendChild(span);
+      }
+    }
+    detail.appendChild(row);
+  }
+}
+
+$("policy-toggle").onclick = () => {
+  const detail = $("policy-detail");
+  const btn = $("policy-toggle");
+  const open = detail.classList.toggle("open");
+  btn.textContent = open ? "收起 ▴" : "展开 ▾";
+};
+
+async function loadDemos() {
+  try {
+    const resp = await fetch("/api/demos");
+    const j = await resp.json();
+    demos = {};
+    demoSelect.innerHTML = "";
+    for (const m of j.demos) {
+      demos[m.demo_id] = m;
+      const opt = document.createElement("option");
+      opt.value = m.demo_id;
+      opt.textContent = m.title;
+      demoSelect.appendChild(opt);
+    }
+    // 拿 LLM 元信息：context_window 用于 pill 渲染占比；provider/model 备用
+    llmInfo = j.llm || { provider: null, model: null, context_window: null };
+    applyDemoMeta();
+    renderLoopPill();
+  } catch (e) {
+    demoDesc.textContent = "❌ 加载 demo 列表失败：" + e.message;
+  }
+}
+
+function switchDemo() {
+  // 切换 demo：清屏 + 重连 SSE + 重置 loop 状态 + 解锁 send
+  // 关键：旧 demo 若 turn 仍在跑，其 turn_completed 会发到旧 SSE 队列 ——
+  // 切换后新 SSE 收不到，会让 send 卡在 disabled。这里主动复位。
+  log.innerHTML = "";
+  evList.innerHTML = "";
+  count = 0;
+  evCount.textContent = "0";
+  currentAssistantBubble = null;
+  loop.state = "idle";
+  loop.iter = loop.tools = loop.skills = loop.hitl = 0;
+  // 切换 demo / session 等于换会话，ctx + 本次累计都清零
+  loop.subInTokens = loop.subOutTokens = loop.ctxTokens = 0;
+  loop.turnStartedAt = 0;
+  stopLoopTicker();
+  renderLoopPill();
+  // 切 demo / session = 换会话，会话级聚合指标一并归零
+  resetObs();
+  $("send").disabled = false;
+  // 若切换时弹着 HITL modal，强制关闭 + 弃用旧 request_id + 清空待审批队列
+  $("modal-bg").classList.remove("show");
+  pendingRequestId = null;
+  hitlQueue = [];
+  // 切 demo 退出续接态：清 resumeThreadId + 解锁 session 输入；历史列表换 demo 重拉
+  resumeThreadId = null;
+  sessInput.disabled = false;
+  applyDemoMeta();
+  connectSSE();
+  loadThreads();
+}
+
+demoSelect.onchange = switchDemo;
+sessInput.onchange = connectSSE;
+threadSelect.onchange = onThreadSelect;
+
+$("fill-sample").onclick = () => {
+  const m = demos[demoSelect.value];
+  if (!m) return;
+  $("input").value = m.sample_prompt;
+  $("input").focus();
+};
+
+$("send").onclick = async () => {
+  const message = $("input").value.trim();
+  if (!message) return;
+  $("send").disabled = true;
+  $("input").value = "";
+  // 每次新提交重置"本次提交累计"；ctx 跨提交保留（context 一直在长）
+  loop.subInTokens = 0;
+  loop.subOutTokens = 0;
+
+  const userEl = document.createElement("div");
+  userEl.className = "msg user";
+  userEl.textContent = message;
+  log.appendChild(userEl);
+  log.scrollTop = log.scrollHeight;
+  currentAssistantBubble = null;
+
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message,
+        demo_id: demoSelect.value,
+        session_id: activeSession(),
+        // 续接态带上 thread_id：后端首次发到该 session 时从持久化历史物化 engine
+        resume_thread_id: resumeThreadId,
+      }),
+    });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${txt}`);
+    }
+  } catch (e) {
+    const err = document.createElement("div");
+    err.className = "msg assistant";
+    err.textContent = "❌ " + e.message;
+    log.appendChild(err);
+    $("send").disabled = false;
+  }
+};
+
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault(); $("send").click();
+  }
+});
+
+$("clear-events").onclick = () => {
+  evList.innerHTML = ""; count = 0; evCount.textContent = "0";
+  resetObs();
+};
+
+(async () => {
+  await loadDemos();
+  renderObsPanel();   // 启动即渲染一行全 0 的指标 tile
+  connectSSE();
+  loadThreads();      // 拉首个 demo 的历史会话填充「历史」下拉
+})();
+</script>
+</body>
+</html>

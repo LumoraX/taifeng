@@ -1,0 +1,235 @@
+"""ConsoleSink —— 类似 claw-code / codex 的人类可读控制台输出。
+
+样式：
+    [12:34:56] turn  → submission_id (entry=code-reviewer)
+    [12:34:56] llm   ← assistant: "正在分析..."
+    [12:34:56] tool  → call_skill(style-checker) call_id=tc_abc
+    [12:34:57] skill ⇣ depth=1 path=[code-reviewer]
+    [12:34:58] tool  ← call_skill ok (123ms)
+    [12:34:58] turn  ✓ iter=2 dur=1.23s tokens=1234 cached=890 (72%)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from typing import Any, TextIO
+
+from taifeng.loop.engine import AgentEngine
+from taifeng.loop.event import EventMsg
+
+
+class _Colors:
+    RESET = "\x1b[0m"
+    DIM = "\x1b[2m"
+    BOLD = "\x1b[1m"
+    BLUE = "\x1b[34m"
+    CYAN = "\x1b[36m"
+    GREEN = "\x1b[32m"
+    YELLOW = "\x1b[33m"
+    RED = "\x1b[31m"
+    MAGENTA = "\x1b[35m"
+    GRAY = "\x1b[90m"
+
+
+_KIND_TAG = {
+    "turn_started": ("turn", _Colors.BLUE, "→"),
+    "assistant_text": ("llm ", _Colors.CYAN, "←"),
+    "assistant_reasoning": ("llm ", _Colors.MAGENTA, "·"),
+    "tool_call_started": ("tool", _Colors.YELLOW, "→"),
+    "tool_call_completed": ("tool", _Colors.YELLOW, "←"),
+    "skill_dispatched": ("skil", _Colors.MAGENTA, "⇣"),
+    "skill_returned": ("skil", _Colors.MAGENTA, "⇡"),
+    "orchestration_plan_resolved": ("plan", _Colors.MAGENTA, "≡"),
+    "orchestration_condition_missing": ("plan", _Colors.RED, "✗"),
+    "tool_batch_dispatched": ("tool", _Colors.YELLOW, "⇉"),
+    "thread_resumed": ("eng ", _Colors.GRAY, "↻"),
+    "compaction_started": ("comp", _Colors.GRAY, "→"),
+    "compaction_completed": ("comp", _Colors.GRAY, "←"),
+    "cache_break_detected": ("cach", _Colors.RED, "!"),
+    # Permission gate 事件（红色 —— 表示拦截）
+    "permission_prompt_timeout": ("perm", _Colors.RED, "⏱"),
+    "skill_dispatch_hook_denied": ("hook", _Colors.RED, "✗"),
+    "skill_dispatch_permission_denied": ("perm", _Colors.RED, "✗"),
+    "turn_completed": ("turn", _Colors.GREEN, "✓"),
+    "turn_failed": ("turn", _Colors.RED, "✗"),
+    "engine_log": ("eng ", _Colors.GRAY, "·"),
+    "shutdown": ("eng ", _Colors.GRAY, "⏹"),
+}
+
+
+def _now_str() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] | None = None) -> str:
+    tag, col, arrow = _KIND_TAG.get(ev.msg.kind, ("evt ", _Colors.GRAY, "·"))
+    data: dict[str, Any] = ev.msg.data
+    parts: list[str] = []
+
+    if ev.msg.kind == "turn_started":
+        parts.append(f"sub={ev.submission_id[:12]}")
+        if eid := data.get("entry_skill_id"):
+            parts.append(f"entry={eid}")
+        if model := data.get("model"):
+            parts.append(f"model={model}")
+    elif ev.msg.kind == "assistant_text":
+        delta = data.get("delta", "")
+        # 累积 buffer per submission；遇到换行或 turn_completed 才打印
+        if text_buffer is not None:
+            buf = text_buffer.get(ev.submission_id, "")
+            buf += delta
+            if "\n" in delta or len(buf) > 120:
+                # flush
+                line, _, rest = buf.rpartition("\n") if "\n" in buf else (buf, "", "")
+                text_buffer[ev.submission_id] = rest
+                parts.append(repr(line)[1:-1])  # 去掉引号
+            else:
+                text_buffer[ev.submission_id] = buf
+                return ""  # 暂不打印
+        else:
+            parts.append(repr(delta)[1:-1])
+    elif ev.msg.kind == "assistant_reasoning":
+        delta = data.get("delta", "")
+        parts.append(f"reasoning: {delta[:80]}")
+    elif ev.msg.kind == "tool_call_started":
+        parts.append(f"{data.get('name')}({_short(data.get('arguments'), 60)}) call_id={data.get('call_id', '')[:8]}")
+    elif ev.msg.kind == "tool_call_completed":
+        status = "err" if data.get("is_error") else "ok"
+        parts.append(
+            f"{data.get('name')} {status} ({data.get('duration_ms', 0)}ms): "
+            f"{_short(data.get('output', ''), 80)}"
+        )
+    elif ev.msg.kind == "skill_dispatched":
+        parts.append(f"{data.get('skill_id')} depth={data.get('depth')} path={data.get('stack_path')}")
+    elif ev.msg.kind == "skill_returned":
+        status = "✓" if data.get("success") else "✗"
+        parts.append(f"{data.get('skill_id')} {status} summary={_short(data.get('summary', ''), 60)}")
+    elif ev.msg.kind == "compaction_started":
+        parts.append(f"phase={data.get('phase')} strategy={data.get('strategy')} tokens={data.get('token_estimate')}")
+    elif ev.msg.kind == "compaction_completed":
+        status = "✓" if data.get("success") else "✗"
+        parts.append(
+            f"{status} removed={data.get('removed_count')} cache_invalid={data.get('cache_invalidated')}"
+            + (f" reason={data.get('reason')}" if data.get("reason") else "")
+        )
+    elif ev.msg.kind == "cache_break_detected":
+        u = "unexpected" if data.get("unexpected") else "expected"
+        parts.append(f"{u} drop={data.get('token_drop')} reason={data.get('reason')}")
+    elif ev.msg.kind == "permission_prompt_timeout":
+        # 业务侧若未配 timeout 永远不会出现；触发即代表"prompter 卡死"诊断信号
+        parts.append(
+            f"{data.get('scope')}:{data.get('target')} "
+            f"after {data.get('timeout_seconds')}s "
+            f"chain={data.get('call_chain')}"
+        )
+    elif ev.msg.kind == "skill_dispatch_hook_denied":
+        parts.append(
+            f"pre_skill_dispatch → {data.get('target_skill_id')} "
+            f"caller={data.get('caller_skill_id')} "
+            f"reason={_short(data.get('hook_reason', ''), 60)}"
+        )
+    elif ev.msg.kind == "skill_dispatch_permission_denied":
+        parts.append(
+            f"{data.get('caller_skill_id')} → {data.get('target_skill_id')} "
+            f"reason={_short(data.get('reason', ''), 60)}"
+        )
+    elif ev.msg.kind == "turn_completed":
+        usage = data.get("usage") or {}
+        in_t = usage.get("input_tokens", 0)
+        cache_r = usage.get("cache_read_input_tokens", 0)
+        ratio = (cache_r / in_t * 100) if in_t > 0 else 0
+        parts.append(
+            f"iter={data.get('iterations')} dur={data.get('duration_ms')}ms "
+            f"in={in_t} out={usage.get('output_tokens', 0)} cached={cache_r} ({ratio:.0f}%)"
+            f" end={data.get('end_reason')}"
+        )
+    elif ev.msg.kind == "turn_failed":
+        parts.append(f"error={data.get('error')} kind={data.get('kind')}")
+    elif ev.msg.kind == "tool_batch_dispatched":
+        # 并发批次派发：count 本批 tool 数，max_parallel 当前并发上限（=1 表串行）
+        parts.append(f"batch count={data.get('count')} max_parallel={data.get('max_parallel')}")
+    elif ev.msg.kind == "orchestration_plan_resolved":
+        # 声明式编排计划解析：把 groups 摘要成 "parallel[a,b] → serial[c] → when(cond)"
+        seq = []
+        for g in data.get("groups", []) or []:
+            gtype = g.get("type")
+            if gtype == "when":
+                seq.append(f"when({g.get('condition')})")
+            else:
+                seq.append(f"{gtype}[{','.join(g.get('skills', []))}]")
+        parts.append(f"{data.get('skill_id')}: " + " → ".join(seq))
+    elif ev.msg.kind == "orchestration_condition_missing":
+        parts.append(f"condition missing: {data.get('condition')} (skill={data.get('skill_id')})")
+    elif ev.msg.kind == "thread_resumed":
+        parts.append(f"thread={data.get('thread_id')} items={data.get('item_count', data.get('items', '?'))}")
+    elif ev.msg.kind == "engine_log":
+        parts.append(f"{data.get('level')}: {data.get('message')}")
+    else:
+        # 兜底：没有专用 formatter 的事件（多为诊断/恢复类边缘事件）也必须自描述——
+        # 打出 kind 名 + 原始 data，确保"所有关键信息都输出"，不出现匿名 `?` 行。
+        parts.append(f"{ev.msg.kind} {data}")
+
+    body = " ".join(parts)
+    ts = _now_str()
+    if color:
+        return f"{_Colors.GRAY}[{ts}]{_Colors.RESET} {col}{tag}{_Colors.RESET} {arrow} {body}"
+    return f"[{ts}] {tag} {arrow} {body}"
+
+
+def _short(s: Any, n: int) -> str:
+    s = str(s)
+    if len(s) <= n:
+        return s
+    return s[: n - 3] + "..."
+
+
+class ConsoleSink:
+    """订阅 EventMsg 并打印到控制台。
+
+    用法：
+        sink = ConsoleSink(out=sys.stdout)
+        task = asyncio.create_task(sink.attach(engine))
+    """
+
+    def __init__(
+        self,
+        *,
+        out: TextIO | None = None,
+        color: bool = True,
+        flush_text_on_turn_end: bool = True,
+    ) -> None:
+        self._out = out or sys.stdout
+        self._color = color and self._out.isatty()
+        self._flush_text_on_turn_end = flush_text_on_turn_end
+        self._text_buffer: dict[str, str] = {}
+
+    async def handle(self, ev: EventMsg) -> None:
+        line = _fmt_event(ev, color=self._color, text_buffer=self._text_buffer)
+        if line:
+            self._out.write(line + "\n")
+            self._out.flush()
+        # turn 结束时强制 flush 剩余 buffer
+        if self._flush_text_on_turn_end and ev.msg.kind in ("turn_completed", "turn_failed"):
+            rest = self._text_buffer.pop(ev.submission_id, "")
+            if rest.strip():
+                tag, col, arrow = _KIND_TAG["assistant_text"]
+                ts = _now_str()
+                prefix = (
+                    f"{_Colors.GRAY}[{ts}]{_Colors.RESET} {col}{tag}{_Colors.RESET} {arrow} "
+                    if self._color
+                    else f"[{ts}] {tag} {arrow} "
+                )
+                self._out.write(prefix + rest + "\n")
+                self._out.flush()
+
+    async def attach(self, engine: AgentEngine) -> None:
+        async for ev in engine.subscribe_all():
+            await self.handle(ev)
+
+
+def attach_console_sink(engine: AgentEngine, **kwargs: Any) -> asyncio.Task[None]:
+    """便捷：构造 ConsoleSink 并启动后台 task。"""
+    sink = ConsoleSink(**kwargs)
+    return asyncio.create_task(sink.attach(engine))
