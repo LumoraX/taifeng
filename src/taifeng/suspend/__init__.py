@@ -8,5 +8,6 @@ docs/superpowers/specs/2026-06-02-suspend-resume-design.md §2)。
 from __future__ import annotations
 
 from taifeng.suspend.reason import PendingRequest, SuspendReason
+from taifeng.suspend.signal import SuspendSignal
 
-__all__ = ["PendingRequest", "SuspendReason"]
+__all__ = ["PendingRequest", "SuspendReason", "SuspendSignal"]

@@ -6,7 +6,9 @@ import json
 
 import pytest
 
+from taifeng.llm.errors import LLMError
 from taifeng.suspend.reason import PendingRequest, SuspendReason
+from taifeng.suspend.signal import SuspendSignal
 
 
 def test_suspend_reason_values():
@@ -46,3 +48,13 @@ def test_suspend_reason_json_serializes_to_string():
     # StrEnum 跨层序列化契约:json.dumps 直接得到字符串值(若有人改回普通 Enum 会回归)
     assert json.dumps({"r": SuspendReason.FORM}) == '{"r": "form"}'
     assert str(SuspendReason.PERMISSION) == "permission"
+
+
+def test_suspend_signal_carries_pending():
+    """SuspendSignal 携带 PendingRequest,且是 Exception 子类但非 LLMError 子类。"""
+    req = PendingRequest(request_id="r1", reason=SuspendReason.FORM)
+    sig = SuspendSignal(req)
+    assert sig.pending is req
+    # 是 Exception 子类(控制流),但不是 LLMError 家族
+    assert isinstance(sig, Exception)
+    assert not isinstance(sig, LLMError)
