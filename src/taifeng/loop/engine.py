@@ -500,6 +500,12 @@ class AgentEngine:
                                 ),
                             )
                         )
+                    else:
+                        # R4：挂起态没有 live pending（turn 已退栈），CancelTurn 需
+                        # 按 submission_id 匹配并清除活跃挂起 record（闭环可取消）。
+                        await self._cancel_active_suspension(
+                            sub.id, sub.op.submission_id
+                        )
                     continue
                 if isinstance(sub.op, InjectSystemMessage):
                     item = system_injection(
@@ -814,6 +820,49 @@ class AgentEngine:
         turn_cancel = root_cancel.child(f"sub:{sub.id}")
         self._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
         await self._build_and_run_runner(sub.id, turn_cancel, list(self._last_resolved or []))
+
+    async def _cancel_active_suspension(
+        self, cancel_sub_id: str, target_sub_id: str
+    ) -> None:
+        """R4：若存在 submission_id 匹配的活跃挂起，追加 resolved-marker 丢弃之。
+
+        与 _handle_resume 第 4 步同机制（同 marker text 格式 'suspend_resolved:<id>'），
+        保证两条丢弃路径被 _find_active_suspension 一致识别。丢弃后该 record 不再被
+        _find_active_suspension 返回，后续 Resume 命中 no_active_suspension 被拒。
+        无匹配挂起则 no-op（保持 CancelTurn 既有宽容语义：找不到目标不报错）。
+
+        参数：
+            cancel_sub_id: 本次 CancelTurn submission 的 id（EngineLog 归属）。
+            target_sub_id: CancelTurn 要取消的目标 submission id（挂起 turn 的 sub）。
+        副作用：向 history + store 追加一条 resolved-marker；emit 一条 EngineLog。
+        """
+        record = self._find_active_suspension()
+        # 仅当存在活跃挂起且其 submission_id 与取消目标一致时才丢弃
+        if record is None or record.submission_id != target_sub_id:
+            return
+        marker = system_injection(
+            text=f"suspend_resolved:{record.record_id}",
+            thread_id=self._thread_id,
+            source="suspend_resolved",
+        )
+        async with self._lock:
+            self._history.append(marker)
+        await self._store.append(marker)
+        await self._emit(
+            EventMsg(
+                submission_id=cancel_sub_id,
+                msg=EngineLog(
+                    data={
+                        "level": "info",
+                        "message": (
+                            f"cancelled suspended turn {target_sub_id} "
+                            f"(record {record.record_id})"
+                        ),
+                        "extra": {},
+                    }
+                ),
+            )
+        )
 
     def _find_active_suspension(self) -> SuspensionRecord | None:
         """扫 self._history，返回最后一条尚未被 resolved-marker 消费的 suspension record。

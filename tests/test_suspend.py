@@ -1245,16 +1245,17 @@ max_call_depth: 2
     assert rej.msg.data["reason"] == "no_active_suspension"
 
 
-async def test_cancel_during_suspension(skills_dir, threads_dir):
-    """R4：挂起后 CancelTurn 该挂起 turn → resume 仍能干净处理（不崩溃 / 不挂死）。
+async def test_cancel_clears_suspension_then_resume_rejected(skills_dir, threads_dir):
+    """R4 闭环：挂起后 CancelTurn 该挂起 turn → 活跃挂起被丢弃 → 后续 Resume 被拒。
 
-    观察到的当前行为（记录为后续 follow-up）：挂起 turn 在挂起点已以
-    end_reason=suspended 正常收尾，其 _pending 条目已被注销；因此对该
-    submission_id 的 CancelTurn 找不到目标，是 no-op（既不报错也不清挂起）。
-    后续 Resume 仍能找到活跃挂起并正常续跑完成。
+    挂起 turn 在挂起点已以 end_reason=suspended 收尾，其 _pending 条目已退栈；
+    因此 CancelTurn 找不到 live pending 目标，但必须按 submission_id 匹配活跃挂起
+    record 并落 resolved-marker 丢弃之（与 _handle_resume 同机制）。丢弃后：
+      - _find_active_suspension 不再返回该 record；
+      - 后续 Resume 命中 no_active_suspension 被拒（suspension_resolve_rejected）；
+      - 被挂起的 tool 不被执行（无 call_d1 的 function_call_output 回填）。
 
-    即：当前实现「cancel 不特殊处理已挂起 turn」。本测试断言这一真实行为
-    （确定性事件 + 无崩溃 / 无挂死），把「cancel 丢弃待输入 turn」留作 follow-up。
+    取代旧的「cancel 对挂起 turn 是 no-op」断言（Task 13 占位，已被本任务闭环）。
     """
     import taifeng
     from taifeng.loop.submission import CancelTurn
@@ -1267,6 +1268,7 @@ async def test_cancel_during_suspension(skills_dir, threads_dir):
         client=_suspend_client(), gated_tool=gated_tool, policy=policy,
     )
 
+    # 1. 触发挂起，捕获挂起 turn 的 submission id 与持久化 record 的 request_id
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events1 = await _drain_until_terminal(engine, sub_id)
     assert events1[-1].msg.kind == "turn_completed"
@@ -1277,21 +1279,45 @@ async def test_cancel_during_suspension(skills_dir, threads_dir):
         next(it for it in items if it.kind == "suspension")
     )
     req_id = rec.pending[0].request_id
+    # 挂起 record 的 submission_id 应等于触发挂起的 UserMessage 的 sub_id
+    assert rec.submission_id == sub_id
 
-    # 对已挂起的 turn 提交 CancelTurn —— 当前实现为 no-op（pending 已注销）
-    await engine.submit(CancelTurn(submission_id=sub_id))
+    # 2. CancelTurn(该挂起 sub_id) → 应丢弃活跃挂起（落 resolved-marker）
+    cancel_sub = await engine.submit(CancelTurn(submission_id=sub_id))
+    # CancelTurn 无终态事件流，仅 emit EngineLog；以排空一次确保已被主循环处理
+    async for ev in engine.subscribe(cancel_sub):
+        if ev.msg.kind == "engine_log":
+            break
 
-    # Resume 仍能找到活跃挂起并正常续跑完成（cancel 未清挂起，这是观察到的现状）
+    # 3. Resume → 因挂起已被 cancel 丢弃，命中 no_active_suspension 被拒
     resume_sub = await engine.submit(taifeng.Resume(
         thread_id=engine.thread_id, resolutions={req_id: {"granted": True}},
     ))
-    events2 = await _drain_until_terminal(engine, resume_sub)
+    events2 = []
+    async for ev in engine.subscribe(resume_sub):
+        events2.append(ev)
+        if ev.msg.kind in (
+            "suspension_resolve_rejected", "turn_completed", "turn_failed",
+        ):
+            break
+
+    items2 = [it async for it in await pool.store.load_thread(engine.thread_id)]
     await pool.close()
 
     kinds2 = [ev.msg.kind for ev in events2]
-    # 确定性：要么续跑完成（当前行为），要么被拒（若将来 cancel 清挂起）；二者均不崩溃
-    assert events2[-1].msg.kind == "turn_completed", f"cancel 后 resume 应干净收尾，实得 {kinds2}"
-    assert "suspension_resolved" in kinds2
+    # 4a. Resume 被拒（reason=no_active_suspension —— cancel 已丢弃挂起）
+    rej = next(
+        (ev for ev in events2 if ev.msg.kind == "suspension_resolve_rejected"),
+        None,
+    )
+    assert rej is not None, f"cancel 后 resume 应被拒，实得 {kinds2}"
+    assert rej.msg.data["reason"] == "no_active_suspension", f"实得 {kinds2}"
+    # 4b. 挂起 tool 未被执行（无 call_d1 的 function_call_output 回填）
+    fco_d1 = [
+        it for it in items2
+        if it.kind == "function_call_output" and it.payload.get("call_id") == "call_d1"
+    ]
+    assert not fco_d1, "被 cancel 丢弃的挂起不得回填 function_call_output"
 
 
 async def test_tier2_rebuild_resume(skills_dir, threads_dir):
