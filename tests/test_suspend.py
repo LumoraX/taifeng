@@ -8,6 +8,7 @@ import pytest
 
 from taifeng.conversation.models import user_message
 from taifeng.llm.errors import LLMError
+from taifeng.permission.types import PermissionRequest, SuspendingPrompter
 from taifeng.suspend.reason import PendingRequest, SuspendReason
 from taifeng.suspend.record import SuspensionRecord
 from taifeng.suspend.signal import SuspendSignal
@@ -123,3 +124,20 @@ def test_record_from_item_rejects_wrong_kind():
     bad = user_message("hi", thread_id="t")
     with pytest.raises(ValueError):
         SuspensionRecord.from_item(bad)
+
+
+async def test_suspending_prompter_raises_signal():
+    """ask 模式不阻塞,而是抛 SuspendSignal(reason=PERMISSION)。"""
+    prompter = SuspendingPrompter()
+    req = PermissionRequest.for_tool_call(
+        "shell_exec", {"cmd": "rm -rf /tmp/x"},
+        thread_id="th", submission_id="sub", entry_skill_id="root",
+        turn_index=1, call_chain=("root",),
+    )
+    with pytest.raises(SuspendSignal) as ei:
+        await prompter.prompt(req)
+    pending = ei.value.pending
+    assert pending.reason is SuspendReason.PERMISSION
+    assert pending.detail["scope"] == "tool_use"
+    assert pending.detail["target"] == "shell_exec"
+    assert pending.request_id  # 非空

@@ -17,6 +17,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -721,3 +722,60 @@ class CallbackPrompter(PermissionPrompter):
 
     async def prompt(self, request: PermissionRequest) -> PermissionDecision:
         return await self._callback(request)
+
+
+class SuspendingPrompter(PermissionPrompter):
+    """挂起式 prompter —— ask 模式不阻塞,抛 SuspendSignal 让 turn 退栈挂起。
+
+    参照 openclaw「tool 早返回 approval-pending」:差异是 taifeng 不返回状态码,
+    而是抛控制流异常,由 run_turn 聚合为 TurnSuspended。
+
+    request_id 由注入工厂生成(测试可固定);payload_schema 给出审批决定的 JSON Schema。
+    """
+
+    # 审批决定的 JSON Schema —— 业务/前端据此渲染审批 UI
+    _DECISION_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "granted": {"type": "boolean"},
+            "reason": {"type": "string"},
+            "remember_until": {"enum": ["once", "session", "always"]},
+        },
+        "required": ["granted"],
+    }
+
+    def __init__(self, *, request_id_factory: Callable[[], str] | None = None) -> None:
+        """初始化 SuspendingPrompter。
+
+        Args:
+            request_id_factory: 注入式 id 工厂(测试可固定);默认随机生成。
+        """
+        # 注入式 id 工厂(测试可固定);默认随机
+        self._gen_id = request_id_factory or (lambda: f"req_{secrets.token_hex(6)}")
+
+    async def prompt(self, request: PermissionRequest) -> PermissionDecision:
+        """不返回 —— 总是抛 SuspendSignal(reason=PERMISSION)。
+
+        Raises:
+            SuspendSignal: 总是抛出,使 turn 退栈挂起等待审批。
+        """
+        # 延迟导入避免循环依赖（suspend 包不依赖 permission 包）
+        from taifeng.suspend.reason import PendingRequest, SuspendReason
+        from taifeng.suspend.signal import SuspendSignal
+
+        # detail:把审批上下文透传给前端(R1:taifeng 不解析,仅携带)
+        detail: dict[str, Any] = {
+            "scope": request.scope,
+            "target": request.target,
+            "reason": request.reason,
+            "call_chain": list(request.call_chain),
+            **request.metadata,
+        }
+        pending = PendingRequest(
+            request_id=self._gen_id(),
+            reason=SuspendReason.PERMISSION,
+            payload_schema=self._DECISION_SCHEMA,
+            related_call_id=request.metadata.get("call_id"),
+            detail=detail,
+        )
+        raise SuspendSignal(pending)
