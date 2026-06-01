@@ -526,3 +526,60 @@ async def test_request_user_input_empty_prompt_rejected():
     ctx = _make_tool_ctx(call_id="c1")
     with pytest.raises(ValueError):
         await spec.handler({"prompt": "", "response_schema": {}}, ctx)
+
+
+# ============================================================
+# Task 9：三个新 EventMsg 变体
+# ============================================================
+
+
+def test_new_event_msgs():
+    """TurnSuspended / SuspensionResolved / SuspensionResolveRejected 三个新 EventMsg。
+
+    按 EventMsg 实际 API 构造（外层 EventMsg 包裹内层 _Msg 子类），验证：
+    - kind 值正确；
+    - 可通过 discriminated-union 反序列化（round-trip）；
+    - 三个类均已加入 EventMsg Union（pydantic 判别器可识别）。
+    """
+    from taifeng.loop.event import (
+        EventMsg,
+        SuspensionResolved,
+        SuspensionResolveRejected,
+        TurnSuspended,
+    )
+
+    # TurnSuspended
+    e1 = EventMsg(
+        submission_id="s",
+        msg=TurnSuspended(data={
+            "thread_id": "t",
+            "record_id": "sr",
+            "pending": [],
+            "cache_invalidated": True,
+        }),
+    )
+    assert e1.msg.kind == "turn_suspended"
+    # round-trip 验证 discriminated-union 配线正确
+    e1b = EventMsg.model_validate_json(e1.model_dump_json())
+    assert e1b.msg.kind == "turn_suspended"
+    assert e1b.msg.data["record_id"] == "sr"
+
+    # SuspensionResolved
+    e2 = EventMsg(
+        submission_id="s",
+        msg=SuspensionResolved(data={"record_id": "sr", "request_ids": ["r1"]}),
+    )
+    assert e2.msg.kind == "suspension_resolved"
+    e2b = EventMsg.model_validate_json(e2.model_dump_json())
+    assert e2b.msg.kind == "suspension_resolved"
+    assert e2b.msg.data["request_ids"] == ["r1"]
+
+    # SuspensionResolveRejected
+    e3 = EventMsg(
+        submission_id="s",
+        msg=SuspensionResolveRejected(data={"reason": "unknown_request_id"}),
+    )
+    assert e3.msg.kind == "suspension_resolve_rejected"
+    e3b = EventMsg.model_validate_json(e3.model_dump_json())
+    assert e3b.msg.kind == "suspension_resolve_rejected"
+    assert e3b.msg.data["reason"] == "unknown_request_id"

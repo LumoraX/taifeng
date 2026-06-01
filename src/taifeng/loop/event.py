@@ -53,6 +53,10 @@ MsgKind = Literal[
     "index_hook_failed",
     "index_hook_abandoned",
     "rebuild_skipped_corrupt",
+    # suspend-resume 生命周期事件
+    "turn_suspended",
+    "suspension_resolved",
+    "suspension_resolve_rejected",
 ]
 
 
@@ -246,6 +250,39 @@ class SubagentPolicyOverridden(_Msg):
     kind: Literal["subagent_policy_overridden"] = "subagent_policy_overridden"
 
 
+class TurnSuspended(_Msg):
+    """turn 在中途挂起，实例可释放；业务凭 thread_id + record_id 提交 Resume 续跑。
+
+    data = {
+        "thread_id": str,
+        "record_id": str,
+        "pending": list[dict],     # 每项 {request_id, reason, payload_schema,
+                                   #        related_call_id, detail}
+        "cache_invalidated": bool, # tier-2 跨进程 resume 必须为 True
+    }
+    """
+
+    kind: Literal["turn_suspended"] = "turn_suspended"
+
+
+class SuspensionResolved(_Msg):
+    """Resume 成功配对，turn 续跑。
+
+    data = {"record_id": str, "request_ids": list[str]}
+    """
+
+    kind: Literal["suspension_resolved"] = "suspension_resolved"
+
+
+class SuspensionResolveRejected(_Msg):
+    """Resume 被拒（resolution 不全 / 多余、record 已消费、payload 不符 schema 等）。
+
+    data = {"reason": str, "record_id": str | None, "detail": dict}
+    """
+
+    kind: Literal["suspension_resolve_rejected"] = "suspension_resolve_rejected"
+
+
 class ThreadResumed(_Msg):
     """EnginePool 从已有 thread_id 恢复了 engine —— history 已注入。
 
@@ -433,6 +470,9 @@ Msg = Union[
     SkillDispatchPermissionDenied,
     PreTurnHookDenied,
     PreCompactHookSkipped,
+    TurnSuspended,
+    SuspensionResolved,
+    SuspensionResolveRejected,
     ThreadResumed,
     SubagentPolicyOverridden,
     TurnCompleted,
