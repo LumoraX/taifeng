@@ -1,0 +1,34 @@
+"""挂起原因分类 + 单个待办请求的数据契约。"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
+
+
+class SuspendReason(StrEnum):
+    """挂起原因 —— 决定 resume 时的续跑语义。"""
+
+    PERMISSION = "permission"      # 等权限审批 → decision 回填 gate 结果
+    FORM = "form"                  # 等用户填表 → payload 成 tool output
+    DATA = "data"                  # 等外部数据 → payload 成 tool output
+    SYSTEM_RETRY = "system_retry"  # 限流/余额/key/LLM 错 → resume 即重试同次 sample
+
+
+@dataclass(frozen=True)
+class PendingRequest:
+    """一个挂起点的待办请求。
+
+    Attributes:
+        request_id: 关联 id(对标 codex call_id);Resume.resolutions 的 key。
+        reason: 挂起原因分类。
+        payload_schema: JSON Schema —— 业务/前端据此渲染表单或审批 UI。
+        related_call_id: 关联的 function_call call_id;人类输入类必有,系统态为 None。
+        detail: 不透明上下文(scope/target/command/failure_class 等);taifeng 不解析(R1)。
+    """
+
+    request_id: str
+    reason: SuspendReason
+    payload_schema: dict[str, Any] = field(default_factory=dict)
+    related_call_id: str | None = None
+    detail: dict[str, Any] = field(default_factory=dict)
