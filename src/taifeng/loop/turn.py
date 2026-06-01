@@ -103,6 +103,34 @@ def _history_orphan_call_ids(history: list[ResponseItem]) -> set[str]:
     return {cid for cid in (fc ^ fco) if cid is not None}
 
 
+def _should_suspend_on_error(err: Exception) -> bool:
+    """LLMError 是否转 SYSTEM_RETRY 挂起(等外部条件清除后重跑同次 sample 可过)。
+
+    判据(见 spec §5.3):retryable 为真,或 failure_class 属"等外部介入"类
+    (鉴权 / 配额 / 余额)。ContentFilter / ContextOverflow / InvalidRequest
+    这类确定性失败不挂起,照旧硬失败(resume 也救不回,只会无限挂)。
+
+    Args:
+        err: 待判定的异常;非 LLMError 一律返回 False(不挂起)。
+
+    Returns:
+        True 表示应转 SYSTEM_RETRY 挂起;False 表示硬失败照旧上抛。
+    """
+    from taifeng.llm.errors import LLMError
+
+    if not isinstance(err, LLMError):
+        return False
+    # retryable 为真(限流 / 瞬时网络 / 5xx)→ 外部条件清除后重跑可过
+    if getattr(err, "retryable", False):
+        return True
+    # 等外部介入类:鉴权(本仓库 provider_auth);配额 / 余额命名保留以兼容其他 provider
+    return getattr(err, "failure_class", None) in (
+        "provider_auth",
+        "provider_quota",
+        "provider_balance",
+    )
+
+
 class _BatchSuspend(Exception):  # noqa: N818
     """内部:_dispatch_tools 把整批挂起 pending 上抛给 run_turn。
 
@@ -563,68 +591,98 @@ class TurnRunner:
         assistant_text = ""
         # 累积 tool calls
         tool_calls: list[dict[str, Any]] = []
-        async with sess as s:
-            async for ev in s.stream(request):
-                self.cancel.raise_if_cancelled()
-                if ev.kind == "text_delta":
-                    delta = ev.data.get("text", "")
-                    assistant_text += delta
-                    await self._emit(AssistantText(data={"delta": delta}))
-                elif ev.kind == "reasoning_delta":
-                    await self._emit(AssistantReasoning(data={"delta": ev.data.get("delta", "")}))
-                elif ev.kind == "tool_call_done":
-                    tool_calls.append(
-                        {
-                            "call_id": ev.data["call_id"],
-                            "name": ev.data["name"],
-                            "arguments": ev.data.get("arguments", "{}"),
-                        }
-                    )
-                elif ev.kind == "completed":
-                    usage_dict = ev.data.get("usage") or {}
-                    self._accumulate_usage(usage_dict)
-                    # G3：回流的服务端 request-id（供失败 / telemetry 关联）
-                    rid = ev.data.get("request_id")
-                    if rid:
-                        self._last_request_id = rid
-                elif ev.kind == "prompt_cache":
-                    cache_read = int(ev.data.get("cache_read_input_tokens") or 0)
-                    cache_creation = int(ev.data.get("cache_creation_input_tokens") or 0)
-                    expected = self._next_cache_break_expected
-                    expected_reason = self._next_cache_break_reason
-                    # 消费一次预期标记
-                    self._next_cache_break_expected = False
-                    self._next_cache_break_reason = None
-                    # G-CACHE：压缩未标记预期，但结构（snapshot/tool/system）变了 →
-                    # 这是可解释的预期失效，归因到具体结构原因，避免误记 unknown_drop
-                    if not expected and structural_break_reason is not None:
-                        expected = True
-                        expected_reason = structural_break_reason
-                    break_event = self.cache_stats.record_turn(
-                        cache_read=cache_read,
-                        cache_creation=cache_creation,
-                        anchor_expected=expected,
-                        anchor_expected_reason=expected_reason,  # type: ignore[arg-type]
-                    )
-                    # 同步给 client 用于下一轮 previous_cache_read 比较
-                    recorder = getattr(self.model_client, "record_cache_read", None)
-                    if callable(recorder):
-                        try:
-                            recorder(cache_read)
-                        except Exception:
-                            logger.debug("record_cache_read on client failed", exc_info=True)
-                    if break_event is not None:
+        # retry 已由 provider 内 retry_async 兜底(≤3 次);走到这里的 LLMError 即重试耗尽。
+        # 可恢复 / 等外部介入类 → 转 SYSTEM_RETRY 挂起(等业务侧 resume 重跑同次 sample);
+        # 确定性失败照旧上抛硬失败。CancelledError 走 asyncio 路径,不在此 except 内。
+        try:
+            async with sess as s:
+                async for ev in s.stream(request):
+                    self.cancel.raise_if_cancelled()
+                    if ev.kind == "text_delta":
+                        delta = ev.data.get("text", "")
+                        assistant_text += delta
+                        await self._emit(AssistantText(data={"delta": delta}))
+                    elif ev.kind == "reasoning_delta":
                         await self._emit(
-                            CacheBreakDetected(
-                                data={
-                                    "unexpected": break_event.unexpected,
-                                    "token_drop": break_event.token_drop,
-                                    "reason": break_event.reason,
-                                    "previous": break_event.previous_cache_read_input_tokens,
-                                    "current": break_event.current_cache_read_input_tokens,
-                                }
-                            )
+                            AssistantReasoning(data={"delta": ev.data.get("delta", "")})
                         )
+                    elif ev.kind == "tool_call_done":
+                        tool_calls.append(
+                            {
+                                "call_id": ev.data["call_id"],
+                                "name": ev.data["name"],
+                                "arguments": ev.data.get("arguments", "{}"),
+                            }
+                        )
+                    elif ev.kind == "completed":
+                        usage_dict = ev.data.get("usage") or {}
+                        self._accumulate_usage(usage_dict)
+                        # G3：回流的服务端 request-id（供失败 / telemetry 关联）
+                        rid = ev.data.get("request_id")
+                        if rid:
+                            self._last_request_id = rid
+                    elif ev.kind == "prompt_cache":
+                        cache_read = int(ev.data.get("cache_read_input_tokens") or 0)
+                        cache_creation = int(ev.data.get("cache_creation_input_tokens") or 0)
+                        expected = self._next_cache_break_expected
+                        expected_reason = self._next_cache_break_reason
+                        # 消费一次预期标记
+                        self._next_cache_break_expected = False
+                        self._next_cache_break_reason = None
+                        # G-CACHE：压缩未标记预期，但结构（snapshot/tool/system）变了 →
+                        # 这是可解释的预期失效，归因到具体结构原因，避免误记 unknown_drop
+                        if not expected and structural_break_reason is not None:
+                            expected = True
+                            expected_reason = structural_break_reason
+                        break_event = self.cache_stats.record_turn(
+                            cache_read=cache_read,
+                            cache_creation=cache_creation,
+                            anchor_expected=expected,
+                            anchor_expected_reason=expected_reason,  # type: ignore[arg-type]
+                        )
+                        # 同步给 client 用于下一轮 previous_cache_read 比较
+                        recorder = getattr(self.model_client, "record_cache_read", None)
+                        if callable(recorder):
+                            try:
+                                recorder(cache_read)
+                            except Exception:
+                                logger.debug("record_cache_read on client failed", exc_info=True)
+                        if break_event is not None:
+                            await self._emit(
+                                CacheBreakDetected(
+                                    data={
+                                        "unexpected": break_event.unexpected,
+                                        "token_drop": break_event.token_drop,
+                                        "reason": break_event.reason,
+                                        "previous": break_event.previous_cache_read_input_tokens,
+                                        "current": break_event.current_cache_read_input_tokens,
+                                    }
+                                )
+                            )
+        except LLMError as e:
+            if _should_suspend_on_error(e):
+                # 可恢复错误且重试已耗尽 → 转 SYSTEM_RETRY 挂起,等业务侧 resume 重跑同次 sample。
+                # 该 SuspendSignal 穿透回 run_turn 的 except SuspendSignal(Task 7 已加),落盘挂起。
+                from taifeng.suspend.reason import PendingRequest, SuspendReason
+                from taifeng.suspend.signal import SuspendSignal as _SuspendSignal
+
+                raise _SuspendSignal(
+                    PendingRequest(
+                        request_id=self._suspend_id_factory(),
+                        reason=SuspendReason.SYSTEM_RETRY,
+                        payload_schema={
+                            "type": "object",
+                            "properties": {"action": {"enum": ["retry", "abort"]}},
+                        },
+                        related_call_id=None,
+                        detail={
+                            "failure_class": getattr(e, "failure_class", None),
+                            "retry_after_seconds": getattr(e, "retry_after_seconds", None),
+                            "kind": type(e).__name__,
+                        },
+                    )
+                ) from e
+            raise  # 确定性失败:照旧上抛硬失败(走 run_turn 宽 except → TurnFailed)
 
         # 落 assistant message（即使为空也记下，因为 tool calls 也在这条消息上）
         if assistant_text or tool_calls:

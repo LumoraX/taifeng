@@ -328,8 +328,11 @@ async def test_typed_request_fields_populated() -> None:
     assert req.entry_skill_id == "A"
     assert req.call_chain == ("A", "B")
     assert req.turn_index == 5
-    # 业务侧不透明上下文经 request_metadata 合并进 metadata（无业务命名字段，R1）
-    assert req.metadata == {"caller_skill_id": "B", "x_corr": "v-7"}
+    # 业务侧不透明上下文经 request_metadata 合并进 metadata（无业务命名字段，R1）；
+    # call_id 由 builtin 透传(Task 8)→ SuspendingPrompter 据此填 related_call_id
+    assert req.metadata == {
+        "caller_skill_id": "B", "x_corr": "v-7", "call_id": "tc-call-skill",
+    }
 
 
 # ====================================================================
@@ -593,8 +596,9 @@ async def test_request_metadata_optional_default_empty() -> None:
 
     tool = make_call_skill_tool()
     await tool.handler({"skill_id": "c"}, ctx)
-    # 未注入 request_metadata → metadata 仅含 skill_dispatch 工厂默认的 caller_skill_id
-    assert captured[0].metadata == {"caller_skill_id": "p"}
+    # 未注入 request_metadata → metadata 含 skill_dispatch 工厂默认的 caller_skill_id
+    # 及 builtin 透传的 call_id(Task 8:供挂起时配对 related_call_id)
+    assert captured[0].metadata == {"caller_skill_id": "p", "call_id": "tc-call-skill"}
 
 
 @pytest.mark.asyncio

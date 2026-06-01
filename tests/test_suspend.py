@@ -341,3 +341,148 @@ max_call_depth: 2
     }
     assert "call_d1" in fc_ids, "挂起的 function_call 必须落盘"
     assert "call_d1" not in fco_ids, "挂起点不得有 function_call_output(history-gap)"
+
+
+# ============================================================
+# Task 8 A：system_retry —— 可恢复 LLMError 转 SYSTEM_RETRY 挂起
+# ============================================================
+
+
+def test_should_suspend_classifies_recoverable():
+    """_should_suspend_on_error:可恢复 / 等外部介入 → True;确定性失败 → False。"""
+    from taifeng.llm.errors import (
+        AuthenticationError,
+        ContentFilterError,
+        ContextOverflowError,
+        InvalidRequestError,
+        RateLimitError,
+    )
+    from taifeng.loop.turn import _should_suspend_on_error
+
+    # 可恢复(retryable=True)/ 等外部条件(provider_auth) → 挂起
+    assert _should_suspend_on_error(RateLimitError("rl")) is True
+    assert _should_suspend_on_error(AuthenticationError("bad key")) is True
+    # 确定性失败(retryable=False 且 failure_class 不在等外部介入类) → 不挂起,硬失败
+    assert _should_suspend_on_error(ContentFilterError("blocked")) is False
+    assert _should_suspend_on_error(ContextOverflowError("too long")) is False
+    assert _should_suspend_on_error(InvalidRequestError("bad req")) is False
+    # 非 LLMError → 不挂起
+    assert _should_suspend_on_error(ValueError("x")) is False
+
+
+async def test_system_retry_suspends_turn(skills_dir, threads_dir):
+    """retry 耗尽后 stream 抛 RateLimitError(可恢复)→ turn 挂起为 SYSTEM_RETRY。
+
+    用一个 stream 直接抛 RateLimitError 的最小 client(模拟 retry 已耗尽);
+    断言 turn 以 end_reason=="suspended" 结束,落一条 SuspensionRecord,
+    其单个 pending.reason == SYSTEM_RETRY、related_call_id is None、
+    detail["failure_class"] 已填。
+    """
+    import taifeng
+    from taifeng.llm.client import ModelClient
+    from taifeng.llm.errors import RateLimitError
+
+    class _RaisingSession:
+        """stream 直接抛 RateLimitError(模拟 provider retry 已耗尽)。"""
+
+        def __init__(self, cancel):  # noqa: ANN001, ANN204
+            self._cancel = cancel
+
+        async def __aenter__(self):  # noqa: ANN204
+            return self
+
+        async def __aexit__(self, *exc):  # noqa: ANN002, ANN204
+            pass
+
+        async def stream(self, request):  # noqa: ANN001, ANN201
+            # 必须先 yield 才是 async generator;yield 前抛即在首次迭代抛出
+            raise RateLimitError("rate limited", retry_after_seconds=3.0)
+            yield  # pragma: no cover —— 使函数成为 async generator
+
+    class _RaisingClient(ModelClient):
+        def session(self, *, cancel, model=None):  # noqa: ANN001, ANN201
+            return _RaisingSession(cancel)
+
+    skill_md = """---
+name: retry-skill
+description: system_retry entry
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [style-checker]
+max_call_depth: 2
+---
+# Retry
+"""
+    (skills_dir / "retry-skill").mkdir()
+    (skills_dir / "retry-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=_RaisingClient(),
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="retry-e2e", entry_skill_id="retry-skill",
+    )
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            break
+
+    # 可恢复错误转挂起 → turn 以 suspended 正常结束,而非 turn_failed
+    assert ev.msg.kind == "turn_completed", f"system_retry 应挂起非失败,实得 {ev.msg.kind}"
+    assert ev.msg.data.get("end_reason") == "suspended"
+
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    await pool.close()
+
+    suspension_items = [it for it in items if it.kind == "suspension"]
+    assert len(suspension_items) == 1, "应恰好落一条 suspension item"
+    rec = SuspensionRecord.from_item(suspension_items[0])
+    assert len(rec.pending) == 1
+    pending = rec.pending[0]
+    assert pending.reason is SuspendReason.SYSTEM_RETRY
+    assert pending.related_call_id is None
+    # detail 携带可恢复错误的归因信息(R1:taifeng 仅携带不解析)
+    assert pending.detail["failure_class"] == "provider_rate_limit"
+    assert pending.detail["kind"] == "RateLimitError"
+
+
+# ============================================================
+# Task 8 B：builtins 透传 call_id 到 permission 的 PendingRequest.related_call_id
+# ============================================================
+
+
+async def test_permission_pending_carries_call_id():
+    """SuspendingPrompter 经 builtin(shell)的 PermissionRequest 挂起时,
+    PendingRequest.related_call_id 等于该 tool call 的 call_id。
+
+    验证 builtin 在构造 PermissionRequest 时把 ctx.call_id 写入 metadata["call_id"],
+    使 SuspendingPrompter 能把它填进 PendingRequest.related_call_id。
+    """
+    from taifeng.permission.types import PermissionPolicy
+    from taifeng.tool.builtins.shell import make_shell_exec_tool
+    from taifeng.tool.spec import ToolContext
+
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    tool = make_shell_exec_tool(policy=policy)
+    ctx = ToolContext(
+        call_id="call_shell_1",
+        thread_id="th",
+        cancel=_noop_cancel(),
+        extras={"submission_id": "sub", "entry_skill_id": "root", "turn_index": 1},
+    )
+    with pytest.raises(SuspendSignal) as ei:
+        await tool.handler({"command": "echo hi"}, ctx)
+    # related_call_id 必须等于发起该工具调用的 call_id(history-gap 配对依据)
+    assert ei.value.pending.related_call_id == "call_shell_1"
+
+
+def _noop_cancel():
+    """构造一个未取消的 CancellationToken(测试用)。"""
+    from taifeng.loop.cancellation import CancellationToken
+
+    return CancellationToken()

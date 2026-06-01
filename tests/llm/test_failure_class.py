@@ -56,7 +56,11 @@ def test_classify_failure_generic_is_unknown() -> None:
 
 @pytest.mark.asyncio
 async def test_turn_failed_event_carries_failure_class(skills_dir) -> None:
-    """LLMError 透传到 TurnRunner.run → TurnFailed 带 failure_class + 建议。"""
+    """确定性 LLMError 透传到 TurnRunner.run → TurnFailed 带 failure_class + 建议。
+
+    用 InvalidRequestError(不可恢复)走硬失败路径:Task 8 起,可恢复错误
+    (限流 / 鉴权等)改转 SYSTEM_RETRY 挂起,不再硬失败;确定性失败照旧 TurnFailed。
+    """
     from collections.abc import AsyncIterator
 
     from taifeng.context.budget import ContextBudget
@@ -70,7 +74,7 @@ async def test_turn_failed_event_carries_failure_class(skills_dir) -> None:
     from taifeng.tool.registry import ToolRegistry
     from taifeng.tool.runtime import ToolCallRuntime
 
-    # --- 一个在 stream 中抛 RateLimitError 的假 client ---
+    # --- 一个在 stream 中抛 InvalidRequestError(确定性、不挂起)的假 client ---
     class _RaisingSession:
         def __init__(self, cancel: CancellationToken) -> None:
             self._cancel = cancel
@@ -82,7 +86,7 @@ async def test_turn_failed_event_carries_failure_class(skills_dir) -> None:
             return None
 
         async def stream(self, request: ApiRequest) -> AsyncIterator[object]:
-            err = RateLimitError("429 slow down")
+            err = InvalidRequestError("bad request schema")
             err.request_id = "req-abc123"  # provider 回填的服务端 request-id
             raise err
             yield  # pragma: no cover —— 使其成为 async generator
@@ -127,10 +131,10 @@ async def test_turn_failed_event_carries_failure_class(skills_dir) -> None:
     await runner.run()
 
     failed = next(m for m in events if m.kind == "turn_failed")
-    assert failed.data["failure_class"] == "provider_rate_limit"
+    assert failed.data["failure_class"] == "invalid_request"
     assert failed.data["suggested_action"]
     # G3 恢复配方也随事件透出（机读）
-    assert failed.data["recovery"]["failure_class"] == "provider_rate_limit"
-    assert "backoff_retry" in failed.data["recovery"]["steps"]
+    assert failed.data["recovery"]["failure_class"] == "invalid_request"
+    assert "adjust_input" in failed.data["recovery"]["steps"]
     # G3 request-id 回流（异常自带 → TurnFailed）
     assert failed.data["request_id"] == "req-abc123"

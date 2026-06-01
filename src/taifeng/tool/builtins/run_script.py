@@ -247,7 +247,9 @@ async def _run_script_handler(args: dict[str, Any], ctx: ToolContext) -> ToolRes
             entry_skill_id=entry_skill_id,
             call_chain=call_chain,
             turn_index=turn_index,
-            extra_metadata=request_metadata,
+            # 透传当前 tool call 的 call_id → SuspendingPrompter 据此填 related_call_id,
+            # 使挂起的 PendingRequest 能与发起的 function_call 配对(history-gap 续跑依据)
+            extra_metadata={"call_id": ctx.call_id, **request_metadata},
         )
         perm_decision = await permission_policy.check(perm_request)
         if not perm_decision.granted:
