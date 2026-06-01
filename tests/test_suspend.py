@@ -310,6 +310,12 @@ max_call_depth: 2
         if ev.msg.kind in ("turn_completed", "turn_failed"):
             break
 
+    # 合约断言:挂起 turn 必须以 turn_completed 结束,而非 turn_failed
+    assert ev.msg.kind == "turn_completed", f"挂起 turn 不应失败,实得 {ev.msg.kind}"
+    assert ev.msg.data.get("end_reason") == "suspended", (
+        f"挂起 turn 的 end_reason 应为 'suspended',实得 {ev.msg.data.get('end_reason')!r}"
+    )
+
     # 落盘验证:store 含 kind=="suspension" item;call_d1 有 function_call 无 output
     items = [it async for it in await pool.store.load_thread(engine.thread_id)]
     await pool.close()
