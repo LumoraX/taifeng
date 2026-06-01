@@ -329,7 +329,7 @@ class CancellationToken:
 | Rust `tokio::mpsc` unbounded | Python `asyncio.Queue`（默认 bounded=1024，可配） |
 | `Submission` 含 `id: SubmissionId` | 同 |
 | `Event` 含 `id: EventId` + `submission_id` | 简化为 `EventMsg(submission_id, msg)` |
-| `Op::*` 枚举 ~20 种 | 实现 9 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Shutdown），见 `loop/submission.py` |
+| `Op::*` 枚举 ~20 种 | 实现 10 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Shutdown），见 `loop/submission.py` |
 
 ## 测试用例（M3 验收）
 
@@ -409,4 +409,34 @@ TurnCompleted event
 | `pre_script_use` | deny → ToolResult.error；异常 → ToolResult.error；metadata['args_override'] 替换 args |
 | `post_script_use` | **deny / 异常都被吞掉**（仅审计） |
 | `permission_policy.check` | timeout → deny + emit `permission_prompt_timeout` |
+
+## turn 的终止结局：含 suspended（suspend-resume）
+
+`run_turn` 现有四种 `end_reason`（写进 `TurnCompleted.data["end_reason"]`，业务侧据此路由）：
+
+| end_reason | 含义 | 后续 |
+| --- | --- | --- |
+| `completed` | 正常结束（含 max_iterations / resource_limit 等收尾） | — |
+| `cancelled` | `CancelTurn` 中止 | — |
+| `error` | 未捕获异常 / 确定性 LLMError 硬失败 | TurnFailed 配方 |
+| **`suspended`** | turn 中途挂起（人类输入类 / 系统态），实例可释放 | 业务侧凭 `thread_id` 提交 `Resume` 续跑 |
+
+**挂起即结局，不阻塞**：挂起点（`SuspendingPrompter.ask` / `request_user_input` 工具 / LLM 可恢复错误 retry 耗尽）不再阻塞 `await`，而是抛 `SuspendSignal`（内部控制流异常，**不继承 LLMError**）。`dispatch_batch` 把整批 `SuspendSignal` 收集成 `ToolCallOutcome.suspend`（不 fail-fast，支持多挂起点并存），`_dispatch_tools` 聚合后 `raise _BatchSuspend(pending...)`；`run_turn` 在通用 `except Exception` **之前**先 `except _BatchSuspend` / `except SuspendSignal`，落一条 `suspension` item（history + store）并把 `end_reason` 退栈为 `"suspended"`（避免被误分类成 TurnFailed）。协程随即彻底退栈，engine 实例可释放（tier-1 留 Pool / tier-2 驱逐 + 进程可退）。
+
+**`Resume` Op 续跑**：`AgentEngine._handle_resume`（详见 [suspend-resume 契约](capabilities/suspend-resume.md)）：
+
+```
+Resume(thread_id, resolutions)
+  → _find_active_suspension：扫 history 取最后一条未被 resolved-marker 消费的 suspension
+       （找不到 → emit suspension_resolve_rejected(reason="no_active_suspension")）
+  → SuspensionResolver.plan（禁部分 resume；ResolveError → suspension_resolve_rejected）
+  → 应用 plan：补齐 history-gap（form/data 直接回填 output；permission deny 回填 error；
+       permission allow → _execute_resumed_tool 真正执行 tool，preapprove 一次性放行）
+  → 落 resolved-marker（system_injection source='suspend_resolved'，幂等：重复 Resume 被拒）
+  → emit suspension_resolved
+  → 非 abort → _build_and_run_runner 续采样（system_retry → 重跑同次 sample）
+```
+
+挂起期间收到 `CancelTurn` → `_cancel_active_suspension` 同样追加 resolved-marker 丢弃挂起（R4）。**挂起真相** = 持久化的 `suspension` item + `function_call`-无-`function_call_output` 的 history-gap，使 mid-turn 挂起跨进程 resume 可行（R5）。
+
 - [x] `cancel.child()` 派生层级正确，父取消级联 —— `tests/loop/test_cancellation.py::test_child_cancel_propagates_from_parent`

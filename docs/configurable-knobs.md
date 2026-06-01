@@ -164,9 +164,10 @@ class TenantPolicySource:
 | **`UpdateBudget`** | 运行时调整 ContextBudget | `context_window` / `soft_limit_ratio` / `hard_limit_ratio` / `preserve_tail_messages` |
 | **`RefreshSnapshot`** | 拉最新 SkillSnapshot | — |
 | **`UpdateInstructions`** | 热更指定 layer 的 source；缓存立即失效；下个 turn 生效 | `layer_name`, `new_source` (str 或 `InstructionSource`) |
+| **`Resume`** | 续跑一个挂起的 thread（`end_reason="suspended"` 的 turn）。配对 `resolutions` → 补齐 history-gap → 续采样。详见 §8 与 [suspend-resume 契约](architecture/capabilities/suspend-resume.md) | `thread_id`, `resolutions: {request_id: payload}` |
 | `Shutdown` | 关闭 engine | — |
 
-加粗的 5 个是本轮新增。
+加粗的 6 个是本轮新增。
 
 > `UpdateInstructions` 行为：成功 → 发 `instruction_updated` EventMsg；未知 `layer_name` → 发 `instruction_update_rejected(reason='unknown_layer')` 且 layers 不修改（spec D4）。
 
@@ -735,3 +736,57 @@ async for ev in session.stream(req):
 - **Taifeng 不绑定 Pydantic** —— `ResponseFormatSpec.json_schema` 是 dict，业务侧自己用 `MyModel.model_json_schema()` 生成（R1 业务零侵入）
 - **parse 失败不阻断流** —— 仍 emit `completed`，业务可在事件流中决定重试/回退
 - **R3 可观测**：新事件类型独立，telemetry 链路自动覆盖
+
+## 8. 挂起 / Resume 原语（suspend-resume）
+
+把"turn 中途阻塞等待"改造成**通用挂起原语**：turn 可在任意点以 `end_reason="suspended"` 早返回并释放实例，业务侧之后凭 `thread_id` + `resolutions` 提交 `Resume` Op 续跑。完整契约见 [suspend-resume 契约](architecture/capabilities/suspend-resume.md) + ADR 0012。
+
+### 8.1 `SuspendingPrompter`（opt-in 挂起式审批 prompter）
+
+`PermissionPolicy.prompter` 的一个实现：`ask` 模式**不阻塞**，而是抛 `SuspendSignal`（`reason=permission`）让 turn 退栈挂起。与 `CliPrompter` / `CallbackPrompter`（阻塞等待决定）互斥选用——选它即开启"权限审批可释放实例"。
+
+```python
+from taifeng import PermissionPolicy
+from taifeng.permission.types import SuspendingPrompter
+
+policy = PermissionPolicy(
+    rules=[...],
+    default_mode="ask",
+    prompter=SuspendingPrompter(),   # ask → 抛 SuspendSignal，turn end_reason="suspended"
+)
+```
+
+挂起后业务侧 emit / 持久化 pending（前端据 `payload_schema` 渲染审批 UI），收到决定后 `engine.submit(Resume(thread_id, {request_id: {"granted": True/False, "reason": "..."}}))` 续跑。
+
+### 8.2 `request_user_input` 内置工具（opt-in 采集型 HITL）
+
+LLM 向人类发起结构化问询并等待回答的内置工具。**业务侧按需 register**（不默认注入）。调用即抛 `SuspendSignal(reason=data)`，turn 挂起；resume 时该 `request_id`（= call_id）的 payload 回填成该 call 的 `function_call_output`。`parallel_safe=False`，应作为该 step 唯一的工具调用。
+
+```python
+from taifeng.tool.builtins import make_request_user_input_tool
+
+pool = await EnginePool.create(..., extra_tools=[make_request_user_input_tool()])
+# LLM 调用 request_user_input(prompt="...", response_schema={...}) → turn 挂起
+# 业务侧收齐回答后：
+await engine.submit(Resume(thread_id, {call_id: {"answer": "..."}}))
+```
+
+`prompt` 必填非空（系统边界校验）；`response_schema` 不透明透传（R1，内核不解析）。
+
+### 8.3 retry-then-suspend（系统态挂起，复用 RetryConfig）
+
+LLM 限流 / 配额 / 余额 / key 鉴权失败 / 可恢复网络错时，`_sample_once` **先**走 §7 的 `RetryConfig`（默认 `max_attempts=3`）自动退避重试；**3 次耗尽**后（或确定性"等外部介入"类 `provider_auth` / `provider_quota` / `provider_balance`）才转 `SuspendSignal(reason=system_retry)` 挂起。无独立旋钮——重试阈值即 `RetryConfig.max_attempts`。
+
+resume payload：`{"action": "retry"}`（默认，重跑同次 sample 获全新 retry 预算）或 `{"action": "abort"}`（turn 终止不续跑）。`ContentFilter` / `ContextOverflow` / `InvalidRequest` 等确定性失败**不挂起**，照旧硬失败（`end_reason="error"`）。
+
+### 8.4 `PermissionPolicy.preapprove(call_id)`（内部 / resume 用）
+
+resume 一个 permission-allow 的挂起 tool 时，engine 在重新执行该 tool 前调 `policy.preapprove(call_id)` 一次性放行——否则 `SuspendingPrompter` 会再次抛 `SuspendSignal` 导致**无限挂起**。预批准是 one-shot：命中即从内部集合移除（`reason="resume_preapproved"`），不污染后续同 scope/target 的 check。业务侧通常无需直接调用（engine 内部在 `_handle_resume` → `_execute_resumed_tool` 自动处理）。
+
+### 8.5 三个 EventMsg
+
+| kind | 触发 | data |
+| --- | --- | --- |
+| `turn_suspended` | 挂起结局的契约事件类型（业务可构造转发，如 Web SSE 桥）；当前实现挂起经 `TurnCompleted{end_reason="suspended"}` 上事件流 | `{thread_id, record_id, pending[...], cache_invalidated}` |
+| `suspension_resolved` | `Resume` 成功配对、turn 续跑 | `{record_id, request_ids}` |
+| `suspension_resolve_rejected` | resolution 不全 / 多余、无活跃挂起、重复 resume、ResolveError | `{reason, record_id, detail}` |
