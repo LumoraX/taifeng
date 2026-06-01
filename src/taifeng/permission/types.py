@@ -24,6 +24,8 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 import anyio
 
+from taifeng.suspend.signal import SuspendSignal
+
 logger = logging.getLogger(__name__)
 
 
@@ -626,6 +628,9 @@ class PermissionPolicy:
                 },
             )
             return PermissionDecision.deny(reason=timeout_reason)
+        except SuspendSignal:
+            # 挂起信号不是错误:必须穿透 ask 模式的宽 except,交由 dispatch_batch 捕获挂起
+            raise
         except Exception as e:
             logger.exception("prompter raised")
             return PermissionDecision.deny(reason=f"prompter_error: {e}")

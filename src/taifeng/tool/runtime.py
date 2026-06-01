@@ -9,6 +9,7 @@ import asyncio
 import logging
 from typing import Any
 
+from taifeng.suspend.signal import SuspendSignal
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
@@ -131,6 +132,9 @@ class ToolCallRuntime:
             #     asyncio 卫生，让真正的任务取消生效（否则被静默吃掉、任务无法中止）。
             if ctx.cancel.is_cancelled:
                 return ToolResult.error("cancelled", reason="cancelled")
+            raise
+        except SuspendSignal:
+            # 工具内挂起信号穿透,交由 dispatch_batch 捕获(不吞成 tool_error)
             raise
         except Exception as e:
             logger.exception("tool %s raised", spec.name)

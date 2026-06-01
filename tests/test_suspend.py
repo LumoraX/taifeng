@@ -149,3 +149,60 @@ def test_outcome_has_optional_suspend_field():
 
     fields = {f.name for f in dataclasses.fields(ToolCallOutcome)}
     assert "suspend" in fields
+
+
+# ====================================================================
+# 防御纵深:SuspendSignal 必须穿透上游宽 except(否则 HITL 暂停被静默吞)
+# ====================================================================
+
+
+async def test_permission_check_propagates_suspend_signal():
+    """SuspendingPrompter 经 PermissionPolicy.check 必须抛 SuspendSignal,
+    而不是被宽 except 吞成 deny(否则 HITL 暂停被静默转成拒绝)。"""
+    from taifeng.permission.types import PermissionPolicy
+
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    req = PermissionRequest.for_tool_call(
+        "shell_exec",
+        {"cmd": "echo hi"},
+        thread_id="t",
+        submission_id="s",
+        entry_skill_id="root",
+        turn_index=1,
+        call_chain=("root",),
+    )
+    with pytest.raises(SuspendSignal):
+        await policy.check(req)
+
+
+async def test_runtime_invoke_propagates_suspend_signal():
+    """工具 handler 抛 SuspendSignal 时 ToolCallRuntime 必须放行,不吞成 ToolResult.error。
+
+    构造一个 handler 直接抛 SuspendSignal 的 ToolSpec,注册进 runtime,经
+    dispatch 应原样向上抛出而非吞成 reason=exception 的 ToolResult。
+    """
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.tool.registry import ToolRegistry
+    from taifeng.tool.runtime import ToolCallRuntime
+    from taifeng.tool.spec import ToolContext, ToolSpec
+
+    # 触发挂起的 handler:模拟权限 ask 深处抛 SuspendSignal
+    async def _suspending_handler(args, ctx):
+        pending = PendingRequest(
+            request_id="req_x",
+            reason=SuspendReason.PERMISSION,
+            related_call_id=ctx.call_id,
+        )
+        raise SuspendSignal(pending)
+
+    spec = ToolSpec(
+        name="needs_approval",
+        description="抛挂起信号的测试工具",
+        input_schema={"type": "object"},
+        handler=_suspending_handler,
+    )
+    runtime = ToolCallRuntime(ToolRegistry([spec]))
+    ctx = ToolContext(call_id="call_1", cancel=CancellationToken(), thread_id="t")
+
+    with pytest.raises(SuspendSignal):
+        await runtime.dispatch(name="needs_approval", arguments={}, ctx=ctx)
