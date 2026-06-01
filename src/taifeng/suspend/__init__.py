@@ -9,6 +9,15 @@ from __future__ import annotations
 
 from taifeng.suspend.reason import PendingRequest, SuspendReason
 from taifeng.suspend.record import SuspensionRecord
+from taifeng.suspend.resolver import ResolveError, ResolvePlan, SuspensionResolver
 from taifeng.suspend.signal import SuspendSignal
 
-__all__ = ["PendingRequest", "SuspendReason", "SuspensionRecord", "SuspendSignal"]
+__all__ = [
+    "PendingRequest",
+    "SuspendReason",
+    "SuspensionRecord",
+    "SuspendSignal",
+    "SuspensionResolver",
+    "ResolvePlan",
+    "ResolveError",
+]

@@ -602,3 +602,75 @@ def test_resume_op_in_union():
     sub2 = Submission.model_validate_json(sub.model_dump_json())
     assert sub2.op.kind == "resume"
     assert sub2.op.resolutions["r1"]["granted"] is True
+
+
+# ============================================================
+# Task 11：SuspensionResolver —— 把 resolutions 配回 record.pending
+# ============================================================
+
+
+def _rec(*reqs):
+    from taifeng.suspend.record import SuspensionRecord
+    return SuspensionRecord(record_id="sr", thread_id="t", submission_id="s",
+                            turn_index=1, pending=tuple(reqs), created_at=1)
+
+
+def test_resolver_rejects_incomplete():
+    import pytest
+
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+    rec = _rec(
+        PendingRequest(request_id="r1", reason=SuspendReason.FORM),
+        PendingRequest(request_id="r2", reason=SuspendReason.FORM),
+    )
+    with pytest.raises(ResolveError):
+        SuspensionResolver().validate(rec, {"r1": {"x": 1}})   # 缺 r2
+
+
+def test_resolver_rejects_unknown():
+    import pytest
+
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.FORM))
+    with pytest.raises(ResolveError):
+        SuspensionResolver().validate(rec, {"r1": {}, "rX": {}})   # 多余 rX
+
+
+def test_resolver_classifies_outputs():
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import SuspensionResolver
+    rec = _rec(
+        PendingRequest(request_id="r1", reason=SuspendReason.PERMISSION, related_call_id="ca"),
+        PendingRequest(request_id="r2", reason=SuspendReason.FORM, related_call_id="cb"),
+        PendingRequest(request_id="r3", reason=SuspendReason.SYSTEM_RETRY),
+    )
+    plan = SuspensionResolver().plan(rec, {
+        "r1": {"granted": True},
+        "r2": {"answer": "hello"},
+        "r3": {"action": "retry"},
+    })
+    assert plan.execute_tool_call_ids == ["ca"]
+    assert plan.direct_outputs["cb"] == {"answer": "hello"}
+    assert plan.resample is True
+
+
+def test_resolver_permission_deny_path():
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import SuspensionResolver
+    rec = _rec(
+        PendingRequest(request_id="r1", reason=SuspendReason.PERMISSION, related_call_id="ca")
+    )
+    plan = SuspensionResolver().plan(rec, {"r1": {"granted": False, "reason": "no"}})
+    assert plan.execute_tool_call_ids == []
+    assert plan.deny_outputs["ca"] == "no"
+
+
+def test_resolver_system_retry_abort():
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.SYSTEM_RETRY))
+    plan = SuspensionResolver().plan(rec, {"r1": {"action": "abort"}})
+    assert plan.abort is True
+    assert plan.resample is False
