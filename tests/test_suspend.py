@@ -781,34 +781,12 @@ async def test_resume_after_permission_suspension(skills_dir, threads_dir):
     from taifeng.llm.types import TokenUsage
     from taifeng.loop.submission import Resume
     from taifeng.permission.types import (
-        PermissionDecision,
         PermissionPolicy,
+        SuspendingPrompter,
     )
-    from taifeng.suspend.reason import PendingRequest, SuspendReason
-    from taifeng.suspend.signal import SuspendSignal
 
-    class _OneShotPrompter:
-        """首次 prompt 抛 SuspendSignal（挂起等审批）；之后放行（模拟人类已批准）。
-
-        resume 续跑时 _execute_resumed_tool 会再次经 policy.check 走本 prompter，
-        此时返回 allow —— 即「人类批准后再执行被挂起的 tool」。
-        """
-
-        def __init__(self) -> None:
-            self._asked = False
-
-        async def prompt(self, request: PermissionRequest) -> PermissionDecision:
-            if not self._asked:
-                self._asked = True
-                pending = PendingRequest(
-                    request_id="req_perm_1",
-                    reason=SuspendReason.PERMISSION,
-                    related_call_id=request.metadata.get("call_id"),
-                    detail={"scope": request.scope, "target": request.target},
-                )
-                raise SuspendSignal(pending)
-            return PermissionDecision.allow(reason="resumed-approved")
-
+    # 用真实的 SuspendingPrompter（总是挂起）：resume 续跑必须靠 engine 的一次性预批准
+    # 放行，而不再触发 prompter（Task 12c：否则会无限挂起死循环）。
     gated_tool = await _gated_tool_with_call_id_factory()
     _build_suspend_skill(skills_dir)
 
@@ -825,7 +803,7 @@ async def test_resume_after_permission_suspension(skills_dir, threads_dir):
         ),
     ])
 
-    policy = PermissionPolicy(default_mode="ask", prompter=_OneShotPrompter())
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
         threads_dir=threads_dir,
@@ -982,3 +960,28 @@ max_call_depth: 2
     kinds2 = [ev.msg.kind for ev in events2]
     assert "suspension_resolved" in kinds2, f"未见 suspension_resolved，实得 {kinds2}"
     assert events2[-1].msg.kind == "turn_completed", f"续跑应完成，实得 {kinds2}"
+
+
+async def test_permission_policy_preapprove_one_shot():
+    """预批准:check 命中 call_id 即放行(不触发 prompter),且一次性(只放行一次)。"""
+    import pytest
+
+    from taifeng.permission.types import PermissionPolicy, PermissionRequest, SuspendingPrompter
+    from taifeng.suspend.signal import SuspendSignal
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    req = PermissionRequest.for_tool_call(
+        "shell_exec", {"cmd": "echo hi"},
+        thread_id="t", submission_id="s", entry_skill_id="root",
+        turn_index=1, call_chain=("root",),
+        extra_metadata={"call_id": "call_X"},
+    )
+    # 未预批准:仍挂起
+    with pytest.raises(SuspendSignal):
+        await policy.check(req)
+    # 预批准 call_X 后:放行,不挂起
+    policy.preapprove("call_X")
+    decision = await policy.check(req)
+    assert decision.granted is True
+    # 一次性:再次 check 又挂起(预批准已被消费)
+    with pytest.raises(SuspendSignal):
+        await policy.check(req)

@@ -885,6 +885,9 @@ class AgentEngine:
                 "script_executors": self._script_executors,
             },
         )
+        # resume：人类已批准该挂起 call → 预批准，避免重跑时再次触发 prompter（防无限挂起）
+        if self._permission_policy is not None:
+            self._permission_policy.preapprove(call_id)
         result = await self._tool_runtime.dispatch(name=name, arguments=args, ctx=ctx)
         out = function_call_output(
             call_id=call_id, output=result.output,

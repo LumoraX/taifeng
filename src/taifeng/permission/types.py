@@ -458,6 +458,23 @@ class PermissionPolicy:
     telemetry: PolicyTelemetryCallback | None = None
     """业务侧注入的 telemetry 回调；用于发 ``permission_prompt_timeout`` 事件。"""
 
+    # 一次性预批准的 call_id 集合（resume 时 engine 注入，check 命中即放行并消费）。
+    # 用 field(default_factory=set) 持有可变状态；不参与 from_dict / from_capability_tier
+    # 构造（它们走 cls(rules=..., default_mode=..., prompter=...) 不传本字段，default_factory
+    # 兜底为空集，行为零变化）。
+    _preapproved_call_ids: set[str] = field(default_factory=set)
+
+    def preapprove(self, call_id: str) -> None:
+        """登记一次性预批准：下一次该 call_id 的 check 直接放行（不 prompt）。
+
+        用于 resume：人类已通过 Resume 决定批准某挂起 tool call，engine 重跑该 call
+        前调用本方法，避免再次触发 prompter（否则 SuspendingPrompter 会无限挂起）。
+
+        Args:
+            call_id: 被批准的挂起 tool call id（对应 PermissionRequest.metadata['call_id']）。
+        """
+        self._preapproved_call_ids.add(call_id)
+
     @classmethod
     def from_capability_tier(
         cls,
@@ -586,6 +603,13 @@ class PermissionPolicy:
         )
 
     async def check(self, request: PermissionRequest) -> PermissionDecision:
+        # 0. 一次性预批准：命中即消费 + 放行（resume 已获人类批准，勿再 prompt）。
+        #    必须在规则/prompter 之前，否则 SuspendingPrompter 会再次挂起导致死循环。
+        call_id = request.metadata.get("call_id")
+        if call_id is not None and call_id in self._preapproved_call_ids:
+            self._preapproved_call_ids.discard(call_id)
+            return PermissionDecision.allow(reason="resume_preapproved")
+
         # 1+2. 规则查找
         mode: PermissionMode = self.default_mode
         rule_reason = ""
