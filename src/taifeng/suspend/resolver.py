@@ -77,4 +77,7 @@ class SuspensionResolver:
                     plan.abort = True
                 else:
                     plan.resample = True
+            else:
+                # 未知 reason:禁静默丢弃(CLAUDE.md 禁 silent fallback)
+                raise ResolveError(f"unhandled_suspend_reason: {p.reason}")
         return plan

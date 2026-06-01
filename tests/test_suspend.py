@@ -674,3 +674,25 @@ def test_resolver_system_retry_abort():
     plan = SuspensionResolver().plan(rec, {"r1": {"action": "abort"}})
     assert plan.abort is True
     assert plan.resample is False
+
+
+def test_resolver_permission_granted_missing_call_id_raises():
+    import pytest
+
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+    rec = _rec(PendingRequest(
+        request_id="r1", reason=SuspendReason.PERMISSION, related_call_id=None,
+    ))
+    with pytest.raises(ResolveError):
+        SuspensionResolver().plan(rec, {"r1": {"granted": True}})
+
+
+def test_resolver_form_missing_call_id_raises():
+    import pytest
+
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.FORM, related_call_id=None))
+    with pytest.raises(ResolveError):
+        SuspensionResolver().plan(rec, {"r1": {"answer": "x"}})
