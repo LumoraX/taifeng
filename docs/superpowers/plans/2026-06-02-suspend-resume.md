@@ -34,7 +34,9 @@
 | `tests/test_suspend.py` | 单元 + 集成测试 | Create |
 | `tests/test_engine_e2e.py` | e2e resume 用例 | Modify |
 
-执行顺序自底向上:Phase 1(纯原语)→ 2(持久化)→ 3(prompter)→ 4(batch)→ 5(turn)→ 6(event+Op)→ 7(resolver)→ 8(engine)→ 9(e2e+docs)。
+执行顺序自底向上:Phase 1(纯原语)→ 2(持久化)→ 3(prompter)→ 4(batch)→ 5(turn)→ **5b(request_user_input 采集工具,Task 15)**→ 6(event+Op)→ 7(resolver)→ 8(engine)→ 9(e2e+docs)。
+
+> **与已有 openspec change 的调和(2026-06-02 决策)**:仓库主树有一份**未提交**的 openspec change `hitl-user-input-suspend-resume`(只做采集型、permission 仍阻塞、单挂起点)。决策为**本通用方案超集化并吸收它**:① 新增 Task 15 创建其定义的 `request_user_input` 内置工具(并入我们的 reason=form/data 挂起);② Task 14 把该 openspec change 改写/归档为覆盖四类挂起的超集形状。差异详见 spec 与对话记录。
 
 ---
 
@@ -1417,16 +1419,146 @@ git commit -m "feat(suspend): 顶层导出 + 边界/幂等/cancel/tier2 测试"
 
 - [ ] **Step 1: 写能力契约** `capabilities/suspend-resume.md` —— 数据契约(`SuspendReason`/`PendingRequest`/`SuspensionRecord`/`Resume`/3 EventMsg)+ 行为契约(挂起→释放→resume 时序、禁部分 resume、幂等、cancel、tier1/tier2、R1–R5)。内容取自 spec §3–§7。
 - [ ] **Step 2: 更新** `agent-loop.md` 的 turn 数据流(加挂起分支)、`capabilities/README.md` 索引。
-- [ ] **Step 3: 写 ADR** —— 记两条决策:① 为什么挂起=turn 结局而非阻塞 channel(对 codex/hermes/claw-code 的差异);② 为什么额外持久化 SuspensionRecord(对 codex `resume_thread_from_rollout` 的差异)。`Supersedes` 留空。
+- [ ] **Step 3: 写 ADR** —— 记三条决策:① 为什么挂起=turn 结局而非阻塞 channel(对 codex/hermes/claw-code 的差异);② 为什么额外持久化 SuspensionRecord(对 codex `resume_thread_from_rollout` 的差异);③ 为什么用通用四类挂起超集吸收原 `hitl-user-input-suspend-resume`(而非两层并存)。`Supersedes` 留空。
 - [ ] **Step 4: 更新** `configurable-knobs.md`。
-- [ ] **Step 5: commit**
+- [ ] **Step 5: 调和 openspec change** —— 主树有未提交的 openspec change `openspec/changes/hitl-user-input-suspend-resume`(窄方案)。改写它为本超集形状:proposal 的 What/Capabilities 扩为四类挂起(permission/form/data/system_retry)、Op 由 `provide_tool_result(call_id,result)` 收敛为 `Resume(thread_id,{request_id:payload})`(form/data 场景 request_id↔related_call_id 等价)、新增 `request_user_input` 工具归入 form/data 触发器、多挂起点并存取代"单 pending"、`turn_suspended` 对齐本设计的 data 字段;spec.md 的 Requirements 同步改写。**保留**其优秀的"纯 history-gap + tool-result 回灌"叙述作为 form/data 子路径说明。改后 `cd <主树> && openspec validate hitl-user-input-suspend-resume`(若装了 openspec CLI;否则人工核对)。
+- [ ] **Step 6: commit**
 
 ```bash
 git add docs/
 git commit -m "docs(suspend): 能力契约 + agent-loop 活文档 + ADR + knobs"
+# openspec change 在主树(未提交、不在本 worktree),其调和由集成阶段在主树单独处理
 ```
 
+> 注:openspec change 目录在**主树**(`/Volumes/Codes/Qiuben/qiuben/taifeng/openspec/`),不在本 worktree。Step 5 的改写在集成阶段于主树执行(或由控制方单独安排),不混入本分支的 `docs/` commit。
+
 > **硬约束(CLAUDE.md)**:architecture / 契约未同步 → PR 不合并。Task 14 是合并前置条件,不可省。
+
+---
+
+## Phase 5b — 采集型触发工具(吸收 openspec change)
+
+### Task 15: `request_user_input` 内置工具
+
+> **执行时机**:在 Task 8 之后、Task 12(engine e2e)之前。它是 reason=form/data 挂起的**用户面触发器**,吸收自原 openspec change `hitl-user-input-suspend-resume`。机制完全复用 Task 6/7:工具被调用时抛 `SuspendSignal(reason=DATA)`,`dispatch_batch` 捕获 → turn 留 `function_call` gap + 落 `SuspensionRecord` → 挂起。resume 时该 `request_id` 的 payload 经 resolver 直接回填成 `function_call_output`(等价原方案的 `provide_tool_result`)。
+
+**Files:**
+- Create: `src/taifeng/tool/builtins/request_user_input.py`
+- Modify: 内置工具注册处(读 `src/taifeng/tool/builtins/__init__.py` 看 `file_read`/`shell_exec` 等如何注册,照葫芦画瓢)
+- Test: `tests/test_suspend.py`
+
+- [ ] **Step 1: 先读现有 builtin** —— 打开 `src/taifeng/tool/builtins/file_io.py` 或 `shell.py` 看 `ToolSpec` 构造(name/description/parameters JSON Schema/`parallel_safe`)、handler 签名(`async def handler(args, ctx) -> ToolResult`,`ctx: ToolContext` 含 `call_id`),以及 `builtins/__init__.py` 的注册列表。务必匹配既有风格。
+
+- [ ] **Step 2: 写失败测试**
+
+```python
+# tests/test_suspend.py 追加
+async def test_request_user_input_raises_form_suspend():
+    """request_user_input 被调用 → 抛 SuspendSignal(reason=DATA),
+    related_call_id == 本次 call_id,prompt/response_schema 进 detail(不透明透传)。"""
+    import pytest
+    from taifeng.suspend.reason import SuspendReason
+    from taifeng.suspend.signal import SuspendSignal
+    from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+    spec = make_request_user_input_tool()
+    assert spec.name == "request_user_input"
+    assert spec.parallel_safe is False
+    # 构造一个最小 ToolContext(参考既有 builtin 测试的 ctx 搭建)
+    ctx = _make_tool_ctx(call_id="call_xyz")   # helper:见既有 builtins 测试
+    with pytest.raises(SuspendSignal) as ei:
+        await spec.handler({"prompt": "你的年龄?", "response_schema": {"type": "integer"}}, ctx)
+    p = ei.value.pending
+    assert p.reason is SuspendReason.DATA
+    assert p.related_call_id == "call_xyz"
+    assert p.detail["prompt"] == "你的年龄?"
+    assert p.detail["response_schema"] == {"type": "integer"}
+
+
+async def test_request_user_input_empty_prompt_rejected():
+    """空 prompt → typed error(禁静默占位)。"""
+    import pytest
+    from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+    spec = make_request_user_input_tool()
+    ctx = _make_tool_ctx(call_id="c1")
+    with pytest.raises(ValueError):
+        await spec.handler({"prompt": "", "response_schema": {}}, ctx)
+```
+
+> `_make_tool_ctx` helper:参考既有 builtin 测试(grep `ToolContext(` in tests/)构造最小 ctx;若无现成 helper,在本测试文件内写一个返回 `ToolContext(call_id=..., ...)` 的小工厂,字段按 `tool/spec.py::ToolContext` 必填项填默认。
+
+- [ ] **Step 3: 跑测试确认失败** — `PYTHONPATH=src uv run pytest tests/test_suspend.py -k request_user_input -v` → FAIL(模块不存在)。
+
+- [ ] **Step 4: 实现**
+
+```python
+# src/taifeng/tool/builtins/request_user_input.py
+"""request_user_input —— 采集型 HITL 触发工具。
+
+参照 openspec change hitl-user-input-suspend-resume 的工具定义。差异:不引入独立
+provide_tool_result Op,而是统一走 SuspendSignal(reason=DATA)→ TurnSuspended →
+Resume({request_id: payload}),payload 经 resolver 回填成本次 call 的 function_call_output。
+
+LLM 调用本工具向人类发问;response_schema 为不透明 passthrough(R1,内核不解析)。
+本工具 parallel_safe=False。被调用时不同步返回 result,而是抛 SuspendSignal 让 turn 挂起。
+"""
+from __future__ import annotations
+
+from taifeng.suspend.reason import PendingRequest, SuspendReason
+from taifeng.suspend.signal import SuspendSignal
+from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec   # 按实际 spec.py 导出名调整
+
+
+def make_request_user_input_tool() -> ToolSpec:
+    """构造 request_user_input ToolSpec(注册进内置工具表)。"""
+
+    async def handler(args: dict, ctx: ToolContext) -> ToolResult:
+        # 边界校验:prompt 必填非空(系统边界,禁静默占位)
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("request_user_input_empty_prompt: prompt 必须为非空字符串")
+        response_schema = args.get("response_schema") or {}
+        # 不同步返回 → 抛挂起信号;related_call_id 锚定本次 call,resume 时回填其 output
+        raise SuspendSignal(PendingRequest(
+            request_id=ctx.call_id,                 # form/data 场景 request_id 直接用 call_id
+            reason=SuspendReason.DATA,
+            payload_schema=response_schema,          # 不透明透传
+            related_call_id=ctx.call_id,
+            detail={"prompt": prompt, "response_schema": response_schema},
+        ))
+
+    return ToolSpec(
+        name="request_user_input",
+        description=(
+            "向人类发起一个结构化问询并等待回答。调用本工具会挂起当前 turn 直到收到回答。"
+            "应作为该 step 唯一的工具调用发起。参数:prompt(问询文本)、response_schema(回答的 JSON Schema)。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "向人类展示的问询文本"},
+                "response_schema": {"type": "object", "description": "期望回答的 JSON Schema(不透明)"},
+            },
+            "required": ["prompt"],
+        },
+        handler=handler,
+        parallel_safe=False,
+    )
+```
+
+> 注:`ToolSpec` 字段名(`handler`/`parameters`/`parallel_safe`)与 `ToolResult`/`ToolContext` 的确切签名以 `src/taifeng/tool/spec.py` 为准——Step 1 已要求先读。若注册是通过一个 `BUILTIN_TOOLS` 列表 / `register_builtins()`,把 `make_request_user_input_tool()` 加进去。
+
+- [ ] **Step 5: 注册 + 跑测试 + 回归**
+- 在 `builtins/__init__.py`(或既有注册入口)注册本工具。
+- `PYTHONPATH=src uv run pytest tests/test_suspend.py -k request_user_input -v`(expect pass)
+- `PYTHONPATH=src uv run pytest tests/ -k "tool or builtin" -v`(回归:工具注册/schema 不破)
+- `uv run ruff check src/taifeng/tool/builtins/request_user_input.py tests/test_suspend.py`
+
+- [ ] **Step 6: commit**
+
+```bash
+git add src/taifeng/tool/builtins/request_user_input.py src/taifeng/tool/builtins/__init__.py tests/test_suspend.py
+git commit -m "feat(tool): request_user_input 采集型挂起触发工具(吸收 openspec hitl-user-input)"
+```
 
 ---
 
