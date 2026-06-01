@@ -18,6 +18,7 @@ from taifeng.conversation.models import (
     function_call,
     function_call_output,
     reasoning,
+    suspension_item,
     system_injection,
     user_message,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "iter_thread_files",
     "rebuild_index",
     "reasoning",
+    "suspension_item",
     "system_injection",
     "user_message",
 ]

@@ -78,3 +78,4 @@ def test_suspension_item_constructor():
     assert item.payload["turn_index"] == 2
     assert item.payload["pending"][0]["request_id"] == "r1"
     assert item.payload["resolved"] is False
+    assert item.payload["created_at"] == 1000

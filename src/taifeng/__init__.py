@@ -49,6 +49,7 @@ from taifeng.conversation import (
     function_call,
     function_call_output,
     rebuild_index,
+    suspension_item,
     user_message,
 )
 from taifeng.hooks import (
@@ -230,6 +231,7 @@ __all__ = [
     "function_call",
     "function_call_output",
     "rebuild_index",
+    "suspension_item",
     "user_message",
 ]
 
