@@ -651,6 +651,28 @@ class AgentEngine:
             self._turn_index += 1
             return
 
+        await self._build_and_run_runner(sub.id, turn_cancel, resolved_for_turn)
+
+    async def _build_and_run_runner(
+        self,
+        submission_id: str,
+        turn_cancel: CancellationToken,
+        resolved_for_turn: list[ResolvedInstruction],
+    ) -> None:
+        """构造 TurnRunner(基于当前 self._history)→ run → 回写 engine 状态。
+
+        从 _run_turn_for 抽出，供 UserMessage turn 与 resume 续跑复用。
+        调用方负责在调用前完成 gating(user_message 落盘 / instruction resolve /
+        pre_turn hook / token 守卫)并把 pending 注册好；本方法只负责"跑一轮 + 回写"。
+
+        参数:
+            submission_id: 当前 turn 的 submission id（用于 pending 注销 / emit 归因）
+            turn_cancel: 当前 turn 的取消子 token（由调用方从 root_cancel 派生）
+            resolved_for_turn: 当前 turn 已 resolve 的 instruction 列表
+        副作用:
+            注销 self._pending[submission_id]、自增 self._turn_index、
+            回写 self._history / cache_anchor / prompt 指纹 / 压缩计数 / 会话 token。
+        """
         runner = TurnRunner(
             entry_skill=self._entry_skill,
             snapshot=self._snapshot,
@@ -661,7 +683,7 @@ class AgentEngine:
             dispatch_policy=self._dispatch_policy,
             budget=self._budget,
             thread_id=self._thread_id,
-            submission_id=sub.id,
+            submission_id=submission_id,
             emit=self._emit,
             cancel=turn_cancel,
             hooks=self._hooks,
@@ -690,7 +712,7 @@ class AgentEngine:
         try:
             await runner.run()
         finally:
-            self._pending.pop(sub.id, None)
+            self._pending.pop(submission_id, None)
             self._turn_index += 1
 
         # 同步 turn 内的 history 变更回 engine
