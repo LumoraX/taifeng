@@ -1,0 +1,41 @@
+# 发布到 PyPI —— 基于 GitHub Trusted Publishing（OIDC，无需在仓库存 token）
+# 触发：推送形如 v* 的 tag（如 v0.0.2）即自动构建并发布。
+# 一次性前置：在 https://pypi.org/manage/account/publishing/ 把本仓库 + 本文件名
+#   (publish.yml) + environment (pypi) 登记为 trusted publisher。
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # environment 名需与 PyPI trusted publisher 配置中的一致
+    environment: pypi
+    permissions:
+      # OIDC 令牌签发权限 —— Trusted Publishing 必需，缺它会鉴权失败
+      id-token: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: 构建 wheel 与 sdist
+        run: uv build
+
+      - name: 校验 tag 版本与 pyproject 版本一致
+        # 防止打错 tag：tag 去掉前缀 v 后必须等于 pyproject.toml 的 version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          proj_version="$(uv version --short)"
+          if [ "$tag_version" != "$proj_version" ]; then
+            echo "::error::tag ($tag_version) 与 pyproject version ($proj_version) 不一致"
+            exit 1
+          fi
+
+      - name: 发布到 PyPI（Trusted Publishing）
+        run: uv publish --trusted-publishing always
