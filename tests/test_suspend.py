@@ -206,3 +206,132 @@ async def test_runtime_invoke_propagates_suspend_signal():
 
     with pytest.raises(SuspendSignal):
         await runtime.dispatch(name="needs_approval", arguments={}, ctx=ctx)
+
+
+# ====================================================================
+# Task 7 集成:run_turn 命中挂起点 → 退栈为 suspended 结局 + 落 suspension 断点
+# ====================================================================
+#
+# 走 EnginePool → AgentEngine → 一次 turn 的真实链路(参照 tests/loop/test_engine_e2e.py
+# 与 tests/loop/test_permission_policy_wiring.py 的 MockClient + EnginePool 搭建套路):
+#   - 注册一个工具,其 handler 主动经注入的 PermissionPolicy.check 走审批门控;
+#   - PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter()) → check 抛
+#     SuspendSignal(reason=PERMISSION);
+#   - runtime._invoke 放行 SuspendSignal → dispatch_batch 捕获为 outcome.suspend;
+#   - 阶段 3 配对回填区识别 suspend → 只落 function_call(无 output)、抛 _BatchSuspend;
+#   - run() 捕获 _BatchSuspend → end_reason="suspended" + 落 SuspensionRecord。
+# 选用集成测试(而非直接单测 _dispatch_tools)因为它同时验证了 end_reason 这一关键结局。
+
+
+async def _gated_tool_factory():
+    """构造一个工具:handler 经 ctx.extras 注入的 PermissionPolicy 走审批门控。
+
+    门控为 ask 模式时 check() 抛 SuspendSignal,据此触发 turn 挂起;
+    返回值仅在门控放行(此场景不会发生)时使用。
+    """
+    from taifeng.permission.types import PermissionRequest
+    from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+    async def handler(args, ctx: ToolContext) -> ToolResult:
+        policy = ctx.extras.get("permission_policy")
+        # 构造审批请求并走门控:ask 模式下 SuspendingPrompter 抛 SuspendSignal,
+        # 由 runtime._invoke 放行 → dispatch_batch 捕获为 outcome.suspend。
+        req = PermissionRequest.for_tool_call(
+            "danger",
+            args,
+            thread_id=ctx.thread_id,
+            submission_id=str(ctx.extras.get("submission_id") or ""),
+            entry_skill_id=str(ctx.extras.get("entry_skill_id") or ""),
+            turn_index=int(ctx.extras.get("turn_index") or 0),
+            call_chain=("root",),
+        )
+        await policy.check(req)
+        return ToolResult.ok("approved")  # 门控放行才到这(本场景不会)
+
+    return ToolSpec(
+        name="danger",
+        description="需审批的危险工具(测试用)",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=handler,
+        parallel_safe=True,
+    )
+
+
+async def test_suspend_turn_ends_suspended_and_persists_record(skills_dir, threads_dir):
+    """run_turn 命中挂起点时:end_reason=="suspended"、落 SuspensionRecord、
+    function_call 有但无配对 function_call_output(history-gap)。"""
+    import taifeng
+    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.types import TokenUsage
+    from taifeng.permission.types import PermissionPolicy
+
+    gated_tool = await _gated_tool_factory()
+
+    # entry skill 声明 tool_names 含 danger,否则会被 turn.py 的白名单过滤掉
+    skill_md = """---
+name: suspend-skill
+description: suspend entry
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [style-checker]
+tool_names: [danger]
+max_call_depth: 2
+---
+# Suspend
+"""
+    (skills_dir / "suspend-skill").mkdir()
+    (skills_dir / "suspend-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+    # MockClient:第一轮产出一个 danger tool call(命中审批挂起);无第二轮(turn 挂起不再采样)
+    client = MockClient(turns=[
+        MockTurn(
+            text="calling danger",
+            tool_calls=[{"id": "call_d1", "name": "danger", "arguments": "{}"}],
+            usage=TokenUsage(input_tokens=10, output_tokens=5),
+        ),
+    ])
+
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        extra_tools=[gated_tool],
+        permission_policy=policy,
+    )
+    engine = await pool.get_or_create(
+        session_id="suspend-e2e", entry_skill_id="suspend-skill",
+    )
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            break
+
+    # 落盘验证:store 含 kind=="suspension" item;call_d1 有 function_call 无 output
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    await pool.close()
+
+    suspension_items = [it for it in items if it.kind == "suspension"]
+    assert len(suspension_items) == 1, "应恰好落一条 suspension item"
+
+    # 还原为 SuspensionRecord 校验 pending
+    rec = SuspensionRecord.from_item(suspension_items[0])
+    assert len(rec.pending) == 1
+    assert rec.pending[0].reason is SuspendReason.PERMISSION
+
+    # history-gap:danger 的 function_call 已落,但无配对的 function_call_output
+    fc_ids = {
+        it.payload.get("call_id")
+        for it in items
+        if it.kind == "function_call"
+    }
+    fco_ids = {
+        it.payload.get("call_id")
+        for it in items
+        if it.kind == "function_call_output"
+    }
+    assert "call_d1" in fc_ids, "挂起的 function_call 必须落盘"
+    assert "call_d1" not in fco_ids, "挂起点不得有 function_call_output(history-gap)"

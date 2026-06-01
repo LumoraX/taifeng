@@ -69,6 +69,7 @@ from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import CallStack, DispatchPolicy
 from taifeng.skill.eligibility import RuntimeCapabilities
 from taifeng.skill.registry import SkillSnapshot
+from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获，不可放 TYPE_CHECKING
 from taifeng.tool.runtime import ToolCallRuntime
 from taifeng.tool.spec import ToolContext
 
@@ -102,6 +103,23 @@ def _history_orphan_call_ids(history: list[ResponseItem]) -> set[str]:
     return {cid for cid in (fc ^ fco) if cid is not None}
 
 
+class _BatchSuspend(Exception):  # noqa: N818
+    """内部:_dispatch_tools 把整批挂起 pending 上抛给 run_turn。
+
+    挂起不是错误,只是 turn 的正常中断信号;run() 在宽 except 之前先捕获本异常,
+    据此把结局退栈为 suspended(否则会被分类成 TurnFailed,即 Task 6 修过的吞错类问题)。
+    """
+
+    def __init__(self, pending: tuple[Any, ...]) -> None:
+        """初始化批量挂起异常。
+
+        Args:
+            pending: 本 turn 全部挂起点的 PendingRequest(不可变 tuple)。
+        """
+        self.pending = pending
+        super().__init__(f"batch suspend: {len(pending)} pending")
+
+
 @dataclass(frozen=True)
 class TurnOutcome:
     success: bool
@@ -111,6 +129,8 @@ class TurnOutcome:
     final_text: str
     end_reason: str
     error: str | None = None
+    suspension: Any = None
+    """SuspensionRecord | None;end_reason=="suspended" 时非空(R5 跨进程 resume 的真相)。"""
 
 
 @dataclass
@@ -185,6 +205,27 @@ class TurnRunner:
     _next_cache_break_reason: str | None = None
     # G3：最近一次 LLM 调用回流的服务端 request-id（completed 事件携带）
     _last_request_id: str | None = None
+
+    # 挂起 id / 时间戳工厂（R1：src 内不取系统时钟 / 随机；业务侧注入，测试可固定）。
+    # None → __post_init__ 兜底默认（secrets / time）。
+    suspend_id_factory: Any = None
+    now_factory: Any = None
+
+    def __post_init__(self) -> None:
+        """兜底注入挂起 id / 时间戳工厂，并初始化当前迭代序号。
+
+        R1:src 内不直接取系统时钟 / 随机;业务侧可注入固定工厂(测试用)。
+        ``_current_iteration`` 在 run() 主循环每次 ``iterations += 1`` 后同步,
+        用于落 SuspensionRecord.turn_index。
+        """
+        import secrets as _secrets
+        import time as _time
+
+        self._suspend_id_factory = self.suspend_id_factory or (
+            lambda: f"sr_{_secrets.token_hex(6)}"
+        )
+        self._now_factory = self.now_factory or (lambda: int(_time.time()))
+        self._current_iteration = 0
 
     async def _emit(self, msg) -> None:
         try:
@@ -295,6 +336,7 @@ class TurnRunner:
         final_text = ""
         end_reason = "completed"
         error_msg: str | None = None
+        suspension: Any = None  # SuspensionRecord | None;命中挂起点时落盘后赋值
         try:
             # B 声明式编排：entry 声明了 orchestration → 纯编排器路径（不采样 LLM）
             if self.entry_skill.orchestration is not None:
@@ -307,6 +349,8 @@ class TurnRunner:
                 while iterations < self.max_iterations:
                     self.cancel.raise_if_cancelled()
                     iterations += 1
+                    # 同步当前迭代序号 → 挂起时落 SuspensionRecord.turn_index
+                    self._current_iteration = iterations
 
                     # pre-turn 压缩判断
                     await self._maybe_compress(phase="pre_turn")
@@ -341,6 +385,15 @@ class TurnRunner:
                     await self._maybe_compress(phase="mid_turn")
                 else:
                     end_reason = "max_iterations"
+        except _BatchSuspend as bs:
+            # 工具批次命中挂起点：落 SuspensionRecord，turn 终结于 suspended（非失败）。
+            # 必须在宽 except Exception 之前捕获，否则会被分类成 TurnFailed（吞错类问题）。
+            end_reason = "suspended"
+            suspension = await self._persist_suspension(bs.pending)
+        except SuspendSignal as sig:
+            # 单点挂起（如 system_retry 在 sample 阶段抛出）：同样落盘挂起。
+            suspension = await self._persist_suspension((sig.pending,))
+            end_reason = "suspended"
         except asyncio.CancelledError:
             end_reason = "cancelled"
             error_msg = "cancelled"
@@ -392,6 +445,7 @@ class TurnRunner:
             final_text=final_text,
             end_reason=end_reason,
             error=error_msg,
+            suspension=suspension,
         )
 
         await self._emit(
@@ -642,6 +696,8 @@ class TurnRunner:
         # === 阶段 3：按发起序以 (call, output) 配对写历史 ===
         # 配对追加复现今天的交错 transcript 结构（history_to_api_messages 1:1 保序），
         # 并发度=1 时与历史字节级一致。
+        # 挂起的 outcome 只落 function_call（留 history-gap、无 output），收集 pending 上抛。
+        suspended_pending: list[Any] = []
         for req, outcome in zip(requests, outcomes, strict=True):
             fc_item = function_call(
                 call_id=req.call_id,
@@ -651,6 +707,11 @@ class TurnRunner:
             )
             self.history_buffer.append(fc_item)
             await self.store.append(fc_item)
+            if outcome.suspend is not None:
+                # 挂起点：留无 output 的 function_call；不回填，收集 pending。
+                # resume 时由 SuspensionRecord 重导，再补回对应 function_call_output。
+                suspended_pending.append(outcome.suspend)
+                continue
             fco_item = function_call_output(
                 call_id=req.call_id,
                 output=outcome.result.output,
@@ -660,6 +721,9 @@ class TurnRunner:
             self.history_buffer.append(fco_item)
             await self.store.append(fco_item)
 
+        if suspended_pending:
+            # 整批挂起 pending 上抛给 run()/run_turn 聚合落一条 SuspensionRecord。
+            raise _BatchSuspend(tuple(suspended_pending))
         return assistant_text, True
 
     def _build_tool_context(self, call_id: str, iteration: int) -> ToolContext:
@@ -692,6 +756,33 @@ class TurnRunner:
                 "script_executors": self.script_executors,
             },
         )
+
+    async def _persist_suspension(self, pending: tuple[Any, ...]) -> Any:
+        """把本次挂起落 store 并返回 SuspensionRecord（R5 跨进程 resume 的真相）。
+
+        record_id / created_at 由注入工厂提供（R1：src 内不取系统时钟 / 随机）；
+        pending 为本次挂起的全部 PendingRequest。
+
+        Args:
+            pending: 本 turn 全部挂起点的 PendingRequest（不可变 tuple）。
+
+        Returns:
+            落盘后的 SuspensionRecord（同时已追加进 history_buffer 与 store）。
+        """
+        from taifeng.suspend.record import SuspensionRecord
+
+        record = SuspensionRecord(
+            record_id=self._suspend_id_factory(),
+            thread_id=self.thread_id,
+            submission_id=self.submission_id,
+            turn_index=self._current_iteration,
+            pending=pending,
+            created_at=self._now_factory(),
+        )
+        item = record.to_item()
+        self.history_buffer.append(item)
+        await self.store.append(item)
+        return record
 
     def _session_limit_exceeded(self) -> bool:
         """K2：会话累计 token（基线 + 本 turn 已用）是否达到上限。
