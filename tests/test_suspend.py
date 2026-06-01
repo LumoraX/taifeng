@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import pytest
 
@@ -30,3 +31,18 @@ def test_pending_request_frozen_and_fields():
     # frozen:不可变
     with pytest.raises(dataclasses.FrozenInstanceError):
         req.request_id = "x"  # type: ignore[misc]
+
+
+def test_pending_request_default_dicts_are_independent():
+    # 默认 payload_schema / detail 必须是各实例独立的对象(field default_factory),
+    # 不能共享同一 dict,否则一处 mutate 会污染其他实例
+    a = PendingRequest(request_id="a", reason=SuspendReason.FORM)
+    b = PendingRequest(request_id="b", reason=SuspendReason.FORM)
+    assert a.payload_schema is not b.payload_schema
+    assert a.detail is not b.detail
+
+
+def test_suspend_reason_json_serializes_to_string():
+    # StrEnum 跨层序列化契约:json.dumps 直接得到字符串值(若有人改回普通 Enum 会回归)
+    assert json.dumps({"r": SuspendReason.FORM}) == '{"r": "form"}'
+    assert str(SuspendReason.PERMISSION) == "permission"
