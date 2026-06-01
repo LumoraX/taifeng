@@ -273,6 +273,12 @@
   #obs-panel .tile.alert .val { color: var(--danger); }
   #obs-panel .tile.warn  { border-color: var(--warn); }
   #obs-panel .tile.warn  .val { color: var(--warn); }
+  /* ctx 占用迷你进度条：填充宽度 = 占用百分比，颜色按阈值（绿/橙/红）内联设置 */
+  #obs-panel .tile .gauge {
+    height: 3px; margin-top: 5px; background: var(--border);
+    border-radius: 2px; overflow: hidden;
+  }
+  #obs-panel .tile .gauge > i { display: block; height: 100%; transition: width .3s; }
   #events-list {
     /* 底部留 32px：同 chat-log 的呼吸感处理；事件流字号小，给一点更友好 */
     flex: 1; overflow-y: auto; padding: 8px 8px 32px;
@@ -532,6 +538,8 @@ const obs = {
   inTok: 0,         // 会话累计 input tokens（含子 turn）
   outTok: 0,        // 会话累计 output tokens
   cacheReadTok: 0,  // 会话累计命中 prompt cache 的 input tokens
+  ctxTokens: 0,     // 当前 context 占用 = 最后一次 root turn 的 input_tokens
+                    // （= 下次提问会带进去的完整 prompt+历史，最贴近"占了多少窗口"）
 };
 
 function resetObs() {
@@ -564,7 +572,15 @@ function accumulateObs(kind, data) {
       obs.outTok += u.output_tokens || 0;
       obs.cacheReadTok += u.cache_read_input_tokens || 0;
       // 根 / 子 turn 分开计数 —— fan-out 时一条 user 输入会派生多个子 turn
-      if (data.is_root) obs.turns += 1; else obs.subTurns += 1;
+      if (data.is_root) {
+        obs.turns += 1;
+        // ctx 占用以 root turn 的 input_tokens 为准（这里直接取 data.usage，
+        // 不依赖 pushEvent 里晚一步才更新的 loop.ctxTokens —— accumulateObs
+        // 在 pushEvent 早段调用，时序上先于 loop.ctxTokens 赋值）
+        obs.ctxTokens = u.input_tokens || obs.ctxTokens;
+      } else {
+        obs.subTurns += 1;
+      }
       break;
     }
     case "turn_failed": if (data.is_root) obs.failures += 1; break;
@@ -576,7 +592,33 @@ function accumulateObs(kind, data) {
 function renderObsPanel() {
   // cache 命中率：会话累计 cache_read / 累计 input；MockClient 无缓存恒为 0（符合预期）。
   const cacheRate = obs.inTok ? (obs.cacheReadTok / obs.inTok) * 100 : 0;
+  // ── ctx 窗口 + 占用两块 ──────────────────────────────────────
+  // 窗口大小来自 LLM model 的 context window（/api/demos 的 llm.context_window）；
+  // 占用 = obs.ctxTokens（最后一次 root turn 的 input_tokens）。颜色阈值与 loop
+  // pill 一致：< 60% 绿、60–85% 橙、≥ 85% 红（接近上限应清场或换模型）。
+  const cw = llmInfo.context_window;
+  const winTile = { lbl: "ctx窗口", val: cw ? fmtTokens(cw) : "—" };
+  let ctxTile;
+  if (cw && obs.ctxTokens) {
+    const pct = (obs.ctxTokens / cw) * 100;
+    const color = pct >= 85 ? "var(--danger)"
+                : pct >= 60 ? "var(--warn)" : "var(--ok)";
+    ctxTile = {
+      lbl: "ctx占用",
+      cls: pct >= 85 ? "alert" : pct >= 60 ? "warn" : "",
+      val: `${fmtTokens(obs.ctxTokens)}`
+        + `<span class="sub"> ${pct.toFixed(pct < 10 ? 1 : 0)}%</span>`,
+      // 迷你进度条：宽度 = 占用百分比（封顶 100%），颜色按阈值
+      extra: `<div class="gauge"><i style="width:${Math.min(pct, 100).toFixed(1)}%;`
+        + `background:${color}"></i></div>`,
+    };
+  } else {
+    // 窗口未知或尚无 turn：占用只显示绝对数（无窗口则无法算百分比）
+    ctxTile = { lbl: "ctx占用", val: obs.ctxTokens ? fmtTokens(obs.ctxTokens) : "—" };
+  }
   const tiles = [
+    winTile,
+    ctxTile,
     { lbl: "events", val: obs.events },
     { lbl: "turns", val: `${obs.turns}<span class="sub"> +${obs.subTurns}子</span>` },
     { lbl: "tools",
@@ -596,7 +638,8 @@ function renderObsPanel() {
   ];
   $("obs-panel").innerHTML = tiles.map((t) =>
     `<div class="tile ${t.cls || ""}">` +
-    `<div class="lbl">${t.lbl}</div><div class="val">${t.val}</div></div>`,
+    `<div class="lbl">${t.lbl}</div><div class="val">${t.val}</div>` +
+    `${t.extra || ""}</div>`,
   ).join("");
 }
 
@@ -1160,6 +1203,7 @@ async function loadDemos() {
     llmInfo = j.llm || { provider: null, model: null, context_window: null };
     applyDemoMeta();
     renderLoopPill();
+    renderObsPanel();  // llmInfo 就绪后立即渲染，让"ctx窗口"开局即显示（无需等首轮）
   } catch (e) {
     demoDesc.textContent = "❌ 加载 demo 列表失败：" + e.message;
   }

@@ -53,7 +53,7 @@ web_ui 的设计原则：**它只是一个「基础能力」展台 —— 不重
 
 这三项不是某个 demo 专属，而是 web_ui 对所有 demo 生效的基础能力：
 
-- **🔭 会话级可观测面板**（右侧事件流上方）：把流经的每条 EventMsg 实时聚合成指标网格 —— `events / turns(+子) / tools(✗err) / skills / hitl / 拦截 / 压缩 / 失败 / tok↓↑ / cache%`。区别于顶部 loop-pill（每 turn 重置、只反映「这一轮」），可观测面板跨整个会话累计；拦截/失败标红、tool 出错标橙。clear / 切 demo / 切 session 时归零。
+- **🔭 会话级可观测面板**（右侧事件流上方）：把流经的每条 EventMsg 实时聚合成指标网格 —— `ctx窗口 / ctx占用 / events / turns(+子) / tools(✗err) / skills / hitl / 拦截 / 压缩 / 失败 / tok↓↑ / cache%`。其中 **`ctx窗口`** 常驻显示 LLM model 的 context window 大小（来自 `/api/demos` 的 `llm.context_window`），**`ctx占用`** 显示当前 context 占用（= 最后一次 root turn 的 input_tokens）+ 百分比 + 迷你进度条，按用量分档变色（<60% 绿 / 60–85% 橙 / ≥85% 红）。区别于顶部 loop-pill（每 turn 重置、只反映「这一轮」），可观测面板跨整个会话累计；拦截/失败标红、tool 出错标橙。clear / 切 demo / 切 session 时归零。
 - **🕑 历史会话续接（R5 resume）**：header 的「历史」下拉列出该 demo 已持久化的 thread（标题取首条 user 消息 + 条数 + 时间）。选中即载入其对话并进入续接态（session 切 `resume:<tid>`、后端从 JSONL 物化历史续聊）；选「🆕 新会话」回到全新对话。证明对话持久化 + 跨会话可恢复（即便 server 重启）。
 - **📊 ctx 占比 pill**（顶部 loop-pill）：当前 session context = 最后一次 root turn 的 input_tokens，按 LLM 真实 context window 渲染 `N.Nk / Mk (X%)`，分档变色（<60% 绿 / 60–85% 橙 / ≥85% 红）。
 
