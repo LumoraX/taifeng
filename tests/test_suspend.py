@@ -486,3 +486,43 @@ def _noop_cancel():
     from taifeng.loop.cancellation import CancellationToken
 
     return CancellationToken()
+
+
+def _make_tool_ctx(call_id: str):
+    """构造最小 ToolContext(测试用)。"""
+    from taifeng.tool.spec import ToolContext
+
+    return ToolContext(call_id=call_id, cancel=_noop_cancel(), thread_id="t")
+
+
+async def test_request_user_input_raises_data_suspend():
+    """request_user_input 被调用 → 抛 SuspendSignal(reason=DATA),
+    related_call_id == 本次 call_id,prompt/response_schema 进 detail(不透明透传)。"""
+    from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+
+    spec = make_request_user_input_tool()
+    assert spec.name == "request_user_input"
+    assert spec.parallel_safe is False
+    ctx = _make_tool_ctx(call_id="call_xyz")
+    with pytest.raises(SuspendSignal) as ei:
+        await spec.handler(
+            {"prompt": "你的年龄?", "response_schema": {"type": "integer"}}, ctx,
+        )
+    p = ei.value.pending
+    assert p.reason is SuspendReason.DATA
+    assert p.related_call_id == "call_xyz"
+    assert p.request_id == "call_xyz"
+    assert p.detail["prompt"] == "你的年龄?"
+    assert p.detail["response_schema"] == {"type": "integer"}
+    # payload_schema 直接透传 response_schema(R1:内核不解析)
+    assert p.payload_schema == {"type": "integer"}
+
+
+async def test_request_user_input_empty_prompt_rejected():
+    """空 prompt → typed error(禁静默占位)。"""
+    from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+
+    spec = make_request_user_input_tool()
+    ctx = _make_tool_ctx(call_id="c1")
+    with pytest.raises(ValueError):
+        await spec.handler({"prompt": "", "response_schema": {}}, ctx)

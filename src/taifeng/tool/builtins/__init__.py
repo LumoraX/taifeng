@@ -23,6 +23,7 @@ from taifeng.tool.builtins.call_skill import make_call_skill_tool
 from taifeng.tool.builtins.file_io import make_file_read_tool, make_file_write_tool
 from taifeng.tool.builtins.http_request import make_http_request_tool
 from taifeng.tool.builtins.read_skill import make_read_skill_tool
+from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 from taifeng.tool.builtins.run_script import make_run_script_tool
 from taifeng.tool.builtins.shell import make_shell_exec_tool
 
@@ -35,6 +36,7 @@ __all__ = [
     "make_file_write_tool",
     "make_http_request_tool",
     "make_read_skill_tool",
+    "make_request_user_input_tool",
     "make_run_in_background_tool",
     "make_run_script_tool",
     "make_shell_exec_tool",
