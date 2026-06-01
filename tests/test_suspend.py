@@ -141,3 +141,11 @@ async def test_suspending_prompter_raises_signal():
     assert pending.detail["scope"] == "tool_use"
     assert pending.detail["target"] == "shell_exec"
     assert pending.request_id  # 非空
+
+
+def test_outcome_has_optional_suspend_field():
+    # ToolCallOutcome 新增 suspend 字段,默认 None(正常完成的 outcome)
+    from taifeng.loop.tool_batch import ToolCallOutcome
+
+    fields = {f.name for f in dataclasses.fields(ToolCallOutcome)}
+    assert "suspend" in fields

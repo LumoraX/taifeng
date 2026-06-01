@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.context.truncate import truncate_middle
 from taifeng.loop.event import ToolCallCompleted
+from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获,不可放 TYPE_CHECKING
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -49,13 +50,18 @@ class ToolCallRequest:
 
 @dataclass(frozen=True)
 class ToolCallOutcome:
-    """单条 tool call 的执行结果。"""
+    """单条 tool call 的执行结果。
+
+    suspend 非 None 时表示该 tool call 命中挂起点(此时 result 为占位,
+    调用方据 suspend 改走挂起落盘路径,不回填 function_call_output)。
+    """
 
     index: int
     call_id: str
     name: str
     result: ToolResult
     duration_ms: int
+    suspend: Any = None  # PendingRequest | None;Any 避免顶层 import suspend 包到本模块注解层
 
 
 async def dispatch_batch(
@@ -103,10 +109,47 @@ async def _dispatch_one(
     submission_id: str,
     entry_skill_id: str,
 ) -> ToolCallOutcome:
-    """执行单条:PreToolUse hook → dispatch → PostToolUse hook → emit Completed。"""
+    """执行单条:PreToolUse hook → dispatch → PostToolUse hook → emit Completed。
+
+    若执行链抛 SuspendSignal(如 SuspendingPrompter / request_user_input 触发),
+    捕获为带 suspend=pending 的 outcome,不让其冒泡打断整批(挂起不是错误)。
+    """
     ctx = ctx_for(req.call_id)
     start = time.monotonic()
 
+    try:
+        return await _dispatch_one_inner(
+            req, ctx=ctx, start=start, runtime=runtime, hooks=hooks, emit=emit,
+            thread_id=thread_id, submission_id=submission_id,
+            entry_skill_id=entry_skill_id,
+        )
+    except SuspendSignal as sig:
+        # 挂起:不 emit ToolCallCompleted(turn 侧据 suspend 落 suspension);返回占位 result
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return ToolCallOutcome(
+            index=req.index, call_id=req.call_id, name=req.name,
+            result=ToolResult(output="<suspended>", is_error=False),
+            duration_ms=duration_ms, suspend=sig.pending,
+        )
+
+
+async def _dispatch_one_inner(
+    req: ToolCallRequest,
+    *,
+    ctx: ToolContext,
+    start: float,
+    runtime: Any,
+    hooks: Any,
+    emit: Callable[[Any], Awaitable[None]],
+    thread_id: str,
+    submission_id: str,
+    entry_skill_id: str,
+) -> ToolCallOutcome:
+    """``_dispatch_one`` 的成功路径主体(从原函数体平移而来)。
+
+    单列为内层函数,使 ``_dispatch_one`` 仅承担 SuspendSignal try/except 边界,
+    保持各函数 ≤ 80 行且圈复杂度受控。
+    """
     # G5a：PreToolUse hook 可改写 args（与 script hook 的 args_override 对齐）。
     # effective_args 默认 = LLM 原始 args；hook 放行且给出合法 dict override 时替换。
     # 注：直接遍历 registry handlers —— HookRunner.run 在全部 allow 时返回新的
@@ -130,6 +173,9 @@ async def _dispatch_one(
                     ),
                     hook_ctx,
                 )
+            except SuspendSignal:
+                # 挂起信号不是 hook 错误,放行给外层 _dispatch_one 捕获落挂起
+                raise
             except Exception as e:  # noqa: BLE001 —— hook 异常按 deny 处理
                 denied = HookDecision.deny(f"hook_error: {e}")
                 break
