@@ -90,6 +90,7 @@ from taifeng.loop import (
 )
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.pool import EnginePool
+from taifeng.loop.submission import Resume
 from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.mcp import McpStdioClient, McpStdioServer, McpToolError
 from taifeng.permission import (
@@ -116,6 +117,15 @@ from taifeng.skill.scripts import (
     ScriptLanguage,
     ScriptResult,
     ShellScriptExecutor,
+)
+from taifeng.suspend import (
+    PendingRequest,
+    ResolveError,
+    ResolvePlan,
+    SuspendReason,
+    SuspendSignal,
+    SuspensionRecord,
+    SuspensionResolver,
 )
 from taifeng.tool import (
     ToolCallRuntime,
@@ -172,8 +182,12 @@ __all__ = [
     "NoopIndexHook",
     "NullThreadDirectory",
     "Op",
+    "PendingRequest",
     "PromptCacheStats",
     "RebuildReport",
+    "ResolveError",
+    "ResolvePlan",
+    "Resume",
     "ResponseEvent",
     "ResponseFormatSpec",
     "ResponseItem",
@@ -183,6 +197,10 @@ __all__ = [
     "SlidingWindowStrategy",
     "SqliteThreadDirectory",
     "Submission",
+    "SuspendReason",
+    "SuspendSignal",
+    "SuspensionRecord",
+    "SuspensionResolver",
     "ThreadDirectory",
     "ThreadFilter",
     "ThreadMetadata",

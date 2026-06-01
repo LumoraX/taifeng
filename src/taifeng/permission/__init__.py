@@ -22,6 +22,7 @@ from taifeng.permission.types import (
     PermissionRule,
     PermissionScope,
     PromptCallback,
+    SuspendingPrompter,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "PermissionRule",
     "PermissionScope",
     "PromptCallback",
+    "SuspendingPrompter",
 ]

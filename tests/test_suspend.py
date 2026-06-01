@@ -985,3 +985,380 @@ async def test_permission_policy_preapprove_one_shot():
     # 一次性:再次 check 又挂起(预批准已被消费)
     with pytest.raises(SuspendSignal):
         await policy.check(req)
+
+
+# ============================================================
+# Task 13 A：顶层公共导出
+# ============================================================
+
+
+def test_public_exports():
+    """挂起 / resume 核心原语必须在顶层 taifeng 命名空间可见。
+
+    导出范围对齐 Task 13：suspend 模块原语 + Resume Op 走顶层；
+    EventMsg 子类与 SuspendingPrompter 因同族符号本就不在顶层（仅 EventMsg /
+    PermissionPolicy 暴露），故只校验 SuspendingPrompter 可从 taifeng.permission 导入。
+    """
+    import taifeng
+
+    for name in (
+        "SuspendReason",
+        "PendingRequest",
+        "Resume",
+        "SuspensionRecord",
+        "SuspensionResolver",
+        "SuspendSignal",
+        "ResolvePlan",
+        "ResolveError",
+    ):
+        assert hasattr(taifeng, name), name
+    from taifeng.permission import SuspendingPrompter  # noqa: F401
+
+
+# ============================================================
+# Task 13 B：边界 / 幂等 / cancel / tier-2 重建 resume
+# ============================================================
+
+
+async def _suspend_pool_and_engine(
+    skills_dir, threads_dir, *, session_id, client, gated_tool, policy,
+):
+    """搭建一个会在第一轮挂起（permission ask）的 pool + engine 并返回二者。
+
+    复用 `_build_suspend_skill` 写入 entry skill；调用方负责后续 submit / close。
+    """
+    import taifeng
+
+    _build_suspend_skill(skills_dir)
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        extra_tools=[gated_tool],
+        permission_policy=policy,
+    )
+    engine = await pool.get_or_create(
+        session_id=session_id, entry_skill_id="suspend-skill",
+    )
+    return pool, engine
+
+
+def _suspend_client():
+    """构造一个第一轮产出 danger tool call、第二轮纯文本完成的 MockClient。"""
+    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.types import TokenUsage
+
+    return MockClient(turns=[
+        MockTurn(
+            text="calling danger",
+            tool_calls=[{"id": "call_d1", "name": "danger", "arguments": "{}"}],
+            usage=TokenUsage(input_tokens=10, output_tokens=5),
+        ),
+        MockTurn(
+            text="approved and done",
+            usage=TokenUsage(input_tokens=8, output_tokens=4),
+        ),
+    ])
+
+
+async def _suspend_once(pool, engine):
+    """提交 UserMessage 触发挂起，返回 (req_id, record)。"""
+    import taifeng
+
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+    events = await _drain_until_terminal(engine, sub_id)
+    assert events[-1].msg.kind == "turn_completed"
+    assert events[-1].msg.data.get("end_reason") == "suspended"
+
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    suspension_items = [it for it in items if it.kind == "suspension"]
+    assert len(suspension_items) == 1
+    rec = SuspensionRecord.from_item(suspension_items[0])
+    return rec.pending[0].request_id, rec
+
+
+async def test_resume_partial_resolution_rejected(skills_dir, threads_dir):
+    """单 pending 挂起 + 提交带多余 request_id 的 Resume → resolver 拒绝。
+
+    本用例覆盖「resolutions 与 record.pending 不匹配」这条边界：提交一个
+    包含真实 req_id 之外的多余 key 的 Resume，SuspensionResolver.plan 抛
+    ResolveError → engine emit suspension_resolve_rejected，turn 不续跑。
+    （两 pending 同批挂起经 MockClient 难构造；resolver 层「缺项 / 多余项」
+    已由 test_resolver_rejects_incomplete / _rejects_unknown 单测覆盖，此处
+    在 engine 层验证拒绝路径真实触发。）
+    """
+    import taifeng
+    from taifeng.permission.types import PermissionPolicy, SuspendingPrompter
+
+    gated_tool = await _gated_tool_with_call_id_factory()
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    pool, engine = await _suspend_pool_and_engine(
+        skills_dir, threads_dir, session_id="resume-partial",
+        client=_suspend_client(), gated_tool=gated_tool, policy=policy,
+    )
+    req_id, _ = await _suspend_once(pool, engine)
+
+    # 提交带多余 request_id 的 Resume：resolver 应拒绝（unknown request id）
+    resume_sub = await engine.submit(taifeng.Resume(
+        thread_id=engine.thread_id,
+        resolutions={req_id: {"granted": True}, "bogus_req": {"granted": True}},
+    ))
+    events = []
+    async for ev in engine.subscribe(resume_sub):
+        events.append(ev)
+        if ev.msg.kind in (
+            "suspension_resolve_rejected", "turn_completed", "turn_failed",
+        ):
+            break
+
+    # 续跑落盘前读取 items（验证 turn 未续跑：无新 function_call_output）
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    await pool.close()
+
+    kinds = [ev.msg.kind for ev in events]
+    assert "suspension_resolve_rejected" in kinds, f"应拒绝部分 / 多余 resume，实得 {kinds}"
+    # turn 不应续跑完成（没有 suspension_resolved，也没有补回挂起 call 的 output）
+    assert "suspension_resolved" not in kinds
+    fco_ids = {
+        it.payload.get("call_id") for it in items
+        if it.kind == "function_call_output"
+    }
+    assert "call_d1" not in fco_ids, "被拒绝的 resume 不得补回 function_call_output"
+
+
+async def test_duplicate_resume_idempotent(skills_dir, threads_dir):
+    """重复 Resume 幂等：首次成功后再次提交同一 Resume → no_active_suspension 拒绝。
+
+    record 在首次 resume 时被 resolved-marker 消费；二次 _find_active_suspension
+    返回 None → suspension_resolve_rejected(reason=no_active_suspension)，
+    且不会二次执行 tool（不崩溃）。
+    """
+    import taifeng
+    from taifeng.permission.types import PermissionPolicy, SuspendingPrompter
+
+    gated_tool = await _gated_tool_with_call_id_factory()
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    pool, engine = await _suspend_pool_and_engine(
+        skills_dir, threads_dir, session_id="resume-dup",
+        client=_suspend_client(), gated_tool=gated_tool, policy=policy,
+    )
+    req_id, _ = await _suspend_once(pool, engine)
+
+    # 首次 Resume：成功续跑完成
+    resume_sub = await engine.submit(taifeng.Resume(
+        thread_id=engine.thread_id, resolutions={req_id: {"granted": True}},
+    ))
+    events1 = await _drain_until_terminal(engine, resume_sub)
+    assert "suspension_resolved" in [ev.msg.kind for ev in events1]
+    assert events1[-1].msg.kind == "turn_completed"
+
+    # 首次续跑后挂起 call 已补回 output（计 1 条）
+    items1 = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    fco_count_1 = sum(
+        1 for it in items1
+        if it.kind == "function_call_output" and it.payload.get("call_id") == "call_d1"
+    )
+    assert fco_count_1 == 1
+
+    # 二次提交相同 Resume：record 已被消费 → no_active_suspension 拒绝
+    resume_sub2 = await engine.submit(taifeng.Resume(
+        thread_id=engine.thread_id, resolutions={req_id: {"granted": True}},
+    ))
+    events2 = []
+    async for ev in engine.subscribe(resume_sub2):
+        events2.append(ev)
+        if ev.msg.kind in (
+            "suspension_resolve_rejected", "turn_completed", "turn_failed",
+        ):
+            break
+
+    items2 = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    await pool.close()
+
+    kinds2 = [ev.msg.kind for ev in events2]
+    rej = next(
+        ev for ev in events2 if ev.msg.kind == "suspension_resolve_rejected"
+    )
+    assert rej.msg.data["reason"] == "no_active_suspension", f"实得 {kinds2}"
+    # 幂等：未再次执行 tool（call_d1 的 output 仍只有 1 条）
+    fco_count_2 = sum(
+        1 for it in items2
+        if it.kind == "function_call_output" and it.payload.get("call_id") == "call_d1"
+    )
+    assert fco_count_2 == 1, "重复 resume 不得二次执行 tool"
+
+
+async def test_resume_unknown_thread_or_no_suspension(skills_dir, threads_dir):
+    """对一个无活跃挂起的 thread 提交 Resume → no_active_suspension 拒绝（不崩溃）。
+
+    引擎单 thread，故用 engine 自身的 thread_id；该 thread 从未挂起 →
+    _find_active_suspension 返回 None → suspension_resolve_rejected。
+    """
+    import taifeng
+    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.types import TokenUsage
+
+    # 一个纯文本（不挂起）的 entry skill：直接完成,无挂起
+    skill_md = """---
+name: plain-skill
+description: plain entry
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [style-checker]
+max_call_depth: 2
+---
+# Plain
+"""
+    (skills_dir / "plain-skill").mkdir()
+    (skills_dir / "plain-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+    client = MockClient(turns=[
+        MockTurn(text="done", usage=TokenUsage(input_tokens=4, output_tokens=2)),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="no-suspension", entry_skill_id="plain-skill",
+    )
+
+    # 对无挂起的 thread 提交 Resume → 拒绝
+    resume_sub = await engine.submit(taifeng.Resume(
+        thread_id=engine.thread_id, resolutions={"x": {}},
+    ))
+    events = []
+    async for ev in engine.subscribe(resume_sub):
+        events.append(ev)
+        if ev.msg.kind in (
+            "suspension_resolve_rejected", "turn_completed", "turn_failed",
+        ):
+            break
+    await pool.close()
+
+    rej = next(
+        ev for ev in events if ev.msg.kind == "suspension_resolve_rejected"
+    )
+    assert rej.msg.data["reason"] == "no_active_suspension"
+
+
+async def test_cancel_during_suspension(skills_dir, threads_dir):
+    """R4：挂起后 CancelTurn 该挂起 turn → resume 仍能干净处理（不崩溃 / 不挂死）。
+
+    观察到的当前行为（记录为后续 follow-up）：挂起 turn 在挂起点已以
+    end_reason=suspended 正常收尾，其 _pending 条目已被注销；因此对该
+    submission_id 的 CancelTurn 找不到目标，是 no-op（既不报错也不清挂起）。
+    后续 Resume 仍能找到活跃挂起并正常续跑完成。
+
+    即：当前实现「cancel 不特殊处理已挂起 turn」。本测试断言这一真实行为
+    （确定性事件 + 无崩溃 / 无挂死），把「cancel 丢弃待输入 turn」留作 follow-up。
+    """
+    import taifeng
+    from taifeng.loop.submission import CancelTurn
+    from taifeng.permission.types import PermissionPolicy, SuspendingPrompter
+
+    gated_tool = await _gated_tool_with_call_id_factory()
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    pool, engine = await _suspend_pool_and_engine(
+        skills_dir, threads_dir, session_id="cancel-suspend",
+        client=_suspend_client(), gated_tool=gated_tool, policy=policy,
+    )
+
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+    events1 = await _drain_until_terminal(engine, sub_id)
+    assert events1[-1].msg.kind == "turn_completed"
+    assert events1[-1].msg.data.get("end_reason") == "suspended"
+
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    rec = SuspensionRecord.from_item(
+        next(it for it in items if it.kind == "suspension")
+    )
+    req_id = rec.pending[0].request_id
+
+    # 对已挂起的 turn 提交 CancelTurn —— 当前实现为 no-op（pending 已注销）
+    await engine.submit(CancelTurn(submission_id=sub_id))
+
+    # Resume 仍能找到活跃挂起并正常续跑完成（cancel 未清挂起，这是观察到的现状）
+    resume_sub = await engine.submit(taifeng.Resume(
+        thread_id=engine.thread_id, resolutions={req_id: {"granted": True}},
+    ))
+    events2 = await _drain_until_terminal(engine, resume_sub)
+    await pool.close()
+
+    kinds2 = [ev.msg.kind for ev in events2]
+    # 确定性：要么续跑完成（当前行为），要么被拒（若将来 cancel 清挂起）；二者均不崩溃
+    assert events2[-1].msg.kind == "turn_completed", f"cancel 后 resume 应干净收尾，实得 {kinds2}"
+    assert "suspension_resolved" in kinds2
+
+
+async def test_tier2_rebuild_resume(skills_dir, threads_dir):
+    """R5（头条）：进程退出 + 重建后跨实例 resume。
+
+    1. pool#1：UserMessage 触发 permission 挂起 → 落 suspension item，记 thread_id / req_id。
+    2. 完全释放 pool#1（模拟实例销毁）。
+    3. pool#2（同 threads_dir）：get_or_create(resume_thread_id=<thread_id>) 物化历史。
+    4. 对新 engine 提交 Resume → 经重建的 history 经 _find_active_suspension 找到挂起，
+       补齐 gap、续采样完成 → 证明跨进程 resume。
+    """
+    import taifeng
+    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.types import TokenUsage
+    from taifeng.permission.types import PermissionPolicy, SuspendingPrompter
+
+    # === 实例#1：触发挂起并落盘 ===
+    gated_tool_1 = await _gated_tool_with_call_id_factory()
+    policy_1 = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    pool1, engine1 = await _suspend_pool_and_engine(
+        skills_dir, threads_dir, session_id="tier2-orig",
+        client=_suspend_client(), gated_tool=gated_tool_1, policy=policy_1,
+    )
+    req_id, rec = await _suspend_once(pool1, engine1)
+    thread_id = engine1.thread_id
+
+    # === 完全释放实例#1（模拟进程退出 / 实例销毁）===
+    await pool1.close()
+    del pool1, engine1, policy_1, gated_tool_1
+
+    # === 实例#2：同 threads_dir 全新构造，从持久化 thread 续接 ===
+    gated_tool_2 = await _gated_tool_with_call_id_factory()
+    policy_2 = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    # resume 续跑只需要「成功完成」的一轮（无需再产出 tool call）
+    client2 = MockClient(turns=[
+        MockTurn(text="recovered and done", usage=TokenUsage(input_tokens=6, output_tokens=3)),
+    ])
+    # 注意：suspend-skill 已在实例#1 setup 时写入磁盘，重建实例直接复用，无需再写。
+    pool2 = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client2, compressors=[], extra_tools=[gated_tool_2],
+        permission_policy=policy_2,
+    )
+    # 用全新 session_id + resume_thread_id 续接同一持久化 thread
+    engine2 = await pool2.get_or_create(
+        session_id="tier2-rebuilt", entry_skill_id="suspend-skill",
+        resume_thread_id=thread_id,
+    )
+    assert engine2.thread_id == thread_id, "重建 engine 必须复用原 thread_id"
+
+    # === 对重建实例提交 Resume → 跨进程续跑 ===
+    resume_sub = await engine2.submit(taifeng.Resume(
+        thread_id=thread_id, resolutions={req_id: {"granted": True}},
+    ))
+    events = await _drain_until_terminal(engine2, resume_sub)
+
+    items = [it async for it in await pool2.store.load_thread(thread_id)]
+    await pool2.close()
+
+    kinds = [ev.msg.kind for ev in events]
+    assert "suspension_resolved" in kinds, f"跨进程 resume 未见 resolved，实得 {kinds}"
+    resolved_ev = next(ev for ev in events if ev.msg.kind == "suspension_resolved")
+    assert resolved_ev.msg.data["record_id"] == rec.record_id
+    assert events[-1].msg.kind == "turn_completed", f"跨进程续跑应完成，实得 {kinds}"
+    # gap 补齐：被批准的挂起 call 现在有 output
+    fco_ids = {
+        it.payload.get("call_id") for it in items
+        if it.kind == "function_call_output"
+    }
+    assert "call_d1" in fco_ids, "跨进程 resume 必须补回 function_call_output"
