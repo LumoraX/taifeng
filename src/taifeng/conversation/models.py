@@ -20,6 +20,7 @@ ItemKind = Literal[
     "reasoning",
     "compacted",
     "system_injection",
+    "suspension",   # 新增:turn 中途挂起断点标记(payload = 序列化 SuspensionRecord)
 ]
 
 
@@ -39,6 +40,8 @@ class ResponseItem(BaseModel):
     - reasoning:              {"text": str, "summary": str}
     - compacted:              {"summary": str, "replaced_range": [int, int], "cache_invalidated": bool}
     - system_injection:       {"text": str, "source": str}
+    - suspension:             {"record_id": str, "submission_id": str, "turn_index": int,
+                               "pending": list[dict], "created_at": int, "resolved": bool}
     """
 
     kind: ItemKind
@@ -87,6 +90,39 @@ def function_call_output(
         kind="function_call_output",
         thread_id=thread_id,
         payload={"call_id": call_id, "output": output, "is_error": is_error},
+    )
+
+
+def suspension_item(
+    *,
+    record_id: str,
+    submission_id: str,
+    turn_index: int,
+    pending: list[dict[str, Any]],
+    created_at: int,
+    thread_id: str,
+) -> ResponseItem:
+    """构造 suspension 断点 item(落 JSONL,使 mid-turn 挂起可跨进程 resume)。
+
+    Args:
+        record_id: 挂起 record 幂等键。
+        submission_id: 触发挂起的 submission。
+        turn_index: 挂起时的 turn 迭代序号。
+        pending: 已序列化的 PendingRequest dict 列表。
+        created_at: 业务侧传入的时间戳(R1:src 内不取系统时钟)。
+        thread_id: 所属 thread。
+    """
+    return ResponseItem(
+        kind="suspension",
+        thread_id=thread_id,
+        payload={
+            "record_id": record_id,
+            "submission_id": submission_id,
+            "turn_index": turn_index,
+            "pending": pending,
+            "created_at": created_at,
+            "resolved": False,
+        },
     )
 
 

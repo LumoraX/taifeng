@@ -58,3 +58,23 @@ def test_suspend_signal_carries_pending():
     # 是 Exception 子类(控制流),但不是 LLMError 家族
     assert isinstance(sig, Exception)
     assert not isinstance(sig, LLMError)
+
+
+def test_suspension_item_constructor():
+    from taifeng.conversation.models import suspension_item
+
+    item = suspension_item(
+        record_id="sr_1",
+        submission_id="sub_1",
+        turn_index=2,
+        pending=[{"request_id": "r1", "reason": "permission", "payload_schema": {},
+                  "related_call_id": "call_a", "detail": {}}],
+        created_at=1000,
+        thread_id="th_1",
+    )
+    assert item.kind == "suspension"
+    assert item.thread_id == "th_1"
+    assert item.payload["record_id"] == "sr_1"
+    assert item.payload["turn_index"] == 2
+    assert item.payload["pending"][0]["request_id"] == "r1"
+    assert item.payload["resolved"] is False
