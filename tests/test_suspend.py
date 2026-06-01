@@ -6,8 +6,10 @@ import json
 
 import pytest
 
+from taifeng.conversation.models import user_message
 from taifeng.llm.errors import LLMError
 from taifeng.suspend.reason import PendingRequest, SuspendReason
+from taifeng.suspend.record import SuspensionRecord
 from taifeng.suspend.signal import SuspendSignal
 
 
@@ -79,3 +81,45 @@ def test_suspension_item_constructor():
     assert item.payload["pending"][0]["request_id"] == "r1"
     assert item.payload["resolved"] is False
     assert item.payload["created_at"] == 1000
+
+
+def test_record_roundtrip_via_item():
+    """SuspensionRecord → to_item() → from_item() 必须完整还原,含 SuspendReason 枚举类型。"""
+    rec = SuspensionRecord(
+        record_id="sr_1",
+        thread_id="th_1",
+        submission_id="sub_1",
+        turn_index=1,
+        pending=(
+            PendingRequest(request_id="r1", reason=SuspendReason.PERMISSION,
+                           related_call_id="call_a", detail={"scope": "tool_use"}),
+            PendingRequest(request_id="r2", reason=SuspendReason.FORM,
+                           related_call_id="call_b"),
+        ),
+        created_at=1234,
+    )
+    item = rec.to_item()
+    assert item.kind == "suspension"
+    back = SuspensionRecord.from_item(item)
+    assert back == rec
+    # 枚举还原正确(不是裸字符串)
+    assert back.pending[0].reason is SuspendReason.PERMISSION
+    assert back.pending[1].related_call_id == "call_b"
+
+
+def test_record_request_ids():
+    """request_ids() 返回全部 pending 的 request_id 集合。"""
+    rec = SuspensionRecord(
+        record_id="sr", thread_id="t", submission_id="s", turn_index=1,
+        pending=(PendingRequest(request_id="a", reason=SuspendReason.DATA),
+                 PendingRequest(request_id="b", reason=SuspendReason.DATA)),
+        created_at=1,
+    )
+    assert rec.request_ids() == {"a", "b"}
+
+
+def test_record_from_item_rejects_wrong_kind():
+    """from_item 传入非 suspension item 必须抛 ValueError。"""
+    bad = user_message("hi", thread_id="t")
+    with pytest.raises(ValueError):
+        SuspensionRecord.from_item(bad)
