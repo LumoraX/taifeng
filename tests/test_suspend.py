@@ -696,3 +696,289 @@ def test_resolver_form_missing_call_id_raises():
     rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.FORM, related_call_id=None))
     with pytest.raises(ResolveError):
         SuspensionResolver().plan(rec, {"r1": {"answer": "x"}})
+
+
+# ============================================================
+# Task 12b：engine _handle_resume —— 配对回填 + 执行被批准 tool + 续跑挂起 turn
+# ============================================================
+
+
+async def _drain_until_terminal(engine, sub_id):
+    """订阅指定 submission 直到 turn_completed / turn_failed，返回收到的事件列表。"""
+    events = []
+    async for ev in engine.subscribe(sub_id):
+        events.append(ev)
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            break
+    return events
+
+
+async def _gated_tool_with_call_id_factory():
+    """构造一个需审批的工具：门控时把 ctx.call_id 透传进 PermissionRequest.metadata。
+
+    与 `_gated_tool_factory` 的区别：本工具显式 ``extra_metadata={"call_id": ...}``，
+    使 SuspendingPrompter 能把 call_id 填进 PendingRequest.related_call_id —— 这是
+    permission-allow resume 路径定位「该执行哪个挂起 tool」的依据。门控放行时返回真实结果。
+    """
+    from taifeng.permission.types import PermissionRequest
+    from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+    async def handler(args, ctx: ToolContext) -> ToolResult:
+        policy = ctx.extras.get("permission_policy")
+        req = PermissionRequest.for_tool_call(
+            "danger",
+            args,
+            thread_id=ctx.thread_id,
+            submission_id=str(ctx.extras.get("submission_id") or ""),
+            entry_skill_id=str(ctx.extras.get("entry_skill_id") or ""),
+            turn_index=int(ctx.extras.get("turn_index") or 0),
+            call_chain=("root",),
+            extra_metadata={"call_id": ctx.call_id},
+        )
+        await policy.check(req)
+        # resume 二次放行时（policy 已不再 ask）走到这里，返回真实结果用于回填 output
+        return ToolResult.ok("danger executed")
+
+    return ToolSpec(
+        name="danger",
+        description="需审批的危险工具（透传 call_id，测试用）",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=handler,
+        parallel_safe=True,
+    )
+
+
+def _build_suspend_skill(skills_dir):
+    """写入一个声明 danger 工具的 entry composite skill（与挂起用例对齐）。"""
+    skill_md = """---
+name: suspend-skill
+description: suspend entry
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [style-checker]
+tool_names: [danger]
+max_call_depth: 2
+---
+# Suspend
+"""
+    (skills_dir / "suspend-skill").mkdir()
+    (skills_dir / "suspend-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+
+async def test_resume_after_permission_suspension(skills_dir, threads_dir):
+    """permission ask 挂起 → Resume(granted=True) → 执行被批准 tool + 续采样完成。
+
+    链路：
+      1. MockClient 第一轮产出 danger tool call → 经 ask 门控挂起为 PERMISSION。
+      2. 提交 Resume(resolutions={req_id: {"granted": True}})。
+      3. 断言：suspension_resolved 事件触发；被挂起的 call 现在有了
+         function_call_output（gap 补齐）；续采样的第二轮以 turn_completed 结束。
+    """
+    import taifeng
+    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.types import TokenUsage
+    from taifeng.loop.submission import Resume
+    from taifeng.permission.types import (
+        PermissionDecision,
+        PermissionPolicy,
+    )
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.signal import SuspendSignal
+
+    class _OneShotPrompter:
+        """首次 prompt 抛 SuspendSignal（挂起等审批）；之后放行（模拟人类已批准）。
+
+        resume 续跑时 _execute_resumed_tool 会再次经 policy.check 走本 prompter，
+        此时返回 allow —— 即「人类批准后再执行被挂起的 tool」。
+        """
+
+        def __init__(self) -> None:
+            self._asked = False
+
+        async def prompt(self, request: PermissionRequest) -> PermissionDecision:
+            if not self._asked:
+                self._asked = True
+                pending = PendingRequest(
+                    request_id="req_perm_1",
+                    reason=SuspendReason.PERMISSION,
+                    related_call_id=request.metadata.get("call_id"),
+                    detail={"scope": request.scope, "target": request.target},
+                )
+                raise SuspendSignal(pending)
+            return PermissionDecision.allow(reason="resumed-approved")
+
+    gated_tool = await _gated_tool_with_call_id_factory()
+    _build_suspend_skill(skills_dir)
+
+    # 第一轮：danger tool call（命中审批挂起）；第二轮（resume 后续跑）：纯文本完成
+    client = MockClient(turns=[
+        MockTurn(
+            text="calling danger",
+            tool_calls=[{"id": "call_d1", "name": "danger", "arguments": "{}"}],
+            usage=TokenUsage(input_tokens=10, output_tokens=5),
+        ),
+        MockTurn(
+            text="approved and done",
+            usage=TokenUsage(input_tokens=8, output_tokens=4),
+        ),
+    ])
+
+    policy = PermissionPolicy(default_mode="ask", prompter=_OneShotPrompter())
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        extra_tools=[gated_tool],
+        permission_policy=policy,
+    )
+    engine = await pool.get_or_create(
+        session_id="resume-perm-e2e", entry_skill_id="suspend-skill",
+    )
+
+    # === 第一轮：触发挂起 ===
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+    events1 = await _drain_until_terminal(engine, sub_id)
+    assert events1[-1].msg.kind == "turn_completed"
+    assert events1[-1].msg.data.get("end_reason") == "suspended"
+
+    # 从持久化的 suspension record 取 request_id（续跑入参）
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    suspension_items = [it for it in items if it.kind == "suspension"]
+    assert len(suspension_items) == 1
+    rec = SuspensionRecord.from_item(suspension_items[0])
+    req_id = rec.pending[0].request_id
+    assert rec.pending[0].related_call_id == "call_d1"
+
+    # === 第二轮：Resume 续跑 ===
+    resume_sub = await engine.submit(Resume(
+        thread_id=engine.thread_id,
+        resolutions={req_id: {"granted": True}},
+    ))
+    events2 = await _drain_until_terminal(engine, resume_sub)
+
+    # 续跑落盘后、close 前读取最新 items（验证 gap 补齐）
+    items2 = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    await pool.close()
+
+    # suspension_resolved 必须触发
+    kinds2 = [ev.msg.kind for ev in events2]
+    assert "suspension_resolved" in kinds2, f"未见 suspension_resolved，实得 {kinds2}"
+    resolved_ev = next(ev for ev in events2 if ev.msg.kind == "suspension_resolved")
+    assert resolved_ev.msg.data["record_id"] == rec.record_id
+    assert req_id in resolved_ev.msg.data["request_ids"]
+    # 续采样以 turn_completed 收尾
+    assert events2[-1].msg.kind == "turn_completed", f"续跑应完成，实得 {kinds2}"
+
+    # 被挂起的 call_d1 现在有了 function_call_output（gap 补齐）
+    fco_ids = {
+        it.payload.get("call_id")
+        for it in items2
+        if it.kind == "function_call_output"
+    }
+    assert "call_d1" in fco_ids, "被批准的挂起 call 必须补回 function_call_output"
+
+
+async def test_resume_system_retry(skills_dir, threads_dir):
+    """system_retry 挂起 → Resume(action=retry) → 第二次 stream 成功完成。
+
+    第一轮 stream 抛 RateLimitError（可恢复）→ turn 挂起为 SYSTEM_RETRY；
+    resume 时 {req_id: {"action": "retry"}} → 续采样走第二个（成功）turn → 完成。
+    """
+    import taifeng
+    from taifeng.llm.client import ModelClient
+    from taifeng.llm.errors import RateLimitError
+    from taifeng.llm.providers import MockSession, MockTurn
+    from taifeng.llm.types import TokenUsage
+    from taifeng.loop.submission import Resume
+
+    class _RetryThenOkClient(ModelClient):
+        """首次 session 的 stream 抛 RateLimitError；之后成功回放空文本完成。
+
+        模拟「retry 耗尽 → 挂起 → resume 续跑时 provider 已恢复」。
+        """
+
+        def __init__(self):  # noqa: ANN204
+            self._calls = 0
+
+        def session(self, *, cancel, model=None):  # noqa: ANN001, ANN201
+            self._calls += 1
+            if self._calls == 1:
+                return _RaisingOnceSession(cancel)
+            # resume 续跑：正常成功 turn（纯文本，无 tool call → 完成）
+            return MockSession(
+                turn=MockTurn(
+                    text="recovered and done",
+                    usage=TokenUsage(input_tokens=6, output_tokens=3),
+                ),
+                cancel=cancel,
+                model=model or "mock-model",
+            )
+
+    class _RaisingOnceSession:
+        """stream 直接抛 RateLimitError（模拟首轮 provider retry 已耗尽）。"""
+
+        def __init__(self, cancel):  # noqa: ANN001, ANN204
+            self._cancel = cancel
+
+        async def __aenter__(self):  # noqa: ANN204
+            return self
+
+        async def __aexit__(self, *exc):  # noqa: ANN002, ANN204
+            pass
+
+        async def stream(self, request):  # noqa: ANN001, ANN201
+            raise RateLimitError("rate limited", retry_after_seconds=3.0)
+            yield  # pragma: no cover —— 使函数成为 async generator
+
+    skill_md = """---
+name: retry-resume-skill
+description: system_retry resume entry
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [style-checker]
+max_call_depth: 2
+---
+# RetryResume
+"""
+    (skills_dir / "retry-resume-skill").mkdir()
+    (skills_dir / "retry-resume-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=_RetryThenOkClient(),
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="retry-resume-e2e", entry_skill_id="retry-resume-skill",
+    )
+
+    # === 第一轮：可恢复错误 → 挂起为 SYSTEM_RETRY ===
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+    events1 = await _drain_until_terminal(engine, sub_id)
+    assert events1[-1].msg.kind == "turn_completed"
+    assert events1[-1].msg.data.get("end_reason") == "suspended"
+
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    suspension_items = [it for it in items if it.kind == "suspension"]
+    assert len(suspension_items) == 1
+    rec = SuspensionRecord.from_item(suspension_items[0])
+    assert rec.pending[0].reason is SuspendReason.SYSTEM_RETRY
+    req_id = rec.pending[0].request_id
+
+    # === 第二轮：Resume(action=retry) → 续采样成功完成 ===
+    resume_sub = await engine.submit(Resume(
+        thread_id=engine.thread_id,
+        resolutions={req_id: {"action": "retry"}},
+    ))
+    events2 = await _drain_until_terminal(engine, resume_sub)
+    await pool.close()
+
+    kinds2 = [ev.msg.kind for ev in events2]
+    assert "suspension_resolved" in kinds2, f"未见 suspension_resolved，实得 {kinds2}"
+    assert events2[-1].msg.kind == "turn_completed", f"续跑应完成，实得 {kinds2}"

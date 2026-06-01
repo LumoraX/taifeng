@@ -14,7 +14,12 @@ from typing import Any
 from taifeng.context.budget import ContextBudget
 from taifeng.context.cache_stats import PromptCacheStats
 from taifeng.context.compressor import CompressionOrchestrator
-from taifeng.conversation.models import ResponseItem, system_injection, user_message
+from taifeng.conversation.models import (
+    ResponseItem,
+    function_call_output,
+    system_injection,
+    user_message,
+)
 from taifeng.conversation.store import MessageStore
 from taifeng.instructions.resolver import InstructionResolver
 from taifeng.instructions.source import InstructionFetchError
@@ -35,6 +40,8 @@ from taifeng.loop.event import (
     InstructionUpdateRejected,
     PreTurnHookDenied,
     ResourceLimitExceeded,
+    SuspensionResolved,
+    SuspensionResolveRejected,
     TurnFailed,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
@@ -44,6 +51,7 @@ from taifeng.loop.submission import (
     InjectSystemMessage,
     Op,
     RefreshSnapshot,
+    Resume,
     Shutdown,
     Submission,
     ThreadRollback,
@@ -55,6 +63,7 @@ from taifeng.loop.turn import TurnRunner
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.skill.registry import SkillSnapshot
+from taifeng.suspend.record import SuspensionRecord
 from taifeng.tool.runtime import ToolCallRuntime
 
 logger = logging.getLogger(__name__)
@@ -515,6 +524,9 @@ class AgentEngine:
                 if isinstance(sub.op, UpdateInstructions):
                     await self._handle_update_instructions(sub.id, sub.op)
                     continue
+                if isinstance(sub.op, Resume):
+                    await self._handle_resume(sub, cancel)
+                    continue
                 if isinstance(sub.op, UserMessage):
                     asyncio.create_task(self._run_turn_for(sub, cancel))
                     continue
@@ -726,6 +738,160 @@ class AgentEngine:
             self._compaction_count = runner.compaction_count
             # K2：累加本 turn 消耗，跨 turn 维护会话累计 token
             self._session_tokens += runner.total_usage.total_tokens
+
+    # -----------------------------------------------------------------
+    # Resume：续跑挂起的 turn（配对 resolutions → 补齐 history gap → 续采样）
+    # -----------------------------------------------------------------
+
+    async def _handle_resume(self, sub: Submission, root_cancel: CancellationToken) -> None:
+        """续跑一个挂起的 thread：配对 resolutions → 补齐 history gap → 续采样。
+
+        步骤：
+          1. 在 self._history 找"活跃挂起"（最后一条 kind=='suspension' 且其 record_id
+             尚未被 resolved-marker 标记消费）。找不到 → SuspensionResolveRejected 返回。
+          2. SuspensionRecord.from_item 还原；SuspensionResolver().plan(record, resolutions)。
+             ResolveError → SuspensionResolveRejected(reason=str(e)) 返回（禁静默）。
+          3. 应用 plan：回填 function_call_output(form/data/deny)、执行 tool(permission allow)。
+          4. 落 resolved-marker（system_injection source='suspend_resolved'）标记消费（幂等）。
+          5. emit SuspensionResolved。
+          6. 非 abort → _build_and_run_runner 续采样；abort → 不续跑（turn 终止）。
+        """
+        assert isinstance(sub.op, Resume)
+        op = sub.op
+
+        # 1. 找活跃挂起 record（扫 history：最后一条未被 resolved-marker 消费的 suspension）
+        record = self._find_active_suspension()
+        if record is None:
+            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
+                data={"reason": "no_active_suspension", "record_id": None, "detail": {}})))
+            return
+
+        # 2. 配对 + 计划（不允许部分 resume；ResolveError 显式拒绝，不静默兜底）
+        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+        try:
+            plan = SuspensionResolver().plan(record, op.resolutions)
+        except ResolveError as e:
+            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
+                data={"reason": str(e), "record_id": record.record_id, "detail": {}})))
+            return
+
+        # 3. 应用 plan：补齐 history gap（挂起点的 function_call 缺 function_call_output）
+        import json
+        async with self._lock:
+            # 3a. form/data 直接回填 output（payload 即工具结果，JSON 序列化）
+            for call_id, payload in plan.direct_outputs.items():
+                out = function_call_output(
+                    call_id=call_id, output=json.dumps(payload, ensure_ascii=False),
+                    thread_id=self._thread_id, is_error=False)
+                self._history.append(out)
+                await self._store.append(out)
+            # 3b. permission deny → error output（让模型知道被拒并据此改写后续）
+            for call_id, reason in plan.deny_outputs.items():
+                out = function_call_output(
+                    call_id=call_id, output=f"permission_denied: {reason}",
+                    thread_id=self._thread_id, is_error=True)
+                self._history.append(out)
+                await self._store.append(out)
+        # 3c. permission allow → 真正执行 tool（复用 runtime，不绕 RwLock）
+        for call_id in plan.execute_tool_call_ids:
+            await self._execute_resumed_tool(call_id)
+
+        # 4. 落 resolved-marker（幂等：下次 _find_active_suspension 会跳过本 record）
+        marker = system_injection(
+            text=f"suspend_resolved:{record.record_id}",
+            thread_id=self._thread_id, source="suspend_resolved")
+        async with self._lock:
+            self._history.append(marker)
+        await self._store.append(marker)
+
+        # 5. emit resolved
+        await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
+            data={"record_id": record.record_id, "request_ids": sorted(record.request_ids())})))
+
+        # 6. 续跑（abort 则不续；turn 已在挂起点终止，gap 已补齐即收尾）
+        if plan.abort:
+            return
+        turn_cancel = root_cancel.child(f"sub:{sub.id}")
+        self._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
+        await self._build_and_run_runner(sub.id, turn_cancel, list(self._last_resolved or []))
+
+    def _find_active_suspension(self) -> SuspensionRecord | None:
+        """扫 self._history，返回最后一条尚未被 resolved-marker 消费的 suspension record。
+
+        resolved-marker = source=='suspend_resolved' 的 system_injection，
+        其 text 形如 'suspend_resolved:<record_id>'。
+        """
+        resolved_ids: set[str] = set()
+        last_suspension: ResponseItem | None = None
+        for item in self._history:
+            if item.kind == "system_injection" and item.payload.get("source") == "suspend_resolved":
+                rid = (item.payload.get("text") or "").removeprefix("suspend_resolved:")
+                resolved_ids.add(rid)
+            elif item.kind == "suspension":
+                last_suspension = item
+        if last_suspension is None:
+            return None
+        record = SuspensionRecord.from_item(last_suspension)
+        if record.record_id in resolved_ids:
+            return None
+        return record
+
+    async def _execute_resumed_tool(self, call_id: str) -> None:
+        """resume 时对一个被批准的挂起 tool call 真正执行，回填 function_call_output。
+
+        从 history 找到该 call_id 的 function_call（取 name + arguments）→ 经
+        tool_runtime.dispatch 执行 → 追加 function_call_output。
+
+        Args:
+            call_id: permission allow 后需真正执行的挂起 tool call id。
+
+        Raises:
+            RuntimeError: history 中找不到该 call_id 的 function_call（断点不一致）。
+        """
+        from taifeng.tool.spec import ToolContext
+
+        # 找原 function_call（取最后一条匹配，与 turn.py 落盘序一致）
+        fc: ResponseItem | None = None
+        for item in self._history:
+            if item.kind == "function_call" and item.payload.get("call_id") == call_id:
+                fc = item
+        if fc is None:
+            raise RuntimeError(f"resumed_tool_call_not_found: {call_id}")
+        import json
+        name = fc.payload["name"]
+        try:
+            args = json.loads(fc.payload.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        # 构造 ToolContext：resume 续跑发生在 engine 层（无 TurnRunner），extras 提供
+        # 工具运行所需的最小上下文（snapshot / 可见 skill / 权限策略 / 元数据）。
+        # 关键：permission_policy 不再注入 ask prompter 的挂起语义——本次执行是"已批准"
+        # 的二次放行，工具内若再次走 check 应按业务策略放行（业务侧据 resolutions 调整）。
+        cancel = CancellationToken().child(f"resume_tool:{call_id}")
+        ctx = ToolContext(
+            call_id=call_id,
+            cancel=cancel,
+            thread_id=self._thread_id,
+            extras={
+                "skill_snapshot": self._snapshot,
+                "visible_skills": self._snapshot.reachable_from(self._entry_skill.id),
+                "dispatch_policy": self._dispatch_policy,
+                "current_skill": self._entry_skill,
+                "entry_skill_id": self._entry_skill.id,
+                "permission_policy": self._permission_policy,
+                "hook_runner": self._hooks,
+                "request_metadata": self._request_metadata,
+                "turn_index": self._turn_index,
+                "script_executors": self._script_executors,
+            },
+        )
+        result = await self._tool_runtime.dispatch(name=name, arguments=args, ctx=ctx)
+        out = function_call_output(
+            call_id=call_id, output=result.output,
+            thread_id=self._thread_id, is_error=result.is_error)
+        async with self._lock:
+            self._history.append(out)
+        await self._store.append(out)
 
     async def _run_compact_now(
         self,
