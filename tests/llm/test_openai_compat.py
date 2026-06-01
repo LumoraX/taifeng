@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from taifeng.llm.providers import OpenAICompatClient
+from taifeng.llm.providers import OpenAICompatClient, OpenAICompatSession
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
 
@@ -67,3 +67,44 @@ async def test_openai_compat_streams_text() -> None:
     assert usage["input_tokens"] == 10
     assert usage["output_tokens"] == 5
     assert usage["cache_read_input_tokens"] == 8
+
+
+# === 空 key 鉴权头处理（本地 Ollama / LM Studio 等无需 key 的端点）===========
+# 回归：空 api_key 旧实现会发出非法的 "Bearer "（带尾空格）→ httpx LocalProtocolError。
+# 修复后：空/空白 key 直接省略 Authorization 头（本地端点正常工作；真实服务端干净 401）。
+
+
+def _session(api_key: str, extra_headers: dict[str, str] | None = None) -> OpenAICompatSession:
+    """构造一个 OpenAICompatSession 用于检查鉴权头（不发请求）。"""
+    return OpenAICompatSession(
+        base_url="https://api.example.com/v1",
+        api_key=api_key,
+        model="gpt-4o-mini",
+        cancel=CancellationToken(),
+        extra_headers=extra_headers,
+    )
+
+
+def test_empty_api_key_omits_authorization_header() -> None:
+    """空 key（如本地 Ollama）应省略 Authorization，而非发出非法的 'Bearer '。"""
+    sess = _session("")
+    assert "Authorization" not in sess._headers
+    assert sess._headers["Content-Type"] == "application/json"
+
+
+def test_whitespace_api_key_omits_authorization_header() -> None:
+    """纯空白 key 同样视为无 key → 省略 Authorization。"""
+    sess = _session("   ")
+    assert "Authorization" not in sess._headers
+
+
+def test_nonempty_api_key_sets_bearer_header() -> None:
+    """正常 key → 标准 Bearer 头。"""
+    sess = _session("sk-test")
+    assert sess._headers["Authorization"] == "Bearer sk-test"
+
+
+def test_extra_headers_can_inject_auth_even_with_empty_key() -> None:
+    """网关自定义鉴权头：即便 api_key 为空，extra_headers 仍可注入 Authorization。"""
+    sess = _session("", extra_headers={"Authorization": "Custom token123"})
+    assert sess._headers["Authorization"] == "Custom token123"

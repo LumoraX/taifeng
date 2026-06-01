@@ -236,6 +236,44 @@ SSE 事件 SHALL 按 Gemini `data: {...}\n\n` 单行格式解析：
 
 ---
 
+### Requirement: 空 api_key 时省略鉴权头/参数（支持本地无鉴权端点）
+
+native client SHALL 在 `api_key` 为空或纯空白时**省略**鉴权头/参数，而非发出语义为空的凭据。动机有二：
+
+1. **本地无鉴权端点**（Ollama / LM Studio / vLLM 等 OpenAI 兼容服务）本就不需要 key —— 必须能在不配 key 的情况下正常调用。
+2. **避免非法 header**：旧实现对空 key 发出 `Authorization: Bearer `（带尾空格），httpx 在请求构造阶段即抛 `LocalProtocolError: Illegal header value`，被分类为 `failure_class=unknown` —— 报错隐晦且无法重试。省略后，对真实需鉴权的服务端会收到干净的 401 → 分类为清晰的 `AuthenticationError`（`provider_auth`）。
+
+各 client 的省略规则：
+
+| client | 鉴权方式 | 空 key 行为 |
+| --- | --- | --- |
+| `OpenAICompatClient` / `DeepSeekClient` | header `Authorization: Bearer {key}` | 省略 `Authorization` 头 |
+| `AnthropicClient` | header `x-api-key: {key}` | 省略 `x-api-key` 头 |
+| `GeminiClient`（`auth_via="header"`） | header `x-goog-api-key: {key}` | 省略 `x-goog-api-key` 头 |
+| `GeminiClient`（`auth_via="query"`） | URL `&key={key}` | URL 不挂 `&key=` |
+
+`extra_headers` 在鉴权头之后合并 —— 即便 `api_key` 为空，业务侧仍可通过 `extra_headers` 注入网关自定义鉴权头。
+
+> **设计对齐**：此规则与官方 OpenAI Python SDK 的 `auth_headers` 同语义（`if not api_key: return {}` —— 空字符串会导致 header 编码失败，故省略）。**授权有效性由服务端裁决，client 不本地预判**：无鉴权端点正常工作，需鉴权端点缺头则 401。决策与动机见 ADR `docs/decisions/0011-empty-api-key-omits-auth.md`。
+
+#### Scenario: 空 key 省略 Authorization（本地 Ollama）
+- **WHEN** `OpenAICompatClient(api_key="").session(...)` 构造
+- **THEN** session `_headers` SHALL NOT 含 `Authorization`，且对本地无鉴权端点正常发请求（不抛 `LocalProtocolError`）
+
+#### Scenario: 空 key 连需鉴权端点 → 干净 401（非 LocalProtocolError）
+- **WHEN** `api_key=""` 连真实需鉴权的服务端（无 `extra_headers` 鉴权）并消费 stream
+- **THEN** 服务端因缺鉴权头返回 401 → `classify_http_error` 归为 `AuthenticationError`（`failure_class=provider_auth`），**而非** httpx `LocalProtocolError`/`failure_class=unknown`
+
+#### Scenario: 纯空白 key 同样视为无 key
+- **WHEN** `api_key="   "`（仅空白）
+- **THEN** 各 client SHALL 省略对应鉴权头/参数
+
+#### Scenario: extra_headers 可在空 key 下注入鉴权
+- **WHEN** `OpenAICompatClient(api_key="", extra_headers={"Authorization": "Custom t"})`
+- **THEN** session `_headers["Authorization"] == "Custom t"`
+
+---
+
 ### Requirement: LiteLLM 作为非主流 provider 兜底，文档明确选型
 
 `LiteLLMClient` SHALL 保留，**不删除**。`docs/architecture/overview.md`（或 `docs/architecture/llm-client.md` 若新建）SHALL 包含选型表：

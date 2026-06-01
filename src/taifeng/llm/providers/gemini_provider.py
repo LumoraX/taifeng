@@ -177,8 +177,10 @@ class GeminiSession:
         self._last_usage: TokenUsage | None = None
         self._end_turn = True
 
+        # 空 key 时省略鉴权（与其余 native client 一致）。header 模式不发空
+        # x-goog-api-key；query 模式见 _build_url —— 空 key 不挂 &key=。
         headers: dict[str, str] = {"content-type": "application/json"}
-        if auth_via == "header":
+        if auth_via == "header" and api_key.strip():
             headers["x-goog-api-key"] = api_key
         if extra_headers:
             headers.update(extra_headers)
@@ -212,7 +214,8 @@ class GeminiSession:
             f"{self._base_url}/v1beta/models/{model}:streamGenerateContent"
             "?alt=sse"
         )
-        if self._auth_via == "query":
+        # 空 key 不挂 &key=（避免发出语义为空的鉴权参数；真实服务端会干净 401）。
+        if self._auth_via == "query" and self._api_key.strip():
             url += f"&key={self._api_key}"
         return url
 

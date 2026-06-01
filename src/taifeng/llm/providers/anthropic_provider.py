@@ -177,12 +177,16 @@ class AnthropicSession:
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._cancel = cancel
+        # 空 key 时省略 x-api-key（与 openai_compat 一致：本地/网关无鉴权场景不发
+        # 语义为空的鉴权头；真实服务端则干净 401 → AuthenticationError）。
         self._headers = {
-            "x-api-key": api_key,
             "anthropic-version": anthropic_version,
             "content-type": "application/json",
-            **(extra_headers or {}),
         }
+        if api_key.strip():
+            self._headers["x-api-key"] = api_key
+        if extra_headers:
+            self._headers.update(extra_headers)
         self._timeout = timeout_seconds
         self._previous_cache_read = previous_cache_read
         self._last_usage: TokenUsage | None = None

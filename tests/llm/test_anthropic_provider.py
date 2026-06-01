@@ -509,3 +509,25 @@ def _patch_httpx(
         original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
+
+
+# === 空 key 鉴权头处理（与 openai_compat 一致：空 key 省略 x-api-key）=========
+
+
+def test_empty_api_key_omits_x_api_key_header() -> None:
+    """空 key → 省略 x-api-key（本地/网关无鉴权场景；真实服务端干净 401）。"""
+    sess = AnthropicSession(
+        api_key="", model="claude-haiku-4-5-20251001",
+        base_url="https://api.anthropic.com", cancel=CancellationToken(),
+    )
+    assert "x-api-key" not in sess._headers
+    assert sess._headers["anthropic-version"]  # 其余头照常
+
+
+def test_nonempty_api_key_sets_x_api_key_header() -> None:
+    """正常 key → x-api-key 照常。"""
+    sess = AnthropicSession(
+        api_key="sk-ant-test", model="claude-haiku-4-5-20251001",
+        base_url="https://api.anthropic.com", cancel=CancellationToken(),
+    )
+    assert sess._headers["x-api-key"] == "sk-ant-test"

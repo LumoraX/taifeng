@@ -62,11 +62,17 @@ class OpenAICompatSession:
         self._api_key = api_key
         self._model = model
         self._cancel = cancel
-        self._headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            **(extra_headers or {}),
-        }
+        # 仅在 api_key 非空白时附 Authorization 头。空 key（本地 Ollama / LM Studio
+        # / vLLM 等无需鉴权的 OpenAI 兼容端点）应**省略**该头，而不是发出非法的
+        # "Bearer "（带尾空格，会触发 httpx LocalProtocolError: Illegal header value）。
+        # 对真实需鉴权的服务端：不带头 → 干净 401 → 分类为清晰的 AuthenticationError，
+        # 而非把 LocalProtocolError 泄漏成 failure_class=unknown。
+        self._headers = {"Content-Type": "application/json"}
+        if api_key.strip():
+            self._headers["Authorization"] = f"Bearer {api_key}"
+        # extra_headers 在最后合并：允许网关注入自定义鉴权头（即便 api_key 为空）。
+        if extra_headers:
+            self._headers.update(extra_headers)
         self._timeout = timeout_seconds
         self._previous_cache_read = previous_cache_read
         self._last_usage: TokenUsage | None = None

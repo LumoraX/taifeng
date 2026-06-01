@@ -425,3 +425,36 @@ def test_client_record_cache_read() -> None:
     c = GeminiClient(api_key="sk-x")
     c.record_cache_read(50)
     assert c._previous_cache_read == 50
+
+
+# === 空 key 鉴权处理（header 模式省略 x-goog-api-key；query 模式不挂 &key=）====
+
+
+def test_empty_api_key_header_mode_omits_goog_header() -> None:
+    """header 模式 + 空 key → 省略 x-goog-api-key。"""
+    sess = GeminiSession(
+        api_key="", model="gemini-2.0-flash",
+        base_url="https://generativelanguage.googleapis.com",
+        cancel=CancellationToken(), auth_via="header",
+    )
+    assert "x-goog-api-key" not in sess._headers
+
+
+def test_empty_api_key_query_mode_omits_key_param() -> None:
+    """query 模式 + 空 key → URL 不挂 &key=。"""
+    sess = GeminiSession(
+        api_key="", model="gemini-2.0-flash",
+        base_url="https://generativelanguage.googleapis.com",
+        cancel=CancellationToken(), auth_via="query",
+    )
+    assert "&key=" not in sess._build_url("gemini-2.0-flash")
+
+
+def test_nonempty_api_key_query_mode_appends_key() -> None:
+    """query 模式 + 正常 key → URL 挂上 &key=。"""
+    sess = GeminiSession(
+        api_key="sk-gem", model="gemini-2.0-flash",
+        base_url="https://generativelanguage.googleapis.com",
+        cancel=CancellationToken(), auth_via="query",
+    )
+    assert "&key=sk-gem" in sess._build_url("gemini-2.0-flash")
