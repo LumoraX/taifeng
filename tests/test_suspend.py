@@ -583,3 +583,22 @@ def test_new_event_msgs():
     e3b = EventMsg.model_validate_json(e3.model_dump_json())
     assert e3b.msg.kind == "suspension_resolve_rejected"
     assert e3b.msg.data["reason"] == "unknown_request_id"
+
+
+# ============================================================
+# Task 10：Resume Op —— 业务侧提交续跑意图
+# ============================================================
+
+
+def test_resume_op_in_union():
+    from taifeng.loop.submission import Resume, Submission
+
+    op = Resume(thread_id="th_1", resolutions={"r1": {"granted": True}})
+    assert op.kind == "resume"
+    sub = Submission(op=op)
+    assert sub.op.thread_id == "th_1"
+    assert sub.op.resolutions["r1"]["granted"] is True
+    # 经判别式 union 解析往返(确认 kind=resume 正确路由)
+    sub2 = Submission.model_validate_json(sub.model_dump_json())
+    assert sub2.op.kind == "resume"
+    assert sub2.op.resolutions["r1"]["granted"] is True

@@ -114,6 +114,23 @@ class UpdateInstructions(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
 
+class Resume(BaseModel):
+    """续跑一个挂起的 thread。
+
+    Attributes:
+        thread_id: 要续跑的 thread。
+        resolutions: {request_id: payload}；必须一次补齐该挂起 record 的全部 pending
+            （不允许部分 resume）。payload 形状由对应 PendingRequest.reason 决定：
+            - permission: {"granted": bool, "reason"?: str, "remember_until"?: str}
+            - form / data: 任意 JSON（直接成 function_call_output）
+            - system_retry: {"action": "retry" | "abort"}
+    """
+
+    kind: Literal["resume"] = "resume"
+    thread_id: str
+    resolutions: dict[str, Any]
+
+
 class Shutdown(BaseModel):
     kind: Literal["shutdown"] = "shutdown"
 
@@ -127,6 +144,7 @@ Op = Union[
     UpdateBudget,
     RefreshSnapshot,
     UpdateInstructions,
+    Resume,
     Shutdown,
 ]
 
