@@ -79,4 +79,5 @@
 | [mcp_showcase/](mcp_showcase/) | taifeng 作为 MCP client：spawn 自带的最小 MCP server 子进程 + 注册其工具远程调用（已注册进 web_ui）|
 | [mcp_basic/](mcp_basic/) | MCP stdio client 连外部 server，自动注册工具 |
 | [mcp_hitl/](mcp_hitl/) | MCP 工具调用走 permission gate |
+| [suspend_resume/](suspend_resume/) | 表单采集型 HITL 挂起 → 释放实例 → 跨实例重建 → Resume 续跑（R5 头条故事）|
 | [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）|
