@@ -363,7 +363,10 @@ class AgentEngine:
                 if ev.submission_id != submission_id:
                     continue
                 yield ev
-                if ev.msg.kind in ("turn_completed", "turn_failed", "shutdown"):
+                # turn_suspended 是独立终结态(turn 已结束，等待 Resume)——必须纳入自动
+                # 终止集合，否则 turn 挂起时消费者的 async for 永远拿不到终结信号、卡死，
+                # 业务也无法释放实例并提交 Resume(Task 16 回归根因)。
+                if ev.msg.kind in ("turn_completed", "turn_failed", "turn_suspended", "shutdown"):
                     return
         finally:
             self._event_subs.pop(submission_id, None)

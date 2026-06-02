@@ -518,6 +518,17 @@ class McpStdioServer:
                         assistant_text += ev.msg.data.get("delta", "")
                     elif kind == "turn_completed":
                         return
+                    elif kind == "turn_suspended":
+                        # turn_suspended 是终结态(turn 挂起等待 Resume)——必须返回，否则会
+                        # 空等到 _TURN_WAIT_TIMEOUT_SECONDS 超时。挂起不是错误，isError 不置真；
+                        # 在 content 里追加挂起说明 + record_id，供调用方据此提交 Resume。
+                        record_id = ev.msg.data.get("record_id")
+                        note = (
+                            f"\n\n[mcp_server: turn suspended, awaiting input; "
+                            f"record_id={record_id}]"
+                        )
+                        assistant_text = assistant_text + note
+                        return
                     elif kind == "turn_failed":
                         is_error = True
                         # turn_failed 时若无 assistant_text，把 error 信息塞 content

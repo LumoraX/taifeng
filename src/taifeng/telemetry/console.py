@@ -53,6 +53,8 @@ _KIND_TAG = {
     "skill_dispatch_permission_denied": ("perm", _Colors.RED, "✗"),
     "turn_completed": ("turn", _Colors.GREEN, "✓"),
     "turn_failed": ("turn", _Colors.RED, "✗"),
+    # turn_suspended 是独立终结态(挂起等待 Resume)——黄色 ⏸ 与完成/失败区分
+    "turn_suspended": ("turn", _Colors.YELLOW, "⏸"),
     "engine_log": ("eng ", _Colors.GRAY, "·"),
     "shutdown": ("eng ", _Colors.GRAY, "⏹"),
 }
@@ -210,8 +212,11 @@ class ConsoleSink:
         if line:
             self._out.write(line + "\n")
             self._out.flush()
-        # turn 结束时强制 flush 剩余 buffer
-        if self._flush_text_on_turn_end and ev.msg.kind in ("turn_completed", "turn_failed"):
+        # turn 结束时强制 flush 剩余 buffer。turn_suspended 同为终结态(挂起等待 Resume)，
+        # 必须纳入，否则挂起前已 buffer 的助手文本会被静默丢弃。
+        if self._flush_text_on_turn_end and ev.msg.kind in (
+            "turn_completed", "turn_failed", "turn_suspended",
+        ):
             rest = self._text_buffer.pop(ev.submission_id, "")
             if rest.strip():
                 tag, col, arrow = _KIND_TAG["assistant_text"]

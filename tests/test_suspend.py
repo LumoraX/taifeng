@@ -1407,3 +1407,84 @@ async def test_tier2_rebuild_resume(skills_dir, threads_dir):
         if it.kind == "function_call_output"
     }
     assert "call_d1" in fco_ids, "跨进程 resume 必须补回 function_call_output"
+
+
+# ============================================================
+# 回归：subscribe(sub_id) 必须在 turn 挂起时自然结束(消费者不挂死)
+# ============================================================
+
+
+async def test_subscribe_terminates_on_suspension(skills_dir, threads_dir):
+    """engine.subscribe(sub_id) 必须在 turn 挂起时自然结束(否则消费者挂死)。
+
+    背景(Task 16 回归)：挂起 turn 改发独立终结态 ``turn_suspended``，不再发
+    ``turn_completed``。``subscribe`` 的自动终止集合若漏掉 ``turn_suspended``，
+    消费者的 ``async for`` 就永远拿不到终结信号、卡死在 ``q.get()``。
+
+    本测试用真实 SuspendingPrompter：submit 一个会挂起的 UserMessage，
+    然后用 **无手动 break** 的 ``async for ev in engine.subscribe(sub_id)`` 收事件，
+    并用 ``anyio.fail_after(5)`` 包裹——若 subscribe 不在挂起时返回，5 秒后超时即测试失败，
+    把"挂死"显式暴露为失败而非无限挂起。最后断言 events[-1] == "turn_suspended"。
+    """
+    import anyio
+
+    import taifeng
+    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.types import TokenUsage
+    from taifeng.permission.types import PermissionPolicy
+
+    gated_tool = await _gated_tool_factory()
+
+    # entry skill 声明 tool_names 含 danger，否则会被 turn.py 的白名单过滤掉
+    skill_md = """---
+name: suspend-skill
+description: suspend entry
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [style-checker]
+tool_names: [danger]
+max_call_depth: 2
+---
+# Suspend
+"""
+    (skills_dir / "suspend-skill").mkdir()
+    (skills_dir / "suspend-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+    # MockClient：第一轮产出一个 danger tool call(命中审批挂起)；无第二轮(挂起不再采样)
+    client = MockClient(turns=[
+        MockTurn(
+            text="calling danger",
+            tool_calls=[{"id": "call_d1", "name": "danger", "arguments": "{}"}],
+            usage=TokenUsage(input_tokens=10, output_tokens=5),
+        ),
+    ])
+
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        extra_tools=[gated_tool],
+        permission_policy=policy,
+    )
+    engine = await pool.get_or_create(
+        session_id="suspend-subscribe", entry_skill_id="suspend-skill",
+    )
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+
+    # 关键：NO manual break —— 完全依赖 subscribe 自身在 turn_suspended 时 return。
+    # fail_after(5) 把"消费者挂死"转成可观测的超时失败。
+    events: list[str] = []
+    with anyio.fail_after(5):
+        async for ev in engine.subscribe(sub_id):
+            events.append(ev.msg.kind)
+
+    await pool.close()
+
+    assert events, "subscribe 至少应收到若干事件"
+    assert events[-1] == "turn_suspended", (
+        f"subscribe 必须以 turn_suspended 自然终结(不依赖手动 break)，实得 {events}"
+    )

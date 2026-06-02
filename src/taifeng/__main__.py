@@ -168,6 +168,14 @@ def _cmd_engine_demo(args: argparse.Namespace) -> int:
             user_text = args.message or "你好"
             sub_id = await engine.submit(UserMessage(text=user_text))
             async for ev in engine.subscribe(sub_id):
+                # turn_suspended 同样是终结态(turn 挂起等待 Resume)——必须 break，
+                # 否则 demo 会卡死；并打印挂起提示而非静默挂起。
+                if ev.msg.kind == "turn_suspended":
+                    print(
+                        f"\n[挂起] turn 已挂起，record_id="
+                        f"{ev.msg.data.get('record_id')}，等待 Resume"
+                    )
+                    break
                 if ev.msg.kind in ("turn_completed", "turn_failed"):
                     break
 
