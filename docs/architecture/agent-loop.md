@@ -421,7 +421,7 @@ TurnCompleted event
 | `error` | 未捕获异常 / 确定性 LLMError 硬失败 | TurnFailed 配方 |
 | **`suspended`** | turn 中途挂起（人类输入类 / 系统态），实例可释放 | 业务侧凭 `thread_id` 提交 `Resume` 续跑 |
 
-**挂起即结局，不阻塞**：挂起点（`SuspendingPrompter.ask` / `request_user_input` 工具 / LLM 可恢复错误 retry 耗尽）不再阻塞 `await`，而是抛 `SuspendSignal`（内部控制流异常，**不继承 LLMError**）。`dispatch_batch` 把整批 `SuspendSignal` 收集成 `ToolCallOutcome.suspend`（不 fail-fast，支持多挂起点并存），`_dispatch_tools` 聚合后 `raise _BatchSuspend(pending...)`；`run_turn` 在通用 `except Exception` **之前**先 `except _BatchSuspend` / `except SuspendSignal`，落一条 `suspension` item（history + store）并把 `end_reason` 退栈为 `"suspended"`（避免被误分类成 TurnFailed）。协程随即彻底退栈，engine 实例可释放（tier-1 留 Pool / tier-2 驱逐 + 进程可退）。
+**挂起即结局，不阻塞**：挂起点（`SuspendingPrompter.ask` / `request_user_input` 工具 / LLM 可恢复错误 retry 耗尽）不再阻塞 `await`，而是抛 `SuspendSignal`（内部控制流异常，**不继承 LLMError**）。`dispatch_batch` 把整批 `SuspendSignal` 收集成 `ToolCallOutcome.suspend`（不 fail-fast，支持多挂起点并存），`_dispatch_tools` 聚合后 `raise _BatchSuspend(pending...)`；`run_turn` 在通用 `except Exception` **之前**先 `except _BatchSuspend` / `except SuspendSignal`，落一条 `suspension` item（history + store）并把 `end_reason` 退栈为 `"suspended"`（避免被误分类成 TurnFailed）。终结 emit 据此发独立终结态 `TurnSuspended`（携带 `thread_id` / `record_id` / `pending` / `cache_invalidated`）而非 `TurnCompleted`，业务侧据此区分「完成」与「挂起待续」（R3）；`TurnOutcome` 返回值不变，仍带 `suspension` 与 `end_reason="suspended"`。协程随即彻底退栈，engine 实例可释放（tier-1 留 Pool / tier-2 驱逐 + 进程可退）。
 
 **`Resume` Op 续跑**：`AgentEngine._handle_resume`（详见 [suspend-resume 契约](capabilities/suspend-resume.md)）：
 

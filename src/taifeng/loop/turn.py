@@ -62,6 +62,7 @@ from taifeng.loop.event import (
     TurnCompleted,
     TurnFailed,
     TurnStarted,
+    TurnSuspended,
 )
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch
@@ -476,20 +477,38 @@ class TurnRunner:
             suspension=suspension,
         )
 
-        await self._emit(
-            TurnCompleted(
-                data={
-                    "iterations": iterations,
-                    "duration_ms": duration_ms,
-                    "usage": self.total_usage.model_dump(),
-                    "end_reason": end_reason,
-                    "success": outcome.success,
-                    # is_root 区分主/子 turn —— 业务桥接层（如 Web SSE 桥）只在
-                    # 根 turn completed 时认为 submission 真正结束。
-                    "is_root": is_root,
-                }
+        # R3：挂起是独立终结态，发专门的 turn_suspended（而非 turn_completed）。
+        # 业务桥接层据此区分「turn 真正完成」与「turn 暂停待 Resume」两种结局，
+        # 凭 thread_id + record_id 后续提交 Resume 续跑。
+        if end_reason == "suspended" and suspension is not None:
+            await self._emit(
+                TurnSuspended(
+                    data={
+                        "thread_id": self.thread_id,
+                        "record_id": suspension.record_id,
+                        # 复用落盘用的序列化 pending（与 SuspensionRecord 持久化形态一致）
+                        "pending": suspension.to_item().payload["pending"],
+                        # 挂起本身不动 head / 不压缩 → 同进程续跑可保 anchor；但跨进程
+                        # （tier-2）resume 必失 provider cache。此字段对业务是保守警示，取 True。
+                        "cache_invalidated": True,
+                    }
+                )
             )
-        )
+        else:
+            await self._emit(
+                TurnCompleted(
+                    data={
+                        "iterations": iterations,
+                        "duration_ms": duration_ms,
+                        "usage": self.total_usage.model_dump(),
+                        "end_reason": end_reason,
+                        "success": outcome.success,
+                        # is_root 区分主/子 turn —— 业务桥接层（如 Web SSE 桥）只在
+                        # 根 turn completed 时认为 submission 真正结束。
+                        "is_root": is_root,
+                    }
+                )
+            )
         return outcome
 
     def _compute_prompt_fingerprint(self, tools: list[Any]) -> dict[str, str]:

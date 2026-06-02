@@ -307,14 +307,11 @@ max_call_depth: 2
     )
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     async for ev in engine.subscribe(sub_id):
-        if ev.msg.kind in ("turn_completed", "turn_failed"):
+        if ev.msg.kind in ("turn_completed", "turn_failed", "turn_suspended"):
             break
 
-    # 合约断言:挂起 turn 必须以 turn_completed 结束,而非 turn_failed
-    assert ev.msg.kind == "turn_completed", f"挂起 turn 不应失败,实得 {ev.msg.kind}"
-    assert ev.msg.data.get("end_reason") == "suspended", (
-        f"挂起 turn 的 end_reason 应为 'suspended',实得 {ev.msg.data.get('end_reason')!r}"
-    )
+    # 合约断言:挂起 turn 以独立终结态 turn_suspended 结束(R3),而非 turn_completed / turn_failed
+    assert ev.msg.kind == "turn_suspended", f"挂起 turn 应发 turn_suspended,实得 {ev.msg.kind}"
 
     # 落盘验证:store 含 kind=="suspension" item;call_d1 有 function_call 无 output
     items = [it async for it in await pool.store.load_thread(engine.thread_id)]
@@ -327,6 +324,14 @@ max_call_depth: 2
     rec = SuspensionRecord.from_item(suspension_items[0])
     assert len(rec.pending) == 1
     assert rec.pending[0].reason is SuspendReason.PERMISSION
+
+    # turn_suspended 事件 data 必须携带与持久化 record 一致的 record_id 与 pending
+    assert ev.msg.data["record_id"] == rec.record_id, "事件 record_id 应匹配落盘 record"
+    assert ev.msg.data["thread_id"] == engine.thread_id
+    assert ev.msg.data["cache_invalidated"] is True
+    ev_pending = ev.msg.data["pending"]
+    assert len(ev_pending) == 1, "事件 pending 长度应与 record 一致"
+    assert ev_pending[0]["reason"] == SuspendReason.PERMISSION.value
 
     # history-gap:danger 的 function_call 已落,但无配对的 function_call_output
     fc_ids = {
@@ -429,12 +434,14 @@ max_call_depth: 2
     )
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     async for ev in engine.subscribe(sub_id):
-        if ev.msg.kind in ("turn_completed", "turn_failed"):
+        if ev.msg.kind in ("turn_completed", "turn_failed", "turn_suspended"):
             break
 
-    # 可恢复错误转挂起 → turn 以 suspended 正常结束,而非 turn_failed
-    assert ev.msg.kind == "turn_completed", f"system_retry 应挂起非失败,实得 {ev.msg.kind}"
-    assert ev.msg.data.get("end_reason") == "suspended"
+    # 可恢复错误转挂起 → turn 发独立终结态 turn_suspended(R3),而非 turn_failed
+    assert ev.msg.kind == "turn_suspended", f"system_retry 应挂起非失败,实得 {ev.msg.kind}"
+    assert ev.msg.data["thread_id"] == engine.thread_id
+    assert ev.msg.data["cache_invalidated"] is True
+    suspended_data = ev.msg.data
 
     items = [it async for it in await pool.store.load_thread(engine.thread_id)]
     await pool.close()
@@ -449,6 +456,11 @@ max_call_depth: 2
     # detail 携带可恢复错误的归因信息(R1:taifeng 仅携带不解析)
     assert pending.detail["failure_class"] == "provider_rate_limit"
     assert pending.detail["kind"] == "RateLimitError"
+
+    # turn_suspended 事件的 record_id / pending 必须与落盘 record 对齐(R3)
+    assert suspended_data["record_id"] == rec.record_id
+    assert len(suspended_data["pending"]) == 1
+    assert suspended_data["pending"][0]["reason"] == SuspendReason.SYSTEM_RETRY.value
 
 
 # ============================================================
@@ -704,11 +716,16 @@ def test_resolver_form_missing_call_id_raises():
 
 
 async def _drain_until_terminal(engine, sub_id):
-    """订阅指定 submission 直到 turn_completed / turn_failed，返回收到的事件列表。"""
+    """订阅指定 submission 直到终结事件，返回收到的事件列表。
+
+    终结事件含三类：turn_completed（正常完成）/ turn_failed（失败）/
+    turn_suspended（挂起独立终结态，R3 对齐）。挂起 turn 不再发 turn_completed，
+    因此 break 条件必须纳入 turn_suspended，否则挂起阶段会卡死在订阅循环。
+    """
     events = []
     async for ev in engine.subscribe(sub_id):
         events.append(ev)
-        if ev.msg.kind in ("turn_completed", "turn_failed"):
+        if ev.msg.kind in ("turn_completed", "turn_failed", "turn_suspended"):
             break
     return events
 
@@ -819,8 +836,8 @@ async def test_resume_after_permission_suspension(skills_dir, threads_dir):
     # === 第一轮：触发挂起 ===
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events1 = await _drain_until_terminal(engine, sub_id)
-    assert events1[-1].msg.kind == "turn_completed"
-    assert events1[-1].msg.data.get("end_reason") == "suspended"
+    # 挂起阶段以独立终结态 turn_suspended 收尾（R3）
+    assert events1[-1].msg.kind == "turn_suspended"
 
     # 从持久化的 suspension record 取 request_id（续跑入参）
     items = [it async for it in await pool.store.load_thread(engine.thread_id)]
@@ -939,8 +956,8 @@ max_call_depth: 2
     # === 第一轮：可恢复错误 → 挂起为 SYSTEM_RETRY ===
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events1 = await _drain_until_terminal(engine, sub_id)
-    assert events1[-1].msg.kind == "turn_completed"
-    assert events1[-1].msg.data.get("end_reason") == "suspended"
+    # 挂起阶段以独立终结态 turn_suspended 收尾（R3）
+    assert events1[-1].msg.kind == "turn_suspended"
 
     items = [it async for it in await pool.store.load_thread(engine.thread_id)]
     suspension_items = [it for it in items if it.kind == "suspension"]
@@ -1068,13 +1085,15 @@ async def _suspend_once(pool, engine):
 
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events = await _drain_until_terminal(engine, sub_id)
-    assert events[-1].msg.kind == "turn_completed"
-    assert events[-1].msg.data.get("end_reason") == "suspended"
+    # 挂起阶段以独立终结态 turn_suspended 收尾（R3）
+    assert events[-1].msg.kind == "turn_suspended"
 
     items = [it async for it in await pool.store.load_thread(engine.thread_id)]
     suspension_items = [it for it in items if it.kind == "suspension"]
     assert len(suspension_items) == 1
     rec = SuspensionRecord.from_item(suspension_items[0])
+    # 事件 record_id 必须与落盘 record 对齐（R3 可观测）
+    assert events[-1].msg.data["record_id"] == rec.record_id
     return rec.pending[0].request_id, rec
 
 
@@ -1271,8 +1290,8 @@ async def test_cancel_clears_suspension_then_resume_rejected(skills_dir, threads
     # 1. 触发挂起，捕获挂起 turn 的 submission id 与持久化 record 的 request_id
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events1 = await _drain_until_terminal(engine, sub_id)
-    assert events1[-1].msg.kind == "turn_completed"
-    assert events1[-1].msg.data.get("end_reason") == "suspended"
+    # 挂起阶段以独立终结态 turn_suspended 收尾（R3）
+    assert events1[-1].msg.kind == "turn_suspended"
 
     items = [it async for it in await pool.store.load_thread(engine.thread_id)]
     rec = SuspensionRecord.from_item(

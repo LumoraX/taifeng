@@ -92,7 +92,7 @@ payload 形状由对应 `PendingRequest.reason` 决定：
 | `suspension_resolved` | `Resume` 成功配对、turn 续跑 | `{record_id, request_ids: list[str]}` |
 | `suspension_resolve_rejected` | `Resume` 被拒（resolution 不全 / 多余、无活跃挂起、ResolveError 等） | `{reason: str, record_id: str \| None, detail: dict}` |
 
-> 当前实现：挂起结局**经 `TurnCompleted{end_reason="suspended"}` 在事件流上被观测**（业务侧以 `end_reason` 路由，与 `completed` / `cancelled` / `error` 并列）；`turn_suspended` 作为契约类型已定义并导出（业务可主动构造转发，如 Web SSE 桥）。`suspension_resolved` / `suspension_resolve_rejected` 由 `AgentEngine._handle_resume` 直接 emit。
+> 当前实现：挂起结局**经独立终结态 `turn_suspended` 在事件流上被观测**（`run_turn` 终结 emit 在 `end_reason == "suspended"` 时发 `TurnSuspended` 而非 `TurnCompleted`，业务侧据此与 `completed` / `cancelled` / `error` 区分）；`TurnOutcome.end_reason` 仍为 `"suspended"`（返回值不变，供 `_handle_resume` 等内部路径判定）。`suspension_resolved` / `suspension_resolve_rejected` 由 `AgentEngine._handle_resume` 直接 emit。
 
 ## 行为契约
 
@@ -180,6 +180,6 @@ Resume(thread_id, resolutions)
 | --- | --- |
 | **R1 业务零侵入** | `suspend/` 全 typed、无业务词；`detail` / `resolutions` payload 不透明 JSON，taifeng 不解析其 keys。`created_at` / `record_id` / `request_id` 由注入工厂提供（src 内不取系统时钟 / 随机）。 |
 | **R2 Cache 友好** | resume 补齐 `function_call_output` 是 **tail append**（不动 head），符合 mid-turn 只改 tail；`turn_suspended.cache_invalidated` 标注 tier-2 跨进程必失效、tier-1 同进程尽量保 anchor。 |
-| **R3 可观测** | 新增 `turn_suspended` / `suspension_resolved` / `suspension_resolve_rejected` EventMsg；挂起结局经 `TurnCompleted{end_reason="suspended"}` 上事件流。 |
+| **R3 可观测** | 新增 `turn_suspended` / `suspension_resolved` / `suspension_resolve_rejected` EventMsg；挂起结局以独立终结态 `turn_suspended` 上事件流（携带 `thread_id` / `record_id` / `pending` / `cache_invalidated`），与 `TurnCompleted` 区分。 |
 | **R4 可取消** | 挂起态可被 `CancelTurn` 丢弃（`_cancel_active_suspension`）；协程已退栈，不阻塞主 actor。 |
 | **R5 可 resume** | `SuspensionRecord` 走既有 JSONL 追加写；复用 `resume_thread_id` 跨进程重建。resolved-marker 同样追加写、不改写历史。 |
