@@ -13,9 +13,9 @@
 
 ## 数据契约
 
-### Requirement: `SuspendReason` 四值枚举
+### Requirement: `SuspendReason` 五值枚举
 
-`SuspendReason` SHALL 是 `enum.StrEnum`，取且仅取以下四值（决定 resume 续跑语义）：
+`SuspendReason` SHALL 是 `enum.StrEnum`，取且仅取以下五值（决定 resume 续跑语义）：
 
 | 值 | 语义 | resume 续跑动作 |
 | --- | --- | --- |
@@ -23,8 +23,9 @@
 | `form` | 等用户填表 | payload 直接成该 call 的 `function_call_output` |
 | `data` | 等外部数据 | 同 `form`，payload 直接成 `function_call_output` |
 | `system_retry` | 限流 / 配额 / 余额 / 鉴权 / 可恢复网络错 | `action=retry`（默认）→ 重跑同次 sample；`action=abort` → turn 终止不续跑 |
+| `child_skill` | `call_skill` 派发的子 skill 内部挂起 → 父的 `call_skill` 随之挂起 | **非用户可直接 resolve**：由 engine 续跑链内部核销——先续跑子 thread 拿结果，再回填本 `call_skill` 的 `function_call_output`（见下「子 thread resume 续跑链」） |
 
-`StrEnum` 保证 JSON 序列化为字符串（`reason.value`），跨进程 `from_item` 还原稳定。
+`StrEnum` 保证 JSON 序列化为字符串（`reason.value`），跨进程 `from_item` 还原稳定。`child_skill` pending 的 `related_call_id` = 父 `call_skill` 的 call_id，`detail` 携带 `{sub_thread_id, skill_id}`（子 thread + 子 entry skill）。
 
 #### Scenario: 枚举值与 JSON 序列化
 - **WHEN** 序列化 `SuspendReason.PERMISSION`
@@ -136,6 +137,26 @@ Resume(thread_id, resolutions)
 ### Requirement: 多挂起点并存 + batch resume
 
 同一 turn 一批 tool call 可同时命中多个挂起点（如 permission + form 同批）。`dispatch_batch` **不 fail-fast**，整批收集所有 `SuspendSignal`，聚合为**一条** `SuspensionRecord`（多个 pending 共享 `record_id`）。resume 用 `{request_id: payload}` 一次补齐全部。
+
+### Requirement: 子 thread resume 续跑链（call_skill 嵌套挂起）
+
+`call_skill` 派发的子 skill 在**独立子 thread** 内运行（`TurnRunner.run_sub_skill` → `_spawn_sub_runner`，`history_buffer` 隔离）。子 turn 命中挂起点时，挂起 `SuspensionRecord` 落在**子 thread**，子 turn emit `turn_suspended`（`thread_id` = 子 thread）。
+
+此时父的 `call_skill` SHALL **随之挂起**而非把子结果误当成功/失败回填：`_spawn_sub_runner` 在子 `outcome.end_reason == "suspended"` 时抛 `SuspendSignal(reason=CHILD_SKILL, related_call_id=父 call_id, detail={sub_thread_id, skill_id})`。该信号经父 `_dispatch_one` 捕获为 `outcome.suspend` → 父 `_BatchSuspend` → 父落自己的 `SuspensionRecord`（含一条 `CHILD_SKILL` pending），逐层上抛至根 → 根 emit `turn_suspended`。**子 thread 与根 thread 各 emit 一次 `turn_suspended`**（子携子 thread_id、根携根 thread_id）。
+
+`Resume(thread_id=<子 thread_id>, resolutions=...)` SHALL 由 `AgentEngine._handle_resume` 在 `op.thread_id != self._thread_id` 时分流到 `_handle_child_resume` 续跑链：
+
+1. **串链**：自根 `self._thread_id` 沿各层活跃挂起的 `CHILD_SKILL` pending（`detail.sub_thread_id`）向下串出 `[根, …, leaf]`，每层记 `(thread_id, entry_skill_id, 父 call_id)`。根 thread / entry skill 由 engine 自持，子层谱系由父挂起 record 的 pending detail 携带——**不依赖 `MessageStore.get_metadata`**（该协议无元数据查询）。串不到目标 leaf → emit `suspension_resolve_rejected(no_active_suspension)`。
+2. **leaf 续跑**：用用户 `resolutions` 核销 leaf 的真实挂起（permission/form/data，复用 `SuspensionResolver` + gap 补齐），重建 `TurnRunner` 续跑子 turn → 拿 `final_text`（= 正常子 turn 完成回传）。
+3. **逐层回传**：自 leaf 向上把每个父 `call_skill` 的 `function_call_output` 回填为子结果（= 正常 `run_sub_skill` 的 `ToolResult.ok`），落 resolved-marker 核销父 record，续跑父 turn；根用既有 `self._history` / `_build_and_run_runner` 收尾 → 根 emit `turn_completed(is_root=True)`。
+
+任一层续跑若**又挂起**，该层各自 emit `turn_suspended`，续跑链在该层中止（上层 `call_skill` 仍挂起，等下一次 `Resume`）。续跑链各层 turn 的事件均带 `Resume` submission 的 `submission_id`；子层续跑 turn 标记 `is_root=False`（engine 注入非空 `call_stack`），仅根续跑 turn `is_root=True`。
+
+> **R1**：`CHILD_SKILL` 是纯内核派发态（`sub_thread_id` / `skill_id` / `call_id` 均为基础调度 id），无业务概念。**R5**：续跑链全程基于 store 持久态（子 thread `load_thread` + 父 record pending detail），跨进程 resume 可行。
+
+#### Scenario: 子 skill 内挂起 → Resume 子 thread → 续跑回传父 → 根完成
+- **WHEN** 父 `call_skill` 派子，子内 `permission` 挂起 → `Resume(thread_id=<子 thread>, resolutions={req: {granted: true}})`
+- **THEN** `turn_suspended` 携子 thread_id（≠ 根）；resume 后 `suspension_resolved`（leaf + 父各一）、子续跑输出落子 thread、被挂起 call 补回 `function_call_output`、整个 submission 以根 `turn_completed(is_root=True)` 收尾
 
 ### Requirement: 禁部分 resume
 

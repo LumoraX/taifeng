@@ -439,4 +439,6 @@ Resume(thread_id, resolutions)
 
 挂起期间收到 `CancelTurn` → `_cancel_active_suspension` 同样追加 resolved-marker 丢弃挂起（R4）。**挂起真相** = 持久化的 `suspension` item + `function_call`-无-`function_call_output` 的 history-gap，使 mid-turn 挂起跨进程 resume 可行（R5）。
 
+**子 thread 嵌套挂起 + 续跑回传父 call_skill**：`call_skill` 派发的子 skill 在独立子 thread 运行（`_spawn_sub_runner`，history 隔离）。子 turn 挂起时挂起记录落**子 thread**，子 emit `turn_suspended`（子 thread_id）。`_spawn_sub_runner` 在子 `end_reason=="suspended"` 时抛 `SuspendSignal(reason=CHILD_SKILL, detail={sub_thread_id, skill_id})` → 父 `call_skill` 随之挂起 → 逐层上抛至根 → 根也 emit `turn_suspended`。`Resume(thread_id=<子 thread>)` 经 `_handle_resume` 分流到 `_handle_child_resume` 续跑链：自根沿 `CHILD_SKILL` pending 串链至 leaf（不依赖 `get_metadata`，谱系由父挂起 record 的 pending detail 携带）→ 核销 leaf 用户挂起 + 续跑子 turn → 把子结果逐层回填父 `call_skill` 的 `function_call_output` + 续跑父 turn → 根以 `_build_and_run_runner` 收尾。子层续跑 turn `is_root=False`（engine 注入非空 `call_stack`），根续跑 `is_root=True`。**`Resume` 经 `asyncio.create_task` 异步派发**（与 `UserMessage` 一致），使续跑链多 turn 不阻塞 run 循环、且给 `subscribe(submission_id)` 留出注册窗口。详见 [suspend-resume 契约](capabilities/suspend-resume.md) §子 thread resume 续跑链。
+
 - [x] `cancel.child()` 派生层级正确，父取消级联 —— `tests/loop/test_cancellation.py::test_child_cancel_propagates_from_parent`

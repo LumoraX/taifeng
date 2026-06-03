@@ -1168,6 +1168,29 @@ class TurnRunner:
         )
         outcome = await sub_runner.run()
         from taifeng.tool.spec import ToolResult
+
+        # 子 turn 挂起：子 thread 内已落 SuspensionRecord 并 emit turn_suspended。
+        # 父的 call_skill 必须随之挂起（而非把挂起误当成功/失败回填），否则父 turn
+        # 会带着占位结果继续/完成，子挂起永远无法回传父调用栈（item d 的根因）。
+        # 抛 SuspendSignal(reason=CHILD_SKILL) → 父 _dispatch_one 捕获为 outcome.suspend
+        # → 父 _BatchSuspend → 父落自己的 SuspensionRecord（pending 携带 sub_thread_id），
+        # 逐层上抛至根 → 根 emit turn_suspended。resume 时 engine 续跑链据 sub_thread_id
+        # 先续跑子 thread 拿结果，再回填本 call_skill 的 function_call_output。
+        if outcome.end_reason == "suspended":
+            from taifeng.suspend.reason import PendingRequest, SuspendReason
+            from taifeng.suspend.signal import SuspendSignal as _SuspendSignal
+
+            raise _SuspendSignal(
+                PendingRequest(
+                    request_id=self._suspend_id_factory(),
+                    reason=SuspendReason.CHILD_SKILL,
+                    # 父 resume 时据 related_call_id 定位要回填 output 的 call_skill；
+                    # 据 detail.sub_thread_id 定位要先续跑的子 thread。
+                    related_call_id=ctx.call_id,
+                    detail={"sub_thread_id": sub_thread_id, "skill_id": target.id},
+                )
+            )
+
         await self._emit(
             SkillReturned(
                 data={

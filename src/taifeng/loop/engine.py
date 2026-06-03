@@ -534,7 +534,11 @@ class AgentEngine:
                     await self._handle_update_instructions(sub.id, sub.op)
                     continue
                 if isinstance(sub.op, Resume):
-                    await self._handle_resume(sub, cancel)
+                    # 与 UserMessage 一致用 create_task 异步派发：让续跑链（可能跨子/根
+                    # 多个 turn）不阻塞主 run 循环，且给 subscribe(submission_id) 留出在
+                    # 事件流出前注册队列的窗口（子 thread resume 续跑链 emit 多个事件，
+                    # 内联执行会与"submit 后再 subscribe"的消费者抢跑导致丢首批事件→挂死）。
+                    asyncio.create_task(self._handle_resume(sub, cancel))
                     continue
                 if isinstance(sub.op, UserMessage):
                     asyncio.create_task(self._run_turn_for(sub, cancel))
@@ -768,6 +772,13 @@ class AgentEngine:
         assert isinstance(sub.op, Resume)
         op = sub.op
 
+        # 子 thread resume：Resume.thread_id 指向 call_skill 派发的子 thread（≠ 根 thread）。
+        # 挂起记录落在子 thread，根 self._history 找不到 → 走专门的续跑链（先续跑子 thread
+        # 拿结果，再逐层回填父 call_skill 的 output，最终根 turn 续跑完成）。
+        if op.thread_id != self._thread_id:
+            await self._handle_child_resume(sub, op, root_cancel)
+            return
+
         # 1. 找活跃挂起 record（扫 history：最后一条未被 resolved-marker 消费的 suspension）
         record = self._find_active_suspension()
         if record is None:
@@ -824,6 +835,351 @@ class AgentEngine:
         self._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
         await self._build_and_run_runner(sub.id, turn_cancel, list(self._last_resolved or []))
 
+    # -----------------------------------------------------------------
+    # 子 thread resume：续跑链（leaf 子 thread → 逐层回填父 call_skill → 根）
+    # -----------------------------------------------------------------
+
+    async def _handle_child_resume(
+        self, sub: Submission, op: Resume, root_cancel: CancellationToken
+    ) -> None:
+        """续跑一个【子 thread】的挂起，并把结果逐层回传父 call_skill 直到根完成。
+
+        机制（对账 call_skill 正常非挂起回传路径 turn.py::_spawn_sub_runner）：
+          1. 自根 self._thread_id 沿 CHILD_SKILL pending（detail.sub_thread_id）向下
+             串出 [根, …, leaf] 链，每层记 (thread_id, entry_skill_id, 父 call_id)。
+             —— 不依赖 store.get_metadata（MessageStore 协议无元数据查询）：根 thread /
+             entry skill 由 engine 自持，子层谱系由父挂起 record 的 pending detail 携带。
+          2. leaf 子 thread：用用户 resolutions 核销真实挂起（permission/form/data），
+             补 gap → 重建 TurnRunner 续跑 → 拿 final_text（= 正常子 turn 完成）。
+          3. 自 leaf 向上：把每个父 call_skill 的 function_call_output 回填为子结果
+             （= 正常 run_sub_skill 的 ToolResult.ok），续跑父 turn；根用既有
+             self._history / _build_and_run_runner 收尾。
+
+        任一层续跑若又挂起（再触发挂起点），该层各自 emit turn_suspended，续跑链在该层
+        中止（上层 call_skill 仍挂起，等下一次 Resume）—— 与单层 resume 语义一致。
+
+        Args:
+            sub: 本次 Resume submission（事件归因）。
+            op: Resume(thread_id=<子 thread>, resolutions=...)。
+            root_cancel: 根取消 token（派生各层 turn 的子 token）。
+        """
+        # 1. 自根向下串链至 leaf（op.thread_id）。链元素 = (thread_id, entry_skill_id, 父 call_id)
+        chain = await self._build_resume_chain(op.thread_id)
+        if chain is None:
+            # 根/中途某层无活跃 CHILD_SKILL 挂起指向目标 leaf → 找不到挂起，拒绝
+            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
+                data={"reason": "no_active_suspension", "record_id": None, "detail": {}})))
+            return
+
+        # 2. leaf：核销用户挂起 + 续跑，拿到回传给父的结果字符串
+        leaf_tid, leaf_skill_id, _ = chain[-1]
+        leaf_result = await self._resume_leaf_thread(
+            sub, leaf_tid, leaf_skill_id, op.resolutions, root_cancel)
+        if leaf_result is None:
+            # leaf 核销失败（已 emit Rejected）或又挂起（已 emit turn_suspended）→ 不上溯
+            return
+
+        # 3. 自 leaf 向上逐层回填父 call_skill output + 续跑父 turn，直到根完成或中途再挂起
+        child_result = leaf_result
+        # 倒序遍历父链（去掉 leaf 自身）：[..., 祖父, 父]
+        for level in range(len(chain) - 2, -1, -1):
+            parent_tid, parent_skill_id, _ = chain[level]
+            # 本层 call_skill 的 call_id = 子层元素携带的"父 call_id"
+            call_id = chain[level + 1][2]
+            cont = await self._resume_parent_level(
+                sub, parent_tid, parent_skill_id, call_id, child_result, root_cancel)
+            if cont is None:
+                # 父是根（根分支已收尾）/ 父又挂起 → 链终止
+                return
+            child_result = cont
+
+    async def _build_resume_chain(
+        self, leaf_thread_id: str
+    ) -> list[tuple[str, str, str | None]] | None:
+        """自根 self._thread_id 沿 CHILD_SKILL pending 向下串出到 leaf 的续跑链。
+
+        每层元素 = (thread_id, entry_skill_id, 该 thread 在【父】里对应的 call_skill call_id)；
+        根层的"父 call_id"为 None。逐层用父挂起 record 的 CHILD_SKILL pending
+        （detail.sub_thread_id / skill_id / related_call_id）确定下一层。
+
+        Returns:
+            [(根tid, 根skill, None), …, (leaftid, leafskill, 父callid)]；
+            根/中途无指向 leaf 的活跃 CHILD_SKILL 挂起 → None（找不到挂起，调用方拒绝）。
+        """
+        chain: list[tuple[str, str, str | None]] = [
+            (self._thread_id, self._entry_skill.id, None)
+        ]
+        cur_tid, cur_items = self._thread_id, list(self._history)
+        # 至多沿链下探 spawn 深度上限的层数（防御性，正常链很短）
+        for _ in range(self._max_total_spawns_guard()):
+            if cur_tid == leaf_thread_id:
+                return chain
+            record = self._find_active_suspension_in(cur_items)
+            if record is None:
+                return None  # 本层无活跃挂起 → 链断（找不到 leaf）
+            nxt = self._next_child_link(record)
+            if nxt is None:
+                return None  # 本层挂起无 CHILD_SKILL pending → 到底但非目标 leaf
+            child_tid, child_skill_id, call_id = nxt
+            chain.append((child_tid, child_skill_id, call_id))
+            cur_tid = child_tid
+            cur_items = await self._load_thread_items(child_tid)
+        return None  # 超出深度守卫（异常链）
+
+    def _max_total_spawns_guard(self) -> int:
+        """续跑链下探的最大层数守卫（取 spawn 总配额上界 + 余量，避免坏数据死循环）。"""
+        return 1024
+
+    @staticmethod
+    def _next_child_link(
+        record: SuspensionRecord,
+    ) -> tuple[str, str, str | None] | None:
+        """从一个挂起 record 里取首个 CHILD_SKILL pending → (子tid, 子skill_id, 父callid)。
+
+        正常单链下探每层至多一条 CHILD_SKILL pending（并发多子各自挂起属另一形态，
+        本续跑链按"用户指向的 leaf"单路下探）。无 CHILD_SKILL pending → None。
+        """
+        from taifeng.suspend.reason import SuspendReason
+        for p in record.pending:
+            if p.reason is SuspendReason.CHILD_SKILL:
+                tid = p.detail.get("sub_thread_id")
+                skill_id = p.detail.get("skill_id")
+                if isinstance(tid, str) and isinstance(skill_id, str):
+                    return tid, skill_id, p.related_call_id
+        return None
+
+    async def _resume_leaf_thread(
+        self, sub: Submission, leaf_tid: str, leaf_skill_id: str,
+        resolutions: dict[str, Any], root_cancel: CancellationToken,
+    ) -> str | None:
+        """核销 leaf 子 thread 的用户挂起 + 续跑该子 turn，返回回传父的结果字符串。
+
+        复用既有 resume 语义（SuspensionResolver + gap 补齐 + 续采样），但作用在
+        【子 thread 的 load_thread 历史】而非 self._history。
+
+        Returns:
+            子 turn 续跑后的 final_text（成功）/ 错误串（失败）；核销被拒或子又挂起 → None。
+        """
+        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+
+        items = await self._load_thread_items(leaf_tid)
+        record = self._find_active_suspension_in(items)
+        if record is None:
+            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
+                data={"reason": "no_active_suspension", "record_id": None, "detail": {}})))
+            return None
+        try:
+            plan = SuspensionResolver().plan(record, resolutions)
+        except ResolveError as e:
+            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
+                data={"reason": str(e), "record_id": record.record_id, "detail": {}})))
+            return None
+
+        # 补 gap（在子 thread 上）：form/data 直填、permission deny 填 error、allow 执行 tool
+        await self._apply_plan_on_thread(leaf_tid, leaf_skill_id, record, plan)
+        await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
+            data={"record_id": record.record_id,
+                  "request_ids": sorted(record.request_ids())})))
+        if plan.abort:
+            # system_retry abort：子 turn 在挂起点终止，不续跑 → 视为失败回传父
+            return f"sub_skill_aborted: {record.record_id}"
+        outcome = await self._run_thread_turn(sub, leaf_tid, leaf_skill_id, root_cancel)
+        if outcome.end_reason == "suspended":
+            # 子续跑又挂起：本层 emit 了 turn_suspended，续跑链中止（等下次 Resume）
+            return None
+        return outcome.final_text if outcome.success else (
+            f"sub_skill_failed: {outcome.error or outcome.end_reason}")
+
+    async def _resume_parent_level(
+        self, sub: Submission, parent_tid: str, parent_skill_id: str,
+        call_id: str | None, child_result: str, root_cancel: CancellationToken,
+    ) -> str | None:
+        """回填父 thread 中 call_id 对应 call_skill 的 output，续跑父 turn。
+
+        Returns:
+            父 turn 续跑后的 final_text（需继续上溯时非 None）；父是根 / 父又挂起 → None。
+        """
+        is_root = parent_tid == self._thread_id
+        items = (list(self._history) if is_root
+                 else await self._load_thread_items(parent_tid))
+        record = self._find_active_suspension_in(items)
+        if record is None or call_id is None:
+            logger.warning("child_resume: parent %s missing active CHILD_SKILL link",
+                           parent_tid)
+            return None
+        # 回填父 call_skill 的 function_call_output（= 正常 run_sub_skill 的成功回传）
+        is_error = (child_result.startswith("sub_skill_failed:")
+                    or child_result.startswith("sub_skill_aborted:"))
+        out = function_call_output(
+            call_id=call_id, output=child_result,
+            thread_id=parent_tid, is_error=is_error)
+        marker = system_injection(
+            text=f"suspend_resolved:{record.record_id}",
+            thread_id=parent_tid, source="suspend_resolved")
+        if is_root:
+            # 根：回填进 self._history（续跑机制依赖）+ store，再走既有根续跑
+            async with self._lock:
+                self._history.append(out)
+                self._history.append(marker)
+            await self._store.append(out)
+            await self._store.append(marker)
+            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
+                data={"record_id": record.record_id,
+                      "request_ids": sorted(record.request_ids())})))
+            turn_cancel = root_cancel.child(f"sub:{sub.id}")
+            self._pending[sub.id] = _PendingTurn(
+                submission_id=sub.id, cancel=turn_cancel)
+            await self._build_and_run_runner(
+                sub.id, turn_cancel, list(self._last_resolved or []))
+            return None  # 根是终点，链结束
+        # 非根祖先：落 output + marker 到其 thread，续跑该祖先 turn
+        await self._store.append(out)
+        await self._store.append(marker)
+        await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
+            data={"record_id": record.record_id,
+                  "request_ids": sorted(record.request_ids())})))
+        outcome = await self._run_thread_turn(
+            sub, parent_tid, parent_skill_id, root_cancel)
+        if outcome.end_reason == "suspended":
+            return None
+        return outcome.final_text if outcome.success else (
+            f"sub_skill_failed: {outcome.error or outcome.end_reason}")
+
+    async def _load_thread_items(self, thread_id: str) -> list[ResponseItem]:
+        """load_thread → list（子 thread resume 需要按当前持久态重建历史）。"""
+        return [it async for it in await self._store.load_thread(thread_id)]
+
+    async def _apply_plan_on_thread(
+        self, thread_id: str, entry_skill_id: str,
+        record: SuspensionRecord, plan: Any
+    ) -> None:
+        """在指定 thread 上应用 ResolvePlan 的 gap 补齐（form/data/deny/allow-execute）。
+
+        与根路径 _handle_resume 第 3 步同语义，但作用在子 thread（落 store；子 turn
+        续跑时由 load_thread 读回）。permission allow 走 _execute_resumed_tool_on_thread。
+        entry_skill_id 用于该 thread 内执行被批准 tool 时构造 ToolContext 的 skill 上下文。
+        """
+        import json
+        for call_id, payload in plan.direct_outputs.items():
+            out = function_call_output(
+                call_id=call_id, output=json.dumps(payload, ensure_ascii=False),
+                thread_id=thread_id, is_error=False)
+            await self._store.append(out)
+        for call_id, reason in plan.deny_outputs.items():
+            out = function_call_output(
+                call_id=call_id, output=f"permission_denied: {reason}",
+                thread_id=thread_id, is_error=True)
+            await self._store.append(out)
+        for call_id in plan.execute_tool_call_ids:
+            await self._execute_resumed_tool_on_thread(
+                thread_id, entry_skill_id, call_id)
+        # 落 resolved-marker 核销 leaf 记录
+        marker = system_injection(
+            text=f"suspend_resolved:{record.record_id}",
+            thread_id=thread_id, source="suspend_resolved")
+        await self._store.append(marker)
+
+    async def _run_thread_turn(
+        self, sub: Submission, thread_id: str, entry_skill_id: str,
+        root_cancel: CancellationToken,
+    ) -> Any:
+        """为指定（非根）thread 构造 TurnRunner 并续跑一轮，返回 TurnOutcome。
+
+        history_buffer 从 load_thread 重建（含本次 resume 补的 gap）；entry_skill 由
+        续跑链携带的 entry_skill_id 经 snapshot 解析（不依赖 store.get_metadata）。
+        turn 内若再挂起会 emit turn_suspended 并落新 SuspensionRecord
+        （续跑链据 end_reason=='suspended' 中止）。
+        """
+        from taifeng.loop.turn import TurnRunner
+        from taifeng.skill.dispatch import CallStack
+
+        entry = self._snapshot.get(entry_skill_id)
+        if entry is None:
+            raise RuntimeError(f"child_resume_entry_skill_missing: {entry_skill_id}")
+        items = await self._load_thread_items(thread_id)
+        turn_cancel = root_cancel.child(f"sub:{sub.id}:thr:{thread_id}")
+        # 子 thread 续跑必须标记为非根 turn（is_root=False，由 call_stack 非空判定）：
+        # 否则其 turn_completed 会误带 is_root=True，业务桥接层会把子完成当成 submission
+        # 终结。push 子 skill 自身一帧即可（栈非空 → run() 不再补 entry 帧）。
+        sub_stack = CallStack().push(
+            skill_id=entry.id, call_id=f"resume_{thread_id}")
+        runner = TurnRunner(
+            entry_skill=entry,
+            snapshot=self._snapshot,
+            model_client=self._model_client,
+            tool_runtime=self._tool_runtime,
+            store=self._store,
+            compressors=self._compressors,
+            dispatch_policy=self._dispatch_policy,
+            budget=self._budget,
+            thread_id=thread_id,
+            submission_id=sub.id,
+            emit=self._emit,
+            cancel=turn_cancel,
+            hooks=self._hooks,
+            script_executors=self._script_executors,
+            max_iterations=self._max_iterations,
+            max_parallel_tool_calls=self._max_parallel_tool_calls,
+            history_buffer=list(items),
+            permission_policy=self._permission_policy,
+            request_metadata=self._request_metadata,
+            turn_index=self._turn_index,
+            capabilities=self._capabilities,
+            spawn_registry=self._spawn_registry,
+            memory_store=self._memory_store,
+            call_stack=sub_stack,
+        )
+        return await runner.run()
+
+    async def _execute_resumed_tool_on_thread(
+        self, thread_id: str, entry_skill_id: str, call_id: str
+    ) -> None:
+        """在指定 thread 上执行一个被批准的挂起 tool call，回填 function_call_output。
+
+        与 _execute_resumed_tool 同语义（预批准 + dispatch + 回填），但作用在子 thread：
+        从 load_thread 找原 function_call，落 output 到 store（子 turn 续跑时读回）。
+        entry_skill_id 由续跑链携带（不依赖 store.get_metadata）。
+        """
+        from taifeng.tool.spec import ToolContext
+
+        items = await self._load_thread_items(thread_id)
+        fc: ResponseItem | None = None
+        for item in items:
+            if item.kind == "function_call" and item.payload.get("call_id") == call_id:
+                fc = item
+        if fc is None:
+            raise RuntimeError(f"resumed_tool_call_not_found: {call_id}@{thread_id}")
+        import json
+        name = fc.payload["name"]
+        try:
+            args = json.loads(fc.payload.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        entry = self._snapshot.get(entry_skill_id) or self._entry_skill
+        cancel = CancellationToken().child(f"resume_tool:{call_id}")
+        ctx = ToolContext(
+            call_id=call_id, cancel=cancel, thread_id=thread_id,
+            extras={
+                "skill_snapshot": self._snapshot,
+                "visible_skills": self._snapshot.reachable_from(entry.id),
+                "dispatch_policy": self._dispatch_policy,
+                "current_skill": entry,
+                "entry_skill_id": entry.id,
+                "permission_policy": self._permission_policy,
+                "hook_runner": self._hooks,
+                "request_metadata": self._request_metadata,
+                "turn_index": self._turn_index,
+                "script_executors": self._script_executors,
+            },
+        )
+        if self._permission_policy is not None:
+            self._permission_policy.preapprove(call_id)
+        result = await self._tool_runtime.dispatch(name=name, arguments=args, ctx=ctx)
+        out = function_call_output(
+            call_id=call_id, output=result.output,
+            thread_id=thread_id, is_error=result.is_error)
+        await self._store.append(out)
+
     async def _cancel_active_suspension(
         self, cancel_sub_id: str, target_sub_id: str
     ) -> None:
@@ -873,9 +1229,25 @@ class AgentEngine:
         resolved-marker = source=='suspend_resolved' 的 system_injection，
         其 text 形如 'suspend_resolved:<record_id>'。
         """
+        return self._find_active_suspension_in(self._history)
+
+    @staticmethod
+    def _find_active_suspension_in(
+        items: list[ResponseItem],
+    ) -> SuspensionRecord | None:
+        """在任意 items 序列中找最后一条未被 resolved-marker 消费的 suspension record。
+
+        从 _find_active_suspension 泛化而来 —— 子 thread resume 时对【子 thread 的
+        load_thread 结果】复用同一识别逻辑（resolved-marker 同 text 格式）。
+
+        Args:
+            items: 一个 thread 的 ResponseItem 序列（根 = self._history；子 = load_thread）。
+        Returns:
+            活跃挂起的 SuspensionRecord；无挂起或已被核销 → None。
+        """
         resolved_ids: set[str] = set()
         last_suspension: ResponseItem | None = None
-        for item in self._history:
+        for item in items:
             if item.kind == "system_injection" and item.payload.get("source") == "suspend_resolved":
                 rid = (item.payload.get("text") or "").removeprefix("suspend_resolved:")
                 resolved_ids.add(rid)

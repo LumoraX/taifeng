@@ -13,6 +13,11 @@ class SuspendReason(StrEnum):
     FORM = "form"                  # 等用户填表 → payload 成 tool output
     DATA = "data"                  # 等外部数据 → payload 成 tool output
     SYSTEM_RETRY = "system_retry"  # 限流/余额/key/LLM 错 → resume 即重试同次 sample
+    # call_skill 派发的子 skill 内部挂起 → 父 turn 的 call_skill 随之挂起。
+    # 这是纯内核派发态（非用户可直接 resolve）：resume 时由 engine 续跑链
+    # 内部核销 —— 先续跑子 thread 拿到结果，再回填父 call_skill 的 output。
+    # detail 携带 sub_thread_id（子 thread）；related_call_id = 父 call_skill 的 call_id。
+    CHILD_SKILL = "child_skill"
 
 
 @dataclass(frozen=True)
