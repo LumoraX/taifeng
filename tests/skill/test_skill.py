@@ -161,3 +161,25 @@ def test_composite_with_orchestration_ok(tmp_path: Path) -> None:
         orchestration=OrchestrationSpec(steps=(ParallelStep(skill_ids=("a",)),)),
     )
     defn.validate()  # 不抛即通过
+
+
+def test_tool_only_composite_accepted(tmp_path: Path) -> None:
+    """composite 仅声明 tool_names（无 child_skills）应通过校验 —— 变体 A：有 agency 即合法。"""
+    ok = tmp_path / "ok"
+    ok.mkdir()
+    (ok / "SKILL.md").write_text(
+        """---
+name: ok
+description: x
+type: composite
+tool_names: [request_user_input]
+---
+body
+""",
+        encoding="utf-8",
+    )
+    skills = load_skills_from_dir(tmp_path)
+    # load_skills_from_dir 返回 {id: SkillDefinition}；tool-only composite 正常载入
+    assert skills["ok"].type == "composite"
+    assert "request_user_input" in skills["ok"].tool_names
+    assert not skills["ok"].child_skills
