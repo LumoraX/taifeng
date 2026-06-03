@@ -81,11 +81,13 @@ elif self.type == "composite":
 
 验证命令：`PYTHONPATH=src uv run pytest tests/skill/test_skill.py tests/test_child_suspend_resume.py -v`。
 
+> 切片提示：前两个测试是 loader 级 validate 断言，可与代码改动同 commit；第三个 e2e（`test_tool_only_composite_suspend_resume`）体量最大，建议**独立 commit 切片**（遵守 DoD ≤3h / 单 commit 单功能）。
+
 ## 6. 文档落档（实现完成但文档未同步 → 不合并）
 
 1. **新增 ADR** `docs/decisions/0013-composite-tool-only.md`（只增不改）：撤销 definition.py 的隐式"composite 必须有 child"约束，确立"composite = child_skills 或 tool_names 至少一个"；标注与 ADR 0006 的关系（澄清本意，非推翻）。
 2. **活文档** `docs/architecture/capabilities/skill-dispatch.md:233`：「composite: 必须声明 child_skills（>=1）」→「必须声明 child_skills 或 tool_names 至少一个」。
-3. **活文档** `docs/architecture/skill-system.md` 校验小节 + 数据结构注释同步。
+3. **活文档** `docs/architecture/skill-system.md`：该文件 §162-169 的 `validate()` 代码片段当前只渲染了 atomic 分支（没有"composite 必须 child_skills"的字面行可改），实现时应**补上 composite 分支**（体现新规则），而非搜索替换旧文本；同步校验小节叙述。
 4. `definition.py` 的 docstring / 注释同步。
 
 ## 7. R1–R5 影响声明
