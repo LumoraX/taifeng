@@ -5,7 +5,6 @@ description: 接诊协调员 —— 先派发问卷子 skill 采集患者信息�
 version: 1.0.0
 type: composite
 entry: true
-model: mock-model
 child_skills: [questionnaire, summary]
 tool_names: []
 max_call_depth: 3

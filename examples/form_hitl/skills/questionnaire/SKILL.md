@@ -4,7 +4,6 @@ displayName: 首诊问卷采集
 description: 通过 request_user_input 向用户弹出结构化表单（问答 / 单选 / 多选），采集患者基础信息
 version: 1.0.0
 type: composite
-model: mock-model
 tool_names: [request_user_input]
 max_call_depth: 2
 ---
