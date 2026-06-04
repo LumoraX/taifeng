@@ -122,10 +122,11 @@ def _repo_root_candidates(start: Path | None = None) -> list[Path]:
 
 
 def load_dotenv_files(*extra_paths: Path) -> list[Path]:
-    """把候选 .env 中的 ``LLM_BOOTSTRAP_*`` 拷到 ``os.environ``（不覆盖已有）。
+    """把候选 .env 中的 ``LLM_BOOTSTRAP_*`` / ``TAIFENG_*`` 拷到 ``os.environ``（不覆盖已有）。
 
     返回实际加载成功的路径列表（用于日志）。已有环境变量优先级最高，
-    `.env` 仅作 fallback。
+    `.env` 仅作 fallback。``TAIFENG_*`` 用于 example 自身的旋钮（如 web_ui 的
+    ``TAIFENG_WEBUI_EXTRA_SKILLS_DIR``），与 LLM 凭据同样支持从 .env 提供。
     """
     loaded: list[Path] = []
     candidates: list[Path] = list(_repo_root_candidates()) + list(extra_paths)
@@ -139,7 +140,7 @@ def load_dotenv_files(*extra_paths: Path) -> list[Path]:
             k, _, v = line.partition("=")
             k = k.strip()
             v = v.strip().strip('"').strip("'")
-            if not k.startswith("LLM_BOOTSTRAP_"):
+            if not (k.startswith("LLM_BOOTSTRAP_") or k.startswith("TAIFENG_")):
                 continue
             if k in os.environ:
                 continue
