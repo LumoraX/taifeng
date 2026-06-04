@@ -264,6 +264,11 @@ async def _call_skill_handler(args: dict[str, Any], ctx: ToolContext) -> ToolRes
             # call-skill-reason-field: 透传给 TurnRunner.run_sub_skill，让
             # SkillDispatched.data["reason"] 也能携带 LLM 自陈意图
             "dispatch_reason": dispatch_reason,
+            # 父这次 call_skill 的 call_id（= LLM 给的 tool_call id，父 function_call 落盘用它）。
+            # 子挂起时 _spawn_sub_runner 据此设 CHILD_SKILL.related_call_id，使 resume 回填的
+            # function_call_output 与父 function_call 配对；不可用 sub_call_id(sk_*)，否则
+            # OpenAI-compat 视图里 assistant(tool_calls) 无匹配 tool → orphan → 400。
+            "parent_call_skill_call_id": ctx.call_id,
         },
     )
 

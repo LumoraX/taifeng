@@ -1186,7 +1186,14 @@ class TurnRunner:
                     reason=SuspendReason.CHILD_SKILL,
                     # 父 resume 时据 related_call_id 定位要回填 output 的 call_skill；
                     # 据 detail.sub_thread_id 定位要先续跑的子 thread。
-                    related_call_id=ctx.call_id,
+                    # 必须用【父 call_skill 的 call_id】（call_skill builtin 经 extras 透传，
+                    # = LLM 给的 tool_call id，父 function_call 落盘用它），而非 ctx.call_id
+                    # （= 子帧 sub_call_id "sk_*"）。否则回填 output 与父 function_call 失配 →
+                    # OpenAI-compat orphan tool → 400。extras 缺失时退回 ctx.call_id（仅
+                    # 防御性：call_skill 派发路径必设此 key）。
+                    related_call_id=ctx.extras.get(
+                        "parent_call_skill_call_id"
+                    ) or ctx.call_id,
                     detail={"sub_thread_id": sub_thread_id, "skill_id": target.id},
                 )
             )
