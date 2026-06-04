@@ -7,11 +7,18 @@ from pathlib import Path
 from taifeng.skill import CallStack, DispatchPolicy, SkillDefinition
 
 
-def _mk(id_: str, child: frozenset[str] = frozenset(), entry: bool = False, max_depth: int = 6) -> SkillDefinition:
+def _mk(
+    id_: str,
+    child: frozenset[str] = frozenset(),
+    entry: bool = False,
+    max_depth: int = 6,
+    tools: frozenset[str] = frozenset(),
+) -> SkillDefinition:
     return SkillDefinition(
         id=id_, name=id_, description="x", version="1", body="",
-        body_path=Path("/tmp"), type="composite" if child or entry else "atomic",
-        entry=entry, child_skills=child, max_call_depth=max_depth,
+        body_path=Path("/tmp"),
+        type="composite" if (child or entry or tools) else "atomic",
+        entry=entry, child_skills=child, tool_names=tools, max_call_depth=max_depth,
     )
 
 
@@ -66,6 +73,17 @@ def test_dispatch_reject_entry_target() -> None:
     v = DispatchPolicy().check(stack=stack, caller=caller, target=target)
     assert not v.allowed
     assert v.reason == "cannot_call_entry_skill"
+
+
+def test_dispatch_reject_call_skill_from_tool_only_composite() -> None:
+    """tool-only composite（空 child_skills、仅 tool_names）发起 call_skill 必被拒：
+    白名单为空 → 任何 target 都不在其中（ADR 0013：tool-only composite 无派发能力）。"""
+    caller = _mk("leaf", tools=frozenset({"request_user_input"}))
+    target = _mk("c")
+    stack = CallStack().push("leaf", "call_leaf")
+    v = DispatchPolicy().check(stack=stack, caller=caller, target=target)
+    assert not v.allowed
+    assert v.reason == "not_in_whitelist"
 
 
 def test_call_stack_path() -> None:

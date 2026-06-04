@@ -230,7 +230,7 @@ JSONL 持久化（既有路径）SHALL 通过 tool_call arguments 的整体存�
 
 ### `SkillDefinition.type ∈ {"atomic", "composite"}`
 - atomic: 不可作为入口，不可声明 child_skills / tool_names
-- composite: 必须声明 child_skills（>=1）；可作为 entry（``entry: true``）
+- composite: 必须声明 child_skills 或 tool_names 至少一个（tool-only composite 合法，见 ADR 0013）；可作为 entry（``entry: true``）
 
 ### `CallStack`（不可变值对象）
 - frames[0] 始终是 entry skill 的栈底帧

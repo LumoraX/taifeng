@@ -167,6 +167,11 @@ class SkillDefinition:
                 raise SkillValidationError(f"atomic skill {self.id!r} 不能声明 tool_names")
             if self.entry:
                 raise SkillValidationError(f"atomic skill {self.id!r} 默认不可作为 entry")
+        elif self.type == "composite":
+            # composite = 有 agency：child_skills 或 tool_names 至少其一非空（ADR 0013）
+            if not self.child_skills and not self.tool_names:
+                raise SkillValidationError(
+                    f"composite skill {self.id!r} 必须至少声明 child_skills 或 tool_names 之一")
 ```
 
 ```python

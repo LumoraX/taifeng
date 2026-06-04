@@ -65,7 +65,8 @@ class SkillDefinition:
 
     Atomic 与 composite 通过 ``type`` 字段区分。Composite 独有字段
     （``child_skills`` / ``tool_names`` / ``max_call_depth`` / ``model``）
-    在 atomic 上必须留空，由 ``validate()`` 强制。
+    在 atomic 上必须留空；composite 则需 ``child_skills`` 或 ``tool_names``
+    至少其一非空（tool-only composite 合法，见 ADR 0013），均由 ``validate()`` 强制。
     """
 
     # === 通用字段 ===
@@ -122,9 +123,12 @@ class SkillDefinition:
                     f"atomic skill {self.id!r} 不能声明 orchestration"
                 )
         elif self.type == "composite":
-            if not self.child_skills:
+            # composite = 有 agency 的 skill：可调子 skill、可调工具，二者至少其一。
+            # 两者皆空 = 戴帽子的 atomic（无意义空壳）→ fail-fast 拒绝。
+            # （参照 ADR 0013：放松"必须有 child_skills"为"二者至少其一"。）
+            if not self.child_skills and not self.tool_names:
                 raise SkillValidationError(
-                    f"composite skill {self.id!r} 必须声明 child_skills"
+                    f"composite skill {self.id!r} 必须至少声明 child_skills 或 tool_names 之一"
                 )
             if self.max_call_depth < 1:
                 raise SkillValidationError(
