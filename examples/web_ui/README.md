@@ -140,6 +140,26 @@ PYTHONPATH=src uv run python examples/web_ui/server.py
 # 浏览器 http://localhost:8765
 ```
 
+### 加载你自己的 skill 验证（env 驱动，不改代码）
+
+把一个**外部 skills 目录**里的每个 entry skill 自动注册成可选 demo —— 用来在 web_ui 里
+验证业务侧自有 skill（多步链路、表单型 HITL）：
+
+```bash
+# 指向你的 skills 目录；该目录下每个 entry:true 的 skill 各成一个 "🧩 <id>（外部）" demo
+TAIFENG_WEBUI_EXTRA_SKILLS_DIR=/abs/path/to/agent_skills \
+PYTHONPATH=src uv run python examples/web_ui/server.py
+# 浏览器 → 顶部下拉选 "🧩 <你的 entry skill>（外部）" → 发消息跑链路
+
+# 可选：只注册指定 entry（逗号分隔），不写则全部 entry 都注册
+TAIFENG_WEBUI_EXTRA_ENTRY=lung-nodule,metabolic \
+TAIFENG_WEBUI_EXTRA_SKILLS_DIR=/abs/path/to/agent_skills \
+PYTHONPATH=src uv run python examples/web_ui/server.py
+```
+
+外部 demo 默认注入 `request_user_input` 工具 + 关闭 call_skill 派发审批弹窗，聚焦
+「子 skill 表单 HITL → Resume 续跑 → 主 skill 继续派后续子 skill」的端到端验证。
+
 ## 多 provider 支持
 
 server 启动时会按 `LLM_BOOTSTRAP_PROVIDER` 走对应 native client：

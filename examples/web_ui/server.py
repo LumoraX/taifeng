@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 from collections.abc import Callable
@@ -797,11 +798,60 @@ async def _get_or_create_pool(demo_id: str) -> taifeng.EnginePool:
 # ──────────────────────────────────────────────────────────────────
 
 
+def _register_external_skills_demos() -> None:
+    """按环境变量把一个**外部 skills 目录**里的每个 entry skill 注册成 demo。
+
+    用途：验证业务侧自有 skill（无需改代码、不写死绝对路径）。用法——
+
+        TAIFENG_WEBUI_EXTRA_SKILLS_DIR=/abs/path/to/agent_skills \\
+        PYTHONPATH=src uv run python examples/web_ui/server.py
+
+    可选 ``TAIFENG_WEBUI_EXTRA_ENTRY=id1,id2`` 只注册指定 entry（逗号分隔）；缺省则
+    该目录下所有 ``entry: true`` 的 skill 各注册一个 demo（id = ``ext_<skill_id>``）。
+    外部 demo 默认注入 ``request_user_input`` 工具 + 关闭 call_skill 派发审批弹窗，
+    聚焦「表单型 HITL + 多步 skill 链路」验证。
+    """
+    raw = os.getenv("TAIFENG_WEBUI_EXTRA_SKILLS_DIR")
+    if not raw:
+        return
+    skills_dir = Path(raw).expanduser().resolve()
+    if not skills_dir.is_dir():
+        logger.warning("TAIFENG_WEBUI_EXTRA_SKILLS_DIR 非目录，跳过: %s", skills_dir)
+        return
+    from taifeng.skill.loader import load_skills_from_dir
+    try:
+        skills = load_skills_from_dir(skills_dir)
+    except Exception as exc:  # noqa: BLE001 —— demo 容错：加载失败仅跳过，不拖垮启动
+        logger.warning("外部 skills 加载失败，跳过: %s (%s)", skills_dir, exc)
+        return
+    only = os.getenv("TAIFENG_WEBUI_EXTRA_ENTRY")
+    only_ids = {s.strip() for s in only.split(",")} if only else None
+    entries = [
+        s for s in skills.values()
+        if s.entry and (only_ids is None or s.id in only_ids)
+    ]
+    for s in sorted(entries, key=lambda x: x.id):
+        did = f"ext_{s.id}"
+        DEMOS[did] = DemoMeta(
+            demo_id=did,
+            title=f"🧩 {s.id}（外部）",
+            description=(s.description or f"外部 skill {s.id}")[:200],
+            skills_dir=skills_dir,
+            entry_skill_id=s.id,
+            sample_prompt="（业务侧自有 skill）输入一段能触发该 skill 链路的内容。",
+            hitl_on_skill_dispatch=False,
+            wants_user_input_tool=True,
+        )
+        logger.info("注册外部 demo: %s (entry=%s dir=%s)", did, s.id, skills_dir)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _model_client, _llm_meta
     # 加载 .env（推迟到 lifespan 让 module level import 干净）
     load_dotenv_files()
+    # 外部 skills demo（env 驱动）—— 在 .env 加载后注册，业务侧 skill 即可在 UI 选中
+    _register_external_skills_demos()
 
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     # web_ui 启动时 api_key 可能没设；require_api_key=False 让构造继续，
