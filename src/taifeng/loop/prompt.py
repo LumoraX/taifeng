@@ -138,6 +138,13 @@ def history_to_api_messages(items: Iterable[ResponseItem]) -> list[ApiMessage]:
                 )
             )
         elif it.kind == "system_injection":
+            # suspend_resolved 是 resume 的幂等记账 marker（engine._find_active_suspension
+            # 据它跳过已消费的挂起），非 LLM-facing；若渲染成对话中段的 role="system"，
+            # openai_compat 会原样透传 → 严格 OpenAI-compat 代理拒绝中段 system → 400
+            # （anthropic/gemini provider 各自特判丢弃/转 user，openai_compat 不处理）。故跳过。
+            # 业务/记忆类 system_injection（business / memory_pre_evict / rollback 等）保留。
+            if it.payload.get("source") == "suspend_resolved":
+                continue
             out.append(ApiMessage(role="system", content=str(it.payload.get("text", ""))))
         elif it.kind == "compacted":
             # 把摘要作为 system 消息插回 —— LLM 视角看到"曾被压缩的历史"
