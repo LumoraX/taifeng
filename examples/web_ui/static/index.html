@@ -345,6 +345,45 @@
   }
   #modal .allow { background: var(--ok); color: white; }
   #modal .deny { background: var(--danger); color: white; }
+
+  /* 表单型 HITL modal —— 复用授权 modal 的暗色风格 */
+  #form-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 101;
+  }
+  #form-bg.show { display: flex; }
+  #form-modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 20px; min-width: 440px; max-width: 600px; max-height: 84vh;
+    overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  #form-modal h2 { margin: 0 0 6px; font-size: 15px; color: var(--accent); }
+  #form-modal .form-prompt { color: var(--dim); font-size: 12px; margin-bottom: 14px; }
+  .fld { margin: 14px 0; }
+  .fld > .lbl {
+    display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px;
+    color: var(--fg);
+  }
+  .fld > .lbl .req { color: var(--danger); margin-left: 4px; }
+  .fld .hint { font-size: 10px; color: var(--dim); margin-left: 6px; font-weight: 400; }
+  .fld input[type="text"], .fld textarea {
+    width: 100%; box-sizing: border-box; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+    color: var(--fg); font-family: inherit; font-size: 13px;
+  }
+  .fld input[type="text"]:focus, .fld textarea:focus { border-color: var(--accent); outline: none; }
+  .fld .opt {
+    display: flex; align-items: center; gap: 7px; padding: 5px 8px; margin: 3px 0;
+    border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .fld .opt:hover { border-color: var(--accent); }
+  .fld .opt input { cursor: pointer; }
+  #form-modal .actions { margin-top: 18px; display: flex; justify-content: flex-end; }
+  #form-modal button {
+    border: 0; border-radius: 6px; padding: 8px 18px; cursor: pointer;
+    font-weight: 500; font-family: inherit; background: var(--ok); color: white;
+  }
+  .form-err { color: var(--danger); font-size: 11px; margin-top: 8px; min-height: 14px; }
 </style>
 </head>
 <body>
@@ -412,6 +451,19 @@
   </div>
 </div>
 
+<!-- 表单型 HITL（request_user_input）：据 response_schema 动态渲染问答/单选/多选 -->
+<div id="form-bg">
+  <div id="form-modal">
+    <h2>📝 请填写表单</h2>
+    <div class="form-prompt" id="form-prompt"></div>
+    <div id="form-fields"></div>
+    <div class="form-err" id="form-err"></div>
+    <div class="actions">
+      <button class="allow" id="btn-form-submit">提交</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const log = $("chat-log");
@@ -434,6 +486,9 @@ let resumeThreadId = null;
 // 队首正在弹窗时新请求 push 到尾；用户决议 + POST 完成后 shift 出下一个继续弹。
 let hitlQueue = [];
 let pendingRequestId = null;  // 当前正在弹窗的 request_id（队首）
+// 表单型 HITL（request_user_input）：当前挂起的续跑锚点 {thread_id, request_id, schema}。
+// 非 null = 正在显示表单等用户填写；提交后 POST /api/resume 并清空。
+let formSuspension = null;
 let currentAssistantBubble = null;
 let count = 0;
 let demos = {};  // demo_id → meta
@@ -728,6 +783,10 @@ function summarize(kind, data, payload) {
       return truncate(data.delta || "", 80);
     case "hitl_required":
       return `${payload.scope}: ${payload.target}`;
+    case "turn_suspended": {
+      const p = (data.pending || [])[0] || {};
+      return `thread=${truncate(data.thread_id||"", 24)} reason=${p.reason||"?"}`;
+    }
     case "subagent_policy_overridden":
       return `${data.target_skill_id}  mode=${data.mode}`;
     case "skill_dispatch_hook_denied":
@@ -845,7 +904,135 @@ function routeToChat(kind, data, payload) {
   if (kind === "hitl_required") {
     enqueueHitl(payload);
   }
+  if (kind === "turn_suspended") {
+    maybeShowForm(data);
+  }
 }
+
+// ── 表单型 HITL（request_user_input）──────────────────────────────
+// turn_suspended 携带 pending 列表；找到 reason=data/form 且带 response_schema 的
+// 那一条（落在子 skill 子 thread），据其 schema 渲染表单。根 thread 的 pending 是
+// child_skill 类型（无 schema），不会命中——只有真正的表单挂起触发弹窗。
+function maybeShowForm(data) {
+  if (formSuspension) return;  // 已在显示表单，避免重复
+  const pend = (data.pending || []).find(
+    (p) => (p.reason === "data" || p.reason === "form")
+        && p.detail && p.detail.response_schema);
+  if (!pend) return;
+  formSuspension = {
+    thread_id: data.thread_id,
+    request_id: pend.request_id,
+    schema: pend.detail.response_schema,
+  };
+  renderForm(pend.detail.prompt || "请填写以下信息", pend.detail.response_schema);
+}
+
+// 据 JSON Schema 渲染表单：string→问答(文本)、enum→单选(radio)、
+// array+items.enum→多选(checkbox)。每个字段容器带 data-key / data-kind 供收集。
+function renderForm(prompt, schema) {
+  $("form-prompt").textContent = prompt;
+  $("form-err").textContent = "";
+  const props = (schema && schema.properties) || {};
+  const required = (schema && schema.required) || [];
+  const box = $("form-fields");
+  box.innerHTML = "";
+  for (const [key, def] of Object.entries(props)) {
+    const title = (def && def.title) || key;
+    const isReq = required.includes(key);
+    const fld = document.createElement("div");
+    fld.className = "fld";
+    fld.dataset.key = key;
+    let kind, inner = "";
+    if (def && Array.isArray(def.enum)) {
+      kind = "single";
+      inner = def.enum.map((o) =>
+        `<label class="opt"><input type="radio" name="f_${key}" value="${escapeHtml(o)}">`
+        + `<span>${escapeHtml(o)}</span></label>`).join("");
+    } else if (def && def.type === "array" && def.items && Array.isArray(def.items.enum)) {
+      kind = "multi";
+      inner = def.items.enum.map((o) =>
+        `<label class="opt"><input type="checkbox" name="f_${key}" value="${escapeHtml(o)}">`
+        + `<span>${escapeHtml(o)}</span></label>`).join("");
+    } else {
+      kind = "text";
+      inner = `<textarea name="f_${key}" rows="2" placeholder="请输入"></textarea>`;
+    }
+    fld.dataset.kind = kind;
+    const hint = { single: "单选", multi: "多选", text: "问答" }[kind];
+    fld.innerHTML =
+      `<span class="lbl">${escapeHtml(title)}`
+      + (isReq ? `<span class="req">*</span>` : "")
+      + `<span class="hint">(${hint})</span></span>` + inner;
+    box.appendChild(fld);
+  }
+  $("form-bg").classList.add("show");
+}
+
+// 收集表单值 → {key: 值}；single→字符串、multi→数组、text→字符串。
+function collectForm() {
+  const payload = {};
+  for (const fld of $("form-fields").querySelectorAll(".fld")) {
+    const key = fld.dataset.key;
+    const kind = fld.dataset.kind;
+    if (kind === "single") {
+      const sel = fld.querySelector(`input[name="f_${key}"]:checked`);
+      payload[key] = sel ? sel.value : "";
+    } else if (kind === "multi") {
+      payload[key] = [...fld.querySelectorAll(`input[name="f_${key}"]:checked`)]
+        .map((c) => c.value);
+    } else {
+      payload[key] = fld.querySelector(`[name="f_${key}"]`).value.trim();
+    }
+  }
+  return payload;
+}
+
+async function submitForm() {
+  if (!formSuspension) return;
+  const payload = collectForm();
+  // 必填校验（required 里的字段不能为空 / 空数组）
+  const required = (formSuspension.schema && formSuspension.schema.required) || [];
+  const missing = required.filter((k) => {
+    const v = payload[k];
+    return v == null || (Array.isArray(v) ? v.length === 0 : String(v).trim() === "");
+  });
+  if (missing.length) {
+    $("form-err").textContent = "请完成必填项：" + missing.join("、");
+    return;
+  }
+  const anchor = formSuspension;
+  formSuspension = null;
+  $("form-bg").classList.remove("show");
+  try {
+    const resp = await fetch("/api/resume", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        demo_id: demoSelect.value,
+        session_id: activeSession(),
+        thread_id: anchor.thread_id,
+        request_id: anchor.request_id,
+        payload,
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+    // 在 chat 区回显用户填写（与 user 气泡同构），续跑事件经 SSE 流入
+    const el = document.createElement("div");
+    el.className = "msg user";
+    el.textContent = "📝 已提交表单：" +
+      Object.entries(payload).map(([k, v]) =>
+        `${k}=${Array.isArray(v) ? v.join("/") : v}`).join("；");
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+  } catch (e) {
+    const err = document.createElement("div");
+    err.className = "msg assistant";
+    err.textContent = "❌ 表单提交失败：" + e.message;
+    log.appendChild(err);
+    $("send").disabled = false;
+  }
+}
+
+$("btn-form-submit").onclick = submitForm;
 
 /**
  * 解析 numeric_loop 的 apply_delta JSON 输出，渲染轨迹胶丸：
@@ -1232,6 +1419,9 @@ function switchDemo() {
   $("modal-bg").classList.remove("show");
   pendingRequestId = null;
   hitlQueue = [];
+  // 表单型 HITL 同样复位：关表单 modal + 弃用旧挂起锚点
+  $("form-bg").classList.remove("show");
+  formSuspension = null;
   // 切 demo 退出续接态：清 resumeThreadId + 解锁 session 输入；历史列表换 demo 重拉
   resumeThreadId = null;
   sessInput.disabled = false;

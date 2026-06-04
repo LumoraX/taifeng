@@ -80,6 +80,7 @@ from taifeng.permission import (
 )
 from taifeng.skill.scripts.python import PythonScriptExecutor
 from taifeng.skill.scripts.shell import ShellScriptExecutor
+from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent
@@ -177,6 +178,13 @@ class DemoMeta:
     client 存入 _mcp_clients，lifespan 收尾时统一 close（终止子进程）。
     （mcp_showcase demo 用，演示 taifeng 作为 MCP client 远程调用跨进程工具）。"""
 
+    wants_user_input_tool: bool = False
+    """True 时把 ``request_user_input`` 采集工具作为 ``extra_tools`` 注入 pool
+    （opt-in，不默认全局注册）。配合声明 ``tool_names: [request_user_input]`` 的 skill
+    实现表单型 HITL：调用即挂起 turn，前端据 ``response_schema`` 渲染表单，用户填写后
+    经 ``/api/resume`` 提交 ``Resume(thread, {request_id: payload})`` 续跑。
+    （form_hitl demo 用）。"""
+
 
 DEMOS: dict[str, DemoMeta] = {
     "code_review": DemoMeta(
@@ -192,6 +200,23 @@ DEMOS: dict[str, DemoMeta] = {
             "        f\"AND pwd='{password}'\"\n"
             "    return db.execute(q).fetchone()"
         ),
+    ),
+    "form_hitl": DemoMeta(
+        demo_id="form_hitl",
+        title="📝 表单 HITL (问答/单选/多选)",
+        description=(
+            "intake-coordinator 依次派发 questionnaire → summary。questionnaire 调 "
+            "request_user_input 弹出结构化表单（问答题 + 单选 enum + 多选 array），用户填写后 "
+            "Resume 续跑 → coordinator 继续派 summary 出小结。演示「表单型 HITL」+「子 skill "
+            "挂起 → 用户输入 → 主 skill 继续派后续子 skill」。"
+        ),
+        skills_dir=EXAMPLES_DIR / "form_hitl" / "skills",
+        entry_skill_id="intake-coordinator",
+        sample_prompt="我来做个首诊，请帮我登记基础信息。",
+        # 聚焦表单 HITL，关掉 call_skill 派发的权限审批弹窗（否则噪音）
+        hitl_on_skill_dispatch=False,
+        # opt-in 注入 request_user_input 采集工具
+        wants_user_input_tool=True,
     ),
     "travel_planner": DemoMeta(
         demo_id="travel_planner",
@@ -729,16 +754,19 @@ async def _get_or_create_pool(demo_id: str) -> taifeng.EnginePool:
         )
         # 可选：MCP（mcp_showcase demo）——spawn 外部 MCP server 子进程并注册其工具，
         # 作为 extra_tools 注入；client 存入 _mcp_clients，收尾时 close。
-        extra_tools = None
+        extra_tools: list[Any] = []
         if meta.mcp_connect is not None:
             mcp_client, mcp_specs = await meta.mcp_connect()
-            extra_tools = mcp_specs
+            extra_tools.extend(mcp_specs)
             _mcp_clients[demo_id] = mcp_client
             logger.info(
                 "MCP 连接：demo=%s server=%s tools=%s",
                 demo_id, mcp_client.server_info.get("name"),
                 [s.name for s in mcp_specs],
             )
+        # opt-in 注入表单采集工具（form_hitl demo）：声明 tool_names 的 skill 才会用到
+        if meta.wants_user_input_tool:
+            extra_tools.append(make_request_user_input_tool())
         pool = await taifeng.EnginePool.create(
             skills_dir=meta.skills_dir,
             storage_dir=demo_storage,
@@ -756,8 +784,8 @@ async def _get_or_create_pool(demo_id: str) -> taifeng.EnginePool:
             instruction_layers=list(meta.instruction_layers) or None,
             # 可选：业务钩子（hooks_showcase demo）；None=不注入
             hooks=hooks,
-            # 可选：MCP server 远程工具（mcp_showcase demo）；None=无
-            extra_tools=extra_tools,
+            # 可选：MCP 远程工具 / request_user_input 采集工具；空列表→None=无
+            extra_tools=extra_tools or None,
         )
         _pools[demo_id] = pool
         logger.info("EnginePool 创建：demo=%s skills_dir=%s", demo_id, meta.skills_dir)
@@ -829,6 +857,19 @@ class ChatRequest(BaseModel):
 class HitlDecisionRequest(BaseModel):
     granted: bool
     reason: str = "user_decision"
+
+
+class ResumeFormRequest(BaseModel):
+    """表单型 HITL 续跑：用户填完 request_user_input 弹出的表单后提交。"""
+
+    demo_id: str
+    session_id: str = "default"
+    thread_id: str
+    """挂起所在 thread（request_user_input 落在子 skill 的子 thread）。"""
+    request_id: str
+    """待回填的 pending request_id（= 该 request_user_input call 的 call_id）。"""
+    payload: dict[str, Any]
+    """用户填写的表单答案，直接成为该 call 的 function_call_output。"""
 
 
 @app.get("/")
@@ -931,10 +972,19 @@ async def _bridge_events(
             # 仅在「根 turn」收尾时退出桥接；子 turn 的 turn_completed 是父
             # turn 执行窗口内的中间事件。兼容：旧事件未带 is_root 字段时不退出，
             # 等同于"等到 engine 退订"的安全降级。
-            if ev.msg.kind in ("turn_completed", "turn_failed"):
-                data = ev.msg.data if hasattr(ev.msg, "data") else {}
-                if data.get("is_root", False):
-                    break
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if ev.msg.kind in ("turn_completed", "turn_failed") and data.get(
+                "is_root", False
+            ):
+                break
+            # 表单/审批型 HITL：根 thread 挂起即本次 submission 结束（等 Resume 另起
+            # submission 续跑）。根 turn_suspended 的 thread_id == engine.thread_id；
+            # 据此退出桥接，避免任务悬挂直到进程关停。子 thread 的 turn_suspended
+            # （thread_id≠根）只透传不退出——前端据它（reason=data/form）渲染表单。
+            if ev.msg.kind == "turn_suspended" and (
+                data.get("thread_id") == engine.thread_id
+            ):
+                break
     except Exception:
         logger.exception("event bridge failed for sub_key=%s", sub_key)
 
@@ -1007,6 +1057,41 @@ async def hitl_decide(request_id: str, body: HitlDecisionRequest) -> dict[str, A
     fut.set_result(decision)
     logger.info("HITL decided: rid=%s granted=%s", request_id, body.granted)
     return {"ok": True}
+
+
+@app.post("/api/resume")
+async def resume_form(req: ResumeFormRequest) -> dict[str, Any]:
+    """表单 HITL 续跑：提交 Resume(thread, {request_id: payload}) 并桥接续跑事件。
+
+    与 ``/api/hitl``（权限审批，回填 Future）不同——表单走 Resume Op：用户填写的
+    ``payload`` 直接成为挂起 call 的 ``function_call_output``，子 turn 续跑 → 回传父
+    call_skill → 根 turn 继续派后续子 skill。续跑事件经 ``_bridge_events`` 推回前端。
+    """
+    from taifeng.loop.submission import Resume
+
+    if req.demo_id not in DEMOS:
+        raise HTTPException(404, f"unknown demo_id: {req.demo_id}")
+    pool = _pools.get(req.demo_id)
+    if pool is None:
+        # pool 必然已存在（挂起发生在先）；不存在说明状态丢失
+        raise HTTPException(409, "no active pool for this demo (suspension lost?)")
+    meta = DEMOS[req.demo_id]
+    engine = await pool.get_or_create(
+        session_id=f"{req.demo_id}:{req.session_id}",
+        entry_skill_id=meta.entry_skill_id,
+    )
+    sub_id = await engine.submit(Resume(
+        thread_id=req.thread_id,
+        resolutions={req.request_id: req.payload},
+    ))
+    asyncio.create_task(
+        _bridge_events(req.demo_id, req.session_id, engine, sub_id)
+    )
+    logger.info(
+        "form resume: demo=%s thread=%s rid=%s keys=%s",
+        req.demo_id, req.thread_id, req.request_id, list(req.payload.keys()),
+    )
+    return {"submission_id": sub_id, "demo_id": req.demo_id}
 
 
 # ──────────────────────────────────────────────────────────────────
