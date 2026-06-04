@@ -1,10 +1,10 @@
 # Taifeng Web UI Demo
 
-类似 openclaw 的 chat + 数据流可视化最简实现。顶部下拉一键切换 **15 套** skill 演示包，浏览器实时看 LLM agent 的 EventMsg、tool call、HITL 审批、会话级可观测指标，并可续接历史会话。
+类似 openclaw 的 chat + 数据流可视化最简实现。顶部下拉一键切换 **16 套** skill 演示包，浏览器实时看 LLM agent 的 EventMsg、tool call、HITL 审批、会话级可观测指标，并可续接历史会话。
 
 web_ui 的设计原则：**它只是一个「基础能力」展台 —— 不重写任何 skill，直接加载各独立 demo（`examples/<name>/skills`）的现成 skill 目录**。每加一种内核用法，就在 [server.py](server.py) 的 `DEMOS` 里注册一项（必要时给 `DemoMeta` 加一个旋钮），把该用法「汇总」进来。
 
-## 内置 demo 包（15）
+## 内置 demo 包（16）
 
 按演示主题分组。每个 demo 内部独立 `EnginePool`（lazy 创建）+ 独立权限策略 + 独立持久化目录；切换下拉即换 demo，UI 自动清屏 + 重连 SSE + 重置指标。
 
@@ -13,6 +13,7 @@ web_ui 的设计原则：**它只是一个「基础能力」展台 —— 不重
 | Demo | 入口 skill | 演示什么 | HITL? |
 | --- | --- | --- | --- |
 | 🔒 **code_review** | `programmer` | call_skill → code-review 派发，HITL 弹窗底座 | ✅ 全弹 |
+| 📝 **form_hitl** | `intake-coordinator` | **表单型 HITL**：子 skill 调 `request_user_input` 弹结构化表单（问答/单选/多选），用户填写后 Resume 续跑 → 主 skill 继续派后续子 skill | ✅ 表单 |
 | 🧳 **travel_planner** | `trip-planner` | LLM 自主 fan-out 三路（航班/酒店/活动）+ 综合按日行程 | ❌ 静默 |
 | 🧩 **orchestration** | `trip-planner` | **声明式编排**（SKILL.md 的 parallel/serial/when）确定性驱动子 skill | ❌ 静默 |
 | ⚡ **concurrent_fanout** | `research-fanout` | **LLM 自主并发**：一条消息里多个 call_skill 并行派发（对照 orchestration 的声明式）| ❌ 静默 |
@@ -63,11 +64,13 @@ web_ui 的设计原则：**它只是一个「基础能力」展台 —— 不重
 - **左侧 Chat**：user 蓝气泡 / assistant 绿气泡 / tool call+result 卡片
 - **右侧**：顶部「会话级可观测指标网格」+ 下方「`EventMsg` 时间轴」，按 kind 上色（`tool_call_started` 黄、`skill_dispatched` 紫、`hitl_required` / `*_hook_denied` 红、`turn_completed` 绿…）
 - **HITL Modal**：scope/target/reason/entry_skill/call_chain 全部展示，**允许 / 拒绝** 两键
+- **表单 Modal**（`form_hitl`）：据 `response_schema` 动态渲染问答（文本框）/ 单选（radio）/ 多选（checkbox），必填校验后 **提交** 续跑
 
 ## 技术要点
 
 - **HITL 零 MCP**：审批走 SDK 原生 `CallbackPrompter`（不经 MCP）。`PermissionRequest` 通过 SSE 推前端，前端 POST 回包 `set_result(future)` 让 prompter 返回。（唯一用到 MCP 的是 `mcp_showcase`，且是 **client 方向**：连外部 MCP server 取工具，与 HITL 无关。）
 - **每 demo 一个 prompter 闭包**：HITL 事件只推到该 demo 的订阅者，跨 demo 不串扰。
+- **两类 HITL 走两条路**：①**权限审批**（`code_review` 等）走 `CallbackPrompter` + `Future`，前端 POST `/api/hitl/{rid}` 回填决策；②**表单采集**（`form_hitl`）走 `request_user_input` 工具 → turn **挂起**，前端据 `turn_suspended.pending[].detail.response_schema` 动态渲染表单（`string`→问答、`enum`→单选、`array+items.enum`→多选），提交 POST `/api/resume` → `Resume(thread, {request_id: payload})` 续跑（payload 直接成挂起 call 的 `function_call_output`，不重跑工具）。子 skill 挂起经续跑链回传父 call_skill，主 skill 继续派后续子 skill。
 - **SSE 全量转发**：桥接层用 `engine.subscribe_all()` 把内核**所有** EventMsg 透到浏览器（按 submission_id 过滤、按 `is_root` 判退）——可观测面板与时间轴都吃这一条流，新增事件类型零改动即可见。
 - **SSE 单向流**：浏览器原生 `EventSource`，零客户端依赖；15s 心跳防代理切连接。
 - **静态 HTML**：单文件 `static/index.html`，无 build step、无 npm。
