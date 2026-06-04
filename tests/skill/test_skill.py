@@ -183,3 +183,62 @@ body
     assert skills["ok"].type == "composite"
     assert "request_user_input" in skills["ok"].tool_names
     assert not skills["ok"].child_skills
+
+
+def test_tool_only_composite_as_entry_accepted(tmp_path: Path) -> None:
+    """tool-only composite 可作为 entry skill（仅 tool_names、无 child_skills）。"""
+    e = tmp_path / "e"
+    e.mkdir()
+    (e / "SKILL.md").write_text(
+        """---
+name: e
+description: x
+type: composite
+entry: true
+tool_names: [request_user_input]
+---
+body
+""",
+        encoding="utf-8",
+    )
+    skills = load_skills_from_dir(tmp_path)
+    assert skills["e"].type == "composite"
+    assert skills["e"].entry is True
+    assert not skills["e"].child_skills
+
+
+def test_reachable_graph_with_tool_only_composite_child(tmp_path: Path) -> None:
+    """可达图：tool-only composite 作子节点正常可达，且其空 child_skills 不再向下扩展。"""
+    from taifeng.skill import compute_reachable_graph
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "SKILL.md").write_text(
+        """---
+name: root
+description: x
+type: composite
+entry: true
+child_skills: [leaf]
+tool_names: []
+---
+body
+""",
+        encoding="utf-8",
+    )
+    leaf = tmp_path / "leaf"
+    leaf.mkdir()
+    (leaf / "SKILL.md").write_text(
+        """---
+name: leaf
+description: x
+type: composite
+tool_names: [request_user_input]
+---
+body
+""",
+        encoding="utf-8",
+    )
+    skills = load_skills_from_dir(tmp_path)
+    graph = compute_reachable_graph(skills)
+    assert graph["root"] == frozenset({"leaf"})
