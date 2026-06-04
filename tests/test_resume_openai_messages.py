@@ -239,3 +239,150 @@ async def test_child_resume_root_backfill_call_id_matches(tmp_path: Path, thread
 
     # === 渲染后整体 OpenAI 合法（配对 + 无中段 system）===
     assert_openai_valid(history_to_api_messages(ritems))
+
+
+# ---------------------------------------------------------------------------
+# Defect 1 嵌套：深度 2（root → mid → leaf）—— 证明递归修复，每层回填都配对
+# ---------------------------------------------------------------------------
+_N_ROOT = """---
+name: n-root
+description: 根编排
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [n-mid]
+tool_names: []
+max_call_depth: 4
+---
+# 根 ROOT2_MARK
+派发 mid。
+"""
+
+_N_MID = """---
+name: n-mid
+description: 中间层
+version: 1.0.0
+type: composite
+model: mock-model
+child_skills: [n-leaf]
+tool_names: []
+max_call_depth: 4
+---
+# 中间 MID2_MARK
+派发 leaf。
+"""
+
+_N_LEAF = """---
+name: n-leaf
+description: 叶子采集
+version: 1.0.0
+type: composite
+model: mock-model
+tool_names: [request_user_input]
+max_call_depth: 2
+---
+# 叶子 LEAF2_MARK
+调 request_user_input。
+"""
+
+
+def _nested_client():
+    from taifeng.llm.providers import MockTurn
+    from taifeng.llm.providers.mock import RoutingMockClient
+
+    return RoutingMockClient(routes={
+        "ROOT2_MARK": [
+            MockTurn(text="派 mid", tool_calls=[
+                {"id": "r_call", "name": "call_skill",
+                 "arguments": '{"skill_id":"n-mid","reason":"x"}'}]),
+            MockTurn(text="root done"),
+        ],
+        "MID2_MARK": [
+            MockTurn(text="派 leaf", tool_calls=[
+                {"id": "m_call", "name": "call_skill",
+                 "arguments": '{"skill_id":"n-leaf","reason":"x"}'}]),
+            MockTurn(text="mid done"),
+        ],
+        "LEAF2_MARK": [
+            MockTurn(text="采集", tool_calls=[
+                {"id": "leaf_rui", "name": "request_user_input",
+                 "arguments": '{"prompt":"补充"}'}]),
+            MockTurn(text="leaf done LEAF_DONE"),
+        ],
+    })
+
+
+@pytest.mark.asyncio
+async def test_nested_depth2_resume_backfill_call_ids_match(tmp_path: Path, threads_dir):
+    """root→mid→leaf：leaf 内 request_user_input 挂起 → Resume → 每层回填 call_id 都配对。
+
+    证明 Defect 1 的修复是递归生效的：mid 回填用 m_call（mid function_call）、root 回填
+    用 r_call（root function_call），而非各自的子帧 sk_*；三个 thread 渲染均 OpenAI 合法。
+    """
+    import taifeng
+    from taifeng.loop.submission import Resume
+    from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+
+    skills = tmp_path / "skills"
+    for sub, body in (("n-root", _N_ROOT), ("n-mid", _N_MID), ("n-leaf", _N_LEAF)):
+        d = skills / sub
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(body, encoding="utf-8")
+
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills, threads_dir=threads_dir, model_client=_nested_client(),
+        compressors=[], extra_tools=[make_request_user_input_tool()])
+    engine = await pool.get_or_create(session_id="e", entry_skill_id="n-root")
+    root_tid = engine.thread_id
+
+    rec = _Recorder(engine)
+    await asyncio.sleep(0)
+
+    async def _wait(pred, timeout_s: float = 8.0) -> None:
+        async def _p() -> None:
+            while True:
+                if pred():
+                    return
+                await asyncio.sleep(0.02)
+        await asyncio.wait_for(_p(), timeout_s)
+
+    await engine.submit(taifeng.UserMessage(text="go"))
+    # 等到根 thread 也挂起（自底向上传播完成 → 整条链就绪）
+    await _wait(lambda: any(
+        e.msg.kind == "turn_suspended" and e.msg.data["thread_id"] == root_tid
+        for e in rec._events))
+
+    # leaf = 唯一 reason=="data" 的挂起（mid/root 是 child_skill）
+    leaf_ev = next(e for e in rec._events if e.msg.kind == "turn_suspended"
+                   and e.msg.data["pending"][0]["reason"] == "data")
+    leaf_tid = leaf_ev.msg.data["thread_id"]
+    leaf_rid = leaf_ev.msg.data["pending"][0]["request_id"]
+    assert leaf_tid != root_tid
+
+    rsub = await engine.submit(Resume(thread_id=leaf_tid, resolutions={leaf_rid: {"v": "ok"}}))
+    await _wait(lambda: any(
+        e.submission_id == rsub and e.msg.kind == "turn_completed"
+        and e.msg.data.get("is_root") for e in rec._events))
+
+    # 从 root 挂起 record 串出 mid_tid（CHILD_SKILL pending 的 sub_thread_id）
+    ritems = [it async for it in await pool.store.load_thread(root_tid)]
+    root_rec = SuspensionRecord.from_item([it for it in ritems if it.kind == "suspension"][0])
+    mid_tid = root_rec.pending[0].detail["sub_thread_id"]
+    mitems = [it async for it in await pool.store.load_thread(mid_tid)]
+    litems = [it async for it in await pool.store.load_thread(leaf_tid)]
+    await pool.close()
+
+    # 每层：该 thread 内 function_call 的 call_id 必须出现在其 function_call_output 中
+    def _assert_paired(items, expect_call_id: str, level: str) -> None:
+        fco_ids = {it.payload.get("call_id") for it in items
+                   if it.kind == "function_call_output"}
+        assert expect_call_id in fco_ids, (
+            f"{level} 层回填 output 的 call_id 必须匹配 function_call({expect_call_id})，"
+            f"实得 {fco_ids}"
+        )
+        assert_openai_valid(history_to_api_messages(items))
+
+    _assert_paired(ritems, "r_call", "root")     # root→mid 的 call_skill
+    _assert_paired(mitems, "m_call", "mid")       # mid→leaf 的 call_skill
+    _assert_paired(litems, "leaf_rui", "leaf")    # leaf 的 request_user_input
