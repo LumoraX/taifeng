@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Step Pipeline · 步级重试 Demo</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --dim:#8b949e;
+    --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --danger:#f85149; --run:#a371f7;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--border); display:flex;
+    gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  header .hint { color:var(--dim); font-size:12px; }
+  main { max-width:920px; margin:0 auto; padding:20px; }
+  .seed-row { display:flex; gap:8px; margin-bottom:18px; }
+  textarea#seed { flex:1; background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; color:var(--fg); padding:10px; font-family:inherit; font-size:13px; }
+  button { border:0; border-radius:6px; padding:9px 16px; cursor:pointer;
+    font-weight:500; font-family:inherit; background:var(--accent); color:#fff; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background:transparent; border:1px solid var(--border); color:var(--fg); }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:16px; margin-bottom:14px; position:relative; }
+  .card .top { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+  .card .title { font-weight:600; font-size:14px; }
+  .badge { font-size:11px; padding:2px 8px; border-radius:10px; font-weight:600; }
+  .b-pending{background:#21262d;color:var(--dim);}
+  .b-running{background:rgba(163,113,247,.15);color:var(--run);}
+  .b-suspended{background:rgba(210,153,34,.15);color:var(--warn);}
+  .b-done{background:rgba(63,185,80,.15);color:var(--ok);}
+  .b-error{background:rgba(248,81,73,.15);color:var(--danger);}
+  .card .grow { flex:1; }
+  .card .attempt { color:var(--dim); font-size:11px; }
+  details { margin:8px 0; }
+  summary { cursor:pointer; color:var(--dim); font-size:12px; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--bg);
+    border:1px solid var(--border); border-radius:6px; padding:10px; font-size:12px;
+    margin:6px 0; max-height:240px; overflow:auto; }
+  .out { font-size:13px; line-height:1.55; white-space:pre-wrap; }
+  .fld { margin:12px 0; }
+  .fld .lbl { display:block; font-size:12px; font-weight:600; margin-bottom:6px; }
+  .fld .lbl .req{color:var(--danger);margin-left:4px;} .fld .lbl .hint{color:var(--dim);font-weight:400;margin-left:6px;font-size:10px;}
+  .fld textarea, .fld input[type=text]{ width:100%; background:var(--bg);
+    border:1px solid var(--border); border-radius:6px; color:var(--fg); padding:8px; font-family:inherit; font-size:13px; }
+  .opt{ display:flex; align-items:center; gap:7px; padding:5px 8px; margin:3px 0;
+    border:1px solid var(--border); border-radius:6px; cursor:pointer; font-size:13px; }
+  .opt:hover{border-color:var(--accent);}
+  .form-err{ color:var(--danger); font-size:11px; min-height:14px; margin-top:6px; }
+  .actions{ margin-top:10px; display:flex; gap:8px; }
+  .conn{ font-size:11px; color:var(--dim); }
+  .arrow{ text-align:center; color:var(--dim); font-size:18px; margin:-6px 0 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧪 Step Pipeline · 业务编排 + 步级级联重试</h1>
+  <span class="hint">每步独立 thread；重试某步 → 用其持久化输入重放 + 级联重跑下游</span>
+  <span class="grow"></span>
+  <span class="conn" id="conn"></span>
+</header>
+<main>
+  <div class="seed-row">
+    <textarea id="seed" rows="2" placeholder="输入患者数据（如：男 55 岁，吸烟，体检发现右肺结节 8mm）"></textarea>
+    <button id="btn-start">开始流水线</button>
+  </div>
+  <div id="cards"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let steps = [];
+let busy = false;
+
+function setConn(t){ $("conn").textContent = t; }
+
+async function api(path, body){
+  busy = true; render();
+  setConn("运行中…");
+  try{
+    const r = await fetch(path, {method:"POST", headers:{"content-type":"application/json"},
+      body: body ? JSON.stringify(body) : undefined});
+    if(!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    const j = await r.json();
+    steps = j.steps || [];
+    setConn("");
+  }catch(e){ setConn("❌ " + e.message); }
+  busy = false; render();
+}
+
+$("btn-start").onclick = () => {
+  const seed = $("seed").value.trim();
+  if(!seed) return;
+  steps = [];
+  api("/api/start", {seed});
+};
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+// 据 response_schema 渲染表单字段（string→问答 / enum→单选 / array+items.enum→多选）
+function renderForm(idx, pending){
+  const sc = pending.response_schema || {};
+  const props = sc.properties || {};
+  const required = sc.required || [];
+  let html = `<div class="form" data-idx="${idx}"><div style="color:var(--dim);font-size:12px;margin-bottom:6px">${escapeHtml(pending.prompt||"请填写")}</div>`;
+  for(const [key,def] of Object.entries(props)){
+    const title = (def&&def.title)||key;
+    const req = required.includes(key);
+    let kind, inner="";
+    if(def && Array.isArray(def.enum)){ kind="single";
+      inner = def.enum.map(o=>`<label class="opt"><input type="radio" name="${idx}_${key}" value="${escapeHtml(o)}"><span>${escapeHtml(o)}</span></label>`).join(""); }
+    else if(def && def.type==="array" && def.items && Array.isArray(def.items.enum)){ kind="multi";
+      inner = def.items.enum.map(o=>`<label class="opt"><input type="checkbox" name="${idx}_${key}" value="${escapeHtml(o)}"><span>${escapeHtml(o)}</span></label>`).join(""); }
+    else { kind="text"; inner = `<textarea name="${idx}_${key}" rows="1" placeholder="请输入"></textarea>`; }
+    const hint = {single:"单选",multi:"多选",text:"问答"}[kind];
+    html += `<div class="fld" data-key="${key}" data-kind="${kind}"><span class="lbl">${escapeHtml(title)}${req?'<span class="req">*</span>':''}<span class="hint">(${hint})</span></span>${inner}</div>`;
+  }
+  html += `<div class="form-err" id="err_${idx}"></div><div class="actions"><button onclick="submitForm(${idx})">提交</button></div></div>`;
+  return html;
+}
+
+function collectForm(idx){
+  const payload={};
+  document.querySelectorAll(`.form[data-idx="${idx}"] .fld`).forEach(fld=>{
+    const key=fld.dataset.key, kind=fld.dataset.kind;
+    if(kind==="single"){ const s=fld.querySelector(`input:checked`); payload[key]=s?s.value:""; }
+    else if(kind==="multi"){ payload[key]=[...fld.querySelectorAll("input:checked")].map(c=>c.value); }
+    else { payload[key]=fld.querySelector("[name]").value.trim(); }
+  });
+  return payload;
+}
+
+window.submitForm = (idx) => {
+  const st = steps[idx];
+  const payload = collectForm(idx);
+  const required = (st.pending.response_schema||{}).required||[];
+  const miss = required.filter(k=>{const v=payload[k]; return v==null||(Array.isArray(v)?!v.length:!String(v).trim());});
+  if(miss.length){ $("err_"+idx).textContent = "请完成必填：" + miss.join("、"); return; }
+  api(`/api/resume/${idx}`, {request_id: st.pending.request_id, payload});
+};
+
+window.retry = (idx) => api(`/api/retry/${idx}`);
+
+function render(){
+  $("btn-start").disabled = busy;
+  const box = $("cards");
+  if(!steps.length){ box.innerHTML = busy ? '<div class="conn">启动中…</div>' : ''; return; }
+  box.innerHTML = steps.map((s,i)=>{
+    const badge = {pending:"待运行",running:"运行中",suspended:"待补料",done:"完成",error:"失败"}[s.status]||s.status;
+    let bodyHtml = "";
+    if(s.status==="suspended" && s.pending){ bodyHtml = renderForm(i, s.pending); }
+    else if(s.output_text){ bodyHtml = `<div class="out">${escapeHtml(s.output_text)}</div>`; }
+    const inputBlock = s.input_text ? `<details><summary>输入（seed + 前序结论，重试时原样重放）</summary><pre>${escapeHtml(s.input_text)}</pre></details>` : "";
+    const canRetry = (s.status==="done"||s.status==="error") && !busy;
+    const retryBtn = canRetry ? `<button class="ghost" onclick="retry(${i})">🔄 重试此步（级联重跑下游）</button>` : "";
+    return `${i>0?'<div class="arrow">↓</div>':''}
+      <div class="card">
+        <div class="top">
+          <span class="title">${escapeHtml(s.title)}</span>
+          <span class="badge b-${s.status}">${badge}</span>
+          <span class="attempt">尝试 ${s.attempt}</span>
+          <span class="grow"></span>
+        </div>
+        ${inputBlock}
+        ${bodyHtml}
+        <div class="actions">${retryBtn}</div>
+      </div>`;
+  }).join("");
+}
+render();
+</script>
+</body>
+</html>
