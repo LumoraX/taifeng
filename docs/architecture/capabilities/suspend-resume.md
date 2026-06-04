@@ -172,6 +172,8 @@ Resume(thread_id, resolutions)
 
 `_find_active_suspension` 扫 history：返回**最后一条** `kind=="suspension"` 且其 `record_id` **未**出现在任何 resolved-marker 中的 record；否则返回 `None`。`_handle_resume` 成功后落 resolved-marker（标记本 record 已消费）。
 
+> **resolved-marker 是纯内部记账，不进 LLM 视图**：`history_to_api_messages` 渲染时**跳过** `source == "suspend_resolved"` 的 `system_injection`（其它 `system_injection` 如 `business` / `memory_pre_evict` 保留）。否则它会渲染成对话中段 `role="system"` 消息——`openai_compat` provider 原样透传，严格 OpenAI-compat 代理拒绝中段 system → 400（`anthropic` / `gemini` provider 各自特判丢弃 / 转 user，`openai_compat` 不处理）。
+
 #### Scenario: 重复 Resume（同 record 两次）被拒
 - **WHEN** 第一次 Resume 成功（已落 resolved-marker），第二次再 Resume 同 thread
 - **THEN** `_find_active_suspension` 返回 `None` → emit `suspension_resolve_rejected(reason="no_active_suspension")`，turn 不重复续跑
