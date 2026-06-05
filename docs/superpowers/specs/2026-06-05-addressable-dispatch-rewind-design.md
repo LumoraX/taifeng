@@ -1,7 +1,8 @@
 # 设计:Turn 内任意节点可寻址 Rewind(自治链任意节点直接重试)
 
 - 日期:2026-06-05
-- 状态:待 review(已据「LLM loop 节点 + 两切点」反馈升级为通用节点模型)
+- 状态:**已实现**(2026-06-05)。活文档真相见 [`capabilities/turn-rewind.md`](../../architecture/capabilities/turn-rewind.md) + ADR 0014
+- 实现差异(本设计 → 落地):① `turn_root` 节点**收敛进首个 iteration 节点 `it1`**(截点等价,不单列);② `retry_tool` v1 假定**串行派发**(`max_parallel_tool_calls=1`,默认),并行批次内部分重试不支持;③ `new_args` 经内存改写悬空 fc 实现
 - 适用红线:R1(业务零侵入)/ R2(cache 友好)/ R3(可观测)/ R4(可取消)/ R5(可 resume)—— 本能力改 turn/dispatch 模型,按 CLAUDE.md 必须逐条声明影响(见 §7)
 
 ## 1. 问题陈述

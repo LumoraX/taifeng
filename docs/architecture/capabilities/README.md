@@ -25,6 +25,7 @@
 | [tool-builtins-extended](tool-builtins-extended.md) | `apply_patch` 两阶段原子、`BackgroundTaskRegistry`、`http_request`、各工具 `parallel_safe` |
 | [mcp-server](mcp-server.md) | `McpStdioServer`、MCP 握手 / tools / resources、双向 JSON-RPC elicitation、CLI `mcp serve` |
 | [telemetry-otel](telemetry-otel.md) | `OtelSinkConfig` / `OtelTelemetrySink`、EventMsg→OTel 映射表、PII 过滤、预建 counter、fire-and-forget |
+| [turn-rewind](turn-rewind.md) | turn 内可寻址回访节点表（iteration / dispatch）、`Rewind` Op（re_reason / retry_tool 两切点）、`RewindCheckpoint`、`rewind_nodes()`、3 类事件、拒绝路径、R2 expected / R5 append-only |
 
 ### 持久化（对应 [conversation.md](../conversation.md)）
 | 契约 | 覆盖 |

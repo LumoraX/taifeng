@@ -73,6 +73,15 @@ LLM 成本）。已实测 `wrapper(entry)→call_skill(core 非 entry) = ALLOW`�
 `entry` skill（或加 `callable_as_child` 标志）。让「双重身份」真正成立。**触及 entry 不变量，
 必须走 ADR**（评估对 R1–R5 影响）。非必要不走这条。
 
+**④ turn-rewind（想保住自治「一键跑完」+ 又能重跑中间步时，已实现，推荐）**——
+**不碰 entry 约束**：子 skill 全程 `entry: false`，继续被 `lung-nodule` 自治链 `call_skill`
+一键跑完；内核把一次 turn 拆成**可寻址回访节点表**(每圈 LLM 采样 = iteration 节点、每次
+`call_skill`/工具派发 = dispatch 节点)。业务侧 `engine.rewind_nodes()` 取节点、提交
+`Rewind(node_id, mode)` 回退到**任意节点重推**(`re_reason` 让 LLM 重决下游、`retry_tool`
+只重跑某次派发)。这条让 ②/③ 在「自治 + 重试」诉求下**不再必要**。
+→ 契约见 [`docs/architecture/capabilities/turn-rewind.md`](../../docs/architecture/capabilities/turn-rewind.md)；
+与本 demo 的关系：**step_pipeline = 确定性业务编排范式；turn-rewind = 自治链内的节点级重试**。
+
 > 无论选哪条，**body 基本不用动**：每步本就写「你将收到患者数据 + 上一步结论」，天然是
 > 「给定输入即可独立跑」的契约——只要它**只认传入的 `{患者数据 + 上游结论}`**、不依赖
 > 自治链隐式上下文即可。

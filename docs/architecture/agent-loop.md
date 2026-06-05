@@ -329,7 +329,7 @@ class CancellationToken:
 | Rust `tokio::mpsc` unbounded | Python `asyncio.Queue`（默认 bounded=1024，可配） |
 | `Submission` 含 `id: SubmissionId` | 同 |
 | `Event` 含 `id: EventId` + `submission_id` | 简化为 `EventMsg(submission_id, msg)` |
-| `Op::*` 枚举 ~20 种 | 实现 10 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Shutdown），见 `loop/submission.py` |
+| `Op::*` 枚举 ~20 种 | 实现 11 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Rewind / Shutdown），见 `loop/submission.py` |
 
 ## 测试用例（M3 验收）
 
@@ -409,6 +409,28 @@ TurnCompleted event
 | `pre_script_use` | deny → ToolResult.error；异常 → ToolResult.error；metadata['args_override'] 替换 args |
 | `post_script_use` | **deny / 异常都被吞掉**（仅审计） |
 | `permission_policy.check` | timeout → deny + emit `permission_prompt_timeout` |
+
+## turn-rewind：turn 内任意节点可寻址 rewind（turn-rewind 契约）
+
+一次 root turn 的执行轨迹被拆成一张**可寻址回访节点表**，业务侧可对任意节点直接 retry——既能重跑某一次 LLM loop 采样，也能重跑某一次工具 / `call_skill` 派发。子 skill 全程 `entry: false`，**绕开 entry/call_skill 互斥**（不放松 `cannot_call_entry_skill`）。详见 [turn-rewind 契约](capabilities/turn-rewind.md) 与 ADR 0014。
+
+**记录（`loop/rewind.py` + `turn.py`，仅 root turn）**：每圈 `_sample_once` 采样前记一个 `iteration` 节点；每次工具 / `call_skill` 派发的 `function_call` 追加处记一个 `dispatch` 节点（两切点：`history_len` = 所属 iteration 采样前 = re_reason 切点；`inner_history_len` = fc 后 / fco 前 = retry_tool 切点）。`RewindCheckpoint` 只记 history 下标（append-only 不破，R5）；每记一个 emit `rewind_checkpoint_recorded`。turn 结束随状态回写 engine，`engine.rewind_nodes()` 只读暴露。`turn_root` 收敛进首个 iteration 节点 `it1`（冗余，不单列）。
+
+**重推（`engine._handle_rewind`）**：actor 模型下提交 `Rewind` 时上一 turn 已结束（engine 空闲），故「重推」= 截断 engine history（仅内存）+ 回退 `cache_anchor` + 落 rewind marker（store）+ emit `turn_rewound` + 建新 root TurnRunner 重跑：
+
+```
+Rewind(node_id, mode, new_args?)
+  → 查 checkpoint（缺 → rewind_rejected(unknown_node)）
+  → retry_tool 仅 dispatch 节点（否则 rewind_rejected(mode_kind_mismatch)）
+  → 活跃挂起 → rewind_rejected(turn_suspended)   # 挂起态 rewind v1 不支持
+  → 选截点：retry_tool=inner_history_len（保 fc）/ re_reason=history_len
+  → 截断 history + 回退 anchor（锁内；store append-only，旧 items 不删）
+  → re_reason：新 runner 从截点重采样（LLM 重决下游）
+    retry_tool：新 runner 先 _complete_seed_call 补跑悬空 call（复用 dispatch_batch +
+      _build_tool_context，含 dispatcher → call_skill 子 skill 也能重跑）→ 续推
+```
+
+R2：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`reason="rewind"`），不计 `unexpected_cache_breaks`。
 
 ## turn 的终止结局：含 suspended（suspend-resume）
 
