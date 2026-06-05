@@ -19,12 +19,55 @@ from taifeng.llm.providers import MockClient, MockTurn
 from taifeng.loop.submission import Rewind, Submission
 
 
-async def _run_to_end(engine: taifeng.AgentEngine, text: str) -> None:
-    """提交一条 user message 并消费事件到 turn 终结。"""
-    sub_id = await engine.submit(taifeng.UserMessage(text=text))
-    async for ev in engine.subscribe(sub_id):
-        if ev.msg.kind in ("turn_completed", "turn_failed"):
+def _is_root_end(ev: object) -> bool:
+    """事件是否为 root turn 的终结(call_skill 子 turn 也发 turn_completed,需按 is_root 区分)。"""
+    kind = ev.msg.kind  # type: ignore[attr-defined]
+    if kind not in ("turn_completed", "turn_failed"):
+        return False
+    data = ev.msg.data if hasattr(ev.msg, "data") else {}  # type: ignore[attr-defined]
+    return bool(data.get("is_root"))
+
+
+async def _consume_to_root_end(engine: taifeng.AgentEngine, sub_id: str) -> tuple[
+    list[str], str, dict
+]:
+    """消费某 submission 的事件直到 **root turn** 终结,返回 (kinds, assistant 文本, turn_rewound.data)。
+
+    必须走 ``subscribe_all()`` 而非 ``subscribe(sub_id)``:后者在该 submission 的**任意**
+    turn_completed 即终止(含 call_skill **子 turn** 的 is_root=False 完成),会在父续推前
+    断流(见 engine.subscribe 的终止集合)。这里只在 root 完成时停(pipeline.py 同款)。
+    """
+    kinds: list[str] = []
+    text_parts: list[str] = []
+    rewound: dict = {}
+    async for ev in engine.subscribe_all():
+        if ev.submission_id != sub_id:
+            continue
+        kinds.append(ev.msg.kind)
+        data = ev.msg.data if hasattr(ev.msg, "data") else {}
+        if ev.msg.kind == "assistant_text" and data.get("delta"):
+            text_parts.append(str(data["delta"]))
+        if ev.msg.kind == "turn_rewound":
+            rewound = dict(data)
+        if _is_root_end(ev):
             break
+    return kinds, "".join(text_parts), rewound
+
+
+async def _run_to_end(engine: taifeng.AgentEngine, text: str) -> None:
+    """提交一条 user message 并消费事件到 root turn 终结。
+
+    turn_completed 在 runner.run() **内部**发出,而 engine 的状态(history /
+    rewind_checkpoints)回写在 run() **返回后**;故收尾轮询等节点表落地(仓库既有
+    settle 模式),保证 rewind_nodes() 对调用方可见。
+    """
+    import asyncio
+    sub_id = await engine.submit(taifeng.UserMessage(text=text))
+    await _consume_to_root_end(engine, sub_id)
+    for _ in range(100):
+        if engine.rewind_nodes():
+            break
+        await asyncio.sleep(0.01)
 
 
 def test_rewind_op_defaults_and_discriminator() -> None:
@@ -150,20 +193,11 @@ async def test_rewind_checkpoint_recorded_events_emitted(
 
 
 async def _drain(engine: taifeng.AgentEngine, sub_id: str) -> tuple[list[str], str, dict]:
-    """消费某 submission 的事件到终结,返回 (kinds, assistant 文本, turn_rewound.data)。"""
-    kinds: list[str] = []
-    text_parts: list[str] = []
-    rewound: dict = {}
-    async for ev in engine.subscribe(sub_id):
-        kinds.append(ev.msg.kind)
-        data = ev.msg.data if hasattr(ev.msg, "data") else {}
-        if ev.msg.kind == "assistant_text" and data.get("delta"):
-            text_parts.append(str(data["delta"]))
-        if ev.msg.kind == "turn_rewound":
-            rewound = dict(data)
-        if ev.msg.kind in ("turn_completed", "turn_failed"):
-            break
-    return kinds, "".join(text_parts), rewound
+    """消费某 submission 的事件到 **root turn** 终结(委托 _consume_to_root_end)。
+
+    走 subscribe_all + is_root 过滤,避免 call_skill 子 turn 完成时 subscribe 提前断流。
+    """
+    return await _consume_to_root_end(engine, sub_id)
 
 
 @pytest.mark.asyncio
@@ -277,6 +311,104 @@ async def test_rewind_dispatch_retry_tool_reruns_and_continues(
     assert rewound["mode"] == "retry_tool"
     assert rewound["cut_index"] == disp0.inner_history_len
     assert "RETRY-TOOL-DONE" in text, "续推应走出新文本"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_retry_tool_reruns_call_skill(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """头号场景:retry_tool 重跑自治链里的一次 call_skill —— 子 skill 真被重跑、父续推。"""
+    client = MockClient(turns=[
+        # code-reviewer 圈1:派发 call_skill(style-checker)
+        MockTurn(text="派发风格审查", tool_calls=[{
+            "id": "cs0", "name": "call_skill",
+            "arguments": '{"skill_id":"style-checker","reason":"审查风格","args":{}}'}]),
+        MockTurn(text="风格结论-A"),   # style-checker 子 turn(首跑)
+        MockTurn(text="综合-A"),        # code-reviewer 圈2 收尾
+        # —— retry_tool 后:seed 重跑 call_skill → 新子 turn + 父续推 ——
+        MockTurn(text="风格结论-B"),   # style-checker 子 turn(重跑)
+        MockTurn(text="综合-B"),        # code-reviewer 续推
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_csrt", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "审查这段代码")
+
+    disp = next(n for n in engine.rewind_nodes()
+                if n.kind == "dispatch" and n.target_id == "call_skill")
+    sub_id = await engine.submit(Rewind(node_id=disp.node_id, mode="retry_tool"))
+    kinds, text, rewound = await _drain(engine, sub_id)
+
+    assert rewound["node_id"] == disp.node_id
+    assert rewound["mode"] == "retry_tool"
+    assert "风格结论-B" in text, "子 skill 应被真正重跑(走新子 turn)"
+    assert "综合-B" in text, "父 skill 应基于新子结论续推"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_dispatch_re_reason_cuts_to_iteration(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """对 dispatch 节点用 re_reason → 截点归一到所属 iteration 采样前(非 inner 切点)。"""
+    client = MockClient(turns=[
+        MockTurn(text="圈1", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="原收尾"),
+        MockTurn(text="RE-REASON-DONE"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_drr", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "go")
+
+    nodes = engine.rewind_nodes()
+    disp0 = next(n for n in nodes if n.kind == "dispatch")
+    it1 = next(n for n in nodes if n.kind == "iteration" and n.iteration_index == 1)
+
+    sub_id = await engine.submit(Rewind(node_id=disp0.node_id, mode="re_reason"))
+    _, text, rewound = await _drain(engine, sub_id)
+
+    # dispatch.re_reason 截点 == 所属 iteration 采样前(history_len),不是 inner_history_len
+    assert rewound["cut_index"] == disp0.history_len == it1.history_len
+    assert rewound["cut_index"] != disp0.inner_history_len
+    assert "RE-REASON-DONE" in text
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_retry_tool_new_args_rewrites_call(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """retry_tool + new_args:改写悬空 fc 的入参后重跑该工具,续推到新结果。"""
+    client = MockClient(turns=[
+        MockTurn(text="圈1", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="原收尾"),
+        MockTurn(text="NEW-ARGS-DONE"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_na", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "go")
+
+    disp0 = next(n for n in engine.rewind_nodes() if n.kind == "dispatch")
+    sub_id = await engine.submit(Rewind(
+        node_id=disp0.node_id, mode="retry_tool",
+        new_args={"skill_id": "code-reviewer"},  # 换 read_skill 的目标
+    ))
+    _, text, rewound = await _drain(engine, sub_id)
+
+    assert rewound["mode"] == "retry_tool"
+    assert "NEW-ARGS-DONE" in text
+    # 内存 history 中该 fc 的 arguments 已被改写为新 skill_id
+    fc = next(it for it in engine.history_snapshot()
+              if it.kind == "function_call" and it.payload.get("call_id") == disp0.call_id)
+    assert "code-reviewer" in fc.payload.get("arguments", "")
     await pool.close()
 
 
