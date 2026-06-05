@@ -37,7 +37,7 @@ PYTHONPATH=src uv run python examples/orchestration/demo.py         # 声明式�
 PYTHONPATH=src uv run python examples/mcp_basic/demo.py             # taifeng 作为 MCP server
 # 其余 pattern demo：research_assistant / travel_planner / code_review / product_review /
 #   numeric_loop / mcp_hitl / selective_approval / subagent_isolation / observability /
-#   permission / persistence / web_ui —— 见 examples/<name>/demo.py（或 server.py）
+#   permission / persistence / turn_rewind / web_ui —— 见 examples/<name>/demo.py（或 server.py）
 PYTHONPATH=src uv run python examples/real_llm/e2e.py               # 需要真实 LLM API key（real_llm/ 下均是）
 
 # CLI（用于排查 SKILL.md 目录）

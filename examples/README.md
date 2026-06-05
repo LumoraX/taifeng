@@ -31,6 +31,16 @@
 
 运行：`PYTHONPATH=src uv run python examples/kernel_knobs/demo.py`
 
+### `turn_rewind/` —— 自治链一键跑完 + 回退到任意节点重跑（纯 MockClient 无需 API key）
+
+| 文件 | 演示内容 |
+| --- | --- |
+| [turn_rewind/demo.py](turn_rewind/demo.py) | 把一次 root turn 拆成可寻址回访节点表；`Rewind(node_id, retry_tool)` 重跑自治链里的一次 `call_skill`；`Rewind(node_id, re_reason)` 回退到某圈采样前让 LLM 重新决定 |
+
+> 子 skill 全程 `entry: false`，绕开 entry/call_skill 互斥。契约见 [docs/architecture/capabilities/turn-rewind.md](../docs/architecture/capabilities/turn-rewind.md)，决策见 [ADR 0014](../docs/decisions/0014-turn-rewind.md)。与 [step_pipeline/](step_pipeline/)（业务层确定性编排）互为两种范式。
+
+运行：`PYTHONPATH=src uv run python examples/turn_rewind/demo.py`
+
 ### `real_llm/` —— 真实 LLM 验证，需要 API key
 
 | 文件 | 演示内容 |
