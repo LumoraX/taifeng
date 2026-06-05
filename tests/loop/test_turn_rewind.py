@@ -278,3 +278,66 @@ async def test_rewind_dispatch_retry_tool_reruns_and_continues(
     assert rewound["cut_index"] == disp0.inner_history_len
     assert "RETRY-TOOL-DONE" in text, "续推应走出新文本"
     await pool.close()
+
+
+# ── Slice 5：R2 cache 失效如实上报为 expected ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rewind_cache_break_marked_expected(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """rewind 蓄意回退 cache_anchor → 该失效记为 expected,不计入 unexpected_breaks(R2)。"""
+    from taifeng.llm.types import TokenUsage
+
+    client = MockClient(turns=[
+        MockTurn(text="原", cache_read=100, usage=TokenUsage(input_tokens=100)),
+        # 重推首采样:cache_read 跌破 → 若不标 expected 会误记 unexpected break
+        MockTurn(text="重推", cache_read=10, usage=TokenUsage(input_tokens=100)),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_cache", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "go")
+    assert engine.cache_stats.unexpected_cache_breaks == 0
+
+    sub_id = await engine.submit(Rewind(node_id="it1", mode="re_reason"))
+    await _drain(engine, sub_id)
+
+    # rewind 导致的 cache 失效是预期内的,不得计入 unexpected
+    assert engine.cache_stats.unexpected_cache_breaks == 0
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_store_append_only_preserved(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """rewind 只在内存截 history;store(JSONL)append-only,旧 items 不被物理删(R5)。"""
+    client = MockClient(turns=[
+        MockTurn(text="圈1", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="ORIGINAL-TAIL"),
+        MockTurn(text="REDRIVEN"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_ap", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "go")
+
+    # 找到 thread 的 JSONL 落盘文件,记录 rewind 前的行数与内容
+    jsonl = next(iter(threads_dir.rglob("*.jsonl")))
+    before_lines = jsonl.read_text(encoding="utf-8").splitlines()
+    before_blob = "\n".join(before_lines)
+    assert "ORIGINAL-TAIL" in before_blob
+
+    await _drain(engine, await engine.submit(Rewind(node_id="it1", mode="re_reason")))
+
+    after_blob = jsonl.read_text(encoding="utf-8")
+    # append-only:旧内容仍在(含被内存截断掉的 ORIGINAL-TAIL),且只增不减
+    assert "ORIGINAL-TAIL" in after_blob, "旧 items 不得被物理删"
+    assert "[rewind]" in after_blob, "应追加 rewind marker"
+    assert len(after_blob.splitlines()) >= len(before_lines)
+    await pool.close()

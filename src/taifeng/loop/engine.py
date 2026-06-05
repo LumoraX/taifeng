@@ -705,6 +705,7 @@ class AgentEngine:
         resolved_for_turn: list[ResolvedInstruction],
         *,
         seed_pending_call_id: str | None = None,
+        cache_break_expected_reason: str | None = None,
     ) -> None:
         """构造 TurnRunner(基于当前 self._history)→ run → 回写 engine 状态。
 
@@ -758,6 +759,10 @@ class AgentEngine:
         )
         # turn-rewind retry_tool：让 runner 采样前先补跑被保留的悬空 call
         runner._seed_pending_call_id = seed_pending_call_id  # noqa: SLF001
+        # turn-rewind R2：rewind 蓄意回退 anchor → 首采样的 cache 失效记为 expected
+        if cache_break_expected_reason is not None:
+            runner._next_cache_break_expected = True  # noqa: SLF001
+            runner._next_cache_break_reason = cache_break_expected_reason  # noqa: SLF001
         try:
             await runner.run()
         finally:
@@ -1512,6 +1517,7 @@ class AgentEngine:
         await self._build_and_run_runner(
             sub.id, turn_cancel, list(self._last_resolved or []),
             seed_pending_call_id=seed,
+            cache_break_expected_reason="rewind",
         )
 
     async def _handle_rollback(self, submission_id: str, num_turns: int) -> None:
