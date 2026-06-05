@@ -131,6 +131,27 @@ class Resume(BaseModel):
     resolutions: dict[str, Any]
 
 
+class Rewind(BaseModel):
+    """回退到 turn 内任一回访节点并主动重推(turn-rewind 能力)。
+
+    节点由 ``node_id`` 指向 root turn 录下的 ``RewindCheckpoint``;``kind`` 决定截点,
+    ``mode`` 决定语义(见设计 spec 2026-06-05-addressable-dispatch-rewind):
+
+    - ``re_reason``(默认):截到节点采样前 → 重采样,LLM 重新决定下游。
+      turn_root / iteration / dispatch 三类节点都支持。
+    - ``retry_tool``:仅 dispatch 节点。保留 assistant「决定调它」的 function_call,
+      只用 ``new_args``(或原 args)重跑该工具/子 skill、替换其 output;若 ``new_args``
+      改了入参,同步改写 function_call.arguments 保持历史自洽。
+
+    ``new_args`` 仅 ``retry_tool`` + dispatch 节点有意义,其余模式忽略。
+    """
+
+    kind: Literal["rewind"] = "rewind"
+    node_id: str
+    mode: Literal["retry_tool", "re_reason"] = "re_reason"
+    new_args: dict[str, Any] | None = None
+
+
 class Shutdown(BaseModel):
     kind: Literal["shutdown"] = "shutdown"
 
@@ -145,6 +166,7 @@ Op = Union[
     RefreshSnapshot,
     UpdateInstructions,
     Resume,
+    Rewind,
     Shutdown,
 ]
 

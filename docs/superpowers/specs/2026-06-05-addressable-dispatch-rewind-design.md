@@ -161,6 +161,7 @@ async def _handle_rewind(sub_id, op):
 - **replay 模式**:`Rewind(mode="replay")` 把首跑录下的 call 图确定性重放、不重进 LLM——可复现/可审计场景。叠加在同一 checkpoint 基建上,不改 v1 默认。
 - **放开 entry 约束**:本能力让「同一 skill 既自治 child 又独立 entry」不再必要;若未来确需,另起 ADR 评估 `dispatch.py:175` 松绑代价。
 - **挂起态 rewind**:HITL 挂起的 turn 内 rewind,v1 拒绝,后续按需补。
+- **压缩等内核动作作为可寻址节点**(TODO):pre/mid-turn compress、instruction 热更等「非采样、非工具」的内核动作,v1 不进回访节点表;后续若需「回退到某次压缩前」再扩 `kind`。本期节点只覆盖 turn_root / iteration / dispatch 三类。
 
 ## 9. 测试(边界必测)
 
