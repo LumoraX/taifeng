@@ -98,3 +98,49 @@ async def test_checkpoints_cover_iterations_and_dispatches(
         assert d.inner_history_len > d.history_len, "retry_tool 切点应在 fc 之后"
         assert d.target_id == "read_skill"
     await pool.close()
+
+
+# ── Slice 3：rewind 事件类型 + rewind_checkpoint_recorded 发射 ────────────
+
+
+def test_rewind_event_classes_have_kinds() -> None:
+    """三个 rewind 事件类的 discriminator 固定。"""
+    from taifeng.loop.event import (
+        RewindCheckpointRecorded,
+        RewindRejected,
+        TurnRewound,
+    )
+
+    assert RewindCheckpointRecorded().kind == "rewind_checkpoint_recorded"
+    assert TurnRewound().kind == "turn_rewound"
+    assert RewindRejected().kind == "rewind_rejected"
+
+
+@pytest.mark.asyncio
+async def test_rewind_checkpoint_recorded_events_emitted(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """root turn 每记一个回访节点 → 发一条 rewind_checkpoint_recorded 事件(R3)。"""
+    client = MockClient(turns=[
+        MockTurn(text="圈1", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="圈2", tool_calls=[
+            {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="收尾"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_rw3", entry_skill_id="code-reviewer")
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+    kinds: list[str] = []
+    async for ev in engine.subscribe(sub_id):
+        kinds.append(ev.msg.kind)
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            break
+
+    recorded = [k for k in kinds if k == "rewind_checkpoint_recorded"]
+    # 每个节点一条事件;节点表 = 3 iteration + 2 dispatch
+    assert len(recorded) == len(engine.rewind_nodes())
+    assert len(recorded) == 5
+    await pool.close()

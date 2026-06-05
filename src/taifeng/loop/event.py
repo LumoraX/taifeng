@@ -57,6 +57,10 @@ MsgKind = Literal[
     "turn_suspended",
     "suspension_resolved",
     "suspension_resolve_rejected",
+    # turn-rewind 回访节点生命周期
+    "rewind_checkpoint_recorded",
+    "turn_rewound",
+    "rewind_rejected",
 ]
 
 
@@ -446,6 +450,39 @@ class RebuildSkippedCorrupt(_Msg):
     kind: Literal["rebuild_skipped_corrupt"] = "rebuild_skipped_corrupt"
 
 
+# ── turn-rewind：回访节点生命周期事件（R3 可观测）─────────────────────
+
+
+class RewindCheckpointRecorded(_Msg):
+    """root turn 记下一个回访节点（iteration / dispatch）时发出。
+
+    data = {"node_id": str, "kind": str, "iteration_index": int,
+            "history_len": int, "target_id": str | None}
+    """
+
+    kind: Literal["rewind_checkpoint_recorded"] = "rewind_checkpoint_recorded"
+
+
+class TurnRewound(_Msg):
+    """一次 Rewind Op 成功回退到某节点并重推时发出。
+
+    data = {"node_id": str, "node_kind": str, "mode": str,
+            "cut_index": int, "cache_anchor": int}
+    """
+
+    kind: Literal["turn_rewound"] = "turn_rewound"
+
+
+class RewindRejected(_Msg):
+    """一次 Rewind Op 校验失败被拒时发出（禁 silent fallback）。
+
+    data = {"node_id": str, "reason": str}
+    reason ∈ {unknown_node, no_rewindable_turn, mode_kind_mismatch, turn_suspended}
+    """
+
+    kind: Literal["rewind_rejected"] = "rewind_rejected"
+
+
 Msg = Union[
     TurnStarted,
     AssistantText,
@@ -492,6 +529,9 @@ Msg = Union[
     IndexHookFailed,
     IndexHookAbandoned,
     RebuildSkippedCorrupt,
+    RewindCheckpointRecorded,
+    TurnRewound,
+    RewindRejected,
 ]
 
 

@@ -55,6 +55,7 @@ from taifeng.loop.event import (
     ResourceLimitExceeded,
     SkillDispatched,
     SkillReturned,
+    RewindCheckpointRecorded,
     SkillSpawnRejected,
     SubagentPolicyOverridden,
     ToolBatchDispatched,
@@ -238,6 +239,8 @@ class TurnRunner:
     _next_cache_break_reason: str | None = None
     # G3：最近一次 LLM 调用回流的服务端 request-id（completed 事件携带）
     _last_request_id: str | None = None
+    # turn-rewind：本 runner 是否 root turn（run() 入口判定后写入，门控节点记录/发事件）
+    _is_root: bool = False
 
     # 挂起 id / 时间戳工厂（R1：src 内不取系统时钟 / 随机；业务侧注入，测试可固定）。
     # None → __post_init__ 兜底默认（secrets / time）。
@@ -343,6 +346,8 @@ class TurnRunner:
         # parent_stack 已被 push 过当前 sub skill frame（depth ≥ 1）。该值贯穿
         # 整个 run() 生命周期，最终写入 TurnCompleted / TurnFailed 的 data。
         is_root = not self.call_stack.frames
+        # turn-rewind：只 root turn 记录回访节点 / 发事件（子 turn 节点 v1 不入表）
+        self._is_root = is_root
         await self._emit(
             TurnStarted(
                 data={
@@ -556,12 +561,19 @@ class TurnRunner:
 
         # turn-rewind：记本圈 iteration 回访节点(采样前的 history 长度 = re_reason 截点)。
         # 同一长度供本圈所有 dispatch 节点复用为 re_reason 切点(assistant 消息原子)。
+        # 仅 root turn 入表；子 turn 节点 v1 不可寻址。
         iteration_history_len = len(self.history_buffer)
-        self.rewind_log.record_iteration(
-            iteration_index=iteration,
-            history_len=iteration_history_len,
-            cache_anchor=self.cache_anchor_index,
-        )
+        if self._is_root:
+            cp = self.rewind_log.record_iteration(
+                iteration_index=iteration,
+                history_len=iteration_history_len,
+                cache_anchor=self.cache_anchor_index,
+            )
+            await self._emit(RewindCheckpointRecorded(data={
+                "node_id": cp.node_id, "kind": cp.kind,
+                "iteration_index": cp.iteration_index,
+                "history_len": cp.history_len, "target_id": None,
+            }))
 
         # 取可用 tool 集合（白名单）
         tools = []
@@ -797,18 +809,24 @@ class TurnRunner:
             )
             self.history_buffer.append(fc_item)
             await self.store.append(fc_item)
-            # turn-rewind：记本次派发的 dispatch 回访节点。
+            # turn-rewind：记本次派发的 dispatch 回访节点（仅 root turn）。
             # inner_history_len = fc 追加后长度 = retry_tool 切点(fc 与 fco 之间);
             # history_len 复用本圈 iteration 采样前长度 = re_reason 切点。
-            self.rewind_log.record_dispatch(
-                iteration_index=iteration,
-                iteration_history_len=iteration_history_len,
-                cache_anchor=self.cache_anchor_index,
-                call_id=req.call_id,
-                target_id=req.name,
-                inner_history_len=len(self.history_buffer),
-                args_digest=req.arguments_raw[:200],
-            )
+            if self._is_root:
+                dcp = self.rewind_log.record_dispatch(
+                    iteration_index=iteration,
+                    iteration_history_len=iteration_history_len,
+                    cache_anchor=self.cache_anchor_index,
+                    call_id=req.call_id,
+                    target_id=req.name,
+                    inner_history_len=len(self.history_buffer),
+                    args_digest=req.arguments_raw[:200],
+                )
+                await self._emit(RewindCheckpointRecorded(data={
+                    "node_id": dcp.node_id, "kind": dcp.kind,
+                    "iteration_index": dcp.iteration_index,
+                    "history_len": dcp.history_len, "target_id": dcp.target_id,
+                }))
             if outcome.suspend is not None:
                 # 挂起点：留无 output 的 function_call；不回填，收集 pending。
                 # resume 时由 SuspensionRecord 重导，再补回对应 function_call_output。
