@@ -67,6 +67,7 @@ from taifeng.loop.event import (
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch
 from taifeng.skill.definition import SkillDefinition
+from taifeng.loop.rewind import RewindLog
 from taifeng.skill.dispatch import CallStack, DispatchPolicy
 from taifeng.skill.eligibility import RuntimeCapabilities
 from taifeng.skill.registry import SkillSnapshot
@@ -202,6 +203,9 @@ class TurnRunner:
     total_usage: TokenUsage = field(default_factory=TokenUsage)
     history_buffer: list[ResponseItem] = field(default_factory=list)
     """In-memory 视图，与 store 同步追加。"""
+
+    # turn-rewind：本 turn 执行轨迹的回访节点侧录（只 root turn 的会回写 engine）
+    rewind_log: RewindLog = field(default_factory=RewindLog)
 
     # T3: 已 resolve 的指令列表（engine.run_turn 前 resolve 好传入；按 priority 升序）
     instructions: list[Any] = field(default_factory=list)
@@ -550,6 +554,15 @@ class TurnRunner:
     async def _sample_once(self, iteration: int) -> tuple[str, bool]:
         """一次 LLM 采样 + 工具调度，返回 (本轮 assistant text, 是否有 tool call)。"""
 
+        # turn-rewind：记本圈 iteration 回访节点(采样前的 history 长度 = re_reason 截点)。
+        # 同一长度供本圈所有 dispatch 节点复用为 re_reason 切点(assistant 消息原子)。
+        iteration_history_len = len(self.history_buffer)
+        self.rewind_log.record_iteration(
+            iteration_index=iteration,
+            history_len=iteration_history_len,
+            cache_anchor=self.cache_anchor_index,
+        )
+
         # 取可用 tool 集合（白名单）
         tools = []
         for name in sorted(self.entry_skill.tool_names | {"read_skill", "call_skill"}):
@@ -784,6 +797,18 @@ class TurnRunner:
             )
             self.history_buffer.append(fc_item)
             await self.store.append(fc_item)
+            # turn-rewind：记本次派发的 dispatch 回访节点。
+            # inner_history_len = fc 追加后长度 = retry_tool 切点(fc 与 fco 之间);
+            # history_len 复用本圈 iteration 采样前长度 = re_reason 切点。
+            self.rewind_log.record_dispatch(
+                iteration_index=iteration,
+                iteration_history_len=iteration_history_len,
+                cache_anchor=self.cache_anchor_index,
+                call_id=req.call_id,
+                target_id=req.name,
+                inner_history_len=len(self.history_buffer),
+                args_digest=req.arguments_raw[:200],
+            )
             if outcome.suspend is not None:
                 # 挂起点：留无 output 的 function_call；不回填，收集 pending。
                 # resume 时由 SuspensionRecord 重导，再补回对应 function_call_output。

@@ -59,6 +59,7 @@ from taifeng.loop.submission import (
     UpdateInstructions,
     UserMessage,
 )
+from taifeng.loop.rewind import RewindCheckpoint
 from taifeng.loop.turn import TurnRunner
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import DispatchPolicy
@@ -197,6 +198,8 @@ class AgentEngine:
         # cache anchor 保持 -1：resume 场景下 provider prompt cache 跨进程
         # 不可信任，下一次 turn 的 pre_turn 压缩会重新决定 anchor 位置
         self._cache_anchor_index: int = -1
+        # turn-rewind：最近一次 root turn 的回访节点表（从 runner 回写）
+        self._rewind_checkpoints: list[RewindCheckpoint] = []
         # G-CACHE：cache 统计与 prompt 结构指纹由 engine 持有 → 跨 turn 累积/对比，
         # 使 cache 失效原因（snapshot/tool/system 变更）可被归因而非记为 unknown_drop。
         self._cache_stats = PromptCacheStats()
@@ -281,6 +284,14 @@ class AgentEngine:
     def history_snapshot(self) -> list[ResponseItem]:
         """返回当前 in-memory history 的快照副本（业务侧只读）。"""
         return list(self._history)
+
+    def rewind_nodes(self) -> list[RewindCheckpoint]:
+        """返回最近一次 root turn 的回访节点表（业务侧只读，供 UI 渲染可点节点）。
+
+        节点含 turn_root / iteration / dispatch 三类;业务侧据 node_id 提交
+        ``Rewind`` Op 回退到任一节点。turn 结束随状态回写,新 turn 会刷新本表。
+        """
+        return list(self._rewind_checkpoints)
 
     def estimate_tokens(self) -> int:
         """估算当前 history 的 token 占用 —— 业务侧可据此决定是否 CompactNow。"""
@@ -745,6 +756,8 @@ class AgentEngine:
             # runner 直接改 history_buffer 引用 → 把 runner.history_buffer 倒回 engine
             self._history = list(runner.history_buffer)
             self._cache_anchor_index = runner.cache_anchor_index
+            # turn-rewind：回写本 root turn 的回访节点表(供 rewind_nodes / _handle_rewind)
+            self._rewind_checkpoints = list(runner.rewind_log.checkpoints)
             # G-CACHE：读回本轮末的 prompt 指纹，作为下一轮的对比基线
             self._last_prompt_fingerprint = runner.last_prompt_fingerprint
             # G1c：读回累计压缩次数，跨 turn 持久
@@ -1383,6 +1396,8 @@ class AgentEngine:
         async with self._lock:
             self._history = list(runner.history_buffer)
             self._cache_anchor_index = runner.cache_anchor_index
+            # turn-rewind：回写本 root turn 的回访节点表(供 rewind_nodes / _handle_rewind)
+            self._rewind_checkpoints = list(runner.rewind_log.checkpoints)
 
     # -----------------------------------------------------------------
     # Op handlers (rollback / update_budget / refresh_snapshot)
