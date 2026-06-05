@@ -241,6 +241,8 @@ class TurnRunner:
     _last_request_id: str | None = None
     # turn-rewind：本 runner 是否 root turn（run() 入口判定后写入，门控节点记录/发事件）
     _is_root: bool = False
+    # turn-rewind retry_tool：非 None 时,采样前先补跑该悬空 call(末尾留 fc、无 fco)
+    _seed_pending_call_id: str | None = None
 
     # 挂起 id / 时间戳工厂（R1：src 内不取系统时钟 / 随机；业务侧注入，测试可固定）。
     # None → __post_init__ 兜底默认（secrets / time）。
@@ -384,6 +386,9 @@ class TurnRunner:
                 iterations = 1
                 end_reason = "completed"
             else:
+                # turn-rewind retry_tool：先补跑被保留的悬空 call,再进采样循环。
+                if self._seed_pending_call_id is not None:
+                    await self._complete_seed_call(self._seed_pending_call_id)
                 while iterations < self.max_iterations:
                     self.cancel.raise_if_cancelled()
                     iterations += 1
@@ -876,6 +881,53 @@ class TurnRunner:
                 "script_executors": self.script_executors,
             },
         )
+
+    async def _complete_seed_call(self, call_id: str) -> None:
+        """retry_tool：补跑一个悬空 function_call(history 末尾留 fc、无 fco)→ 追加 fco。
+
+        复用 ``dispatch_batch`` + ``_build_tool_context``(含 ``dispatcher``),故
+        ``call_skill`` 子 skill 也能正确重跑。args 取 history 中该 fc 的当前 arguments
+        (engine 已按 new_args 改写过)。若重跑又挂起(子 skill HITL),照常上抛 ``_BatchSuspend``。
+
+        Raises:
+            RuntimeError: history 中找不到该 call_id 的 function_call(断点不一致)。
+        """
+        # 找末条匹配的 function_call(即被保留的悬空 fc)
+        fc = None
+        for item in self.history_buffer:
+            if item.kind == "function_call" and item.payload.get("call_id") == call_id:
+                fc = item
+        if fc is None:
+            raise RuntimeError(f"seed_call_not_found: {call_id}")
+        name = fc.payload["name"]
+        raw = fc.payload.get("arguments") or "{}"
+        try:
+            args = json.loads(raw)
+        except json.JSONDecodeError:
+            args = {}
+        tool_spec = self.tool_runtime._registry.get(name)  # noqa: SLF001
+        parallel_safe = bool(tool_spec.parallel_safe) if tool_spec else False
+        req = ToolCallRequest(
+            index=0, call_id=call_id, name=name,
+            arguments=args, arguments_raw=raw, parallel_safe=parallel_safe,
+        )
+        outcomes = await dispatch_batch(
+            [req], runtime=self.tool_runtime,
+            ctx_for=lambda cid: self._build_tool_context(cid, 0),
+            hooks=self.hooks, emit=self._emit,
+            semaphore=asyncio.Semaphore(1),
+            thread_id=self.thread_id, submission_id=self.submission_id,
+            entry_skill_id=self.entry_skill.id,
+        )
+        outcome = outcomes[0]
+        if outcome.suspend is not None:
+            raise _BatchSuspend((outcome.suspend,))
+        fco = function_call_output(
+            call_id=call_id, output=outcome.result.output,
+            thread_id=self.thread_id, is_error=outcome.result.is_error,
+        )
+        self.history_buffer.append(fco)
+        await self.store.append(fco)
 
     async def _persist_suspension(self, pending: tuple[Any, ...]) -> Any:
         """把本次挂起落 store 并返回 SuspensionRecord（R5 跨进程 resume 的真相）。

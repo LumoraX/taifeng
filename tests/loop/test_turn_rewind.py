@@ -144,3 +144,137 @@ async def test_rewind_checkpoint_recorded_events_emitted(
     assert len(recorded) == len(engine.rewind_nodes())
     assert len(recorded) == 5
     await pool.close()
+
+
+# ── Slice 4：_handle_rewind 行为(拒绝路径 + re_reason 重推)──────────────
+
+
+async def _drain(engine: taifeng.AgentEngine, sub_id: str) -> tuple[list[str], str, dict]:
+    """消费某 submission 的事件到终结,返回 (kinds, assistant 文本, turn_rewound.data)。"""
+    kinds: list[str] = []
+    text_parts: list[str] = []
+    rewound: dict = {}
+    async for ev in engine.subscribe(sub_id):
+        kinds.append(ev.msg.kind)
+        data = ev.msg.data if hasattr(ev.msg, "data") else {}
+        if ev.msg.kind == "assistant_text" and data.get("delta"):
+            text_parts.append(str(data["delta"]))
+        if ev.msg.kind == "turn_rewound":
+            rewound = dict(data)
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            break
+    return kinds, "".join(text_parts), rewound
+
+
+@pytest.mark.asyncio
+async def test_rewind_unknown_node_rejected(skills_dir: Path, threads_dir: Path) -> None:
+    """node_id 不存在 → rewind_rejected(unknown_node),history 不动。"""
+    client = MockClient(turns=[MockTurn(text="hi")])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_rej", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "go")
+    before = len(engine.history_snapshot())
+
+    sub_id = await engine.submit(Rewind(node_id="does-not-exist"))
+    rejected = None
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind == "rewind_rejected":
+            rejected = dict(ev.msg.data)
+            break
+    assert rejected is not None
+    assert rejected["reason"] == "unknown_node"
+    assert len(engine.history_snapshot()) == before, "拒绝路径不得改 history"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_re_reason_truncates_and_redrives(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """rewind 到 iteration 节点(re_reason)→ 截到该圈采样前 + 重采样,走出新路径。"""
+    client = MockClient(turns=[
+        MockTurn(text="圈1", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="圈2", tool_calls=[
+            {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="原收尾"),
+        # 重推消费:rewind 到 it2 后重采样,直接无工具收尾(证明走了新路径)
+        MockTurn(text="REDRIVE-DONE"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_rr", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "go")
+
+    it2 = next(n for n in engine.rewind_nodes()
+               if n.kind == "iteration" and n.iteration_index == 2)
+    cut = it2.history_len
+
+    sub_id = await engine.submit(Rewind(node_id="it2", mode="re_reason"))
+    kinds, text, rewound = await _drain(engine, sub_id)
+
+    assert "turn_rewound" in kinds
+    assert rewound["node_id"] == "it2"
+    assert rewound["mode"] == "re_reason"
+    assert rewound["cut_index"] == cut
+    assert "REDRIVE-DONE" in text, "重采样应走出新文本"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_mode_kind_mismatch_rejected(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """对 iteration 节点用 retry_tool → mode_kind_mismatch 拒绝。"""
+    client = MockClient(turns=[
+        MockTurn(text="圈1", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="收尾"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_mk", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "go")
+
+    sub_id = await engine.submit(Rewind(node_id="it1", mode="retry_tool"))
+    rejected = None
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind == "rewind_rejected":
+            rejected = dict(ev.msg.data)
+            break
+    assert rejected is not None
+    assert rejected["reason"] == "mode_kind_mismatch"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_dispatch_retry_tool_reruns_and_continues(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """retry_tool：保留 assistant 的 function_call,补跑该工具,再续推到新结果。"""
+    client = MockClient(turns=[
+        MockTurn(text="圈1", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
+        MockTurn(text="原收尾"),
+        # retry_tool 后:seed 补跑 read_skill(不耗 MockTurn),续推消费这条
+        MockTurn(text="RETRY-TOOL-DONE"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_rt", entry_skill_id="code-reviewer")
+    await _run_to_end(engine, "go")
+
+    disp0 = next(n for n in engine.rewind_nodes() if n.kind == "dispatch")
+    sub_id = await engine.submit(Rewind(node_id=disp0.node_id, mode="retry_tool"))
+    kinds, text, rewound = await _drain(engine, sub_id)
+
+    assert rewound["node_id"] == disp0.node_id
+    assert rewound["mode"] == "retry_tool"
+    assert rewound["cut_index"] == disp0.inner_history_len
+    assert "RETRY-TOOL-DONE" in text, "续推应走出新文本"
+    await pool.close()

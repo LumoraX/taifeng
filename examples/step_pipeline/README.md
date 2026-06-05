@@ -44,15 +44,35 @@ PYTHONPATH=src uv run python examples/step_pipeline/server.py
 
 ## 这套范式对你的真实 skill 要改什么
 
-**只加一处**：让每个想独立重试的步骤 skill 能作为入口单独跑 —— 即给它加 **`entry: true`**。
+> ⚠️ **重要更正（替代旧版「纯加法」说法）**：本范式与「`lung-nodule` 自治链一键跑完」
+> **不是叠加，是二选一**。原因是 taifeng 的运行时硬约束——
+> **`entry: true` 与「可被 `call_skill` 派发」在同一个 skill 上互斥**：
+>
+> | 角色 | 要求 | 来源 |
+> | --- | --- | --- |
+> | 被业务编排 / retry 单独拉起（作 session root） | **必须 `entry: true`** | `loop/pool.py:389` `loop/engine.py:127`（非 entry 报 `not entry-eligible`） |
+> | 被自治链 `call_skill` 派发（作子 routine） | **必须 `entry: false`** | `skill/dispatch.py:175`（entry 一律拒 `cannot_call_entry_skill`） |
+>
+> 所以**给步骤 skill 加 `entry: true` 会让 `lung-nodule` 的 `call_skill(step)` 在运行时被拒**，
+> 自治链就断了。采用本范式 = **用业务编排替换自治编排**（不是额外叠加）。
 
-- 你的 lung-nodule 6 个子 skill 现在是 `entry: false` 的 tool-only composite（`tool_names:
-  [request_user_input]`）。加 `entry: true` 后，它们**既能**被 `lung-nodule` 自治链 `call_skill`
-  派发（一键跑完），**又能**被本范式的业务编排单独拉起 / 重试。一个 skill 同时是某 entry 的
-  child + 自身 entry，taifeng 允许。
-- body 基本不用动：你的每个步骤本来就写「你将收到患者数据 + 上一步结论」，天然是「给定输入
-  即可独立跑」的契约。只要保证它**只认传入的 `{患者数据 + 上游结论}`**、不依赖自治链的隐式
-  上下文即可。
+### 你有三条路（按推荐度）
 
-即：**纯加法**——自治模式继续可用，额外获得「业务编排 + 步级重试」的调试模式。把
-`server.py` 里的 `STEPS` 与 `SKILLS_DIR` 换成你的 6 步即可（或用 env 指向你的 skills 目录）。
+**① 只用业务编排（推荐，零核心改动）**——把 6 步都标 `entry: true`，由业务层（`pipeline.py`）
+顺序驱动；不再依赖 `lung-nodule` 的 `call_skill` 自治链。「一键跑完」用 `run_from(0)`
+一次跑到底即可模拟。**换来步级 retry，代价是放弃 `call_skill` 自治链**。
+→ 改动：6 个步骤 skill 各加 `entry: true`；`server.py` 的 `STEPS` / `SKILLS_DIR` 换成你的 6 步。
+
+**② wrapper 双轨（想两种模式都保留时）**——核心步骤 skill 保持 `entry: false`（供
+`lung-nodule` 自治链 `call_skill`）；**另给每步加一个薄 entry 包装** `step_xxx`
+（`entry: true, child_skills: [核心步骤]`），业务编排拉起包装、包装内 `call_skill` 核心步骤。
+两种模式共存。代价：6 个包装 skill + 包装需把输入透传给核心、把核心结论原样回流（多一跳
+LLM 成本）。已实测 `wrapper(entry)→call_skill(core 非 entry) = ALLOW`。
+
+**③ 改核心设计（最重）**——放松 `dispatch.py:175`，允许在白名单内 `call_skill` 一个
+`entry` skill（或加 `callable_as_child` 标志）。让「双重身份」真正成立。**触及 entry 不变量，
+必须走 ADR**（评估对 R1–R5 影响）。非必要不走这条。
+
+> 无论选哪条，**body 基本不用动**：每步本就写「你将收到患者数据 + 上一步结论」，天然是
+> 「给定输入即可独立跑」的契约——只要它**只认传入的 `{患者数据 + 上游结论}`**、不依赖
+> 自治链隐式上下文即可。

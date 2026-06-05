@@ -16,6 +16,7 @@ from taifeng.context.cache_stats import PromptCacheStats
 from taifeng.context.compressor import CompressionOrchestrator
 from taifeng.conversation.models import (
     ResponseItem,
+    function_call,
     function_call_output,
     system_injection,
     user_message,
@@ -40,9 +41,11 @@ from taifeng.loop.event import (
     InstructionUpdateRejected,
     PreTurnHookDenied,
     ResourceLimitExceeded,
+    RewindRejected,
     SuspensionResolved,
     SuspensionResolveRejected,
     TurnFailed,
+    TurnRewound,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
 from taifeng.loop.submission import (
@@ -52,6 +55,7 @@ from taifeng.loop.submission import (
     Op,
     RefreshSnapshot,
     Resume,
+    Rewind,
     Shutdown,
     Submission,
     ThreadRollback,
@@ -544,6 +548,11 @@ class AgentEngine:
                 if isinstance(sub.op, UpdateInstructions):
                     await self._handle_update_instructions(sub.id, sub.op)
                     continue
+                if isinstance(sub.op, Rewind):
+                    # 与 Resume 同理用 create_task：重推会跑完整 turn(采样 + 派发),
+                    # 不阻塞主 run 循环,且给 subscribe(submission_id) 留注册窗口。
+                    asyncio.create_task(self._handle_rewind(sub, cancel))
+                    continue
                 if isinstance(sub.op, Resume):
                     # 与 UserMessage 一致用 create_task 异步派发：让续跑链（可能跨子/根
                     # 多个 turn）不阻塞主 run 循环，且给 subscribe(submission_id) 留出在
@@ -694,6 +703,8 @@ class AgentEngine:
         submission_id: str,
         turn_cancel: CancellationToken,
         resolved_for_turn: list[ResolvedInstruction],
+        *,
+        seed_pending_call_id: str | None = None,
     ) -> None:
         """构造 TurnRunner(基于当前 self._history)→ run → 回写 engine 状态。
 
@@ -745,6 +756,8 @@ class AgentEngine:
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
         )
+        # turn-rewind retry_tool：让 runner 采样前先补跑被保留的悬空 call
+        runner._seed_pending_call_id = seed_pending_call_id  # noqa: SLF001
         try:
             await runner.run()
         finally:
@@ -1400,8 +1413,106 @@ class AgentEngine:
             self._rewind_checkpoints = list(runner.rewind_log.checkpoints)
 
     # -----------------------------------------------------------------
-    # Op handlers (rollback / update_budget / refresh_snapshot)
+    # Op handlers (rewind / rollback / update_budget / refresh_snapshot)
     # -----------------------------------------------------------------
+
+    async def _emit_rewind_rejected(
+        self, submission_id: str, node_id: str, reason: str
+    ) -> None:
+        """rewind 校验失败统一出口(禁 silent fallback,显式发事件)。"""
+        await self._emit(EventMsg(
+            submission_id=submission_id,
+            msg=RewindRejected(data={"node_id": node_id, "reason": reason}),
+        ))
+
+    def _rewrite_seed_args(self, call_id: str, new_args: dict[str, Any]) -> None:
+        """retry_tool new_args：把内存 history 中该 call_id 的 function_call 换成新 args。
+
+        只改内存(自洽 + 供重跑读新参);store 保持 append-only,arg 覆盖经 rewind
+        marker 留痕。调用方已持锁。
+        """
+        import json
+        for i, item in enumerate(self._history):
+            if item.kind == "function_call" and item.payload.get("call_id") == call_id:
+                self._history[i] = function_call(
+                    call_id=call_id, name=item.payload["name"],
+                    arguments=json.dumps(new_args, ensure_ascii=False),
+                    thread_id=self._thread_id,
+                )
+
+    async def _handle_rewind(
+        self, sub: Submission, root_cancel: CancellationToken
+    ) -> None:
+        """回退到 turn 内某回访节点并主动重推(turn-rewind 能力)。
+
+        - re_reason：截到节点采样前 → 重采样(LLM 重新决定下游)。
+        - retry_tool：截到 retry_tool 切点(保留 assistant 的 function_call)→ 补跑
+          该工具(可换 new_args)→ 续推。仅 dispatch 节点。
+
+        actor 模型下提交 Rewind 时上一 turn 已结束(engine 空闲),故"重推" = 截断
+        engine history → 建新 root TurnRunner 重跑。详见设计 spec
+        2026-06-05-addressable-dispatch-rewind。
+        """
+        op = sub.op
+        assert isinstance(op, Rewind)
+
+        # 1. 查 checkpoint(最近一次 root turn 回写的节点表)
+        cp = next(
+            (c for c in self._rewind_checkpoints if c.node_id == op.node_id), None
+        )
+        if cp is None:
+            await self._emit_rewind_rejected(sub.id, op.node_id, "unknown_node")
+            return
+        # 2. mode/kind 相容:retry_tool 仅 dispatch 节点(且有 inner 切点)
+        if op.mode == "retry_tool" and (
+            cp.kind != "dispatch" or cp.inner_history_len is None
+        ):
+            await self._emit_rewind_rejected(sub.id, op.node_id, "mode_kind_mismatch")
+            return
+        # 3. 挂起态守卫:活跃挂起的 turn v1 不支持 rewind(挂起态 rewind 留待后续)
+        if self._find_active_suspension() is not None:
+            await self._emit_rewind_rejected(sub.id, op.node_id, "turn_suspended")
+            return
+
+        # 4. 选截点:retry_tool 用 inner(保 fc);其余用 history_len(re_reason)
+        cut = (
+            cp.inner_history_len
+            if op.mode == "retry_tool" and cp.inner_history_len is not None
+            else cp.history_len
+        )
+
+        # 5. 截断 history + 回退 cache_anchor(锁内;append-only:store 不删,仅内存截)
+        async with self._lock:
+            self._history = self._history[:cut]
+            if self._cache_anchor_index >= cut:
+                self._cache_anchor_index = cut - 1
+            # 5b. retry_tool + new_args:改写悬空 fc 的 arguments(自洽 + 重跑用新参)
+            if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
+                self._rewrite_seed_args(cp.call_id, op.new_args)
+
+        # 6. marker(审计;同 rollback 范式,落 store、不进 history)
+        marker = system_injection(
+            f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
+            thread_id=self._thread_id, source="rewind",
+        )
+        await self._store.append(marker)
+
+        # 7. emit turn_rewound(R3)
+        await self._emit(EventMsg(submission_id=sub.id, msg=TurnRewound(data={
+            "node_id": op.node_id, "node_kind": cp.kind, "mode": op.mode,
+            "cut_index": cut, "cache_anchor": self._cache_anchor_index,
+        })))
+
+        # 8. 主动重推:截断后建新 root TurnRunner;retry_tool 先补跑悬空 call
+        turn_cancel = root_cancel.child(f"sub:{sub.id}")
+        self._pending[sub.id] = _PendingTurn(
+            submission_id=sub.id, cancel=turn_cancel
+        )
+        seed = cp.call_id if op.mode == "retry_tool" else None
+        await self._build_and_run_runner(
+            sub.id, turn_cancel, list(self._last_resolved or []),
+            seed_pending_call_id=seed,
+        )
 
     async def _handle_rollback(self, submission_id: str, num_turns: int) -> None:
         """回滚最近 N 轮对话。
