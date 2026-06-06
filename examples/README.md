@@ -41,6 +41,16 @@
 
 运行：`PYTHONPATH=src uv run python examples/turn_rewind/demo.py`
 
+### `multi_expert_consult/` —— 并发多专家 + 错峰 HITL + 联合会诊聚合（纯 MockClient 无需 API key）
+
+| 文件 | 演示内容 |
+| --- | --- |
+| [multi_expert_consult/demo.py](multi_expert_consult/demo.py) | detached-spawn 完整闭环：orchestrator 一个 turn 内 `spawn_skill` 并发发起多个专家 + `await_skills` 登记 join-barrier；各专家在独立 child thread 上**错峰 HITL**（cardio 先恢复完成、metabolic 过一会才恢复）；两句柄全终态 → join-barrier 自动起 `joint-consult` 聚合 → 最终会诊报告。打印完整事件时间线 |
+
+> 专家 / 聚合器全程 `entry: false`（spawn 派发要求 target 非 entry，同 call_skill）。契约见 [docs/architecture/capabilities/detached-spawn.md](../docs/architecture/capabilities/detached-spawn.md)，决策见 [ADR 0015](../docs/decisions/0015-detached-skill-spawn.md)。与 [concurrent_fanout/](concurrent_fanout/)（批量同步收齐）、[step_pipeline/](step_pipeline/)（业务确定性编排）互为三种并发姿态。
+
+运行：`PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py`
+
 ### `real_llm/` —— 真实 LLM 验证，需要 API key
 
 | 文件 | 演示内容 |
