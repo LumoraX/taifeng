@@ -203,8 +203,15 @@ class OpenAICompatSession:
                             yield ev
             except httpx.TimeoutException as e:
                 raise TransientNetworkError(f"timeout: {e}") from e
-            except httpx.NetworkError as e:
-                raise TransientNetworkError(f"network: {e}") from e
+            except httpx.TransportError as e:
+                # 传输层失败统一归瞬时网络错（可重试 / 可挂起恢复）。涵盖 ``NetworkError``
+                # （连接/读写/关闭）**与 ``ProtocolError``**——尤其 ``RemoteProtocolError``
+                # （“Server disconnected without sending a response”，代理/网关流中途断连，
+                # 本仓库实测高发）。此前只 catch ``NetworkError``，而 RemoteProtocolError 属
+                # ``ProtocolError``（≠ NetworkError），会裸逃 → classify_failure 落到 unknown
+                # 硬失败；归到 TransientNetworkError 后 kind=transient_network → retry_async
+                # 退避重试命中，且 retryable=True 触发 turn SYSTEM_RETRY 挂起恢复。
+                raise TransientNetworkError(f"transport: {e}") from e
 
         # finish_reason 异常终止保护：content_filter 表示响应被模型/网关安全策略主动拦截，
         # 返回空 content + 0 token。旧实现完全丢弃 finish_reason，把「被拦截」伪造成

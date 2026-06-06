@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from taifeng.llm.errors import TransientNetworkError
 from taifeng.llm.providers import OpenAICompatClient, OpenAICompatSession
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
@@ -67,6 +68,52 @@ async def test_openai_compat_streams_text() -> None:
     assert usage["input_tokens"] == 10
     assert usage["output_tokens"] == 5
     assert usage["cache_read_input_tokens"] == 8
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_remote_protocol_error_is_transient() -> None:
+    """流中途服务器断连（httpx.RemoteProtocolError）→ 归 TransientNetworkError（可重试）。
+
+    回归：RemoteProtocolError 属 ProtocolError（≠ NetworkError），旧实现只 catch
+    NetworkError → 裸逃 → classify_failure 落 unknown 硬失败（实测代理高发）。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 模拟“Server disconnected without sending a response”
+        raise httpx.RemoteProtocolError(
+            "Server disconnected without sending a response.", request=request
+        )
+
+    transport = httpx.MockTransport(handler)
+    orig_async_client = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return orig_async_client(*args, **kwargs)
+
+    httpx.AsyncClient = patched  # type: ignore[misc]
+    try:
+        client = OpenAICompatClient(
+            base_url="https://api.example.com/v1",
+            api_key="sk-test",
+            model="gpt-4o-mini",
+        )
+        sess = client.session(cancel=CancellationToken())
+        with pytest.raises(TransientNetworkError) as ei:
+            async with sess as s:
+                req = ApiRequest(
+                    model="gpt-4o-mini",
+                    messages=[ApiMessage(role="user", content="hi")],
+                )
+                async for _ev in s.stream(req):
+                    pass
+    finally:
+        httpx.AsyncClient = orig_async_client  # type: ignore[misc]
+
+    # 可重试 + 稳定分类（供 retry_async 退避重试 / turn SYSTEM_RETRY 挂起恢复）
+    assert ei.value.retryable is True
+    assert ei.value.kind == "transient_network"
+    assert ei.value.failure_class == "provider_transport"
 
 
 # === 空 key 鉴权头处理（本地 Ollama / LM Studio 等无需 key 的端点）===========
