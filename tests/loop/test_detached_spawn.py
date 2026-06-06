@@ -30,3 +30,17 @@ def test_registry_all_terminal() -> None:
     assert not reg.all_terminal(["a", "b"])
     reg.set_result("b", status="error", result="boom")
     assert reg.all_terminal(["a", "b"])  # done + error 都算终态
+
+
+def test_spawn_event_kinds() -> None:
+    from taifeng.loop.event import (
+        JoinBarrierFired, JoinBarrierRegistered, SpawnCancelled,
+        SpawnCompleted, SpawnFailed, SpawnStarted, SpawnSuspended,
+    )
+    assert SpawnStarted().kind == "spawn_started"
+    assert SpawnSuspended().kind == "spawn_suspended"
+    assert SpawnCompleted().kind == "spawn_completed"
+    assert SpawnFailed().kind == "spawn_failed"
+    assert SpawnCancelled().kind == "spawn_cancelled"
+    assert JoinBarrierRegistered().kind == "join_barrier_registered"
+    assert JoinBarrierFired().kind == "join_barrier_fired"

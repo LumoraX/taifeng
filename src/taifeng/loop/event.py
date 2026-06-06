@@ -61,6 +61,14 @@ MsgKind = Literal[
     "rewind_checkpoint_recorded",
     "turn_rewound",
     "rewind_rejected",
+    # detached-spawn 生命周期
+    "spawn_started",
+    "spawn_suspended",
+    "spawn_completed",
+    "spawn_failed",
+    "spawn_cancelled",
+    "join_barrier_registered",
+    "join_barrier_fired",
 ]
 
 
@@ -483,6 +491,51 @@ class RewindRejected(_Msg):
     kind: Literal["rewind_rejected"] = "rewind_rejected"
 
 
+# ── detached-spawn：分离式 skill spawn + join-barrier 生命周期事件（R3 可观测）──
+
+
+class SpawnStarted(_Msg):
+    """data = {handle_id, skill_id, child_thread_id}"""
+
+    kind: Literal["spawn_started"] = "spawn_started"
+
+
+class SpawnSuspended(_Msg):
+    """data = {handle_id, thread_id, pending}(= 该 child thread 的挂起)"""
+
+    kind: Literal["spawn_suspended"] = "spawn_suspended"
+
+
+class SpawnCompleted(_Msg):
+    """data = {handle_id, result}"""
+
+    kind: Literal["spawn_completed"] = "spawn_completed"
+
+
+class SpawnFailed(_Msg):
+    """data = {handle_id, error}"""
+
+    kind: Literal["spawn_failed"] = "spawn_failed"
+
+
+class SpawnCancelled(_Msg):
+    """data = {handle_id}"""
+
+    kind: Literal["spawn_cancelled"] = "spawn_cancelled"
+
+
+class JoinBarrierRegistered(_Msg):
+    """data = {barrier_id, handle_ids, then_skill_id}"""
+
+    kind: Literal["join_barrier_registered"] = "join_barrier_registered"
+
+
+class JoinBarrierFired(_Msg):
+    """data = {barrier_id, then_thread_id}"""
+
+    kind: Literal["join_barrier_fired"] = "join_barrier_fired"
+
+
 Msg = Union[
     TurnStarted,
     AssistantText,
@@ -532,6 +585,13 @@ Msg = Union[
     RewindCheckpointRecorded,
     TurnRewound,
     RewindRejected,
+    SpawnStarted,
+    SpawnSuspended,
+    SpawnCompleted,
+    SpawnFailed,
+    SpawnCancelled,
+    JoinBarrierRegistered,
+    JoinBarrierFired,
 ]
 
 
