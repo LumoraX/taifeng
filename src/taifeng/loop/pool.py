@@ -445,6 +445,14 @@ class EnginePool:
             self._engines[session_id] = engine
             self._engine_tasks[session_id] = task
 
+            # detached-spawn 冷恢复:resume 已有 thread 时,从 parent thread 持久项
+            # 重建 spawn 句柄表 / barrier / fired 守卫集(R5 可 resume)。仅 resume 路径
+            # 走此重建(新建 thread 无 prior spawn),恰好一次。重建内部会 _check_barriers
+            # 补触发未 fired 的全终态 barrier;已 fired 的因守卫集存在被幂等跳过。
+            # 放在 run() 任务起后:_root_cancel 已就绪,补触发的聚合 turn 可派生子 token。
+            if resume_thread_id is not None:
+                await engine._rebuild_spawn_state_from_history()  # noqa: SLF001
+
             # engine-resume-by-thread-id: resume 路径 emit ThreadResumed
             # 在 engine.run 启动 task 之后投递，让订阅者（业务可在 pool.get_or_create
             # 返回后立刻 subscribe_all）能消费。订阅者尚未 attach 的事件会丢

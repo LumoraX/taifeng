@@ -721,3 +721,84 @@ async def test_llm_spawn_via_tools(spawn_orch_skills, threads_dir):
     assert results == {"结论A", "结论B"}
     task.cancel()
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_cold_recovery_rebuilds_handles_and_barrier(skills_dir, threads_dir):
+    """冷恢复:engine 释放后同 session 重载,从 parent thread 持久项重建句柄表。
+
+    重载后新 engine 扫描 parent thread 的 spawn 锚 → 重建句柄,再据各子 thread
+    的终态(done/suspended/中断)推断状态。两个已 done 的 spawn 重载后仍判 done。
+    """
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="A"), MockTurn(text="B")],
+        "code-reviewer": [MockTurn(text="会诊")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[])
+    engine = await pool.get_or_create(
+        session_id="cold1", entry_skill_id="code-reviewer")
+    a = (await engine.spawn_skill(
+        skill_id="style-checker", args={}, reason="x"))["handle_id"]
+    b = (await engine.spawn_skill(
+        skill_id="style-checker", args={}, reason="x"))["handle_id"]
+    assert await _wait(
+        lambda: engine.spawn_status([a, b]).get(a, {}).get("status") == "done"
+        and engine.spawn_status([b])[b]["status"] == "done")
+    parent_tid = engine.thread_id
+
+    # 释放 engine(模拟冷态)——两 spawn 已 done → has_live_spawns()==False → 正常释放
+    await pool.release("cold1")
+
+    # 重新加载同 session → 新 engine 从 store 重建(走 resume_thread_id 物化历史)
+    engine2 = await pool.get_or_create(
+        session_id="cold1", entry_skill_id="code-reviewer",
+        resume_thread_id=parent_tid)
+    assert engine2 is not engine  # 确实是新实例,而非 cache 命中
+    st = engine2.spawn_status([a, b])
+    assert st[a]["status"] == "done" and st[b]["status"] == "done"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_cold_recovery_barrier_idempotent(skills_dir, threads_dir):
+    """冷恢复幂等:已触发的 barrier 重载后不二次触发(从 fired 标记重建守卫集)。"""
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="A"), MockTurn(text="B")],
+        "code-reviewer": [MockTurn(text="会诊1"), MockTurn(text="会诊2")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[])
+    engine = await pool.get_or_create(
+        session_id="cold2", entry_skill_id="code-reviewer")
+    a = (await engine.spawn_skill(
+        skill_id="style-checker", args={}, reason="x"))["handle_id"]
+    b = (await engine.spawn_skill(
+        skill_id="style-checker", args={}, reason="x"))["handle_id"]
+    assert await _wait(
+        lambda: engine.spawn_status([a, b]).get(a, {}).get("status") == "done"
+        and engine.spawn_status([b])[b]["status"] == "done")
+    res = await engine.set_join_barrier([a, b], then_skill_id="code-reviewer")
+    barrier_id = res["barrier_id"]
+    # 等 barrier 触发(落 join_barrier_fired 标记)
+    assert await _wait(lambda: barrier_id in engine._fired_barriers)  # noqa: SLF001
+    parent_tid = engine.thread_id
+
+    await pool.release("cold2")
+
+    # 重载:从 join_barrier_fired 标记重建 _fired_barriers → 不二次触发
+    engine2 = await pool.get_or_create(
+        session_id="cold2", entry_skill_id="code-reviewer",
+        resume_thread_id=parent_tid)
+    assert barrier_id in engine2._fired_barriers  # noqa: SLF001
+    # 重载后 parent thread 不应出现第二条 join_barrier_fired 标记
+    items = [it async for it in await pool.store.load_thread(parent_tid)]
+    fired_markers = [
+        it for it in items
+        if it.kind == "join_barrier_fired"
+        and it.payload.get("barrier_id") == barrier_id
+    ]
+    assert len(fired_markers) == 1
+    await pool.close()

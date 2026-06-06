@@ -1471,6 +1471,95 @@ class AgentEngine:
         ))
 
     # -----------------------------------------------------------------
+    # detached-spawn 冷恢复:从 parent thread 持久项重建句柄表 + barrier + 守卫集
+    # -----------------------------------------------------------------
+
+    async def _rebuild_spawn_state_from_history(self) -> None:
+        """冷恢复:扫描已物化的 parent thread 历史,重建 spawn 句柄/barrier/守卫集。
+
+        engine 释放后同 session 重载时,内存中的 ``_spawn_handles`` / ``_fired_barriers``
+        全空——但 parent thread 的 JSONL 里留有 spawn / join_barrier / join_barrier_fired
+        三类锚。本方法据此重建运行态(R5 可 resume):
+
+          1. ``spawn`` 锚 → ``register`` 句柄,再 load 子 thread 推断终态:
+             - 子 thread 有活跃挂起(``_find_active_suspension_in``)→ suspended
+             - 否则有 assistant_message → done(result = 最后一条 assistant 文本)
+             - 否则(无终态标记,跑到一半被中断)→ 保持 running(best-effort,不崩)
+          2. ``join_barrier`` 锚 → 重建 ``JoinBarrier`` 进 barriers 表
+          3. ``join_barrier_fired`` 锚 → 把 barrier_id 加入 ``_fired_barriers`` 守卫集
+             (幂等:已触发过的 barrier 重载后不二次起聚合 turn)
+
+        重建后调一次 ``_check_barriers``:某 barrier 全终态却尚未触发(进程在触发前
+        崩溃)→ 此刻补触发;已 fired 的 barrier 因守卫集存在被跳过(no-op)。
+
+        仅在 engine 持有 prior history(resume 场景)时由 pool 调用,且每次重载恰好一次。
+        """
+        # 扫一遍 parent history,按 kind 分类处理三类锚
+        for item in list(self._history):
+            if item.kind == "spawn":
+                handle_id = item.payload["handle_id"]
+                skill_id = item.payload["skill_id"]
+                child_thread_id = item.payload["child_thread_id"]
+                # 重复 register 是安全的(同 id 覆盖),但正常每个 handle 只一条 spawn 锚
+                self._spawn_handles.register(
+                    handle_id=handle_id,
+                    skill_id=skill_id,
+                    child_thread_id=child_thread_id,
+                )
+                await self._infer_spawn_status_from_child(
+                    handle_id, child_thread_id
+                )
+            elif item.kind == "join_barrier":
+                barrier = JoinBarrier(
+                    barrier_id=item.payload["barrier_id"],
+                    handle_ids=tuple(item.payload["handle_ids"]),
+                    then_skill_id=item.payload["then_skill_id"],
+                    then_args_template=item.payload.get("then_args_template"),
+                )
+                self._spawn_handles.barriers[barrier.barrier_id] = barrier
+            elif item.kind == "join_barrier_fired":
+                # 幂等守卫集重建:已触发的 barrier 重载后不再二次触发聚合 turn
+                self._fired_barriers.add(item.payload["barrier_id"])
+
+        # 重建后补触发:全终态但尚未 fired 的 barrier 此刻起聚合 turn;
+        # 已 fired 的因守卫集存在被 _check_barriers 跳过(幂等 no-op)。
+        await self._check_barriers()
+
+    async def _infer_spawn_status_from_child(
+        self, handle_id: str, child_thread_id: str
+    ) -> None:
+        """据子 thread 的持久态推断单个 spawn 句柄的终态,best-effort 回写句柄。
+
+        分类(与 _drive_spawn/_finalize_spawn 的终态语义对齐):
+          - 活跃挂起记录 → suspended(可后续 resume)
+          - 无挂起 + 有 assistant_message → done(result = 最后一条 assistant 文本)
+          - 既无挂起也无 assistant_message → 跑到一半被中断 → 保持 register 的 running
+            (v1 best-effort:不臆断为 error,留 running 表"需重跑";绝不崩)
+
+        Args:
+            handle_id: 已 register 的句柄 id。
+            child_thread_id: 该句柄对应的子 thread id。
+        """
+        items = await self._load_thread_items(child_thread_id)
+        # 优先判挂起:活跃(未被 resolved-marker 核销)的挂起记录 → suspended
+        if self._find_active_suspension_in(items) is not None:
+            self._spawn_handles.set_result(
+                handle_id, status="suspended", result=None
+            )
+            return
+        # 无挂起:找最后一条 assistant_message 作为完成结果
+        last_text: str | None = None
+        for it in items:
+            if it.kind == "assistant_message":
+                last_text = it.payload.get("text")
+        if last_text is not None:
+            self._spawn_handles.set_result(
+                handle_id, status="done", result=last_text
+            )
+            return
+        # 既无挂起也无 assistant_message → 中断态,保持 running(best-effort,不回写)
+
+    # -----------------------------------------------------------------
     # Resume：续跑挂起的 turn（配对 resolutions → 补齐 history gap → 续采样）
     # -----------------------------------------------------------------
 
