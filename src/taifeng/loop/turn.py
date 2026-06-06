@@ -222,6 +222,10 @@ class TurnRunner:
     max_session_tokens: int | None = None
     # K3：长期记忆 swap 接口（engine 注入）；None=无内存层级（默认，行为不变）。
     memory_store: Any = None  # MemoryStore | None
+    # detached-spawn：spawn 协调器（engine 注入 self）；让 spawn_skill / await_skills /
+    # join_skill / kill_skill 四工具经 ctx.extras['spawn_coordinator'] 拿到 engine 的
+    # spawn API。None=无 engine 上下文（裸 TurnRunner 单测），工具返回 spawn_unavailable。
+    spawn_coordinator: Any = None  # AgentEngine | None
     # 本 turn page-in 的记忆文本（run 开始 prefetch 一次，注入每轮 prompt 尾部）
     _prefetched_memory: str = ""
 
@@ -879,6 +883,8 @@ class TurnRunner:
                 "turn_index": self.turn_index or iteration,
                 # === run_script 工具按 language 查 executor ===
                 "script_executors": self.script_executors,
+                # === detached-spawn 四工具据此拿到 engine 的 spawn API ===
+                "spawn_coordinator": self.spawn_coordinator,
             },
         )
 

@@ -599,3 +599,125 @@ async def test_join_barrier_with_failed_expert(expert_skills, threads_dir):
     assert payload[b]["status"] == "done"
     task.cancel()
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 9: LLM 入口 —— spawn_skill / await_skills / join_skill / kill_skill 四工具。
+#         LLM 在一个 turn 内调用工具发起 detached spawn，工具转发到 engine spawn API。
+# ---------------------------------------------------------------------------
+
+# spawn-orch：编排型 entry skill，child_skills 含 style-checker，
+# tool_names 声明 4 个 spawn 工具（业务侧以 extra_tools 注入）。
+_SPAWN_ORCH_SKILL = """---
+name: spawn-orch
+description: 分离式编排器
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [style-checker]
+tool_names: [spawn_skill, await_skills, join_skill, kill_skill]
+max_call_depth: 3
+---
+# 分离式编排器 SPAWN_ORCH_MARK
+你是编排器，按需分离发起子 skill。
+"""
+
+_SPAWN_ORCH_CHILD = """---
+name: style-checker
+description: 代码风格审查
+version: 1.0.0
+type: atomic
+---
+# 风格审查
+按规范审查 diff。
+"""
+
+
+@pytest.fixture
+def spawn_orch_skills(tmp_path):
+    """spawn-orch（entry）+ style-checker（atomic）双 skill 目录。"""
+    skills = tmp_path / "orch_skills"
+    (skills / "spawn-orch").mkdir(parents=True)
+    (skills / "spawn-orch" / "SKILL.md").write_text(
+        _SPAWN_ORCH_SKILL, encoding="utf-8")
+    (skills / "style-checker").mkdir(parents=True)
+    (skills / "style-checker" / "SKILL.md").write_text(
+        _SPAWN_ORCH_CHILD, encoding="utf-8")
+    return skills
+
+
+@pytest.mark.asyncio
+async def test_llm_spawn_via_tools(spawn_orch_skills, threads_dir):
+    """LLM 在 turn 内连发两个 spawn_skill tool_call → 两个 detached spawn 起飞并跑完。
+
+    orchestrator 首 turn 吐两个 spawn_skill 调用、次 turn 收尾；工具 handler 经
+    ctx.extras['spawn_coordinator'] 转发到 engine.spawn_skill。断言：看到两条
+    spawn_started 事件，且两个 spawn 句柄最终都到达 done。
+    """
+    from taifeng.tool.builtins.spawn_skill import (
+        make_await_skills_tool,
+        make_join_skill_tool,
+        make_kill_skill_tool,
+        make_spawn_skill_tool,
+    )
+
+    client = RoutingMockClient(routes={
+        # orchestrator：首 turn 两个 spawn_skill，次 turn 收尾文本
+        "SPAWN_ORCH_MARK": [
+            MockTurn(text="发起两个并发分析", tool_calls=[
+                {"id": "sp_call_1", "name": "spawn_skill",
+                 "arguments":
+                    '{"skill_id":"style-checker","reason":"a","args":{}}'},
+                {"id": "sp_call_2", "name": "spawn_skill",
+                 "arguments":
+                    '{"skill_id":"style-checker","reason":"b","args":{}}'},
+            ]),
+            MockTurn(text="已发起，编排结束"),
+        ],
+        # 两个子 spawn 各跑出一条结论
+        "style-checker": [MockTurn(text="结论A"), MockTurn(text="结论B")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=spawn_orch_skills, threads_dir=threads_dir,
+        model_client=client, compressors=[],
+        extra_tools=[
+            make_spawn_skill_tool(),
+            make_await_skills_tool(),
+            make_join_skill_tool(),
+            make_kill_skill_tool(),
+        ])
+    engine = await pool.get_or_create(
+        session_id="task9", entry_skill_id="spawn-orch")
+
+    spawn_started: list[dict] = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind == "spawn_started":
+                spawn_started.append(dict(ev.msg.data))
+
+    task = asyncio.create_task(watch())
+    sub_id = await engine.submit(taifeng.UserMessage(text="分析这段代码"))
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            assert ev.msg.kind == "turn_completed"
+            break
+
+    # 两条 spawn_started 事件（LLM 连发两个 spawn_skill 工具调用）
+    assert await _wait(lambda: len(spawn_started) == 2)
+    handle_ids = [d["handle_id"] for d in spawn_started]
+    assert len(handle_ids) == 2
+    # 两个 spawn 最终都 done
+    assert await _wait(
+        lambda: all(
+            engine.spawn_status(handle_ids)[h]["status"] == "done"
+            for h in handle_ids
+        )
+    )
+    results = {
+        engine.spawn_status([h])[h]["result"] for h in handle_ids
+    }
+    assert results == {"结论A", "结论B"}
+    task.cancel()
+    await pool.close()

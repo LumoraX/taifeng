@@ -789,6 +789,9 @@ class AgentEngine:
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
+            # detached-spawn：注入自身作 spawn 协调器 → spawn_skill/await_skills/
+            # join_skill/kill_skill 四工具经 ctx.extras['spawn_coordinator'] 转发
+            spawn_coordinator=self,
         )
         # turn-rewind retry_tool：让 runner 采样前先补跑被保留的悬空 call
         runner._seed_pending_call_id = seed_pending_call_id  # noqa: SLF001
@@ -991,6 +994,8 @@ class AgentEngine:
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
             history_buffer=buffer,
+            # detached-spawn：spawned 子 runner 也注入协调器 → 子 skill 可继续 spawn
+            spawn_coordinator=self,
         )
 
     async def _drive_spawn(
