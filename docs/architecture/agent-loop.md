@@ -432,6 +432,91 @@ Rewind(node_id, mode, new_args?)
 
 R2：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`reason="rewind"`），不计 `unexpected_cache_breaks`。
 
+## 分离式 spawn + join-barrier（detached-spawn 契约）
+
+在一次 turn 内发起**各自独立 HITL、各自独立完成**的并发专家 sub-skill，并在全部专家到达终态后自动触发一次聚合 skill turn，全程无 parked 父 turn。详见 [detached-spawn 契约](capabilities/detached-spawn.md) 与 ADR 0015。
+
+### 数据流
+
+```
+业务 / LLM 工具 spawn_skill(skill_id, args, reason)
+  → DispatchPolicy.check（白名单/深度/环/cannot_call_entry → ValueError）
+  → K1 SpawnSlotRegistry.reserve（超限 → SpawnLimitError）
+  → 建 child thread + detached asyncio task（cancel = root_cancel.child("spawn:xxx")）
+  → 追加 spawn ResponseItem 到父 thread（R5）
+  → emit spawn_started{handle_id, skill_id, child_thread_id}
+  → 立即返回 {handle_id, child_thread_id}（非阻塞）
+  → 父 turn 继续或结束
+
+child task 运行（独立 TurnRunner @ child thread）：
+  → 正常完成  → _finalize_spawn → emit spawn_completed
+              → _check_barriers（每次终态均检查）
+  → HITL 挂起 → 挂起 record 落 child thread → emit spawn_suspended{handle_id, thread_id, pending}
+              → task 退栈，K1 slot 释放（suspended 不占并发额度）
+  → 错误      → emit spawn_failed
+  → 取消      → emit spawn_cancelled
+
+Resume(thread_id=<child_thread_id>, resolutions=...)
+  → engine 先查 SpawnHandleRegistry：命中挂起态 → SpawnDriver.resume_spawn（专用路径）
+  → SuspensionResolver 全量 resume（禁部分 resume）
+  → _build_child_runner（call_stack 为空 → 独立根 turn）→ 续跑
+  → 终态 → _finalize_spawn → _check_barriers
+  → 再挂起 → 句柄重标 suspended，可再 Resume（多轮 HITL）
+
+join-barrier（全终态触发）：
+  set_join_barrier(handle_ids=[A,B,C], then_skill_id="joint-review")
+    → 校验每个 handle 已知 + then_skill_id 存在于 snapshot
+    → 追加 join_barrier ResponseItem 到父 thread（R5）
+    → emit join_barrier_registered
+
+每次 _check_barriers：
+  若全部 handle 终态 + 未 fired → 聚合 args = {hid: {status, result}} for ALL handles
+  → _build_child_runner（call_stack 为空，then_skill_id 无 entry 门控）
+  → 追加 join_barrier_fired 标记（幂等锚）
+  → emit join_barrier_fired{barrier_id, then_thread_id}
+```
+
+### engine keepalive 生命周期（引用计数）
+
+`has_live_spawns()` True（有 running / suspended 句柄）时：
+- `pool.release(session_id)`（非 force）**空操作**，engine 保持缓存运行
+- 父 turn 结束不触发释放
+
+只有以下情形才释放：
+- `pool.close()`：无条件拆除，级联取消全部 detached child
+- `pool.release(force=True)`：强制释放
+
+### 4 个 LLM 工具（`extra_tools=` opt-in）
+
+通过 `ctx.extras["spawn_coordinator"]`（engine 在每次 TurnRunner 构建时注入自身）接入 engine，均 `parallel_safe=True`：
+
+| 工具名 | 对应 API | 说明 |
+| --- | --- | --- |
+| `spawn_skill` | `engine.spawn_skill(skill_id, args, reason)` | 分离发起，立即返回 `{handle_id, child_thread_id}` |
+| `await_skills` | `engine.set_join_barrier(handle_ids, then_skill_id, then_args_template)` | 登记 join-barrier，返回 `{barrier_id}` |
+| `join_skill` | `engine.spawn_status(handle_ids)` | 非阻塞读各句柄当前 status+result |
+| `kill_skill` | `engine.kill_spawn(handle_id)` | R4：杀单个，兄弟不受影响 |
+
+**注**：detached-spawn 能力**无新 Op**——发起 / 查询 / 取消全部通过 LLM 工具或业务直调 engine API 完成，不走 Submission 队列（与 turn 无关的 out-of-band 操作）。
+
+### Resume child-thread 路由
+
+`Resume(thread_id=<child_thread_id>)` 在 engine 分发时：
+
+1. **先查 `SpawnHandleRegistry`**：命中 suspended 句柄 → `SpawnDriver.resume_spawn`（专用路径，不走父链）
+2. **未命中** → 走原有 `_handle_resume` / `_handle_child_resume`（call_skill 嵌套挂起续跑链）
+
+两条路径**严格不重叠**：detached spawn 用专用路径，call_skill 嵌套挂起用父链。
+
+### K1 配额语义（nuance）
+
+| 旋钮 | 维度 | suspended 是否占用 |
+| --- | --- | --- |
+| `max_concurrent_spawns` | 并发（in-flight runner） | **否**——runner 退栈即释放 slot |
+| `max_total_spawns` | 生命周期累计（单调） | 是（每次 spawn 调用递增，不回收） |
+
+结论：HITL 等待期不消耗并发额度，可支持大量错峰 HITL 并发场景。
+
 ## turn 的终止结局：含 suspended（suspend-resume）
 
 `run_turn` 现有四种 `end_reason`（写进 `TurnCompleted.data["end_reason"]`，业务侧据此路由）：

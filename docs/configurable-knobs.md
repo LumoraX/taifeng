@@ -29,8 +29,8 @@
 
 | 参数 | 默认值 | 内核维度 | 说明 | 对标 |
 | --- | --- | --- | --- | --- |
-| **`max_concurrent_spawns`** | `16` | K1 广度准入 | 单 engine 内并发在飞子 skill（spawn）的上限。防 fork-bomb（深度有界但广度无界）。超限时**不派发**——内核把 `SpawnLimitError` 转成 `SkillSpawnRejected` **事件**（业务订阅该事件感知，不是捕异常）+ 该 call_skill 返回 `ToolResult.error` | codex `agent/registry.rs::reserve_spawn_slot` |
-| **`max_total_spawns`** | `1000` | K1 广度准入 | 单 engine 生命周期内累计 spawn 上限（单调，兜底 runaway 循环），与并发上限独立 | codex 同上 |
+| **`max_concurrent_spawns`** | `16` | K1 广度准入 | 单 engine 内并发**在飞**（running）detached spawn 的上限。防 fork-bomb。超限时内核把 `SpawnLimitError` 转成 `SkillSpawnRejected` **事件** + `ToolResult.error`。⚠️ **nuance**：只统计 `runner.run()` in-flight 的 spawn；HITL 挂起的 spawn **退栈即释放 slot**（suspended 不计并发），resume 时重新占用——HITL 等待期不消耗并发额度。详见 [detached-spawn 契约](architecture/capabilities/detached-spawn.md) §K1 | codex `agent/registry.rs::reserve_spawn_slot` |
+| **`max_total_spawns`** | `1000` | K1 广度准入 | 单 engine 生命周期内累计 spawn 上限（单调递增，不回收；兜底 runaway 循环），与并发上限独立 | codex 同上 |
 | **`max_session_tokens`** | `None` | K2 资源强制 | 会话累计 token 硬天花板（OOM-killer）。`None`=不强制（只告警）。设值后：跨 turn 累计触顶 → pre-turn 拒新 turn（`turn_refused`）；turn 内触顶且有后续 tool call → `ResourceLimitExceeded(turn_aborted)` 事件 + 停采样 | codex `UsageLimitReached` |
 | **`memory_store`** | `None` | K3 内存层级 | `MemoryStore` 协议实现（长期记忆 swap/缺页接口）：`prefetch` 换入注入 prompt 尾部 / `writeback` 脏页写回 / `on_pre_evict` 换出前抢救 digest / `on_session_end` teardown。`None`=无内存层级（=`NullMemoryStore`）。全 best-effort（钩子异常不打断 turn）。后端（向量库/KV/RAG）是 **userspace**，业务自接。协议见 `src/taifeng/context/memory.py` | hermes `memory_provider.py`（剔业务字段） |
 | **`submission_queue_size`** | `256` | K4 入站流控 | 入站 submission 队列 maxsize（bounded backpressure）。满则 `submit()` 在 `put` 处 await（业务侧自然阻塞），不丢提交。与 `event_queue_size`（出站）成对 | codex bounded 入站队列 |
@@ -188,6 +188,21 @@ engine.usage_ratio()           # 占 context_window 的比例 (0.0~1.0+)
 engine.instructions_snapshot() # list[ResolvedInstruction] 副本（按 priority 升序，frozen）
 engine.events_dropped          # K4：出站事件累计丢弃数（慢消费者自检漏事件；lossy-but-accounted）
 engine.introspect()            # K6：/proc 式只读快照（见下）
+
+# ── detached-spawn API（业务直调，详见 detached-spawn 契约 + ADR 0015）──────────
+engine.spawn_skill(            # 分离发起：立即返回 {handle_id, child_thread_id}；门控：未知/非白名单/超限 → raise
+    *, skill_id, args, reason  #   reason 必填；gates: unknown_skill(ValueError) / dispatch_rejected(ValueError) / SpawnLimitError
+)
+engine.set_join_barrier(       # 注册 join-barrier：全终态自动触发聚合；返回 {barrier_id}
+    handle_ids,                #   每个 handle 必须已知；then_skill_id 必须在 snapshot 存在（不校验 entry 资格）
+    then_skill_id,
+    then_args_template=None    #   None → 聚合 args = {hid: {status, result}} for ALL handles（含 failed/cancelled）
+)
+engine.spawn_status(           # 非阻塞读各句柄状态；未知 handle_id → {status:"unknown",result:None}（不 raise）
+    handle_ids,                #   返回 {hid: {status, result}}
+)
+engine.kill_spawn(handle_id)   # R4：取消单个 spawn token；terminal → no-op；unknown → KeyError
+engine.has_live_spawns()       # bool：True iff 有 running/suspended 句柄（keepalive 引用计数）
 
 await engine.submit(op)        # 入队 Op
 async for ev in engine.subscribe(sub_id):    # 订阅指定 submission 事件
@@ -687,6 +702,44 @@ tool = make_http_request_tool(
 - R4 取消：handler 入口 `ctx.cancel.raise_if_cancelled()` + `httpx.Timeout` 双保险
 
 **parallel_safe=False**（保守：单一 ToolSpec 同时承载读写方法）。后续如需，可拆 `http_get`(True) / `http_request`(False) 两个工具。
+
+### 6.4 分离式 spawn 工具（detached-spawn）
+
+4 个 LLM 工具，**业务侧按需 opt-in**（不默认注入，通过 `extra_tools=` 参数传入）。均 `parallel_safe=True`，通过 `ctx.extras["spawn_coordinator"]`（engine 在构建 TurnRunner 时注入自身）接入 engine。详见 [detached-spawn 契约](architecture/capabilities/detached-spawn.md) 与 ADR 0015。
+
+```python
+from taifeng.tool.builtins import (
+    make_spawn_skill_tool,
+    make_await_skills_tool,
+    make_join_skill_tool,
+    make_kill_skill_tool,
+)
+
+pool = await EnginePool.create(
+    ...,
+    extra_tools=[
+        make_spawn_skill_tool(),
+        make_await_skills_tool(),
+        make_join_skill_tool(),
+        make_kill_skill_tool(),
+    ],
+)
+```
+
+| 工具名 | 对应 engine API | 输入 schema | 输出 |
+| --- | --- | --- | --- |
+| `spawn_skill` | `engine.spawn_skill(skill_id, args, reason)` | `{skill_id, args?, reason}` | `{handle_id, child_thread_id}` |
+| `await_skills` | `engine.set_join_barrier(handle_ids, then_skill_id, then_args_template?)` | `{handle_ids:[...], then_skill_id, then_args_template?}` | `{barrier_id}` |
+| `join_skill` | `engine.spawn_status(handle_ids)` | `{handle_ids:[...]}` | `{hid: {status, result}, ...}` |
+| `kill_skill` | `engine.kill_spawn(handle_id)` | `{handle_id}` | `{killed: bool}` |
+
+**关键设计**：
+- `spawn_skill` 拒绝路径（unknown_skill / dispatch_rejected / SpawnLimitError）返回 `ToolResult.error`，不静默丢弃
+- `join_skill` 非阻塞：未完成句柄返回 `{status:"running"/"suspended", result:null}`，LLM 自决何时重查
+- `kill_skill` 的 unknown handle → `ToolResult.error`；terminal handle → `{killed:false}`（no-op）；running/suspended → 取消该 token，兄弟 spawn 不受影响
+- 父 turn 结束后（engine keepalive 中），LLM 在下一条 `UserMessage` 的 turn 内可继续调用上述工具操作已有句柄
+
+**K1 配额 nuance**：`max_concurrent_spawns` 只统计 running（in-flight runner）的 spawn；suspended spawn 释放 slot，不计入并发额度（见 §1.0）。
 
 ## 7. LLM 强类型输出（structured_output / P1）
 
