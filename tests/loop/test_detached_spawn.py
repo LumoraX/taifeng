@@ -802,3 +802,216 @@ async def test_cold_recovery_barrier_idempotent(skills_dir, threads_dir):
     ]
     assert len(fired_markers) == 1
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 11: spawn / barrier 拒绝路径 + K1 配额（禁 silent fallback）。
+#          每条非法入参都必须显式 raise，绝不静默降级。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_rejections(skills_dir, threads_dir):
+    """spawn / barrier / kill 的全部拒绝路径都显式 raise（不静默）。
+
+    覆盖：
+      - spawn_skill 未知 skill → ValueError(unknown_skill)
+      - set_join_barrier 句柄集含未注册句柄 → ValueError(unknown_spawn_handle)
+      - set_join_barrier then_skill_id 不在 snapshot → ValueError(unknown_skill)
+      - kill_spawn 未知句柄 → KeyError
+    spawn_status 未知句柄是只读、返回 {"status":"unknown"} 不 raise（不在此测）。
+    """
+    client = RoutingMockClient(routes={
+        "code-reviewer": [MockTurn(text="主")],
+        "style-checker": [MockTurn(text="x")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[])
+    engine = await pool.get_or_create(
+        session_id="rej", entry_skill_id="code-reviewer")
+
+    # 1. 未知 skill —— spawn 必须显式报错（不静默 no-op）
+    with pytest.raises(ValueError, match="unknown_skill"):
+        await engine.spawn_skill(skill_id="ghost", args={}, reason="x")
+
+    # 合法 spawn 一个 style-checker（在白名单内）作为后续 barrier 句柄
+    a = (await engine.spawn_skill(
+        skill_id="style-checker", args={}, reason="x"))["handle_id"]
+
+    # 2. barrier 句柄集含未注册句柄 → 显式报错
+    with pytest.raises(ValueError, match="unknown_spawn_handle"):
+        await engine.set_join_barrier(
+            [a, "unknown-handle"], then_skill_id="code-reviewer")
+
+    # 3. barrier then_skill_id 不在 snapshot → 显式报错
+    with pytest.raises(ValueError, match="unknown_skill"):
+        await engine.set_join_barrier([a], then_skill_id="does-not-exist")
+
+    # 4. kill 未知句柄 → 显式 KeyError（与 spawn_status 只读未知不同：写操作必报错）
+    with pytest.raises(KeyError):
+        await engine.kill_spawn("nope")
+
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_not_in_whitelist_rejected(skills_dir, threads_dir):
+    """spawn 一个存在但不在 caller 白名单的 skill → dispatch_rejected(not_in_whitelist)。
+
+    code-reviewer 的 child_skills 仅含 style-checker；尝试 spawn code-reviewer
+    本身（存在但不在自身白名单，且为 entry）→ DispatchPolicy.check 拒绝 → 显式报错。
+    """
+    client = RoutingMockClient(routes={
+        "code-reviewer": [MockTurn(text="主")],
+        "style-checker": [MockTurn(text="x")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[])
+    engine = await pool.get_or_create(
+        session_id="rej-wl", entry_skill_id="code-reviewer")
+
+    # code-reviewer 存在但不在自身 child_skills 白名单（且 entry）→ 派发被拒
+    with pytest.raises(ValueError, match="dispatch_rejected"):
+        await engine.spawn_skill(
+            skill_id="code-reviewer", args={}, reason="x")
+
+    await pool.close()
+
+
+# K1 配额测试专用 skill：tool-only 专家，turn1 调一个会阻塞的工具 hold_slot，
+# 子 turn 一直卡在工具内（status=running，K1 slot 由 _drive_spawn 持有），
+# 直到测试 set 释放事件。比 suspend 路径更稳：suspend 会让 runner.run() 返回 →
+# _drive_spawn finally 释放 slot（slot 不再被占），无法稳定制造并发占用。
+_HOLD_EXPERT_A = """---
+name: hold-a
+description: 占位专家A
+version: 1.0.0
+type: composite
+model: mock-model
+tool_names: [hold_slot]
+max_call_depth: 2
+---
+# 占位专家A HOLD_A_MARK
+调 hold_slot 长占。
+"""
+
+_HOLD_EXPERT_B = """---
+name: hold-b
+description: 占位专家B
+version: 1.0.0
+type: composite
+model: mock-model
+tool_names: [hold_slot]
+max_call_depth: 2
+---
+# 占位专家B HOLD_B_MARK
+调 hold_slot 长占。
+"""
+
+_HOLD_ORCH = """---
+name: hold-orch
+description: 占位编排器
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [hold-a, hold-b]
+tool_names: []
+max_call_depth: 3
+---
+# 占位编排器 HOLD_ORCH_MARK
+并发派发占位专家。
+"""
+
+
+@pytest.fixture
+def hold_skills(tmp_path):
+    """hold-a / hold-b（tool-only，调阻塞工具长占 slot）+ hold-orch（entry）。"""
+    skills = tmp_path / "hold_skills"
+    for sub, body in (
+        ("hold-a", _HOLD_EXPERT_A),
+        ("hold-b", _HOLD_EXPERT_B),
+        ("hold-orch", _HOLD_ORCH),
+    ):
+        d = skills / sub
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(body, encoding="utf-8")
+    return skills
+
+
+@pytest.mark.asyncio
+async def test_spawn_quota_rejected(hold_skills, threads_dir):
+    """K1 配额：max_concurrent_spawns=1，首个 spawn 卡在阻塞工具占住唯一 slot，
+    第二个超限被显式拒（SpawnLimitError，不静默丢弃）。
+
+    确定性关键：mock spawn 跑得太快会瞬间完成、释放 slot；suspend 路径同样会让
+    runner.run() 返回从而释放 slot。故注入一个 hold_slot 工具——它在被取消前一直
+    await，使首个 spawn 的子 turn 停在 running（slot 由 _drive_spawn 持续持有）。
+    此时第二个 spawn 的 reserve_manual 必触发 SpawnLimitError(concurrent>=1)。
+    """
+    from taifeng.loop.spawn import SpawnLimitError
+    from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+    # 阻塞工具：被调后挂在 _release 事件上，直到测试显式释放（或被取消）。
+    # 借此把首个 spawn 的子 turn 钉在 running，稳定占住 K1 slot。
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def _hold_slot(args, ctx: ToolContext) -> ToolResult:
+        """长占工具：标记已进入 → 等待释放事件（可被 cancel）。"""
+        entered.set()
+        await release.wait()
+        return ToolResult.ok("released")
+
+    hold_tool = ToolSpec(
+        name="hold_slot",
+        description="测试用：长占一个 spawn slot 直到被释放",
+        input_schema={"type": "object", "properties": {}},
+        handler=_hold_slot,
+        parallel_safe=False,
+        timeout_seconds=30.0,
+    )
+
+    client = RoutingMockClient(routes={
+        "HOLD_A_MARK": [
+            MockTurn(text="A 长占", tool_calls=[
+                {"id": "call_a", "name": "hold_slot", "arguments": "{}"},
+            ]),
+            MockTurn(text="A 完成"),
+        ],
+        "HOLD_B_MARK": [
+            MockTurn(text="B 长占", tool_calls=[
+                {"id": "call_b", "name": "hold_slot", "arguments": "{}"},
+            ]),
+            MockTurn(text="B 完成"),
+        ],
+    })
+    # K1：并发上限设为 1（knob 真名为 max_concurrent_spawns，透传到 SpawnSlotRegistry）
+    pool = await taifeng.EnginePool.create(
+        skills_dir=hold_skills, threads_dir=threads_dir,
+        model_client=client, compressors=[],
+        extra_tools=[hold_tool],
+        max_concurrent_spawns=1)
+    engine = await pool.get_or_create(
+        session_id="quota", entry_skill_id="hold-orch")
+
+    # 首个 spawn：子 turn 进入 hold_slot 并阻塞 → 一直 running，占住唯一 slot。
+    out = await engine.spawn_skill(skill_id="hold-a", args={}, reason="A")
+    hid = out["handle_id"]
+    assert await _wait(entered.is_set), "首个 spawn 未进入阻塞工具，无法占住 K1 slot"
+    assert engine.spawn_status([hid])[hid]["status"] == "running"
+
+    # 第二个 spawn：并发已达上限 1 → reserve_manual 抛 SpawnLimitError(concurrent)
+    with pytest.raises(SpawnLimitError) as exc:
+        await engine.spawn_skill(skill_id="hold-b", args={}, reason="B")
+    assert exc.value.kind == "concurrent" and exc.value.limit == 1
+
+    # 释放阻塞工具 → 首个 spawn 跑完转 done（slot 归还，不泄漏）。
+    release.set()
+    assert await _wait(
+        lambda: engine.spawn_status([hid])[hid]["status"] == "done")
+    assert engine._spawn_registry.snapshot()["active"] == 0  # noqa: SLF001
+
+    await pool.close()
