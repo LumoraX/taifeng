@@ -42,12 +42,19 @@ from taifeng.loop.event import (
     PreTurnHookDenied,
     ResourceLimitExceeded,
     RewindRejected,
+    SpawnCancelled,
+    SpawnCompleted,
+    SpawnFailed,
+    SpawnStarted,
+    SpawnSuspended,
     SuspensionResolved,
     SuspensionResolveRejected,
     TurnFailed,
     TurnRewound,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
+from taifeng.loop.rewind import RewindCheckpoint
+from taifeng.loop.spawn_handle import SpawnHandleRegistry
 from taifeng.loop.submission import (
     CancelTurn,
     CompactNow,
@@ -63,7 +70,6 @@ from taifeng.loop.submission import (
     UpdateInstructions,
     UserMessage,
 )
-from taifeng.loop.rewind import RewindCheckpoint
 from taifeng.loop.turn import TurnRunner
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import DispatchPolicy
@@ -180,6 +186,12 @@ class AgentEngine:
         # K3：长期记忆 swap 接口（None=无内存层级，默认行为不变）
         self._memory_store = memory_store
         self._session_tokens: int = 0
+        # detached-spawn：分离式 spawn 的句柄登记表（≠ K1 的 SpawnSlotRegistry 配额表）。
+        # 句柄记 handle_id ↔ child_thread_id ↔ 终态/结果；后台分离 task 跑完后回写。
+        self._spawn_handles = SpawnHandleRegistry()
+        # 根取消 token —— 由 run() 入口捕获；spawn 的分离 task 据此派生子 token（R4）。
+        # run() 启动前为 None（spawn_skill 在 engine.run 已起的前提下被调用）。
+        self._root_cancel: CancellationToken | None = None
 
         # K4 入站背压：bounded submission 队列；submit() await put，满则业务侧阻塞
         # （flow control）。<=0 视为不限（保留逃生口）。
@@ -486,6 +498,8 @@ class AgentEngine:
 
     async def run(self, cancel: CancellationToken) -> None:
         self._running = True
+        # detached-spawn：记下根取消 token，供 spawn 的分离 task 派生子 token（R4 可取消）。
+        self._root_cancel = cancel
         try:
             while self._running:
                 if cancel.is_cancelled:
@@ -782,6 +796,286 @@ class AgentEngine:
             self._compaction_count = runner.compaction_count
             # K2：累加本 turn 消耗，跨 turn 维护会话累计 token
             self._session_tokens += runner.total_usage.total_tokens
+
+    # -----------------------------------------------------------------
+    # detached-spawn：分离式发起子 skill（立即返回句柄，后台独立跑完）
+    # -----------------------------------------------------------------
+
+    async def spawn_skill(
+        self, *, skill_id: str, args: dict[str, Any], reason: str
+    ) -> dict[str, str]:
+        """分离式发起一个子 skill：立即返回句柄，子 skill 在后台分离 task 跑完。
+
+        与 ``call_skill`` 阻塞父 turn 不同，本方法把子 skill 作为独立 child thread
+        上的 detached ``asyncio.create_task`` 跑（非阻塞），登记句柄后立刻返回。
+        后台 task（``_drive_spawn``）跑完后回写句柄状态并 emit 终态事件。
+
+        准入门控与 ``call_skill`` 一致（除 reject 分类细化留待后续 task）：
+          1. 目标 skill 必须存在（unknown_skill → ValueError）
+          2. ``DispatchPolicy.check``（深度 / 环 / 白名单 / 不可调 entry）→ 拒绝即抛错
+          3. K1 spawn 配额预留（``SpawnSlotRegistry`` 超限 → SpawnLimitError 上抛）
+
+        Args:
+            skill_id: 要分离发起的子 skill id（须在 entry skill 的 child_skills 白名单内）。
+            args: 子 skill 的种子输入（序列化为子 thread 首条 user_message）。
+            reason: LLM / 业务自陈的发起理由（透传到事件 / 审计，taifeng 不解析语义）。
+
+        Returns:
+            ``{"handle_id": ..., "child_thread_id": ...}`` —— 立即可用于 ``spawn_status``。
+
+        Raises:
+            ValueError: 目标 skill 不存在。
+            DispatchRejectedError 语义：派发被策略拒绝（此处直接抛 ValueError 带 reason）。
+            SpawnLimitError: K1 spawn 配额超限。
+            RuntimeError: engine.run 尚未启动（根取消 token 未就绪）。
+        """
+        import json
+        import secrets
+
+        # 1. 目标 skill 必须存在
+        target = self._snapshot.get(skill_id)
+        if target is None:
+            raise ValueError(f"unknown_skill: {skill_id}")
+
+        # 2. DispatchPolicy 门控：以 entry skill 为唯一栈帧的调用栈做派发裁决
+        from taifeng.skill.dispatch import CallStack
+
+        stack = CallStack().push(
+            skill_id=self._entry_skill.id,
+            call_id=f"spawn_entry_{secrets.token_hex(4)}",
+        )
+        verdict = self._dispatch_policy.check(stack, self._entry_skill, target)
+        if not verdict.allowed:
+            raise ValueError(f"dispatch_rejected: {verdict.reason}")
+
+        # engine.run 由 pool 以 create_task 后台启动，``_root_cancel`` 在其首行赋值。
+        # spawn_skill 紧随 get_or_create 调用时可能 run() 尚未被调度 → 短暂让步等待
+        # 根取消 token 就绪（R4：分离 task 必须挂在根取消树上，不可凭空造游离 token）。
+        for _ in range(100):
+            if self._root_cancel is not None:
+                break
+            await asyncio.sleep(0)
+        if self._root_cancel is None:
+            raise RuntimeError("engine not running: root cancel token unavailable")
+
+        # 3. K1 spawn 配额预留（贯穿整棵 turn 树）。注意：detached 语义下不能用
+        #    ``async with reserve()``（那会在本方法返回时即释放 slot，而子 task 还在跑）；
+        #    必须手动 reserve（占用）+ 在 _drive_spawn 收尾时释放（见 finally）。
+        await self._spawn_registry.reserve_manual()
+
+        # 4. 建 child thread + 落种子 user_message（与 turn.py::_spawn_sub_runner 对账）
+        handle_id = f"sp_{secrets.token_hex(4)}"
+        child_thread_id = await self._store.create_thread(
+            cwd=None,
+            entry_skill_id=skill_id,
+            source=f"spawn:{self._entry_skill.id}",
+            extra={
+                "parent_thread_id": self._thread_id,
+                "spawn_handle_id": handle_id,
+                "reason": reason,
+            },
+        )
+        seed = user_message(
+            json.dumps(args, ensure_ascii=False), thread_id=child_thread_id
+        )
+        await self._store.append(seed)
+
+        # 5. 登记句柄 + 在 parent thread 落 spawn 锚（冷恢复可重建 registry）+ emit
+        self._spawn_handles.register(
+            handle_id=handle_id, skill_id=skill_id, child_thread_id=child_thread_id
+        )
+        from taifeng.conversation.models import spawn_item
+
+        anchor = spawn_item(
+            handle_id=handle_id,
+            skill_id=skill_id,
+            child_thread_id=child_thread_id,
+            thread_id=self._thread_id,
+        )
+        async with self._lock:
+            self._history.append(anchor)
+        await self._store.append(anchor)
+        await self._emit(EventMsg(
+            submission_id=handle_id,
+            msg=SpawnStarted(data={
+                "handle_id": handle_id,
+                "skill_id": skill_id,
+                "child_thread_id": child_thread_id,
+            }),
+        ))
+
+        # 6. 分离 task：后台独立跑子 skill turn（非阻塞），跑完回写句柄 + emit 终态。
+        asyncio.create_task(
+            self._drive_spawn(handle_id, target, child_thread_id, args)
+        )
+        return {"handle_id": handle_id, "child_thread_id": child_thread_id}
+
+    def _build_child_runner(
+        self,
+        target: SkillDefinition,
+        child_thread_id: str,
+        seed: ResponseItem,
+        cancel: CancellationToken,
+    ) -> TurnRunner:
+        """构造 detached spawn 的子 TurnRunner（镜像 turn.py::_spawn_sub_runner 的 kwargs）。
+
+        与阻塞式 call_skill 子 runner 的差异：``cancel`` 由 engine 根取消派生（而非
+        父 turn 的 ctx.cancel），其余依赖（snapshot / model / runtime / store /
+        compressors / dispatch_policy / budget / hooks / permission / 资源配额）一致。
+        ``call_stack`` 留空 → 子 runner 自判为独立根 turn（detached 即独立上下文）。
+        """
+        return TurnRunner(
+            entry_skill=target,
+            snapshot=self._snapshot,
+            model_client=self._model_client,
+            tool_runtime=self._tool_runtime,
+            store=self._store,
+            compressors=self._compressors,
+            dispatch_policy=self._dispatch_policy,
+            budget=self._budget,
+            thread_id=child_thread_id,
+            submission_id=child_thread_id,
+            emit=self._emit,
+            cancel=cancel,
+            hooks=self._hooks,
+            permission_policy=self._permission_policy,
+            request_metadata=self._request_metadata,
+            turn_index=self._turn_index,
+            script_executors=self._script_executors,
+            max_iterations=self._max_iterations,
+            max_parallel_tool_calls=self._max_parallel_tool_calls,
+            capabilities=self._capabilities,
+            spawn_registry=self._spawn_registry,
+            session_tokens_used=self._session_tokens,
+            max_session_tokens=self._max_session_tokens,
+            memory_store=self._memory_store,
+            history_buffer=[seed],
+        )
+
+    async def _drive_spawn(
+        self,
+        handle_id: str,
+        target: SkillDefinition,
+        child_thread_id: str,
+        args: dict[str, Any],
+    ) -> None:
+        """后台分离 task：跑子 skill turn 至完成/挂起/失败，回写句柄 + emit 终态。
+
+        外层宽 except 兜底：任何意外异常都把句柄落 error + emit SpawnFailed，
+        绝不让句柄卡在 running（也不静默吞错——记日志 + emit）。收尾必释放 K1 slot。
+
+        Args:
+            handle_id: 本次 spawn 的句柄 id。
+            target: 子 skill 定义。
+            child_thread_id: 子 thread id（句柄已登记的引用）。
+            args: 子 skill 种子输入（用于重建 seed user_message）。
+        """
+        import json
+
+        try:
+            assert self._root_cancel is not None  # spawn_skill 已校验
+            cancel = self._root_cancel.child(f"spawn:{handle_id}")
+            seed = user_message(
+                json.dumps(args, ensure_ascii=False), thread_id=child_thread_id
+            )
+            runner = self._build_child_runner(
+                target, child_thread_id, seed, cancel
+            )
+            outcome = await runner.run()
+            await self._finalize_spawn(handle_id, child_thread_id, outcome)
+        except Exception as e:  # noqa: BLE001
+            # 兜底：不让句柄卡死在 running。记日志（不静默）+ 落 error + emit。
+            logger.exception("detached spawn driver crashed: %s", handle_id)
+            self._spawn_handles.set_result(
+                handle_id, status="error", result=str(e)
+            )
+            await self._emit(EventMsg(
+                submission_id=handle_id,
+                msg=SpawnFailed(data={"handle_id": handle_id, "error": str(e)}),
+            ))
+        finally:
+            # K1：detached 语义下手动占用的 slot 在子 task 收尾时释放。
+            self._spawn_registry.release_manual()
+
+    async def _finalize_spawn(
+        self, handle_id: str, child_thread_id: str, outcome: Any
+    ) -> None:
+        """按子 turn 的 end_reason 回写句柄状态并 emit 对应终态事件。
+
+        - completed → done + SpawnCompleted(result=final_text)
+        - suspended → suspended + SpawnSuspended（resume 路由留待后续 task）
+        - cancelled → cancelled + SpawnCancelled
+        - 其余（error / 未知）→ error + SpawnFailed
+        """
+        end = outcome.end_reason
+        if end == "completed":
+            self._spawn_handles.set_result(
+                handle_id, status="done", result=outcome.final_text
+            )
+            await self._emit(EventMsg(
+                submission_id=handle_id,
+                msg=SpawnCompleted(data={
+                    "handle_id": handle_id, "result": outcome.final_text,
+                }),
+            ))
+        elif end == "suspended":
+            # 子 thread 内已落 SuspensionRecord 并 emit turn_suspended；句柄标 suspended。
+            # Resume 路由（据 child_thread_id 续跑）留待后续 task。
+            self._spawn_handles.set_result(
+                handle_id, status="suspended", result=None
+            )
+            pending = (
+                outcome.suspension.to_item().payload["pending"]
+                if outcome.suspension is not None
+                else []
+            )
+            await self._emit(EventMsg(
+                submission_id=handle_id,
+                msg=SpawnSuspended(data={
+                    "handle_id": handle_id,
+                    "thread_id": child_thread_id,
+                    "pending": pending,
+                }),
+            ))
+        elif end == "cancelled":
+            self._spawn_handles.set_result(
+                handle_id, status="cancelled", result=outcome.error
+            )
+            await self._emit(EventMsg(
+                submission_id=handle_id,
+                msg=SpawnCancelled(data={"handle_id": handle_id}),
+            ))
+        else:
+            # error / max_iterations / resource_limit 等非成功终态 → error
+            err = outcome.error or end
+            self._spawn_handles.set_result(
+                handle_id, status="error", result=err
+            )
+            await self._emit(EventMsg(
+                submission_id=handle_id,
+                msg=SpawnFailed(data={"handle_id": handle_id, "error": err}),
+            ))
+
+    def spawn_status(self, handle_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """查询一批 spawn 句柄的状态 / 结果（业务侧轮询 / join 检查用）。
+
+        未知 handle_id 返回 ``{"status": "unknown", "result": None}``（显式可识别，
+        不静默忽略）；已知句柄返回其当前 ``status`` 与 ``result``。
+
+        Args:
+            handle_ids: 要查询的句柄 id 列表。
+
+        Returns:
+            ``{handle_id: {"status": ..., "result": ...}}``。
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for hid in handle_ids:
+            h = self._spawn_handles.get(hid)
+            if h is None:
+                out[hid] = {"status": "unknown", "result": None}
+            else:
+                out[hid] = {"status": h.status, "result": h.result}
+        return out
 
     # -----------------------------------------------------------------
     # Resume：续跑挂起的 turn（配对 resolutions → 补齐 history gap → 续采样）

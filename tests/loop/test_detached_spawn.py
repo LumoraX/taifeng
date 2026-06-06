@@ -2,7 +2,22 @@
 docs/superpowers/specs/2026-06-06-detached-skill-spawn-design.md"""
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
+import taifeng
+from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
 from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
+
+
+async def _wait(cond, tries: int = 200) -> bool:
+    """轮询等待条件成立(每次 10ms,默认最多 2s),用于等后台分离 task 收敛。"""
+    for _ in range(tries):
+        if cond():
+            return True
+        await asyncio.sleep(0.01)
+    return False
 
 
 def test_registry_register_and_lookup() -> None:
@@ -57,3 +72,27 @@ def test_spawn_response_items() -> None:
     assert bi.kind == "join_barrier" and bi.payload["barrier_id"] == "b0"
     fi = join_barrier_fired_item(barrier_id="b0", then_thread_id="t9", thread_id="root")
     assert fi.kind == "join_barrier_fired"
+
+
+@pytest.mark.asyncio
+async def test_spawn_returns_handle_nonblocking(skills_dir, threads_dir) -> None:
+    """engine.spawn_skill 立即返回句柄(非阻塞),后台分离 task 跑完后句柄转 done。"""
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="风格结论")],
+        "code-reviewer": [MockTurn(text="主")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[])
+    engine = await pool.get_or_create(
+        session_id="s1", entry_skill_id="code-reviewer")
+    out = await engine.spawn_skill(
+        skill_id="style-checker", args={}, reason="并发分析")
+    assert out["handle_id"] and out["child_thread_id"]
+    # 句柄立即可见(running),后台 task 跑完后转 done
+    assert await _wait(
+        lambda: engine.spawn_status([out["handle_id"]])[out["handle_id"]]["status"]
+        == "done")
+    assert (engine.spawn_status([out["handle_id"]])[out["handle_id"]]["result"]
+            == "风格结论")
+    await pool.close()

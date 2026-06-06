@@ -58,6 +58,30 @@ class SpawnSlotRegistry:
             async with self._lock:
                 self._active -= 1
 
+    async def reserve_manual(self) -> None:
+        """手动预留一个 spawn slot（超限抛 ``SpawnLimitError``）。
+
+        ``reserve()`` 上下文管理器在退出时即释放 ``_active``，适合阻塞式 call_skill；
+        但**分离式 spawn**（detached）发起方法返回后子 task 仍在跑，必须把"占用"与
+        "释放"解耦——发起时 ``reserve_manual`` 占用，子 task 收尾时 ``release_manual``
+        释放。``_total`` 同样单调不减（runaway 兜底）。
+        """
+        async with self._lock:
+            if self._total >= self.max_total:
+                raise SpawnLimitError("total", self.max_total)
+            if self._active >= self.max_concurrent:
+                raise SpawnLimitError("concurrent", self.max_concurrent)
+            self._active += 1
+            self._total += 1
+
+    def release_manual(self) -> None:
+        """释放一个由 ``reserve_manual`` 占用的 slot（不取锁；``_active`` 自减）。
+
+        与 ``reserve_manual`` 配对，供分离式 spawn 的子 task 收尾时调用。同步方法
+        （收尾通常在 finally / 异常路径，避免再 await）；并发安全由 GIL + 单调语义保证。
+        """
+        self._active -= 1
+
     def snapshot(self) -> dict[str, int]:
         """best-effort 自省（不取锁）：当前并发 / 累计 / 上限。"""
         return {
