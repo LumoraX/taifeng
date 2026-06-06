@@ -54,7 +54,7 @@ from taifeng.loop.event import (
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
 from taifeng.loop.rewind import RewindCheckpoint
-from taifeng.loop.spawn_handle import SpawnHandleRegistry
+from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
 from taifeng.loop.submission import (
     CancelTurn,
     CompactNow,
@@ -568,6 +568,14 @@ class AgentEngine:
                     asyncio.create_task(self._handle_rewind(sub, cancel))
                     continue
                 if isinstance(sub.op, Resume):
+                    # detached spawn 续跑优先判定：Resume.thread_id 命中某个【挂起】的
+                    # spawn 句柄 child_thread_id → 走 _resume_spawn（在该 child thread
+                    # 自己的线上独立续跑，与父 turn 完全解耦；父 turn 早已结束）。
+                    # 不命中（根 thread / call_skill 子链）→ 维持既有 _handle_resume。
+                    spawn_handle = self._match_suspended_spawn(sub.op.thread_id)
+                    if spawn_handle is not None:
+                        asyncio.create_task(self._resume_spawn(sub, spawn_handle))
+                        continue
                     # 与 UserMessage 一致用 create_task 异步派发：让续跑链（可能跨子/根
                     # 多个 turn）不阻塞主 run 循环，且给 subscribe(submission_id) 留出在
                     # 事件流出前注册队列的窗口（子 thread resume 续跑链 emit 多个事件，
@@ -930,6 +938,8 @@ class AgentEngine:
         child_thread_id: str,
         seed: ResponseItem,
         cancel: CancellationToken,
+        *,
+        history: list[ResponseItem] | None = None,
     ) -> TurnRunner:
         """构造 detached spawn 的子 TurnRunner（镜像 turn.py::_spawn_sub_runner 的 kwargs）。
 
@@ -937,7 +947,13 @@ class AgentEngine:
         父 turn 的 ctx.cancel），其余依赖（snapshot / model / runtime / store /
         compressors / dispatch_policy / budget / hooks / permission / 资源配额）一致。
         ``call_stack`` 留空 → 子 runner 自判为独立根 turn（detached 即独立上下文）。
+
+        Args:
+            history: 续跑场景传入【已补齐 gap 的子 thread 完整历史】（从 store load_thread
+                读回）；首发场景为 None → 用 ``[seed]`` 起跑。两种场景都保持 call_stack 空，
+                即 detached 子 turn 永远是独立根 turn（resume 后仍是独立根，不依附父）。
         """
+        buffer = list(history) if history is not None else [seed]
         return TurnRunner(
             entry_skill=target,
             snapshot=self._snapshot,
@@ -963,7 +979,7 @@ class AgentEngine:
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
-            history_buffer=[seed],
+            history_buffer=buffer,
         )
 
     async def _drive_spawn(
@@ -1066,6 +1082,126 @@ class AgentEngine:
             await self._emit(EventMsg(
                 submission_id=handle_id,
                 msg=SpawnFailed(data={"handle_id": handle_id, "error": err}),
+            ))
+
+    def _match_suspended_spawn(self, thread_id: str) -> SpawnHandle | None:
+        """若 thread_id 命中某个【当前挂起】的 detached spawn 句柄，返回该句柄。
+
+        仅匹配 status=='suspended' 的句柄：running 的句柄子 turn 还在跑（无挂起可续），
+        终态句柄已结束（不可再 resume）。命中即把 Resume 路由到 _resume_spawn。
+        无命中（根 thread / call_skill 子链 / 未挂起）→ None，交回既有 resume 路径。
+
+        Args:
+            thread_id: Resume.thread_id（业务侧从 SpawnSuspended.thread_id 拿到）。
+        Returns:
+            命中的挂起句柄；无命中 → None。
+        """
+        for h in self._spawn_handles.handles.values():
+            if h.child_thread_id == thread_id and h.status == "suspended":
+                return h
+        return None
+
+    async def _resume_spawn(self, sub: Submission, handle: SpawnHandle) -> None:
+        """续跑一个【挂起的 detached spawn 子 thread】至终态，独立回写句柄 + emit 终态。
+
+        与 call_skill 子链 resume（_handle_child_resume）的根本差异：detached spawn 的
+        父 turn 早已结束，不存在「父 call_skill 等回填」的续跑链 —— 子 thread 是独立根
+        turn。因此本路径只做三步，不上溯父：
+          1. 在【子 thread 的 load_thread 历史】上找活跃挂起，核销 resolutions、补 gap
+             （复用 SuspensionResolver + _apply_plan_on_thread，与 leaf resume 同语义；
+             SuspensionResolver 已强制全量 resume，杜绝部分 resume 违例）。
+          2. 以补齐后的子 thread 历史重建 detached 子 TurnRunner（_build_child_runner，
+             call_stack 仍空 → 仍是独立根 turn），续跑至终态。
+          3. _finalize_spawn 回写句柄 + emit SpawnCompleted/SpawnSuspended/SpawnFailed
+             —— 与 _drive_spawn 收尾完全一致：再次挂起则 handle 重新标 suspended（可再
+             resume），从而支持多轮错峰 HITL。
+
+        兜底：任何意外异常落 handle error + emit SpawnFailed（不静默、不卡 suspended）。
+        K1 slot 不在此再占/再放 —— detached slot 由首发 _drive_spawn 的 finally 持有到
+        本句柄真正离开运行态；本续跑只是同一句柄生命周期内的再驱动，不重复占用配额。
+
+        Args:
+            sub: 本次 Resume submission（事件归因 / Rejected emit）。
+            handle: 命中的挂起 spawn 句柄（_match_suspended_spawn 已校验 status）。
+        """
+        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+
+        assert isinstance(sub.op, Resume)
+        op = sub.op
+        child_tid = handle.child_thread_id
+        try:
+            # 1. 子 thread 上找活跃挂起 → 核销 resolutions → 补 gap（落 store）
+            items = await self._load_thread_items(child_tid)
+            record = self._find_active_suspension_in(items)
+            if record is None:
+                await self._emit(EventMsg(
+                    submission_id=sub.id,
+                    msg=SuspensionResolveRejected(data={
+                        "reason": "no_active_suspension",
+                        "record_id": None, "detail": {}}),
+                ))
+                return
+            try:
+                # SuspensionResolver.plan 强制全量配齐该 record 的全部 pending，
+                # 任何部分 resume / 未知 request_id → ResolveError（禁静默兜底）。
+                plan = SuspensionResolver().plan(record, op.resolutions)
+            except ResolveError as e:
+                await self._emit(EventMsg(
+                    submission_id=sub.id,
+                    msg=SuspensionResolveRejected(data={
+                        "reason": str(e),
+                        "record_id": record.record_id, "detail": {}}),
+                ))
+                return
+            # 补 gap + 落 resolved-marker 核销本 record（复用与 leaf resume 同一机制）
+            await self._apply_plan_on_thread(
+                child_tid, handle.skill_id, record, plan)
+            await self._emit(EventMsg(
+                submission_id=sub.id,
+                msg=SuspensionResolved(data={
+                    "record_id": record.record_id,
+                    "request_ids": sorted(record.request_ids())}),
+            ))
+
+            # 句柄回到 running（子 turn 又要跑了）；abort 则不续跑，直接落终态。
+            self._spawn_handles.set_result(
+                handle.handle_id, status="running", result=None)
+            if plan.abort:
+                # system_retry abort：子 turn 在挂起点终止 → 视为失败终态（与 leaf 一致）。
+                self._spawn_handles.set_result(
+                    handle.handle_id, status="error",
+                    result=f"spawn_aborted: {record.record_id}")
+                await self._emit(EventMsg(
+                    submission_id=handle.handle_id,
+                    msg=SpawnFailed(data={
+                        "handle_id": handle.handle_id,
+                        "error": f"spawn_aborted: {record.record_id}"}),
+                ))
+                return
+
+            # 2. 以补齐后的子 thread 历史重建 detached 子 TurnRunner，续跑至终态。
+            target = self._snapshot.get(handle.skill_id)
+            if target is None:
+                raise RuntimeError(
+                    f"spawn_resume_skill_missing: {handle.skill_id}")
+            assert self._root_cancel is not None  # engine.run 已启动
+            cancel = self._root_cancel.child(f"spawn_resume:{handle.handle_id}")
+            resumed_history = await self._load_thread_items(child_tid)
+            runner = self._build_child_runner(
+                target, child_tid, resumed_history[0], cancel,
+                history=resumed_history)
+            outcome = await runner.run()
+            # 3. 与 _drive_spawn 收尾一致：回写句柄 + emit 终态（再挂起 → 可再 resume）。
+            await self._finalize_spawn(handle.handle_id, child_tid, outcome)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(
+                "detached spawn resume crashed: %s", handle.handle_id)
+            self._spawn_handles.set_result(
+                handle.handle_id, status="error", result=str(e))
+            await self._emit(EventMsg(
+                submission_id=handle.handle_id,
+                msg=SpawnFailed(data={
+                    "handle_id": handle.handle_id, "error": str(e)}),
             ))
 
     def spawn_status(self, handle_ids: list[str]) -> dict[str, dict[str, Any]]:
