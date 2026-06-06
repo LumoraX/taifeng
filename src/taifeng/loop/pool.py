@@ -463,8 +463,23 @@ class EnginePool:
                 ))
             return engine
 
-    async def release(self, session_id: str) -> None:
+    async def release(self, session_id: str, *, force: bool = False) -> None:
+        """释放并关停指定 session 的 engine。
+
+        引用计数保活（detached-spawn）：engine 仍有未终结 detached spawn
+        （running / suspended）时**不得**释放——否则后台 detached 子任务 / 待
+        resume 的挂起 spawn 会随 engine 取消而丢失。此时静默跳过释放（engine
+        仍在缓存里继续服务），等 spawn 全终态后调用方可再次 release。
+
+        Args:
+            session_id: 要释放的会话 id。
+            force: True 时无视 has_live_spawns 强制释放（pool.close 全局拆除走此路）。
+        """
         async with self._lock:
+            engine = self._engines.get(session_id)
+            # 保活闸：非 force 且仍有 live spawn → 不弹出、不关停，原样保留。
+            if engine is not None and not force and engine.has_live_spawns():
+                return
             engine = self._engines.pop(session_id, None)
             task = self._engine_tasks.pop(session_id, None)
         if engine is not None:
@@ -480,7 +495,8 @@ class EnginePool:
             self._closed = True
             ids = list(self._engines.keys())
         for sid in ids:
-            await self.release(sid)
+            # 全局拆除：force 释放，无视保活闸（进程退出时 detached spawn 也应随之停）。
+            await self.release(sid, force=True)
         # 停止 watcher
         if self._watcher_task is not None and not self._watcher_task.done():
             watcher = getattr(self, "_watcher", None)

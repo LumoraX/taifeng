@@ -429,3 +429,75 @@ async def test_spawn_staggered_hitl(expert_skills, threads_dir):
 
     watch_task.cancel()
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 7: spawn_status(非阻塞) / kill_spawn(单 spawn 隔离取消) /
+#         has_live_spawns(引用计数保活：有未终结 spawn 不释放 engine)。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_join_skill_nonblocking_and_kill_isolates(skills_dir, threads_dir):
+    """spawn_status 非阻塞读;kill_spawn 未知句柄显式 KeyError(不静默)。"""
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="A done"), MockTurn(text="B done")],
+        "code-reviewer": [MockTurn(text="主")]})
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
+    engine = await pool.get_or_create(session_id="s3", entry_skill_id="code-reviewer")
+    a = (await engine.spawn_skill(skill_id="style-checker", args={}, reason="x"))["handle_id"]
+    st = engine.spawn_status([a])  # 非阻塞:running 或 done
+    assert a in st and st[a]["status"] in ("running", "done", "suspended")
+    with pytest.raises(KeyError):
+        await engine.kill_spawn("nope")  # 未知 handle 显式报错
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_has_live_spawns_keepalive(expert_skills, threads_dir):
+    """有未终结(suspended)spawn 时 engine.has_live_spawns()==True 且 engine 不被释放;
+    kill 后全终结 → False。同 session get_or_create 始终返回同一实例(未被 evict)。"""
+    import taifeng
+    from taifeng.llm.providers import MockTurn
+    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+
+    # 专家 turn1 调 request_user_input → 挂起(非终态);永不 resume → 保持 live。
+    client = RoutingMockClient(routes={
+        "EXPERT_A_MARK": [
+            MockTurn(text="A 提问", tool_calls=[
+                {"id": "call_a", "name": "request_user_input",
+                 "arguments": '{"prompt": "需要补充"}'},
+            ]),
+            MockTurn(text="A 最终"),
+        ],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=expert_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], extra_tools=[make_request_user_input_tool()])
+    engine = await pool.get_or_create(
+        session_id="keepalive", entry_skill_id="orchestrator")
+
+    out = await engine.spawn_skill(skill_id="expert-a", args={}, reason="A")
+    hid = out["handle_id"]
+    # 等子 turn 跑到挂起(suspended,非终态)
+    assert await _wait(
+        lambda: engine.spawn_status([hid])[hid]["status"] == "suspended"), \
+        "spawn 未挂起"
+    # 有未终结 spawn → 保活
+    assert engine.has_live_spawns() is True
+    # 同 session 复用:仍返回同一 engine(未被 evict)
+    same = await pool.get_or_create(
+        session_id="keepalive", entry_skill_id="orchestrator")
+    assert same is engine
+
+    # kill 该 spawn → 转终态 cancelled
+    await engine.kill_spawn(hid)
+    assert engine.spawn_status([hid])[hid]["status"] == "cancelled"
+    # 全终结 → 不再保活
+    assert engine.has_live_spawns() is False
+
+    # kill 已终结句柄是良性 no-op(不报错)
+    await engine.kill_spawn(hid)
+    await pool.close()

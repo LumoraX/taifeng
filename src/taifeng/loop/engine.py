@@ -189,6 +189,11 @@ class AgentEngine:
         # detached-spawn：分离式 spawn 的句柄登记表（≠ K1 的 SpawnSlotRegistry 配额表）。
         # 句柄记 handle_id ↔ child_thread_id ↔ 终态/结果；后台分离 task 跑完后回写。
         self._spawn_handles = SpawnHandleRegistry()
+        # detached-spawn kill 支持：handle_id → 该 spawn 的取消子 token（从 _root_cancel
+        # 派生）。kill_spawn 据此**只取消单个** spawn 子树，不波及兄弟 spawn / 父 turn。
+        # 由 _drive_spawn / _resume_spawn 在派生 token 时登记；spawn 收尾时不强制清理
+        # （终态句柄不会被再 kill，留着无副作用，且便于幂等 no-op）。
+        self._spawn_cancels: dict[str, CancellationToken] = {}
         # 根取消 token —— 由 run() 入口捕获；spawn 的分离 task 据此派生子 token（R4）。
         # run() 启动前为 None（spawn_skill 在 engine.run 已起的前提下被调用）。
         self._root_cancel: CancellationToken | None = None
@@ -1006,6 +1011,8 @@ class AgentEngine:
         try:
             assert self._root_cancel is not None  # spawn_skill 已校验
             cancel = self._root_cancel.child(f"spawn:{handle_id}")
+            # 登记本 spawn 的取消 token，供 kill_spawn 精确取消单个 spawn 子树。
+            self._spawn_cancels[handle_id] = cancel
             runner = self._build_child_runner(
                 target, child_thread_id, seed, cancel
             )
@@ -1186,6 +1193,9 @@ class AgentEngine:
                     f"spawn_resume_skill_missing: {handle.skill_id}")
             assert self._root_cancel is not None  # engine.run 已启动
             cancel = self._root_cancel.child(f"spawn_resume:{handle.handle_id}")
+            # 续跑期间也登记取消 token：覆盖首发遗留的旧 token，使 kill_spawn 取消
+            # 的是当前正在跑的续跑子树（而非已结束的首发子树）。
+            self._spawn_cancels[handle.handle_id] = cancel
             resumed_history = await self._load_thread_items(child_tid)
             runner = self._build_child_runner(
                 target, child_tid, resumed_history[0], cancel,
@@ -1224,6 +1234,61 @@ class AgentEngine:
             else:
                 out[hid] = {"status": h.status, "result": h.result}
         return out
+
+    async def kill_spawn(self, handle_id: str) -> None:
+        """主动终止一个 detached spawn —— 只取消该 spawn 子树，不波及兄弟/父 turn。
+
+        语义（与 spawn_status 的"批量只读、未知不报错"不同：kill 是单点写操作，
+        未知句柄是调用方明确错误，必须显式 KeyError 暴露，杜绝静默 no-op）：
+          - 未知 handle_id → 抛 ``KeyError(handle_id)``。
+          - 已终态句柄（done/error/cancelled）→ 良性 no-op：杀一个已结束的 spawn
+            无意义但无害，直接返回，**不**报错、**不**重复 emit。
+          - 运行中 / 挂起句柄 → 取消其专属取消子 token（若有 live 子树则 runner 在
+            迭代边界 raise CancelledError → _drive_spawn 的 finally 释放 K1 槽位，
+            _finalize_spawn 落 cancelled；挂起句柄已无 live 子树，token 取消是空操作，
+            故此处再显式落 cancelled 终态 + emit SpawnCancelled 保证状态确定收敛）。
+
+        Args:
+            handle_id: 要终止的 spawn 句柄 id。
+
+        Raises:
+            KeyError: handle_id 未注册（调用方传错）。
+        """
+        h = self._spawn_handles.get(handle_id)
+        if h is None:
+            raise KeyError(handle_id)
+        # 已终态：良性 no-op（不报错、不重复落终态、不重复 emit）。
+        if self._spawn_handles.is_terminal(handle_id):
+            return
+        # 取消该 spawn 的专属子树 token（精确隔离，不动兄弟 spawn）。
+        # 运行中：live 子树会在迭代边界 raise → 走 _drive_spawn finally 释放 K1 +
+        #   _finalize_spawn 落 cancelled（与本处落 cancelled 同值，幂等）。
+        # 挂起：无 live 子树（首发 _drive_spawn 已收尾、K1 已释放），cancel 为空操作。
+        token = self._spawn_cancels.get(handle_id)
+        if token is not None:
+            token.cancel()
+        # 显式落 cancelled 终态 + emit —— 确保挂起句柄（无 live 子树驱动 finalize）也
+        # 立即收敛到 cancelled，状态对外可见。
+        self._spawn_handles.set_result(handle_id, status="cancelled", result=None)
+        await self._emit(EventMsg(
+            submission_id=handle_id,
+            msg=SpawnCancelled(data={"handle_id": handle_id}),
+        ))
+
+    def has_live_spawns(self) -> bool:
+        """是否存在未终结（running / suspended）的 detached spawn —— 引用计数保活。
+
+        EnginePool 释放/淘汰 engine 前据此判定：有 live spawn 时**不得**释放
+        engine（否则 detached 子任务 / 挂起待 resume 的 spawn 会随 engine 一起被
+        取消、丢失）。全部 spawn 进入终态后才允许释放。
+
+        Returns:
+            True iff 至少一个句柄状态不在 done/error/cancelled 中。
+        """
+        return any(
+            not self._spawn_handles.is_terminal(hid)
+            for hid in self._spawn_handles.handles
+        )
 
     # -----------------------------------------------------------------
     # Resume：续跑挂起的 turn（配对 resolutions → 补齐 history gap → 续采样）
