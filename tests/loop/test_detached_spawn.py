@@ -224,7 +224,8 @@ async def test_same_skill_multiple_instances(skills_dir, threads_dir):
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
     engine = await pool.get_or_create(session_id="s2", entry_skill_id="code-reviewer")
     handles = [
-        (await engine.spawn_skill(skill_id="style-checker", args={"i": i}, reason="路线"))["handle_id"]
+        (await engine.spawn_skill(
+            skill_id="style-checker", args={"i": i}, reason="路线"))["handle_id"]
         for i in range(3)
     ]
     assert len(set(handles)) == 3  # 三个独立句柄
