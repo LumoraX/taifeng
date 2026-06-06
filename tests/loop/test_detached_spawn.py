@@ -8,7 +8,7 @@ import pytest
 
 import taifeng
 from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
-from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
+from taifeng.loop.spawn_handle import SpawnHandleRegistry
 
 
 async def _wait(cond, tries: int = 200) -> bool:
@@ -22,7 +22,9 @@ async def _wait(cond, tries: int = 200) -> bool:
 
 def test_registry_register_and_lookup() -> None:
     reg = SpawnHandleRegistry()
-    h = reg.register(handle_id="sp0", skill_id="analyzer", child_thread_id="t-1")
+    h = reg.register(
+        handle_id="sp0", skill_id="analyzer", child_thread_id="t-1"
+    )
     assert h.status == "running"
     assert reg.get("sp0") is h
     assert reg.get("nope") is None
@@ -49,8 +51,13 @@ def test_registry_all_terminal() -> None:
 
 def test_spawn_event_kinds() -> None:
     from taifeng.loop.event import (
-        JoinBarrierFired, JoinBarrierRegistered, SpawnCancelled,
-        SpawnCompleted, SpawnFailed, SpawnStarted, SpawnSuspended,
+        JoinBarrierFired,
+        JoinBarrierRegistered,
+        SpawnCancelled,
+        SpawnCompleted,
+        SpawnFailed,
+        SpawnStarted,
+        SpawnSuspended,
     )
     assert SpawnStarted().kind == "spawn_started"
     assert SpawnSuspended().kind == "spawn_suspended"
@@ -63,19 +70,31 @@ def test_spawn_event_kinds() -> None:
 
 def test_spawn_response_items() -> None:
     from taifeng.conversation.models import (
-        join_barrier_fired_item, join_barrier_item, spawn_item,
+        join_barrier_fired_item,
+        join_barrier_item,
+        spawn_item,
     )
-    si = spawn_item(handle_id="sp0", skill_id="a", child_thread_id="t1", thread_id="root")
+    si = spawn_item(
+        handle_id="sp0", skill_id="a",
+        child_thread_id="t1", thread_id="root",
+    )
     assert si.kind == "spawn" and si.payload["handle_id"] == "sp0"
-    bi = join_barrier_item(barrier_id="b0", handle_ids=["sp0"],
-                           then_skill_id="merge", then_args_template=None, thread_id="root")
+    bi = join_barrier_item(
+        barrier_id="b0", handle_ids=["sp0"],
+        then_skill_id="merge", then_args_template=None,
+        thread_id="root",
+    )
     assert bi.kind == "join_barrier" and bi.payload["barrier_id"] == "b0"
-    fi = join_barrier_fired_item(barrier_id="b0", then_thread_id="t9", thread_id="root")
+    fi = join_barrier_fired_item(
+        barrier_id="b0", then_thread_id="t9", thread_id="root"
+    )
     assert fi.kind == "join_barrier_fired"
 
 
 @pytest.mark.asyncio
-async def test_spawn_returns_handle_nonblocking(skills_dir, threads_dir) -> None:
+async def test_spawn_returns_handle_nonblocking(
+    skills_dir, threads_dir
+) -> None:
     """engine.spawn_skill 立即返回句柄(非阻塞),后台分离 task 跑完后句柄转 done。"""
     client = RoutingMockClient(routes={
         "style-checker": [MockTurn(text="风格结论")],
@@ -90,9 +109,105 @@ async def test_spawn_returns_handle_nonblocking(skills_dir, threads_dir) -> None
         skill_id="style-checker", args={}, reason="并发分析")
     assert out["handle_id"] and out["child_thread_id"]
     # 句柄立即可见(running),后台 task 跑完后转 done
+    hid = out["handle_id"]
     assert await _wait(
-        lambda: engine.spawn_status([out["handle_id"]])[out["handle_id"]]["status"]
-        == "done")
-    assert (engine.spawn_status([out["handle_id"]])[out["handle_id"]]["result"]
-            == "风格结论")
+        lambda: engine.spawn_status([hid])[hid]["status"] == "done"
+    )
+    assert engine.spawn_status([hid])[hid]["result"] == "风格结论"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_seed_id_consistent_store_vs_memory(
+    skills_dir, threads_dir
+) -> None:
+    """C1：store 里落盘的种子 id 与 history_buffer[0] 使用的 id 一致。
+
+    修复前：_drive_spawn 会重建 seed（新随机 id），导致 store 里 id ≠
+    内存中 id，冷恢复时会重建出不同的消息图谱。
+    修复后：seed 在 spawn_skill 构造一次，直接传入 _drive_spawn /
+    _build_child_runner，两路径共享同一对象，id 天然一致。
+    此测试验证子 thread 的首条记录是 user_message 且内容与 args 对应。
+    """
+    import json
+
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="风格结论2")],
+        "code-reviewer": [MockTurn(text="主2")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[])
+    engine = await pool.get_or_create(
+        session_id="s-c1", entry_skill_id="code-reviewer")
+
+    args_payload = {"key": "value"}
+    out = await engine.spawn_skill(
+        skill_id="style-checker", args=args_payload, reason="c1-test")
+
+    # 等子 task 完成确保 store 已 flush
+    hid = out["handle_id"]
+    assert await _wait(
+        lambda: engine.spawn_status([hid])[hid]["status"] == "done"
+    )
+
+    # 从 store 读回 child thread，首条必须是 user_message 且内容与 args 一致
+    child_tid = out["child_thread_id"]
+    thread_iter = await pool.store.load_thread(child_tid)
+    items = [item async for item in thread_iter]
+    assert items, "子 thread 至少有一条记录"
+    first = items[0]
+    assert first.kind == "user_message", (
+        f"首条应为 user_message，实际: {first.kind}"
+    )
+    seed_text = first.payload["text"]
+    assert json.loads(seed_text) == args_payload, (
+        f"种子内容不匹配: {seed_text}"
+    )
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_k1_slot_released_on_create_thread_failure(
+    skills_dir, threads_dir
+) -> None:
+    """C2：create_thread 失败时 K1 spawn 槽位必须释放，不永久泄漏。
+
+    修复前：reserve_manual 与 create_task 之间若抛出，_drive_spawn 从不
+    启动，其 finally 中的 release_manual 永远不执行 → 槽位泄漏。
+    修复后：spawn_skill 在 try/except 里捕获预启动失败，立即
+    release_manual 后重抛。
+    """
+    from unittest.mock import AsyncMock, patch
+
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="ok")],
+        "code-reviewer": [MockTurn(text="主")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[])
+    engine = await pool.get_or_create(
+        session_id="s-c2", entry_skill_id="code-reviewer")
+
+    # 注入：让 store.create_thread 抛出，模拟预启动失败
+    with patch.object(
+        engine._store, "create_thread",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("模拟 create_thread 失败"),
+    ), pytest.raises(RuntimeError, match="模拟 create_thread 失败"):
+        await engine.spawn_skill(
+            skill_id="style-checker", args={}, reason="c2-test")
+
+    # 槽位必须已被释放（_active 回到 0）
+    snap = engine._spawn_registry.snapshot()
+    assert snap["active"] == 0, f"K1 槽位泄漏，active={snap['active']}"
+
+    # 泄漏修复后，后续正常 spawn 依然可以成功
+    out = await engine.spawn_skill(
+        skill_id="style-checker", args={}, reason="c2-後続")
+    hid = out["handle_id"]
+    assert await _wait(
+        lambda: engine.spawn_status([hid])[hid]["status"] == "done"
+    )
     await pool.close()

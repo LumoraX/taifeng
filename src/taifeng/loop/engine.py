@@ -863,51 +863,65 @@ class AgentEngine:
         #    必须手动 reserve（占用）+ 在 _drive_spawn 收尾时释放（见 finally）。
         await self._spawn_registry.reserve_manual()
 
-        # 4. 建 child thread + 落种子 user_message（与 turn.py::_spawn_sub_runner 对账）
-        handle_id = f"sp_{secrets.token_hex(4)}"
-        child_thread_id = await self._store.create_thread(
-            cwd=None,
-            entry_skill_id=skill_id,
-            source=f"spawn:{self._entry_skill.id}",
-            extra={
-                "parent_thread_id": self._thread_id,
-                "spawn_handle_id": handle_id,
-                "reason": reason,
-            },
-        )
-        seed = user_message(
-            json.dumps(args, ensure_ascii=False), thread_id=child_thread_id
-        )
-        await self._store.append(seed)
+        # C2 修复：reserve_manual 之后、create_task 之前的所有步骤若抛出，
+        # _drive_spawn 永远不会启动（其 finally 不会执行），K1 槽位会永久泄漏。
+        # 用 try/except 兜住预启动阶段：任何失败都先释放槽位再重抛。
+        # 一旦 create_task 成功，子 task 的 finally 负责释放，本路径不再释放。
+        try:
+            # 4. 建 child thread + 落种子 user_message（与 turn.py::_spawn_sub_runner 对账）
+            handle_id = f"sp_{secrets.token_hex(4)}"
+            child_thread_id = await self._store.create_thread(
+                cwd=None,
+                entry_skill_id=skill_id,
+                source=f"spawn:{self._entry_skill.id}",
+                extra={
+                    "parent_thread_id": self._thread_id,
+                    "spawn_handle_id": handle_id,
+                    "reason": reason,
+                },
+            )
+            # C1 修复：seed 只创建一次，此处落盘并传递给 _drive_spawn。
+            # _drive_spawn 不再重建 seed（那会产生新 id，导致 store 里的 id 与
+            # 内存中 history_buffer[0].id 不一致，冷恢复时会重建出不同的消息图谱）。
+            seed = user_message(
+                json.dumps(args, ensure_ascii=False), thread_id=child_thread_id
+            )
+            await self._store.append(seed)
 
-        # 5. 登记句柄 + 在 parent thread 落 spawn 锚（冷恢复可重建 registry）+ emit
-        self._spawn_handles.register(
-            handle_id=handle_id, skill_id=skill_id, child_thread_id=child_thread_id
-        )
-        from taifeng.conversation.models import spawn_item
+            # 5. 登记句柄 + 在 parent thread 落 spawn 锚（冷恢复可重建 registry）+ emit
+            self._spawn_handles.register(
+                handle_id=handle_id, skill_id=skill_id, child_thread_id=child_thread_id
+            )
+            from taifeng.conversation.models import spawn_item
 
-        anchor = spawn_item(
-            handle_id=handle_id,
-            skill_id=skill_id,
-            child_thread_id=child_thread_id,
-            thread_id=self._thread_id,
-        )
-        async with self._lock:
-            self._history.append(anchor)
-        await self._store.append(anchor)
-        await self._emit(EventMsg(
-            submission_id=handle_id,
-            msg=SpawnStarted(data={
-                "handle_id": handle_id,
-                "skill_id": skill_id,
-                "child_thread_id": child_thread_id,
-            }),
-        ))
+            anchor = spawn_item(
+                handle_id=handle_id,
+                skill_id=skill_id,
+                child_thread_id=child_thread_id,
+                thread_id=self._thread_id,
+            )
+            async with self._lock:
+                self._history.append(anchor)
+            await self._store.append(anchor)
+            await self._emit(EventMsg(
+                submission_id=handle_id,
+                msg=SpawnStarted(data={
+                    "handle_id": handle_id,
+                    "skill_id": skill_id,
+                    "child_thread_id": child_thread_id,
+                }),
+            ))
 
-        # 6. 分离 task：后台独立跑子 skill turn（非阻塞），跑完回写句柄 + emit 终态。
-        asyncio.create_task(
-            self._drive_spawn(handle_id, target, child_thread_id, args)
-        )
+            # 6. 分离 task：后台独立跑子 skill turn（非阻塞），跑完回写句柄 + emit 终态。
+            #    seed 传入 _drive_spawn，确保 history_buffer[0] 与 store 里的同一对象。
+            asyncio.create_task(
+                self._drive_spawn(handle_id, target, child_thread_id, seed)
+            )
+        except Exception:
+            # 预启动失败：子 task 未启动，释放 K1 槽位后重抛。
+            self._spawn_registry.release_manual()
+            raise
+
         return {"handle_id": handle_id, "child_thread_id": child_thread_id}
 
     def _build_child_runner(
@@ -957,27 +971,25 @@ class AgentEngine:
         handle_id: str,
         target: SkillDefinition,
         child_thread_id: str,
-        args: dict[str, Any],
+        seed: ResponseItem,
     ) -> None:
         """后台分离 task：跑子 skill turn 至完成/挂起/失败，回写句柄 + emit 终态。
 
         外层宽 except 兜底：任何意外异常都把句柄落 error + emit SpawnFailed，
         绝不让句柄卡在 running（也不静默吞错——记日志 + emit）。收尾必释放 K1 slot。
 
+        C1：seed 由 spawn_skill 构造并落盘后传入，此处不重建——保证 store 与
+        history_buffer[0] 使用完全相同的对象（相同 id），冷恢复时不会重建出不同图谱。
+
         Args:
             handle_id: 本次 spawn 的句柄 id。
             target: 子 skill 定义。
             child_thread_id: 子 thread id（句柄已登记的引用）。
-            args: 子 skill 种子输入（用于重建 seed user_message）。
+            seed: 已落盘的种子 user_message（由 spawn_skill 构造并 append 到 store）。
         """
-        import json
-
         try:
             assert self._root_cancel is not None  # spawn_skill 已校验
             cancel = self._root_cancel.child(f"spawn:{handle_id}")
-            seed = user_message(
-                json.dumps(args, ensure_ascii=False), thread_id=child_thread_id
-            )
             runner = self._build_child_runner(
                 target, child_thread_id, seed, cancel
             )
