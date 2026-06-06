@@ -211,3 +211,54 @@ async def test_spawn_k1_slot_released_on_create_thread_failure(
         lambda: engine.spawn_status([hid])[hid]["status"] == "done"
     )
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_same_skill_multiple_instances(skills_dir, threads_dir):
+    """同一 skill 同时 spawn 三个实例，各自拥有独立句柄和独立 child thread。"""
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="路线1"), MockTurn(text="路线2"), MockTurn(text="路线3")],
+        "code-reviewer": [MockTurn(text="主")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
+    engine = await pool.get_or_create(session_id="s2", entry_skill_id="code-reviewer")
+    handles = [
+        (await engine.spawn_skill(skill_id="style-checker", args={"i": i}, reason="路线"))["handle_id"]
+        for i in range(3)
+    ]
+    assert len(set(handles)) == 3  # 三个独立句柄
+    assert await _wait(lambda: all(
+        engine.spawn_status([h])[h]["status"] == "done" for h in handles))
+    # 三条独立 child thread
+    threads = {engine._spawn_handles.get(h).child_thread_id for h in handles}  # noqa: SLF001
+    assert len(threads) == 3
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_independent_completion_events(skills_dir, threads_dir):
+    """两个独立 spawn 各自发出独立的 spawn_completed 事件，handle_id 互不混淆。"""
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="A结论"), MockTurn(text="B结论")],
+        "code-reviewer": [MockTurn(text="主")]})
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
+    engine = await pool.get_or_create(session_id="s2b", entry_skill_id="code-reviewer")
+    completed: dict[str, str] = {}
+
+    async def watch():
+        """订阅所有事件，收集 spawn_completed 直到收到两条为止。"""
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind == "spawn_completed":
+                completed[ev.msg.data["handle_id"]] = ev.msg.data.get("result", "")
+                if len(completed) >= 2:
+                    return
+
+    task = asyncio.create_task(watch())
+    a = (await engine.spawn_skill(skill_id="style-checker", args={}, reason="a"))["handle_id"]
+    b = (await engine.spawn_skill(skill_id="style-checker", args={}, reason="b"))["handle_id"]
+    assert await _wait(lambda: len(completed) >= 2)
+    assert set(completed.keys()) == {a, b}  # 各自独立 spawn_completed 事件
+    task.cancel()
+    await pool.close()
