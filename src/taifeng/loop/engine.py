@@ -39,6 +39,8 @@ from taifeng.loop.event import (
     InstructionFetchFailed,
     InstructionUpdated,
     InstructionUpdateRejected,
+    JoinBarrierFired,
+    JoinBarrierRegistered,
     PreTurnHookDenied,
     ResourceLimitExceeded,
     RewindRejected,
@@ -54,7 +56,7 @@ from taifeng.loop.event import (
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
 from taifeng.loop.rewind import RewindCheckpoint
-from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
+from taifeng.loop.spawn_handle import JoinBarrier, SpawnHandle, SpawnHandleRegistry
 from taifeng.loop.submission import (
     CancelTurn,
     CompactNow,
@@ -194,6 +196,10 @@ class AgentEngine:
         # 由 _drive_spawn / _resume_spawn 在派生 token 时登记；spawn 收尾时不强制清理
         # （终态句柄不会被再 kill，留着无副作用，且便于幂等 no-op）。
         self._spawn_cancels: dict[str, CancellationToken] = {}
+        # join-barrier 进程内幂等守卫:已触发过的 barrier_id 集合。保证每个 barrier
+        # 在本进程内**至多触发一次**(配合 parent thread 落 join_barrier_fired 标记,
+        # 冷恢复重建时也不重复起聚合 turn)。
+        self._fired_barriers: set[str] = set()
         # 根取消 token —— 由 run() 入口捕获；spawn 的分离 task 据此派生子 token（R4）。
         # run() 启动前为 None（spawn_skill 在 engine.run 已起的前提下被调用）。
         self._root_cancel: CancellationToken | None = None
@@ -1090,6 +1096,9 @@ class AgentEngine:
                 submission_id=handle_id,
                 msg=SpawnFailed(data={"handle_id": handle_id, "error": err}),
             ))
+        # join-barrier:本 spawn 进入终态(含 suspended——但 suspended 非终态,
+        # all_terminal 不满足 → 不触发),检查是否凑齐某 barrier 的全终态条件。
+        await self._check_barriers(handle_id)
 
     def _match_suspended_spawn(self, thread_id: str) -> SpawnHandle | None:
         """若 thread_id 命中某个【当前挂起】的 detached spawn 句柄，返回该句柄。
@@ -1274,6 +1283,8 @@ class AgentEngine:
             submission_id=handle_id,
             msg=SpawnCancelled(data={"handle_id": handle_id}),
         ))
+        # join-barrier:kill 使本句柄进入 cancelled 终态,可能凑齐某 barrier → 检查。
+        await self._check_barriers(handle_id)
 
     def has_live_spawns(self) -> bool:
         """是否存在未终结（running / suspended）的 detached spawn —— 引用计数保活。
@@ -1289,6 +1300,170 @@ class AgentEngine:
             not self._spawn_handles.is_terminal(hid)
             for hid in self._spawn_handles.handles
         )
+
+    # -----------------------------------------------------------------
+    # join-barrier：登记「{句柄集}全终态 → 自动起聚合(联合会诊)turn」
+    # -----------------------------------------------------------------
+
+    async def set_join_barrier(
+        self,
+        handle_ids: list[str],
+        then_skill_id: str,
+        then_args_template: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """登记一个 join-barrier:等 handle_ids 全终态后自动起 then_skill_id 聚合 turn。
+
+        聚合 turn 走 ``_build_child_runner``(call_stack 空 → 独立根 turn,**不**过
+        DispatchPolicy 的 entry 门控),故 ``then_skill_id`` 可以是 entry 也可以非 entry,
+        校验仅要求其**存在于 snapshot**。失败/取消的专家终态不被丢弃 —— 触发时默认
+        把每个 handle 的 {status, result} 带入聚合输入(见 _check_barriers)。
+
+        登记后**立即检查一次**:handle 可能在登记前就已全终态(本测试/业务常见),
+        此时同步触发,不需要再等新的终态事件。
+
+        Args:
+            handle_ids: 本 barrier 等待的全部 spawn 句柄 id(必须均已注册)。
+            then_skill_id: 全终态后续接执行的聚合 skill id(须存在于 snapshot)。
+            then_args_template: 聚合 skill 的自定义参数模板;None → 用默认(各 handle 终态)。
+
+        Returns:
+            ``{"barrier_id": ...}``。
+
+        Raises:
+            ValueError: 某 handle_id 未注册,或 then_skill_id 不存在于 snapshot。
+        """
+        import secrets
+
+        # 1. 校验:每个 handle 必须已注册(未注册是调用方明确错误,显式抛,不静默)
+        for hid in handle_ids:
+            if self._spawn_handles.get(hid) is None:
+                raise ValueError(f"unknown_spawn_handle: {hid}")
+        # 2. 校验:聚合 skill 必须存在(不门控 entry——聚合走独立根 turn 无 entry 门)
+        if self._snapshot.get(then_skill_id) is None:
+            raise ValueError(f"unknown_skill: {then_skill_id}")
+
+        barrier_id = f"jb_{secrets.token_hex(4)}"
+        barrier = JoinBarrier(
+            barrier_id=barrier_id,
+            handle_ids=tuple(handle_ids),
+            then_skill_id=then_skill_id,
+            then_args_template=then_args_template,
+        )
+        self._spawn_handles.barriers[barrier_id] = barrier
+
+        # 3. parent thread 落登记锚(冷恢复可重建 barrier)+ emit 登记事件
+        from taifeng.conversation.models import join_barrier_item
+
+        anchor = join_barrier_item(
+            barrier_id=barrier_id,
+            handle_ids=list(handle_ids),
+            then_skill_id=then_skill_id,
+            then_args_template=then_args_template,
+            thread_id=self._thread_id,
+        )
+        async with self._lock:
+            self._history.append(anchor)
+        await self._store.append(anchor)
+        await self._emit(EventMsg(
+            submission_id=barrier_id,
+            msg=JoinBarrierRegistered(data={
+                "barrier_id": barrier_id,
+                "handle_ids": list(handle_ids),
+                "then_skill_id": then_skill_id,
+            }),
+        ))
+
+        # 4. 立即检查:handle 可能登记前已全终态 → 同步触发(否则永不再有终态事件唤醒)
+        await self._check_barriers()
+        return {"barrier_id": barrier_id}
+
+    async def _check_barriers(self, changed_handle_id: str | None = None) -> None:
+        """扫描所有 barrier:句柄集全终态且未触发过 → 起聚合 turn(幂等)。
+
+        每个 spawn 进终态(_finalize_spawn / kill_spawn)及 barrier 登记时调用。
+        ``changed_handle_id`` 仅作日志/未来优化用,当前实现全量扫描(barrier 数量极小)。
+
+        幂等:``self._fired_barriers`` 进程内守卫保证每个 barrier 至多触发一次。
+
+        Args:
+            changed_handle_id: 触发本次检查的 handle(可选,仅记录)。
+        """
+        for barrier in list(self._spawn_handles.barriers.values()):
+            if barrier.barrier_id in self._fired_barriers:
+                continue  # 已触发,幂等跳过
+            if not self._spawn_handles.all_terminal(list(barrier.handle_ids)):
+                continue  # 尚未全终态,等下一次终态事件
+            await self._fire_barrier(barrier)
+
+    async def _fire_barrier(self, barrier: JoinBarrier) -> None:
+        """触发一个 barrier:起 then_skill 独立聚合 turn,落 fired 标记 + emit。
+
+        聚合输入:then_args_template(若给)否则默认 = {handle_id: {status, result}},
+        **含失败/取消句柄**(非 done 终态不丢弃,会诊需看到全部专家结局)。
+        聚合 turn 经 ``_build_child_runner``(call_stack 空)以独立根 turn 跑,
+        取消 token 自根派生(R4),其完成不回写本 engine 的 history/句柄表。
+
+        Args:
+            barrier: 已全终态、待触发的 barrier。
+        """
+        import json
+
+        # 默认聚合输入:每个 handle 的终态 {status, result}(含取消/失败,不丢)
+        if barrier.then_args_template is not None:
+            args: dict[str, Any] = dict(barrier.then_args_template)
+        else:
+            args = {}
+            for hid in barrier.handle_ids:
+                h = self._spawn_handles.get(hid)
+                # all_terminal 已保证 h 存在;终态句柄一律带入
+                assert h is not None
+                args[hid] = {"status": h.status, "result": h.result}
+
+        target = self._snapshot.get(barrier.then_skill_id)
+        if target is None:
+            raise RuntimeError(
+                f"join_barrier_skill_missing: {barrier.then_skill_id}")
+
+        # 起独立聚合 child thread + 种子 user_message(聚合输入 JSON)
+        then_thread_id = await self._store.create_thread(
+            cwd=None,
+            entry_skill_id=barrier.then_skill_id,
+            source=f"join_barrier:{barrier.barrier_id}",
+            extra={
+                "parent_thread_id": self._thread_id,
+                "barrier_id": barrier.barrier_id,
+            },
+        )
+        seed = user_message(
+            json.dumps(args, ensure_ascii=False), thread_id=then_thread_id)
+        await self._store.append(seed)
+
+        assert self._root_cancel is not None  # barrier 仅在 run 启动后可被触发
+        cancel = self._root_cancel.child(f"barrier:{barrier.barrier_id}")
+        runner = self._build_child_runner(
+            target, then_thread_id, seed, cancel, history=[seed])
+        # 聚合 turn 后台独立跑(不阻塞主 actor / 不回写本 engine 状态)
+        asyncio.create_task(runner.run())
+
+        # 幂等:先入守卫集再落 fired 标记 + emit(防止并发 _check_barriers 重入触发)
+        self._fired_barriers.add(barrier.barrier_id)
+        from taifeng.conversation.models import join_barrier_fired_item
+
+        marker = join_barrier_fired_item(
+            barrier_id=barrier.barrier_id,
+            then_thread_id=then_thread_id,
+            thread_id=self._thread_id,
+        )
+        async with self._lock:
+            self._history.append(marker)
+        await self._store.append(marker)
+        await self._emit(EventMsg(
+            submission_id=barrier.barrier_id,
+            msg=JoinBarrierFired(data={
+                "barrier_id": barrier.barrier_id,
+                "then_thread_id": then_thread_id,
+            }),
+        ))
 
     # -----------------------------------------------------------------
     # Resume：续跑挂起的 turn（配对 resolutions → 补齐 history gap → 续采样）

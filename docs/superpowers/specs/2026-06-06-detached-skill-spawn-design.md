@@ -108,7 +108,7 @@
 | --- | --- |
 | spawn 未知 skill / 非白名单 / 超深度 / 成环 | `ToolResult.error(<reason>)`,不建 child |
 | SpawnSlot(K1)超限 | `spawn_limit_exceeded`,显式拒 |
-| `await_skills` 含未知 handle / `then_skill_id` 不可作 entry | **注册期拒绝**(不登记永不可触发的屏障) |
+| `set_join_barrier` 含未知 handle / `then_skill_id` 不存在于 snapshot | **注册期拒绝**(`ValueError`,不登记永不可触发的屏障)。注:聚合 turn 走 `_build_child_runner`(call_stack 空,独立根 turn,**无 DispatchPolicy entry 门控**),故 `then_skill_id` 可为 entry 或非 entry —— **只校验存在性,不校验 entry 资格**。 |
 | 某专家 `spawn_failed` | barrier 在全句柄到**终态(done/error/cancelled)**才触发;聚合 skill 收到每句柄终态+结果(含失败),**不静默丢失败专家** |
 | `join_skill` / `kill_skill` 未知 handle | 显式 error |
 | `Resume` 非挂起的 child thread | 走现有 `no_active_suspension` 拒绝 |

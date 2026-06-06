@@ -501,3 +501,101 @@ async def test_has_live_spawns_keepalive(expert_skills, threads_dir):
     # kill 已终结句柄是良性 no-op(不报错)
     await engine.kill_spawn(hid)
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 8: join-barrier —— {句柄集}全终态 → 自动起聚合(联合会诊)turn。
+#         失败/取消的专家不被静默丢弃,聚合输入含其终态。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_join_barrier_fires_when_all_done(skills_dir, threads_dir):
+    """两个 spawn 全 done → barrier 自动起聚合 turn,emit join_barrier_fired。"""
+    client = RoutingMockClient(routes={
+        "style-checker": [MockTurn(text="结论A"), MockTurn(text="结论B")],
+        "code-reviewer": [MockTurn(text="会诊:综合A+B")],  # 聚合 skill 用 code-reviewer 占位
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
+    engine = await pool.get_or_create(session_id="s4", entry_skill_id="code-reviewer")
+    fired = {"v": None}
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind == "join_barrier_fired":
+                fired["v"] = dict(ev.msg.data)
+                return
+
+    task = asyncio.create_task(watch())
+    a = (await engine.spawn_skill(skill_id="style-checker", args={}, reason="x"))["handle_id"]
+    b = (await engine.spawn_skill(skill_id="style-checker", args={}, reason="x"))["handle_id"]
+    await engine.set_join_barrier([a, b], then_skill_id="code-reviewer")
+    assert await _wait(lambda: fired["v"] is not None)
+    assert "then_thread_id" in fired["v"]
+    task.cancel()
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_join_barrier_with_failed_expert(expert_skills, threads_dir):
+    """一个专家挂起后被 kill(cancelled 终态)→ barrier 仍触发,聚合输入含取消终态。
+
+    确定性制造非 done 终态:expert-a 首 turn 调 request_user_input → 挂起(永不
+    resume,故不会 done),再 kill 它 → cancelled(终态);expert-b 直接跑完 → done。
+    两 handle 全终态 → barrier 触发。断言默认聚合参数里**含被取消 handle 的
+    cancelled 状态**(失败/取消专家不被静默丢弃,会诊需看到全部专家结局)。
+    """
+    import json
+
+    from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+
+    client = RoutingMockClient(routes={
+        # expert-a:首 turn 挂起(request_user_input),永不 resume → 等被 kill
+        "EXPERT_A_MARK": [
+            MockTurn(text="A 提问", tool_calls=[
+                {"id": "call_a", "name": "request_user_input",
+                 "arguments": '{"prompt": "需要补充"}'},
+            ]),
+        ],
+        # expert-b:直接给结论 → done
+        "EXPERT_B_MARK": [MockTurn(text="B 结论 B_DONE")],
+        # orchestrator 作聚合 skill 占位(独立根 turn,无 entry 门控也允许 entry)
+        "ORCH_MARK": [MockTurn(text="会诊综合")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=expert_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], extra_tools=[make_request_user_input_tool()])
+    engine = await pool.get_or_create(
+        session_id="jb-fail", entry_skill_id="orchestrator")
+    fired = {"v": None}
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind == "join_barrier_fired":
+                fired["v"] = dict(ev.msg.data)
+                return
+
+    task = asyncio.create_task(watch())
+    a = (await engine.spawn_skill(skill_id="expert-a", args={}, reason="A"))["handle_id"]
+    b = (await engine.spawn_skill(skill_id="expert-b", args={}, reason="B"))["handle_id"]
+    # 等 a 挂起(非终态)、b 跑完(done)
+    assert await _wait(lambda: engine.spawn_status([a])[a]["status"] == "suspended")
+    assert await _wait(lambda: engine.spawn_status([b])[b]["status"] == "done")
+    # kill a → cancelled(终态)。此时两 handle 全终态。
+    await engine.kill_spawn(a)
+    assert engine.spawn_status([a])[a]["status"] == "cancelled"
+    await engine.set_join_barrier([a, b], then_skill_id="orchestrator")
+    assert await _wait(lambda: fired["v"] is not None)
+    then_tid = fired["v"]["then_thread_id"]
+
+    # 聚合 turn 的种子 user_message 应含【两个 handle】的终态(取消的 a 不丢)
+    items = [it async for it in await pool.store.load_thread(then_tid)]
+    seed = items[0]
+    assert seed.kind == "user_message"
+    payload = json.loads(seed.payload["text"])
+    assert a in payload and b in payload
+    assert payload[a]["status"] == "cancelled"  # 失败/取消专家终态被带入,非静默丢
+    assert payload[b]["status"] == "done"
+    task.cancel()
+    await pool.close()
