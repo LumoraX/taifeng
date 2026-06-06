@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 SpawnStatus = Literal["running", "suspended", "done", "error", "cancelled"]
 _TERMINAL: frozenset[str] = frozenset({"done", "error", "cancelled"})
@@ -30,7 +30,7 @@ class JoinBarrier:
     barrier_id: str
     handle_ids: tuple[str, ...]
     then_skill_id: str
-    then_args_template: dict | None = None
+    then_args_template: dict[str, Any] | None = None
 
 
 @dataclass
