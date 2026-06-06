@@ -1015,3 +1015,93 @@ async def test_spawn_quota_rejected(hold_skills, threads_dir):
     assert engine._spawn_registry.snapshot()["active"] == 0  # noqa: SLF001
 
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_kill_running_spawn_emits_exactly_one_cancelled(
+    hold_skills, threads_dir
+):
+    """kill 一个 RUNNING spawn → 恰好一条 spawn_cancelled 且终态 cancelled。
+
+    回归点（终态幂等单点收敛）：running 句柄被 kill 时，kill_spawn 仅取消 token、
+    不内联 emit；被取消的 live runner 退栈后 _drive_spawn 调 _finalize_spawn 唯一
+    一次 emit SpawnCancelled。若 kill_spawn 也内联 emit，则同一句柄会收到两条
+    spawn_cancelled（消费方重复计数）。
+
+    用 hold_slot 阻塞工具把 spawn 钉在 running（与 test_spawn_quota_rejected 同法），
+    确保 kill 时句柄确为 running（有 live 子树），从而走 _finalize_spawn 收敛路径。
+    """
+    from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+    # 阻塞工具：进入后等待 token 取消（kill 取消子树 token 时被唤醒并抛 CancelledError）。
+    # 取消是协作式：工具须主动 race 在 ctx.cancel.wait_cancelled() 上，kill 才能中断它，
+    # 使 runner 退栈 → end_reason=cancelled → _drive_spawn 调 _finalize_spawn 收敛。
+    entered = asyncio.Event()
+
+    async def _hold_slot(args, ctx: ToolContext) -> ToolResult:
+        """长占工具：标记已进入 → 等待本 spawn 子树取消，被取消即抛 CancelledError。"""
+        entered.set()
+        await ctx.cancel.wait_cancelled()
+        ctx.cancel.raise_if_cancelled()  # 被 kill 取消 → 抛 CancelledError，turn 退栈
+        return ToolResult.ok("unreachable")
+
+    hold_tool = ToolSpec(
+        name="hold_slot",
+        description="测试用：长占直到被释放/取消",
+        input_schema={"type": "object", "properties": {}},
+        handler=_hold_slot,
+        parallel_safe=False,
+        timeout_seconds=30.0,
+    )
+
+    client = RoutingMockClient(routes={
+        "HOLD_A_MARK": [
+            MockTurn(text="A 长占", tool_calls=[
+                {"id": "call_a", "name": "hold_slot", "arguments": "{}"},
+            ]),
+            MockTurn(text="A 完成"),
+        ],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=hold_skills, threads_dir=threads_dir,
+        model_client=client, compressors=[], extra_tools=[hold_tool])
+    engine = await pool.get_or_create(
+        session_id="kill-running", entry_skill_id="hold-orch")
+
+    # 订阅全部事件，统计该句柄的 spawn_cancelled 条数。
+    cancelled_events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind == "spawn_cancelled":
+                cancelled_events.append(dict(ev.msg.data))
+            if ev.msg.kind == "shutdown":
+                break
+
+    watch_task = asyncio.create_task(watch())
+    await asyncio.sleep(0)  # 让 subscribe_all 注册队列
+
+    out = await engine.spawn_skill(skill_id="hold-a", args={}, reason="A")
+    hid = out["handle_id"]
+    # 等子 turn 进入阻塞工具 → 句柄确为 running（有 live 子树）。
+    assert await _wait(entered.is_set), "spawn 未进入阻塞工具，无法钉在 running"
+    assert engine.spawn_status([hid])[hid]["status"] == "running"
+
+    # kill running spawn：token 取消 → runner 退栈 → _finalize_spawn 唯一一次 emit。
+    await engine.kill_spawn(hid)
+    # 终态收敛到 cancelled。
+    assert await _wait(
+        lambda: engine.spawn_status([hid])[hid]["status"] == "cancelled"), \
+        "running spawn kill 后未收敛到 cancelled"
+
+    # 关键断言：恰好一条 spawn_cancelled（无双发）。给后台 finalize 充分时间后再核。
+    assert await _wait(
+        lambda: len([d for d in cancelled_events if d["handle_id"] == hid]) >= 1)
+    # 再等一拍，确认不会出现第二条。
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+    mine = [d for d in cancelled_events if d["handle_id"] == hid]
+    assert len(mine) == 1, f"应恰好一条 spawn_cancelled，实际 {len(mine)} 条"
+
+    watch_task.cancel()
+    await pool.close()

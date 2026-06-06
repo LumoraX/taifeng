@@ -77,6 +77,25 @@ class SpawnDriver:
         # 冷恢复重建时也不重复起聚合 turn)。
         self._fired_barriers: set[str] = set()
 
+    async def _await_root_cancel_ready(self) -> None:
+        """有界让步等待根取消 token 就绪，超时显式抛错（不无限自旋、不静默跳过）。
+
+        engine.run 由 pool 以 create_task 后台启动，``_root_cancel`` 在其首行赋值。
+        紧随 ``get_or_create`` 的调用方（spawn_skill / rebuild_from_history）可能在
+        run() 尚未被调度时触达，需短暂让步等其就绪——任何会派子 runner / 触发 barrier
+        （都派生 ``_root_cancel.child(...)``，R4 要求挂在根取消树上）的入口都应先等。
+
+        Raises:
+            RuntimeError: 让步上限内根取消 token 仍未就绪（engine 未启动）。
+        """
+        eng = self._engine
+        for _ in range(100):
+            if eng._root_cancel is not None:  # noqa: SLF001
+                return
+            await asyncio.sleep(0)
+        if eng._root_cancel is None:  # noqa: SLF001
+            raise RuntimeError("engine not running: root cancel token unavailable")
+
     # -----------------------------------------------------------------
     # detached-spawn：分离式发起子 skill（立即返回句柄，后台独立跑完）
     # -----------------------------------------------------------------
@@ -132,15 +151,9 @@ class SpawnDriver:
         if not verdict.allowed:
             raise ValueError(f"dispatch_rejected: {verdict.reason}")
 
-        # engine.run 由 pool 以 create_task 后台启动，``_root_cancel`` 在其首行赋值。
-        # spawn_skill 紧随 get_or_create 调用时可能 run() 尚未被调度 → 短暂让步等待
+        # spawn_skill 紧随 get_or_create 调用时可能 run() 尚未被调度 → 有界让步等待
         # 根取消 token 就绪（R4：分离 task 必须挂在根取消树上，不可凭空造游离 token）。
-        for _ in range(100):
-            if eng._root_cancel is not None:  # noqa: SLF001
-                break
-            await asyncio.sleep(0)
-        if eng._root_cancel is None:  # noqa: SLF001
-            raise RuntimeError("engine not running: root cancel token unavailable")
+        await self._await_root_cancel_ready()
 
         # 3. K1 spawn 配额预留（贯穿整棵 turn 树）。注意：detached 语义下不能用
         #    ``async with reserve()``（那会在本方法返回时即释放 slot，而子 task 还在跑）；
@@ -263,8 +276,19 @@ class SpawnDriver:
         - suspended → suspended + SpawnSuspended（resume 路由留待后续 task）
         - cancelled → cancelled + SpawnCancelled
         - 其余（error / 未知）→ error + SpawnFailed
+
+        **终态幂等（单点收敛）**：若句柄已处于终态（done/error/cancelled），直接
+        no-op 返回——不覆盖状态、不重复 emit、不重复跑 _check_barriers。这使
+        _finalize_spawn 成为唯一安全收敛点：kill 一个 running spawn 时，
+        kill_spawn 已显式取消 token 但**不**内联落终态/emit（见 kill_spawn），
+        由被取消的 live runner 退栈后唯一一次走到本方法 emit SpawnCancelled；
+        而 kill 一个 suspended spawn（无 live runner 驱动本方法）由 kill_spawn
+        内联收敛。两路径合计对同一句柄**恰好一次** SpawnCancelled。
         """
         eng = self._engine
+        # 终态幂等：已收敛的句柄不再二次处理（防 running-kill 双发 spawn_cancelled）。
+        if self._spawn_handles.is_terminal(handle_id):
+            return
         end = outcome.end_reason
         if end == "completed":
             self._spawn_handles.set_result(
@@ -471,10 +495,18 @@ class SpawnDriver:
           - 未知 handle_id → 抛 ``KeyError(handle_id)``。
           - 已终态句柄（done/error/cancelled）→ 良性 no-op：杀一个已结束的 spawn
             无意义但无害，直接返回，**不**报错、**不**重复 emit。
-          - 运行中 / 挂起句柄 → 取消其专属取消子 token（若有 live 子树则 runner 在
-            迭代边界 raise CancelledError → _drive_spawn 的 finally 释放 K1 槽位，
-            _finalize_spawn 落 cancelled；挂起句柄已无 live 子树，token 取消是空操作，
-            故此处再显式落 cancelled 终态 + emit SpawnCancelled 保证状态确定收敛）。
+          - **运行中句柄**（status=running，有 live 子树）→ 仅取消其专属 token，**不**
+            在此内联落终态/emit；被取消的 runner 在迭代边界 raise CancelledError →
+            退栈后由 _drive_spawn 调 _finalize_spawn 唯一一次 emit SpawnCancelled
+            （_drive_spawn 的 finally 同时释放 K1 槽位）。如此 running-kill 恰好一次。
+          - **挂起句柄**（status=suspended，无 live 子树驱动 finalize）→ 取消 token
+            （空操作，首发 _drive_spawn 已退栈），并在此内联落 cancelled + emit +
+            _check_barriers 收敛，确保挂起句柄状态确定对外可见。
+
+        为何按 status 分流而非统一内联：running-kill 若也内联 emit，则 live runner
+        退栈后 _finalize_spawn 会对同一句柄再 emit 第二条 spawn_cancelled（消费方
+        重复计数）。把 running 的收敛权唯一交给 _finalize_spawn（已做终态幂等），
+        suspended 因无 live runner 必须自行收敛——两者合计恰好一次 spawn_cancelled。
 
         Args:
             handle_id: 要终止的 spawn 句柄 id。
@@ -490,14 +522,15 @@ class SpawnDriver:
         if self._spawn_handles.is_terminal(handle_id):
             return
         # 取消该 spawn 的专属子树 token（精确隔离，不动兄弟 spawn）。
-        # 运行中：live 子树会在迭代边界 raise → 走 _drive_spawn finally 释放 K1 +
-        #   _finalize_spawn 落 cancelled（与本处落 cancelled 同值，幂等）。
-        # 挂起：无 live 子树（首发 _drive_spawn 已收尾、K1 已释放），cancel 为空操作。
         token = self._spawn_cancels.get(handle_id)
         if token is not None:
             token.cancel()
-        # 显式落 cancelled 终态 + emit —— 确保挂起句柄（无 live 子树驱动 finalize）也
-        # 立即收敛到 cancelled，状态对外可见。
+        # running：有 live 子树，收敛权唯一交给被取消 runner 退栈后的 _finalize_spawn
+        #   （已做终态幂等），此处**不**内联 emit，避免双发 spawn_cancelled。
+        if h.status == "running":
+            return
+        # suspended：无 live 子树驱动 finalize（首发 _drive_spawn 已退栈、K1 已释放），
+        #   故在此内联落 cancelled 终态 + emit + barrier 检查，保证确定收敛。
         self._spawn_handles.set_result(handle_id, status="cancelled", result=None)
         await eng._emit(EventMsg(  # noqa: SLF001
             submission_id=handle_id,
@@ -712,6 +745,11 @@ class SpawnDriver:
         仅在 engine 持有 prior history(resume 场景)时由 pool 调用,且每次重载恰好一次。
         """
         eng = self._engine
+        # 冷恢复加固：rebuild 末尾的 _check_barriers 可能补触发 barrier，而 _fire_barrier
+        # 派生 _root_cancel.child(...) 并 assert 其非 None。pool.get_or_create 调本方法时
+        # run() 可能尚未被调度（_root_cancel 未赋值）——故先有界让步等其就绪再继续，
+        # 不依赖偶然的 await 时序（与 spawn_skill 同一就绪保障）。
+        await self._await_root_cancel_ready()
         # 扫一遍 parent history,按 kind 分类处理三类锚
         for item in list(eng._history):  # noqa: SLF001
             if item.kind == "spawn":

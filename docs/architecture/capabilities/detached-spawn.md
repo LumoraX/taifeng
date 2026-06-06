@@ -27,7 +27,7 @@
 | `skill_id` | `str` | 被 spawn 的 skill id |
 | `child_thread_id` | `str` | 独立 child thread id；`Resume` 路由用此字段 |
 | `status` | `Literal["running","suspended","done","error","cancelled"]` | 当前状态 |
-| `result` | `dict \| None` | 终态结果（done → assistant text 结构；error → error 信息；cancelled / running / suspended → None） |
+| `result` | `str \| None` | 终态结果（done → assistant 最终文本 `outcome.final_text`；error → error 信息字符串；cancelled / running / suspended → None） |
 
 **状态转换**：
 
@@ -43,7 +43,7 @@ running → done | error | cancelled
 | `barrier_id` | `str` | 唯一 id |
 | `handle_ids` | `frozenset[str]` | 需全部到达终态才触发 |
 | `then_skill_id` | `str` | 聚合 skill id（注册时校验存在性，**不校验** entry 资格） |
-| `then_args_template` | `dict \| None` | `None` → 聚合 args = `{handle_id: {status, result}}` for 全部句柄（含 failed / cancelled，不丢弃）；非 None → 模板中 `{{handle_id}}` 占位由各句柄结果填充 |
+| `then_args_template` | `dict \| None` | `None` → 聚合 args = `{handle_id: {status, result}}` for 全部句柄（含 failed / cancelled，不丢弃）；非 None → 模板 dict **原样透传**为聚合 turn 的种子 args（v1 **不做**任何 `{{handle_id}}` 占位替换） |
 
 ### SpawnHandle 落盘（append-only ResponseItem）
 
