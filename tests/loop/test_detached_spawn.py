@@ -44,3 +44,16 @@ def test_spawn_event_kinds() -> None:
     assert SpawnCancelled().kind == "spawn_cancelled"
     assert JoinBarrierRegistered().kind == "join_barrier_registered"
     assert JoinBarrierFired().kind == "join_barrier_fired"
+
+
+def test_spawn_response_items() -> None:
+    from taifeng.conversation.models import (
+        join_barrier_fired_item, join_barrier_item, spawn_item,
+    )
+    si = spawn_item(handle_id="sp0", skill_id="a", child_thread_id="t1", thread_id="root")
+    assert si.kind == "spawn" and si.payload["handle_id"] == "sp0"
+    bi = join_barrier_item(barrier_id="b0", handle_ids=["sp0"],
+                           then_skill_id="merge", then_args_template=None, thread_id="root")
+    assert bi.kind == "join_barrier" and bi.payload["barrier_id"] == "b0"
+    fi = join_barrier_fired_item(barrier_id="b0", then_thread_id="t9", thread_id="root")
+    assert fi.kind == "join_barrier_fired"

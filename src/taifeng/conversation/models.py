@@ -20,7 +20,10 @@ ItemKind = Literal[
     "reasoning",
     "compacted",
     "system_injection",
-    "suspension",   # 新增:turn 中途挂起断点标记(payload = 序列化 SuspensionRecord)
+    "suspension",        # 新增:turn 中途挂起断点标记(payload = 序列化 SuspensionRecord)
+    "spawn",             # 新增:分离 spawn 句柄锚(冷恢复重建 registry 用)
+    "join_barrier",      # 新增:join-barrier 登记锚(记录等待的 handle_ids + 续接 skill)
+    "join_barrier_fired",  # 新增:barrier 已触发的幂等标记(重载时不重复触发)
 ]
 
 
@@ -157,6 +160,84 @@ def system_injection(text: str, *, thread_id: str, source: str) -> ResponseItem:
         kind="system_injection",
         thread_id=thread_id,
         payload={"text": text, "source": source},
+    )
+
+
+def spawn_item(
+    *,
+    handle_id: str,
+    skill_id: str,
+    child_thread_id: str,
+    thread_id: str,
+) -> ResponseItem:
+    """parent thread 落:一次分离 spawn 的句柄锚(冷恢复重建 registry)。
+
+    Args:
+        handle_id: spawn 句柄唯一 ID，与 SpawnHandle.handle_id 对应。
+        skill_id: 被分离执行的子 skill ID。
+        child_thread_id: 子 thread 的 thread_id（用于重建 registry 时定位子 store）。
+        thread_id: 本条 item 归属的 parent thread_id。
+    """
+    return ResponseItem(
+        kind="spawn",
+        thread_id=thread_id,
+        payload={
+            "handle_id": handle_id,
+            "skill_id": skill_id,
+            "child_thread_id": child_thread_id,
+        },
+    )
+
+
+def join_barrier_item(
+    *,
+    barrier_id: str,
+    handle_ids: list[str],
+    then_skill_id: str,
+    then_args_template: dict[str, Any] | None,
+    thread_id: str,
+) -> ResponseItem:
+    """parent thread 落:一个 join-barrier 登记锚。
+
+    Args:
+        barrier_id: barrier 幂等键，与 JoinBarrierRegistered 事件对应。
+        handle_ids: 本 barrier 等待的所有 spawn handle_id 列表。
+        then_skill_id: 所有 handle 完成后续接执行的 skill ID。
+        then_args_template: 续接 skill 的参数模板（None 表示无额外参数）。
+        thread_id: 本条 item 归属的 parent thread_id。
+    """
+    return ResponseItem(
+        kind="join_barrier",
+        thread_id=thread_id,
+        payload={
+            "barrier_id": barrier_id,
+            "handle_ids": list(handle_ids),
+            "then_skill_id": then_skill_id,
+            "then_args_template": then_args_template,
+        },
+    )
+
+
+def join_barrier_fired_item(
+    *,
+    barrier_id: str,
+    then_thread_id: str,
+    thread_id: str,
+) -> ResponseItem:
+    """parent thread 落:barrier 已触发的幂等标记(重载不重复触发)。
+
+    Args:
+        barrier_id: 已触发的 barrier 幂等键。
+        then_thread_id: 续接 skill 启动后分配的 thread_id（用于追踪续接执行）。
+        thread_id: 本条 item 归属的 parent thread_id。
+    """
+    return ResponseItem(
+        kind="join_barrier_fired",
+        thread_id=thread_id,
+        payload={
+            "barrier_id": barrier_id,
+            "then_thread_id": then_thread_id,
+        },
     )
 
 
