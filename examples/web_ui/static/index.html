@@ -1141,6 +1141,18 @@ function renderFormInto(box, schema) {
   const props = (schema && schema.properties) || {};
   const required = (schema && schema.required) || [];
   box.innerHTML = "";
+  // 纯提示型 HITL（request_user_input 只给 prompt、response_schema 为空 {}）：
+  // schema 无 properties，退化为单个自由文本框，key=answer
+  // （提交 payload 形如 {answer: "..."}，与 demo / MockClient 约定一致），
+  // 否则只剩"提交"按钮没有输入框，用户无处填写。
+  if (Object.keys(props).length === 0) {
+    const fld = document.createElement("div");
+    fld.className = "fld"; fld.dataset.key = "answer"; fld.dataset.kind = "text";
+    fld.innerHTML = `<span class="lbl">回答<span class="hint">(问答)</span></span>`
+      + `<textarea name="f_answer" rows="2" placeholder="请输入你的回答"></textarea>`;
+    box.appendChild(fld);
+    return;
+  }
   for (const [key, def] of Object.entries(props)) {
     const title = (def && def.title) || key;
     const isReq = required.includes(key);
