@@ -3,7 +3,6 @@ name: cardio-expert
 description: 心血管专科专家（会诊子 skill，先 HITL 问诊再下结论）
 version: 1.0.0
 type: composite
-model: mock-model
 tool_names: [request_user_input]
 max_call_depth: 2
 ---
