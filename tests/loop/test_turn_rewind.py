@@ -247,11 +247,11 @@ async def test_rewind_re_reason_truncates_and_redrives(
                if n.kind == "iteration" and n.iteration_index == 2)
     cut = it2.history_len
 
-    sub_id = await engine.submit(Rewind(node_id="it2", mode="re_reason"))
+    sub_id = await engine.submit(Rewind(node_id="t1:it2", mode="re_reason"))
     kinds, text, rewound = await _drain(engine, sub_id)
 
     assert "turn_rewound" in kinds
-    assert rewound["node_id"] == "it2"
+    assert rewound["node_id"] == "t1:it2"
     assert rewound["mode"] == "re_reason"
     assert rewound["cut_index"] == cut
     assert "REDRIVE-DONE" in text, "重采样应走出新文本"
@@ -274,7 +274,7 @@ async def test_rewind_mode_kind_mismatch_rejected(
     engine = await pool.get_or_create(session_id="s_mk", entry_skill_id="code-reviewer")
     await _run_to_end(engine, "go")
 
-    sub_id = await engine.submit(Rewind(node_id="it1", mode="retry_tool"))
+    sub_id = await engine.submit(Rewind(node_id="t1:it1", mode="retry_tool"))
     rejected = None
     async for ev in engine.subscribe(sub_id):
         if ev.msg.kind == "rewind_rejected":
@@ -434,7 +434,7 @@ async def test_rewind_cache_break_marked_expected(
     await _run_to_end(engine, "go")
     assert engine.cache_stats.unexpected_cache_breaks == 0
 
-    sub_id = await engine.submit(Rewind(node_id="it1", mode="re_reason"))
+    sub_id = await engine.submit(Rewind(node_id="t1:it1", mode="re_reason"))
     await _drain(engine, sub_id)
 
     # rewind 导致的 cache 失效是预期内的,不得计入 unexpected
@@ -465,7 +465,10 @@ async def test_rewind_store_append_only_preserved(
     before_blob = "\n".join(before_lines)
     assert "ORIGINAL-TAIL" in before_blob
 
-    await _drain(engine, await engine.submit(Rewind(node_id="it1", mode="re_reason")))
+    await _drain(
+        engine,
+        await engine.submit(Rewind(node_id="t1:it1", mode="re_reason")),
+    )
 
     after_blob = jsonl.read_text(encoding="utf-8")
     # append-only:旧内容仍在(含被内存截断掉的 ORIGINAL-TAIL),且只增不减

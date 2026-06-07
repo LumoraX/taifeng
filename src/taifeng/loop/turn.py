@@ -66,9 +66,9 @@ from taifeng.loop.event import (
     TurnSuspended,
 )
 from taifeng.loop.prompt import build_api_request
+from taifeng.loop.rewind import RewindLog, count_turns
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch
 from taifeng.skill.definition import SkillDefinition
-from taifeng.loop.rewind import RewindLog
 from taifeng.skill.dispatch import CallStack, DispatchPolicy
 from taifeng.skill.eligibility import RuntimeCapabilities
 from taifeng.skill.registry import SkillSnapshot
@@ -574,6 +574,7 @@ class TurnRunner:
         iteration_history_len = len(self.history_buffer)
         if self._is_root:
             cp = self.rewind_log.record_iteration(
+                turn_index=count_turns(self.history_buffer),
                 iteration_index=iteration,
                 history_len=iteration_history_len,
                 cache_anchor=self.cache_anchor_index,
@@ -823,6 +824,7 @@ class TurnRunner:
             # history_len 复用本圈 iteration 采样前长度 = re_reason 切点。
             if self._is_root:
                 dcp = self.rewind_log.record_dispatch(
+                    turn_index=count_turns(self.history_buffer),
                     iteration_index=iteration,
                     iteration_history_len=iteration_history_len,
                     cache_anchor=self.cache_anchor_index,
