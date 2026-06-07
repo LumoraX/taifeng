@@ -1,13 +1,16 @@
 """derive_rewind_log 推导 + 冷场景 rewind。"""
 from __future__ import annotations
 
+import taifeng
 from taifeng.conversation.models import (
     assistant_message,
     function_call,
     function_call_output,
     user_message,
 )
+from taifeng.llm.providers import MockClient, MockTurn
 from taifeng.loop.rewind import derive_rewind_log
+from taifeng.loop.submission import Rewind
 
 T = "thr"
 
@@ -251,6 +254,93 @@ async def test_parity_derive_equals_live_recording(
         "derive_rewind_log 与 live RewindLog 出现分歧！\n"
         "首个分歧节点在报告第 1 条：\n"
         + "\n".join(divergence_report)
+    )
+
+    await pool.close()
+
+
+# ── Task 6：rewind/rollback marker 持久化 cut_index ──────────────────────────
+
+
+async def _drain_to_root_end(
+    engine: taifeng.AgentEngine, sub_id: str
+) -> None:
+    """消费某 submission 的事件直到 root turn 终结（is_root=True 的 turn_completed/failed）。"""
+    async for ev in engine.subscribe_all():
+        if ev.submission_id != sub_id:
+            continue
+        kind = ev.msg.kind
+        if kind in ("turn_completed", "turn_failed"):
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if data.get("is_root"):
+                break
+
+
+async def test_rewind_marker_persists_cut_index(
+    skills_dir: object, threads_dir: object
+) -> None:
+    """rewind 后 store 里的 rewind marker payload 含 cut_index。
+
+    具体：提交 re_reason rewind 到 t1:it2 节点，等重推完成，
+    从 store 加载全部 items，找到 source=='rewind' 的 system_injection，
+    断言其 payload['cut_index'] == it2.history_len（即 rewind 截断点）。
+    """
+    import asyncio
+
+    # 三圈模型：圈 1/2 各一次 read_skill，圈 3 收尾；rewind 后重推用第 4 条
+    client = MockClient(turns=[
+        MockTurn(text="圈1", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
+        ]),
+        MockTurn(text="圈2", tool_calls=[
+            {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
+        ]),
+        MockTurn(text="原收尾"),
+        # rewind 重推消费：直接无工具收尾
+        MockTurn(text="REDRIVE-DONE"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,  # type: ignore[arg-type]
+        threads_dir=threads_dir,  # type: ignore[arg-type]
+        model_client=client,
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="s_marker_cut", entry_skill_id="code-reviewer"
+    )
+
+    # 第一轮 turn，等节点表落地
+    sub_id = await engine.submit(taifeng.UserMessage(text="请审查"))
+    await _drain_to_root_end(engine, sub_id)
+    for _ in range(100):
+        if engine.rewind_nodes():
+            break
+        await asyncio.sleep(0.01)
+
+    # 取 t1:it2 节点（圈 2 的 iteration 节点）
+    it2 = next(n for n in engine.rewind_nodes() if n.node_id == "t1:it2")
+    expected_cut = it2.history_len
+
+    # 提交 re_reason rewind 并等重推完成
+    rw_sub_id = await engine.submit(Rewind(node_id="t1:it2", mode="re_reason"))
+    await _drain_to_root_end(engine, rw_sub_id)
+
+    # 从 store 加载所有 items，找 source=='rewind' 的 system_injection
+    thread_id = engine.thread_id
+    items = [it async for it in await engine._store.load_thread(thread_id)]  # type: ignore[attr-defined]
+    rewind_markers = [
+        it for it in items
+        if it.kind == "system_injection" and it.payload.get("source") == "rewind"
+    ]
+
+    assert rewind_markers, "store 中应有 source='rewind' 的 system_injection marker"
+    # 取最后一条 rewind marker（对应本次 rewind 操作）
+    marker_payload = rewind_markers[-1].payload
+    assert "cut_index" in marker_payload, (
+        f"rewind marker payload 缺少 cut_index 字段: {marker_payload}"
+    )
+    assert marker_payload["cut_index"] == expected_cut, (
+        f"cut_index={marker_payload['cut_index']} 应等于 it2.history_len={expected_cut}"
     )
 
     await pool.close()

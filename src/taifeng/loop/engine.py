@@ -1654,9 +1654,11 @@ class AgentEngine:
                 self._rewrite_seed_args(cp.call_id, op.new_args)
 
         # 6. marker(审计;同 rollback 范式,落 store、不进 history)
+        # cut_index 持久化：供 reconstruct_logical_history 冷恢复时按截断点重建逻辑 history
         marker = system_injection(
             f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
             thread_id=self._thread_id, source="rewind",
+            extra={"cut_index": cut},
         )
         await self._store.append(marker)
 
@@ -1707,10 +1709,12 @@ class AgentEngine:
                 self._cache_anchor_index = cut_idx - 1
 
         # 写一条 system_injection 标记
+        # cut_index 持久化：供 reconstruct_logical_history 冷恢复时按截断点重建逻辑 history
         marker = system_injection(
             f"[rollback] dropped {removed} item(s), {num_turns} turn(s)",
             thread_id=self._thread_id,
             source="rollback",
+            extra={"cut_index": cut_idx},
         )
         await self._store.append(marker)
         await self._emit(
