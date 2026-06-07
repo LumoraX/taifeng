@@ -328,6 +328,13 @@
   .consult-report { margin-top:8px; border-top:1px dashed var(--border); padding-top:8px; }
   .cr-title { font-weight:600; }
   .cr-body { white-space:pre-wrap; }
+  /* rewind 节点表（turn_rewind demo）—— 只在 wants_rewind demo 渲染 */
+  .rewind-panel { border:1px solid var(--border); border-radius:8px; padding:10px; margin:8px 0; }
+  .rp-title { font-weight:600; margin-bottom:6px; }
+  #rewind-table { width:100%; border-collapse:collapse; font-size:13px; }
+  #rewind-table td { padding:4px 6px; border-bottom:1px solid var(--border); }
+  .rw-actions button { margin-right:6px; }
+
   /* spawn / barrier 事件时间线着色 */
   .evt.k-spawn_started .kind { color:#3b82f6; }
   .evt.k-spawn_suspended .kind { color:var(--warn,#d6a700); }
@@ -482,6 +489,12 @@
     <div class="cr-title">联合会诊报告</div>
     <div id="consult-report-body" class="cr-body"></div>
   </div>
+</div>
+
+<!-- Rewind 节点表（turn_rewind demo）：根 turn 完成后列出回访节点 -->
+<div id="rewind-panel" class="rewind-panel" style="display:none">
+  <div class="rp-title">回访节点（点节点重跑）</div>
+  <table id="rewind-table"><tbody></tbody></table>
 </div>
 
 <!-- 表单型 HITL（request_user_input）：据 response_schema 动态渲染问答/单选/多选 -->
@@ -853,6 +866,11 @@ function summarize(kind, data, payload) {
       return `barrier=${truncate(data.barrier_id||"",12)} 守卫=${(data.handle_ids||[]).length}`;
     case "join_barrier_fired":
       return `barrier 触发 → then_thread=${truncate(data.then_thread_id||"",12)}`;
+    // rewind 事件：wire kind 已在 event.py Literal 声明中确认
+    case "rewind_rejected":
+      return `✗ ${truncate(data.reason||data.node_id||"",120)}`;
+    case "rewind_checkpoint_recorded":
+      return `节点 ${truncate(data.node_id||"",24)}`;
     default:
       return fmtData(data);
   }
@@ -954,6 +972,8 @@ function routeToChat(kind, data, payload) {
     // 根 turn 收尾后刷新历史列表：新会话首轮完成后该 thread 即可被续接，
     // 续聊也会更新其消息数。保留当前选中项（resumeThreadId）。
     loadThreads();
+    // turn_rewind demo：根 turn 完成后自动拉回访节点表供用户选择重跑
+    if (window.__activeWantsRewind) loadRewindNodes();
   }
   if (kind === "hitl_required") {
     enqueueHitl(payload);
@@ -1054,6 +1074,56 @@ async function submitCardForm(handleId) {
   }
 }
 
+// 拉回访节点表并渲染（turn_rewind demo）。
+async function loadRewindNodes() {
+  try {
+    const did = demoSelect.value, sid = activeSession();
+    const r = await fetch(`/api/rewind_nodes/${encodeURIComponent(did)}/${encodeURIComponent(sid)}`);
+    if (!r.ok) return;
+    const nodes = (await r.json()).nodes || [];
+    const tb = $("rewind-table").querySelector("tbody");
+    tb.innerHTML = "";
+    if (!nodes.length) { $("rewind-panel").style.display = "none"; return; }
+    $("rewind-panel").style.display = "block";
+    for (const n of nodes) {
+      const tr = document.createElement("tr");
+      const isDispatch = n.kind === "dispatch";
+      tr.innerHTML =
+        `<td>${escapeHtml(n.node_id)}</td><td>${escapeHtml(n.kind)}</td>` +
+        `<td>${escapeHtml(n.target_id||"")}</td>` +
+        `<td class="rw-actions"></td>`;
+      const act = tr.querySelector(".rw-actions");
+      const reBtn = document.createElement("button");
+      reBtn.textContent = "re_reason";
+      reBtn.onclick = () => doRewind(n.node_id, "re_reason");
+      act.appendChild(reBtn);
+      if (isDispatch) {
+        const rtBtn = document.createElement("button");
+        rtBtn.textContent = "retry_tool";
+        rtBtn.onclick = () => doRewind(n.node_id, "retry_tool");
+        act.appendChild(rtBtn);
+      }
+      tb.appendChild(tr);
+    }
+  } catch (e) { /* demo 容错：节点表拉取失败不阻断主流程 */ }
+}
+
+// 触发一次 rewind 重跑（事件经 SSE 回流到 timeline）。
+async function doRewind(nodeId, mode) {
+  try {
+    const r = await fetch("/api/rewind", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        demo_id: demoSelect.value, session_id: activeSession(),
+        node_id: nodeId, mode }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    $("send").disabled = true;  // 重跑期间锁输入，根 turn 完成回调会解锁
+  } catch (e) {
+    alert("rewind 失败：" + e.message);
+  }
+}
+
 // 切 demo / 新会话时：重置专家卡与报告区
 function resetExpertPanel() {
   expertCards = {}; consultThreadId = null;
@@ -1061,6 +1131,8 @@ function resetExpertPanel() {
   $("consult-report").style.display = "none";
   $("consult-report-body").textContent = "";
   $("expert-panel").style.display = "none";
+  // rewind 节点表一并隐藏（切 demo / 新会话时清场）
+  $("rewind-panel").style.display = "none";
 }
 
 // 把 JSON Schema 渲染进任意容器（卡片表单 / 弹窗表单共用）。
@@ -1551,6 +1623,8 @@ async function loadDemos() {
     // 初始 demo 的 detached 标志（首次加载时与 switchDemo 对称）
     const _initMeta = demos[demoSelect.value];
     window.__activeStreamsDetached = !!(_initMeta && _initMeta.streams_detached);
+    // turn_rewind demo 的识别标志：首次加载与 switchDemo 对称
+    window.__activeWantsRewind = !!(_initMeta && _initMeta.wants_rewind);
     renderLoopPill();
     renderObsPanel();  // llmInfo 就绪后立即渲染，让"ctx窗口"开局即显示（无需等首轮）
   } catch (e) {
@@ -1590,6 +1664,8 @@ function switchDemo() {
   // detached-spawn 标志 + 专家面板重置：切换 demo 时根据新 demo 的元信息刷新
   const _switchMeta = demos[demoSelect.value];
   window.__activeStreamsDetached = !!(_switchMeta && _switchMeta.streams_detached);
+  // turn_rewind demo 的识别标志：根 turn 完成后拉节点表
+  window.__activeWantsRewind = !!(_switchMeta && _switchMeta.wants_rewind);
   resetExpertPanel();
   applyDemoMeta();
   connectSSE();
