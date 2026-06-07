@@ -999,6 +999,8 @@ async def list_demos() -> dict[str, Any]:
                 "hitl_on_skill_dispatch": m.hitl_on_skill_dispatch,
                 "policy_preview": _build_policy_config(m),
                 "loaded": m.demo_id in _pools,
+                "streams_detached": m.streams_detached,
+                "wants_rewind": m.wants_rewind,
             }
             for m in DEMOS.values()
         ],
