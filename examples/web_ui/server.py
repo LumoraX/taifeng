@@ -983,6 +983,19 @@ class ResumeFormRequest(BaseModel):
     """用户填写的表单答案，直接成为该 call 的 function_call_output。"""
 
 
+class RewindRequest(BaseModel):
+    """节点重跑：回退到 root turn 录下的某回访节点并主动重推。"""
+
+    demo_id: str
+    session_id: str = "default"
+    node_id: str
+    """目标回访节点（来自 /api/rewind_nodes）。"""
+    mode: str = "re_reason"
+    """``re_reason``（截到采样前重新决定）/ ``retry_tool``（仅 dispatch 节点，重跑该工具）。"""
+    new_args: dict[str, Any] | None = None
+    """仅 retry_tool + dispatch 节点有意义：替换重跑入参。"""
+
+
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -1234,6 +1247,52 @@ async def resume_form(req: ResumeFormRequest) -> dict[str, Any]:
         "form resume: demo=%s thread=%s rid=%s keys=%s",
         req.demo_id, req.thread_id, req.request_id, list(req.payload.keys()),
     )
+    return {"submission_id": sub_id, "demo_id": req.demo_id}
+
+
+@app.get("/api/rewind_nodes/{demo_id}/{session_id}")
+async def rewind_nodes(demo_id: str, session_id: str) -> dict[str, Any]:
+    """列出当前 session engine 的回访节点（turn-rewind 前端节点表数据源）。"""
+    if demo_id not in DEMOS:
+        raise HTTPException(404, f"unknown demo_id: {demo_id}")
+    pool = _pools.get(demo_id)
+    if pool is None:
+        return {"nodes": []}
+    meta = DEMOS[demo_id]
+    engine = await pool.get_or_create(
+        session_id=f"{demo_id}:{session_id}", entry_skill_id=meta.entry_skill_id)
+    nodes = [
+        {
+            "node_id": cp.node_id,
+            "kind": cp.kind,
+            "target_id": cp.target_id,
+            "args_digest": cp.args_digest,
+            "iteration_index": cp.iteration_index,
+        }
+        for cp in engine.rewind_nodes()
+    ]
+    return {"nodes": nodes}
+
+
+@app.post("/api/rewind")
+async def rewind(req: RewindRequest) -> dict[str, Any]:
+    """提交 Rewind op 重跑某节点；重跑事件经 detached bridge 回流前端。"""
+    from taifeng.loop.submission import Rewind
+
+    if req.demo_id not in DEMOS:
+        raise HTTPException(404, f"unknown demo_id: {req.demo_id}")
+    pool = _pools.get(req.demo_id)
+    if pool is None:
+        raise HTTPException(409, "no active pool for this demo")
+    meta = DEMOS[req.demo_id]
+    engine = await pool.get_or_create(
+        session_id=f"{req.demo_id}:{req.session_id}",
+        entry_skill_id=meta.entry_skill_id)
+    sub_id = await engine.submit(Rewind(
+        node_id=req.node_id, mode=req.mode, new_args=req.new_args))  # type: ignore[arg-type]
+    asyncio.create_task(_bridge_events(
+        req.demo_id, req.session_id, engine, sub_id, detached=True))
+    logger.info("rewind: demo=%s node=%s mode=%s", req.demo_id, req.node_id, req.mode)
     return {"submission_id": sub_id, "demo_id": req.demo_id}
 
 
