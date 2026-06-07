@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -1702,6 +1701,7 @@ class AgentEngine:
             and not self._last_resolved
             and self._history
         ):
+            # cancel=None:rewind 时无活跃 turn-level token,刻意不传(同 warmup_engine_scope)
             ctx = InstructionContext(
                 session_id=self._session_id,
                 thread_id=self._thread_id,
@@ -1710,12 +1710,16 @@ class AgentEngine:
                 metadata=self._request_metadata,
                 cancel=None,
             )
-            # fetch 失败时不阻塞 rewind：保留空列表继续（相当于无指令层）。
-            # 与热路径不同（热路径 fail-fast），此处降级为 best-effort，
-            # 因为 rewind 本身已经发出了 turn_rewound 事件，强制中止会破坏一致性。
-            with contextlib.suppress(InstructionFetchError):
+            # best-effort:turn_rewound 已发出,resolve 失败不硬 abort(会留下不一致),
+            # 但不静默——按仓库惯例(turn.py on_pre_evict)落 warning 日志,保留可观测(R3)
+            try:
                 self._last_resolved = await self._instruction_resolver.resolve(
                     ("engine", "session", "turn"), ctx,
+                )
+            except InstructionFetchError:
+                logger.warning(
+                    "冷 rewind 指令 resolve 失败,以空指令层续推(thread=%s)",
+                    self._thread_id,
                 )
 
         # 8b. 主动重推:截断后建新 root TurnRunner;retry_tool 先补跑悬空 call
