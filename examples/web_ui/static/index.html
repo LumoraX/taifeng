@@ -320,8 +320,12 @@
   .expert-card.waiting { border-left-color:var(--warn,#d6a700); }
   .expert-card.done    { border-left-color:#16a34a; }
   .expert-card.error   { border-left-color:var(--danger); }
-  .ec-head { display:flex; justify-content:space-between; font-weight:600; }
-  .ec-status { font-size:12px; opacity:.85; }
+  .ec-head { display:flex; justify-content:space-between; align-items:center; gap:8px; font-weight:600; cursor:pointer; }
+  .ec-title { display:flex; align-items:center; gap:6px; min-width:0; }
+  .ec-caret { display:inline-block; width:1em; flex:none; opacity:.7; }
+  .ec-status { font-size:12px; opacity:.85; white-space:nowrap; flex:none; }
+  .expert-card.collapsed .ec-body { display:none; }
+  #expert-cards { max-height:48vh; overflow-y:auto; }
   .ec-result { margin-top:6px; white-space:pre-wrap; }
   .ec-form .fld { margin:6px 0; }
   .ec-form textarea { width:100%; }
@@ -993,7 +997,9 @@ function routeToChat(kind, data, payload) {
     const c = expertCards[data.handle_id];
     if (c) { setCardStatus(c, "done", "已完成");
       c.el.querySelector(".ec-body").innerHTML =
-        `<div class="ec-result">${escapeHtml(data.result||"")}</div>`; }
+        `<div class="ec-result">${escapeHtml(data.result||"")}</div>`;
+      // 完成自动折叠：长结论收起，只留标题+状态，点卡头可展开
+      if (!c.el.classList.contains("collapsed")) toggleCard(c.el); }
   }
   if (kind === "spawn_failed" || kind === "spawn_cancelled") {
     const c = expertCards[data.handle_id];
@@ -1016,13 +1022,23 @@ function ensureCard(handleId, skillId) {
   const el = document.createElement("div");
   el.className = "expert-card running";
   el.innerHTML =
-    `<div class="ec-head"><span>${escapeHtml(skillId || handleId)}</span>` +
+    `<div class="ec-head"><span class="ec-title"><span class="ec-caret">▾</span>` +
+    `<span>${escapeHtml(skillId || handleId)}</span></span>` +
     `<span class="ec-status">running</span></div>` +
     `<div class="ec-body"></div>`;
+  // 点卡头折叠/展开（内容长，多专家时收起省空间）；body 内输入框/按钮点击不冒泡到卡头
+  el.querySelector(".ec-head").onclick = () => toggleCard(el);
   $("expert-cards").appendChild(el);
   const card = { el, skillId, formAnchor: null };
   expertCards[handleId] = card;
   return card;
+}
+
+// 折叠/展开一张专家卡，同步翻转卡头箭头。
+function toggleCard(el) {
+  const collapsed = el.classList.toggle("collapsed");
+  const caret = el.querySelector(".ec-caret");
+  if (caret) caret.textContent = collapsed ? "▸" : "▾";
 }
 
 function setCardStatus(card, statusCls, statusText) {
