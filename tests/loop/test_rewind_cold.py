@@ -1016,3 +1016,349 @@ async def test_cold_rewind_resolves_instructions(
         f"冷 rewind 后 _last_resolved 应含 instruction_text，"
         f"实得 texts={cold_texts}"
     )
+
+
+# ── spec §9 缺口 Test 1：压缩过的 thread 冷 rewind ──────────────────────────────
+
+
+async def test_cold_rewind_compacted_thread_reconstructed_correctly(
+    skills_dir: object, threads_dir: object,
+) -> None:
+    """压缩过的 thread 冷 rewind：engine 构造后 history 是重建的逻辑 history。
+
+    **选用合成 transcript（非真实压缩引擎触发）的原因**：
+    强制触发真实 mid/pre-turn 压缩需要极小的 ContextBudget + 足够多的 turns，
+    且压缩时机由 token estimate 控制，与 turn 调度有时序耦合；在 CI 场景下
+    偶发性高，难以锁定确定性切点坐标。合成方案直接构造与压缩后磁盘布局等价
+    的 transcript（raw_items 含被折叠项 + compacted placeholder），再注入真实
+    AgentEngine.__init__，完整测试 reconstruct→derive 路径（这正是 spec §9 关注
+    的核心：冷加载时废弃项被折叠、后续 turn 可寻址、前置废弃项不可寻址）。
+
+    断言：
+    1. 冷 engine.history_snapshot() = reconstruct 后的逻辑 history
+       - 不含被 compacted 折叠的 superseded 项（id 不在 history 中）；
+       - compacted placeholder 自身出现在 history 中；
+       - 后续（未被折叠的）turn items 出现在 history 中。
+    2. rewind_nodes() 仅含位于压缩边界之后的 turn 的节点（post-compaction 迭代可寻址）。
+    3. 提交一个 bogus（压缩前废弃区域内）node_id → engine 发出 rewind_rejected，
+       reason='unknown_node'（pre-compaction 折叠节点不可寻址）。
+    """
+    import asyncio
+    from pathlib import Path
+
+    import taifeng
+    from taifeng.conversation.models import (
+        ResponseItem,
+        assistant_message,
+        compacted,
+        user_message,
+    )
+    from taifeng.conversation.reconstruct import reconstruct_logical_history
+    from taifeng.conversation.transcript import JsonlMessageStore
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.loop.rewind import derive_rewind_log
+    from taifeng.loop.submission import Rewind
+    from taifeng.skill.registry import FilesystemSkillRegistry
+    from taifeng.tool.builtins import (
+        make_call_skill_tool,
+        make_read_skill_tool,
+        make_run_script_tool,
+    )
+    from taifeng.tool.registry import ToolRegistry
+    from taifeng.tool.runtime import ToolCallRuntime
+
+    tid = "thr-compacted-cold"
+
+    # ── 构造合成 transcript（模拟 3 轮对话 + 压缩第 1-2 轮后的磁盘布局）──────
+    # 热内存历史在压缩前：[u1, a1, u2, a2, u3, a3]（3 轮各一条 user+assistant）
+    # 压缩后热内存变为：[ph, u3, a3]（replaced_range=(0,4) 折叠前 4 项）
+    # 磁盘（append-only）保留全部原始项，compacted 追加到末尾
+
+    u1 = user_message("第一轮用户消息", thread_id=tid)
+    a1 = assistant_message("第一轮助手回复", thread_id=tid, model="mock-model")
+    u2 = user_message("第二轮用户消息", thread_id=tid)
+    a2 = assistant_message("第二轮助手回复", thread_id=tid, model="mock-model")
+    u3 = user_message("第三轮用户消息", thread_id=tid)
+    a3 = assistant_message("第三轮助手回复", thread_id=tid, model="mock-model")
+
+    # placeholder 描述：压缩 [u1, a1, u2, a2]（history 中 index 0..3 → replaced_range=(0,4)）
+    ph = compacted(
+        "前两轮对话压缩摘要",
+        thread_id=tid,
+        replaced_range=(0, 4),
+        cache_invalidated=True,
+    )
+
+    # 磁盘原始写入顺序（append-only）：先按 turn 顺序写入各项，压缩后 ph 追加末尾
+    raw_items: list[ResponseItem] = [u1, a1, u2, a2, u3, a3, ph]
+
+    # 把 raw_items 写入 JsonlMessageStore（供测试读取，同时也验证写入/读出路径）
+    store = JsonlMessageStore(Path(str(threads_dir)))  # type: ignore[arg-type]
+    for item in raw_items:
+        await store.append(item)
+
+    # 从 store 加载回来（验证落盘后读回与构造时一致）
+    stored_items = [it async for it in await store.load_thread(tid)]
+    assert len(stored_items) == len(raw_items), (
+        f"落盘后读回 {len(stored_items)} 项，期望 {len(raw_items)} 项"
+    )
+
+    # 参照重建结果（纯函数，确认预期逻辑 history）
+    expected_logical = reconstruct_logical_history(stored_items)
+    # 预期：[ph, u3, a3]
+    expected_kinds = [i.kind for i in expected_logical]
+    assert expected_kinds == ["compacted", "user_message", "assistant_message"], (
+        f"预期逻辑 history 为 [compacted, user_message, assistant_message]，"
+        f"实得 {expected_kinds}"
+    )
+
+    # 被折叠的废弃项 id 集合（u1, a1, u2, a2）
+    superseded_ids = {u1.id, a1.id, u2.id, a2.id}
+    logical_ids = {i.id for i in expected_logical}
+    assert superseded_ids.isdisjoint(logical_ids), (
+        "逻辑 history 中不应含被折叠的废弃项 id"
+    )
+
+    # ── 构造冷 AgentEngine（注入 raw transcript → 触发 reconstruct 路径）────────
+    snapshot = (await FilesystemSkillRegistry.load(skills_dir)).snapshot()  # type: ignore[arg-type]
+    entry = snapshot.get("code-reviewer")
+    assert entry is not None
+
+    tools = ToolRegistry()
+    tools.register(make_read_skill_tool())
+    tools.register(make_call_skill_tool())
+    tools.register(make_run_script_tool())
+
+    cold_client = MockClient(turns=[MockTurn(text="COLD-COMPACTED-REWIND-DONE")])
+    cold_engine = taifeng.AgentEngine(
+        entry_skill=entry,
+        skill_snapshot=snapshot,
+        tool_runtime=ToolCallRuntime(tools),
+        model_client=cold_client,
+        store=store,
+        thread_id=tid,
+        session_id="s_compacted_cold",
+        compressors=None,
+        initial_history=stored_items,  # 含被折叠废弃项 + compacted placeholder
+    )
+
+    # ── 断言 1：history_snapshot() = 重建后的逻辑 history（废弃项已折叠）────────
+    snap = cold_engine.history_snapshot()
+    snap_ids = {i.id for i in snap}
+    snap_kinds = [i.kind for i in snap]
+
+    # 1a. 废弃项 id 不存在于 history 中
+    for sid in superseded_ids:
+        assert sid not in snap_ids, (
+            f"被折叠废弃项 {sid} 不应出现在冷 engine history 中"
+        )
+    # 1b. compacted placeholder 存在
+    assert any(i.kind == "compacted" for i in snap), (
+        f"compacted placeholder 应在逻辑 history 中，实得 kinds={snap_kinds}"
+    )
+    # 1c. post-compaction items（u3, a3）存在
+    assert u3.id in snap_ids, "u3（压缩后第三轮用户消息）应在逻辑 history 中"
+    assert a3.id in snap_ids, "a3（压缩后第三轮助手回复）应在逻辑 history 中"
+
+    # ── 断言 2：rewind_nodes() 含压缩边界后 turn 的节点（post-compaction 可寻址）──
+    cold_nodes = cold_engine.rewind_nodes()
+    # 逻辑 history = [ph, u3, a3]，derive 推导出：turn1(含 u3,a3 这对)→ t1:it1
+    # 若逻辑 history 有 1 个 user+1 个 assistant，则有至少 1 个节点
+    assert cold_nodes, (
+        f"rewind_nodes() 不应为空：post-compaction turn 应可寻址，"
+        f"history kinds={snap_kinds}"
+    )
+    # 确认这些节点的 node_id 可从逻辑 history 推导（与独立 derive 一致）
+    derived_ids = [n.node_id for n in derive_rewind_log(snap)]
+    cold_ids = [n.node_id for n in cold_nodes]
+    assert cold_ids == derived_ids, (
+        f"冷 engine 节点表应与 derive_rewind_log(logical) 一致，"
+        f"cold_ids={cold_ids}, derived_ids={derived_ids}"
+    )
+
+    # ── 断言 3：提交 bogus pre-compaction node_id → rewind_rejected(unknown_node) ──
+    # bogus_node_id 模拟"如果压缩前的 turn 有节点会是什么 id"，在折叠后不可寻址
+    bogus_node_id = "t0:it1-folded-away"  # 不在 cold_nodes 中的任意 id
+    assert bogus_node_id not in cold_ids, f"{bogus_node_id} 不应是可寻址节点"
+
+    cancel = CancellationToken(name="compacted-cold-root")
+    run_task = asyncio.create_task(cold_engine.run(cancel))
+
+    rw_sub_id = await cold_engine.submit(
+        Rewind(node_id=bogus_node_id, mode="re_reason")
+    )
+    # 消费事件，等待 rewind_rejected 出现（engine 处于 idle 时直接处理 Rewind op）
+    kinds: list[str] = []
+    rejected_data: dict = {}
+    async for ev in cold_engine.subscribe_all():
+        if ev.submission_id != rw_sub_id:
+            continue
+        kinds.append(ev.msg.kind)
+        if ev.msg.kind == "rewind_rejected":
+            rejected_data = dict(ev.msg.data)
+            break  # 拿到即可，无需等更多事件
+
+    await cold_engine.shutdown()
+    try:
+        await asyncio.wait_for(run_task, timeout=5.0)
+    except (TimeoutError, asyncio.CancelledError):
+        run_task.cancel()
+
+    assert "rewind_rejected" in kinds, (
+        f"bogus node_id 应产生 rewind_rejected，实际 kinds={kinds}"
+    )
+    assert rejected_data.get("reason") == "unknown_node", (
+        f"rewind_rejected reason 应为 'unknown_node'，实得 {rejected_data}"
+    )
+    assert rejected_data.get("node_id") == bogus_node_id
+
+
+# ── spec §9 缺口 Test 2：resume 压缩 thread 无废弃项回归 ──────────────────────
+
+
+async def test_resume_compacted_thread_no_superseded_items(
+    skills_dir: object, threads_dir: object,
+) -> None:
+    """resume 压缩 thread 时 engine.history_snapshot() 不含废弃项（reconstruct 生效）。
+
+    这个测试锁住 spec §9 顺带修复的 resume 隐患：若 reconstruct_logical_history
+    未在 engine.__init__ 中被调用（或被跳过），resume 时 _history 会包含被折叠的
+    中间废弃项，导致后续 turn 把已压缩的内容再次喂给 LLM。
+
+    **等价合成方案**（与 Test 1 相同原因，使用合成 transcript）：
+    直接手工构造含废弃项 + compacted placeholder 的 raw transcript，写入 store，
+    用 AgentEngine(initial_history=stored_items) 模拟 resume 路径（这正是
+    EnginePool.get_or_create(resume_thread_id=...) 内部所走的路径）。
+
+    断言：
+    - raw transcript（未经重建）含有废弃项（前置对比，证明 reconstruct 是有意义的）；
+    - cold engine.history_snapshot()（经 reconstruct）不含这些废弃项；
+    - engine.history_snapshot() 含 compacted placeholder（折叠后的摘要仍可见）；
+    - 这两者之差证明 reconstruct 在 resume 路径上起到了清洁过滤的作用。
+    """
+    from pathlib import Path
+
+    import taifeng
+    from taifeng.conversation.models import (
+        ResponseItem,
+        assistant_message,
+        compacted,
+        user_message,
+    )
+    from taifeng.conversation.transcript import JsonlMessageStore
+    from taifeng.skill.registry import FilesystemSkillRegistry
+    from taifeng.tool.builtins import (
+        make_call_skill_tool,
+        make_read_skill_tool,
+        make_run_script_tool,
+    )
+    from taifeng.tool.registry import ToolRegistry
+    from taifeng.tool.runtime import ToolCallRuntime
+
+    tid = "thr-resume-compacted"
+
+    # ── 构造合成 transcript（模拟多轮 + 中间压缩的磁盘布局）────────────────────
+    # 热内存历史（压缩前）：[u1, a1, u2, a2, u3, a3, u4, a4]（4 轮对话）
+    # 压缩后热内存：[ph, u3, a3, u4, a4]（replaced_range=(0, 4) 折叠前 4 项）
+    # 磁盘 append-only：[u1, a1, u2, a2, u3, a3, u4, a4, ph]
+
+    u1 = user_message("resume-test 轮1用户", thread_id=tid)
+    a1 = assistant_message("resume-test 轮1助手", thread_id=tid, model="mock-model")
+    u2 = user_message("resume-test 轮2用户", thread_id=tid)
+    a2 = assistant_message("resume-test 轮2助手", thread_id=tid, model="mock-model")
+    u3 = user_message("resume-test 轮3用户", thread_id=tid)
+    a3 = assistant_message("resume-test 轮3助手", thread_id=tid, model="mock-model")
+    u4 = user_message("resume-test 轮4用户", thread_id=tid)
+    a4 = assistant_message("resume-test 轮4助手", thread_id=tid, model="mock-model")
+
+    # placeholder：压缩 [u1, a1, u2, a2]（history 中 index 0..3）
+    ph = compacted(
+        "前两轮压缩摘要（resume 场景）",
+        thread_id=tid,
+        replaced_range=(0, 4),
+        cache_invalidated=True,
+    )
+
+    # 磁盘写入顺序（append-only）
+    raw_items: list[ResponseItem] = [u1, a1, u2, a2, u3, a3, u4, a4, ph]
+    raw_ids = {i.id for i in raw_items}
+
+    # 被折叠的废弃项 id（u1, a1, u2, a2 被 ph.replaced_range 覆盖）
+    superseded_ids = {u1.id, a1.id, u2.id, a2.id}
+
+    # ── 前置断言：raw transcript 确实含废弃项（证明 reconstruct 有意义）──────────
+    assert superseded_ids.issubset(raw_ids), (
+        "raw transcript 应含所有废弃项，否则测试本身无意义"
+    )
+
+    # 写入 store
+    store = JsonlMessageStore(Path(str(threads_dir)))  # type: ignore[arg-type]
+    for item in raw_items:
+        await store.append(item)
+
+    # 从 store 读回（模拟 resume 时 pool 从磁盘加载 transcript 的过程）
+    stored_items = [it async for it in await store.load_thread(tid)]
+    stored_ids = {i.id for i in stored_items}
+
+    # 再次确认：磁盘上的 stored_items 仍含废弃项
+    assert superseded_ids.issubset(stored_ids), (
+        "从 store 读回的 stored_items 应仍含废弃项（pre-reconstruct 对比基准）"
+    )
+
+    # ── 构造冷 engine（等价于 resume 路径）────────────────────────────────────
+    snapshot = (await FilesystemSkillRegistry.load(skills_dir)).snapshot()  # type: ignore[arg-type]
+    entry = snapshot.get("code-reviewer")
+    assert entry is not None
+
+    tools = ToolRegistry()
+    tools.register(make_read_skill_tool())
+    tools.register(make_call_skill_tool())
+    tools.register(make_run_script_tool())
+
+    cold_engine = taifeng.AgentEngine(
+        entry_skill=entry,
+        skill_snapshot=snapshot,
+        tool_runtime=ToolCallRuntime(tools),
+        model_client=MockClient(turns=[]),  # resume 不触发 turn，无需 LLM 回答
+        store=store,
+        thread_id=tid,
+        session_id="s_resume_compacted",
+        compressors=None,
+        initial_history=stored_items,  # 含废弃项的 raw transcript → reconstruct 路径
+    )
+
+    # ── 核心断言：engine.history_snapshot() 不含废弃项 ────────────────────────
+    snap = cold_engine.history_snapshot()
+    snap_ids = {i.id for i in snap}
+    snap_kinds = [i.kind for i in snap]
+
+    # A. 废弃项 id 不在 history 中（reconstruct 已折叠）
+    for sid in superseded_ids:
+        assert sid not in snap_ids, (
+            f"废弃项 {sid} 不应出现在 resume 后的 engine history 中"
+            f"（reconstruct 应已折叠），实际 history kinds={snap_kinds}"
+        )
+
+    # B. compacted placeholder 存在（折叠后的摘要仍可见）
+    assert any(i.kind == "compacted" for i in snap), (
+        f"compacted placeholder 应在逻辑 history 中，实得 kinds={snap_kinds}"
+    )
+
+    # C. post-compaction items（u3, a3, u4, a4）均存在
+    for item, label in [(u3, "u3"), (a3, "a3"), (u4, "u4"), (a4, "a4")]:
+        assert item.id in snap_ids, (
+            f"{label}（压缩边界后的 item）应在逻辑 history 中"
+        )
+
+    # D. 对比量化：raw 有废弃项而 snap 没有，长度差 = len(superseded_ids)=4
+    assert len(snap) == len(stored_items) - len(superseded_ids), (
+        f"逻辑 history 长度应为 {len(stored_items) - len(superseded_ids)}"
+        f"（raw {len(stored_items)} - {len(superseded_ids)} 折叠项），"
+        f"实得 {len(snap)}"
+    )
+
+    # E. rewind_nodes() 可由逻辑 history 推导（不为空，post-compaction turns 可寻址）
+    cold_nodes = cold_engine.rewind_nodes()
+    assert cold_nodes, (
+        f"resume 后 rewind_nodes() 不应为空，history kinds={snap_kinds}"
+    )
