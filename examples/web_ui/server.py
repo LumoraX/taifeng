@@ -1207,9 +1207,12 @@ async def resume_form(req: ResumeFormRequest) -> dict[str, Any]:
         thread_id=req.thread_id,
         resolutions={req.request_id: req.payload},
     ))
-    asyncio.create_task(
-        _bridge_events(req.demo_id, req.session_id, engine, sub_id)
-    )
+    # detached demo 的 chat bridge 仍存活（has_live_spawns 含 suspended），resume
+    # 续跑事件经它回流；再起一条会重复推送，故仅非 detached demo 才另起 bridge。
+    if not meta.streams_detached:
+        asyncio.create_task(
+            _bridge_events(req.demo_id, req.session_id, engine, sub_id)
+        )
     logger.info(
         "form resume: demo=%s thread=%s rid=%s keys=%s",
         req.demo_id, req.thread_id, req.request_id, list(req.payload.keys()),
