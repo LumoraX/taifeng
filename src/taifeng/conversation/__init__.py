@@ -30,6 +30,7 @@ from taifeng.conversation.protocols import (
     ThreadDirectory,
 )
 from taifeng.conversation.rebuild import rebuild_index
+from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
 from taifeng.conversation.store import MessageStore
 from taifeng.conversation.transcript import (
@@ -51,6 +52,7 @@ __all__ = [
     "RebuildReport",
     "ResponseItem",
     "SqliteThreadDirectory",
+    "reconstruct_logical_history",
     "ThreadDirectory",
     "ThreadFilter",
     "ThreadInfo",

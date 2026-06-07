@@ -33,12 +33,15 @@ def reconstruct_logical_history(raw: list[ResponseItem]) -> list[ResponseItem]:
     for item in raw:
         if item.kind == "compacted":
             # 折叠被替换区间;若紧邻前一项是 salvage note,挪到 placeholder 之后
+            # compacted item 由内部压缩路径构造,replaced_range 必定存在;
+            # 缺失说明 store 数据损坏,KeyError 是期望的快速失败(对比 cut_index 用 .get
+            # 是为区分「键缺失」与「键在但需校验」两种情形)。
             start, end = item.payload["replaced_range"]
             salvage = None
             if logical and _is_salvage(logical[-1]):
                 salvage = logical.pop()
-            tail_extra = [salvage] if salvage is not None else []
-            logical = logical[:start] + [item] + tail_extra + logical[end:]
+            salvage_tail = [salvage] if salvage is not None else []
+            logical = logical[:start] + [item] + salvage_tail + logical[end:]
         elif (
             item.kind == "system_injection"
             and item.payload.get("source") in _TRUNCATING_SOURCES

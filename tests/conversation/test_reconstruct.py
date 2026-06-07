@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from taifeng.conversation.models import (
+    ResponseItem,
     assistant_message,
     compacted,
     system_injection,
@@ -14,8 +15,14 @@ from taifeng.conversation.reconstruct import reconstruct_logical_history
 T = "thr"
 
 
-def _u(n): return user_message(f"u{n}", thread_id=T)
-def _a(n): return assistant_message(f"a{n}", thread_id=T, model="m")
+def _u(n: int) -> ResponseItem:
+    """构造测试用 user_message。"""
+    return user_message(f"u{n}", thread_id=T)
+
+
+def _a(n: int) -> ResponseItem:
+    """构造测试用 assistant_message。"""
+    return assistant_message(f"a{n}", thread_id=T, model="m")
 
 
 def test_clean_thread_is_identity():
@@ -52,6 +59,7 @@ def test_rewind_marker_truncates_to_cut_index():
 
 
 def test_rollback_marker_truncates_to_cut_index():
+    """rollback marker 按 cut_index 截断逻辑 history。"""
     keep = _u(1)
     dead = _a(1)
     marker = system_injection("[rollback]", thread_id=T, source="rollback", extra={"cut_index": 1})
