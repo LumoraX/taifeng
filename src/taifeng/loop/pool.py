@@ -452,6 +452,9 @@ class EnginePool:
             # 放在 run() 任务起后:_root_cancel 已就绪,补触发的聚合 turn 可派生子 token。
             if resume_thread_id is not None:
                 await engine._rebuild_spawn_state_from_history()  # noqa: SLF001
+                # 冷重建完成后补发 rewind_table_rebuilt（R3 可观测）；
+                # _emit 要求事件循环已就绪（run() task 已起）——此处满足。
+                await engine._emit_rewind_table_rebuilt()  # noqa: SLF001
 
             # engine-resume-by-thread-id: resume 路径 emit ThreadResumed
             # 在 engine.run 启动 task 之后投递，让订阅者（业务可在 pool.get_or_create

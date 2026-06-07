@@ -61,6 +61,7 @@ MsgKind = Literal[
     "rewind_checkpoint_recorded",
     "turn_rewound",
     "rewind_rejected",
+    "rewind_table_rebuilt",
     # detached-spawn 生命周期
     "spawn_started",
     "spawn_suspended",
@@ -491,6 +492,22 @@ class RewindRejected(_Msg):
     kind: Literal["rewind_rejected"] = "rewind_rejected"
 
 
+class RewindTableRebuilt(_Msg):
+    """冷加载从逻辑 history 重建 rewind 节点表后发出（R3 可观测）。
+
+    engine.__init__ 接收 initial_history 后调用 reconstruct_logical_history +
+    derive_rewind_log 重建节点表；pool resume 路径在 _rebuild_spawn_state_from_history
+    之后调用 _emit_rewind_table_rebuilt 发出本事件。
+
+    data: {"thread_id": str, "turn_count": int, "node_count": int}
+    - thread_id: 当前 thread 的唯一标识
+    - turn_count: 重建后 history 中累积 user_message 数（= 已跑 turn 数）
+    - node_count: 重建后节点表条目数
+    """
+
+    kind: Literal["rewind_table_rebuilt"] = "rewind_table_rebuilt"
+
+
 # ── detached-spawn：分离式 skill spawn + join-barrier 生命周期事件（R3 可观测）──
 
 
@@ -585,6 +602,7 @@ Msg = Union[
     RewindCheckpointRecorded,
     TurnRewound,
     RewindRejected,
+    RewindTableRebuilt,
     SpawnStarted,
     SpawnSuspended,
     SpawnCompleted,

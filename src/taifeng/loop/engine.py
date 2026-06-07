@@ -31,6 +31,7 @@ from taifeng.instructions.types import (
 )
 from taifeng.llm.client import ModelClient
 from taifeng.loop.cancellation import CancellationToken
+from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.loop.event import (
     EngineLog,
     EventMsg,
@@ -42,13 +43,14 @@ from taifeng.loop.event import (
     PreTurnHookDenied,
     ResourceLimitExceeded,
     RewindRejected,
+    RewindTableRebuilt,
     SuspensionResolved,
     SuspensionResolveRejected,
     TurnFailed,
     TurnRewound,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
-from taifeng.loop.rewind import RewindCheckpoint
+from taifeng.loop.rewind import RewindCheckpoint, count_turns, derive_rewind_log
 from taifeng.loop.spawn_driver import SpawnDriver
 from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
 from taifeng.loop.submission import (
@@ -204,16 +206,17 @@ class AgentEngine:
         self._pending: dict[str, _PendingTurn] = {}
         self._running = False
         # 跨 turn 持久化的 history view（用于复用 + cache）
-        # engine-resume-by-thread-id: 接收 initial_history 拷贝（resume 场景由
-        # pool 层注入），未提供 → 空列表（既有行为）
-        self._history: list[ResponseItem] = (
-            list(initial_history) if initial_history else []
-        )
+        # 冷加载（resume）场景：先把 raw transcript 重建为与热内存等价的逻辑 history
+        # （折叠压缩区间、截断 rewind/rollback 被回滚的尾段），再推导 rewind 节点表。
+        # 对无压缩/无 rewind 的干净 thread 是恒等映射（纯 CPU、不碰 IO）。
+        raw_init: list[ResponseItem] = list(initial_history) if initial_history else []
+        self._history: list[ResponseItem] = reconstruct_logical_history(raw_init)
         # cache anchor 保持 -1：resume 场景下 provider prompt cache 跨进程
         # 不可信任，下一次 turn 的 pre_turn 压缩会重新决定 anchor 位置
         self._cache_anchor_index: int = -1
-        # turn-rewind：最近一次 root turn 的回访节点表（从 runner 回写）
-        self._rewind_checkpoints: list[RewindCheckpoint] = []
+        # turn-rewind 冷重建：从逻辑 history 现算全 turn 节点表（纯 CPU，不碰 IO）。
+        # 新建 thread（initial_history 为空/None）→ 空节点表（既有行为不变）。
+        self._rewind_checkpoints: list[RewindCheckpoint] = derive_rewind_log(self._history)
         # G-CACHE：cache 统计与 prompt 结构指纹由 engine 持有 → 跨 turn 累积/对比，
         # 使 cache 失效原因（snapshot/tool/system 变更）可被归因而非记为 unknown_drop。
         self._cache_stats = PromptCacheStats()
@@ -1586,6 +1589,23 @@ class AgentEngine:
         await self._emit(EventMsg(
             submission_id=submission_id,
             msg=RewindRejected(data={"node_id": node_id, "reason": reason}),
+        ))
+
+    async def _emit_rewind_table_rebuilt(self) -> None:
+        """冷恢复后补发 rewind_table_rebuilt（R3 可观测）。
+
+        pool resume 路径在 _rebuild_spawn_state_from_history 之后调用本方法，
+        告知订阅者冷重建已完成、节点表已就绪。
+        turn_count 取 history 内 user_message 数（与 count_turns 一致）。
+        submission_id 用 '*' 标记系统级事件（不属于某次具体 submission）。
+        """
+        await self._emit(EventMsg(
+            submission_id="*",
+            msg=RewindTableRebuilt(data={
+                "thread_id": self._thread_id,
+                "turn_count": count_turns(self._history),
+                "node_count": len(self._rewind_checkpoints),
+            }),
         ))
 
     def _rewrite_seed_args(self, call_id: str, new_args: dict[str, Any]) -> None:
