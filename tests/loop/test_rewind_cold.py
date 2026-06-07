@@ -1362,3 +1362,222 @@ async def test_resume_compacted_thread_no_superseded_items(
     assert cold_nodes, (
         f"resume 后 rewind_nodes() 不应为空，history kinds={snap_kinds}"
     )
+
+
+# ── 已知边界（ADR 0016 决策三 / spec §7）：冷 rewind 以【构造期】entry skill 为锚点 ──
+
+
+class _EntrySkillEchoSource:
+    """动态指令源：把每次 fetch 时 ctx.entry_skill_id 原样回显进指令文本。
+
+    用于白盒观测「惰性 resolve 实际锚定了哪个 entry_skill_id」。指令层本身不落
+    transcript（resolve 在 turn 时注入 prompt、不持久化），因此冷 engine 无从得知
+    历史 turn 当初用的是哪个 entry skill —— 这正是被锁定的边界来源。
+
+    Attributes:
+        seen_entry_ids: 按调用序记录每次 fetch 收到的 entry_skill_id（供断言）。
+    """
+
+    def __init__(self) -> None:
+        self.seen_entry_ids: list[str] = []
+
+    async def fetch(self, ctx: object) -> str | None:
+        """回显 entry_skill_id；ctx 为 InstructionContext（用 object 避免顶层 import）。"""
+        entry_id = ctx.entry_skill_id  # type: ignore[attr-defined]
+        self.seen_entry_ids.append(entry_id)
+        return f"ENTRY_ECHO::{entry_id}"
+
+
+def _write_entry_skill(skills_root: object, skill_id: str) -> None:
+    """在 skills 目录写一个 entry-eligible composite skill（child=style-checker）。"""
+    from pathlib import Path
+
+    body = (
+        "---\n"
+        f"name: {skill_id}\n"
+        f"description: 审查专家 {skill_id}\n"
+        "version: 1.0.0\n"
+        "type: composite\n"
+        "entry: true\n"
+        "model: mock-model\n"
+        "child_skills: [style-checker]\n"
+        "tool_names: []\n"
+        "max_call_depth: 3\n"
+        "---\n"
+        f"# 审查专家 {skill_id}\n"
+        f"你是审查专家 {skill_id}。\n"
+    )
+    d = Path(str(skills_root)) / skill_id
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(body, encoding="utf-8")
+
+
+async def test_cold_rewind_uses_construction_entry_skill_not_history_origin(
+    tmp_path: object, threads_dir: object,
+) -> None:
+    """锁定已知边界：冷 rewind 的惰性指令 resolve 以【构造期】entry skill 为锚点。
+
+    场景：同一条 thread，热态在 entry skill `reviewer-a` 下产出历史；进程重启后
+    用 entry skill `reviewer-b` 冷加载同一 thread 并 rewind 历史节点。
+
+    ADR 0016 决策三 / engine._handle_rewind §8a 注释明确：冷 rewind 不还原历史
+    turn 当初使用的不同 entry skill 的指令层，统一以构造期 entry skill（此处
+    reviewer-b）为锚点 —— v1 范围外的已知限制。
+
+    本测试是**特征化（characterization）测试**，锁定当前行为：
+        - 热路径 resolve 收到的 entry_skill_id == "reviewer-a"；
+        - 冷 rewind 惰性 resolve 收到的 entry_skill_id == "reviewer-b"（构造期），
+          **绝不**是历史来源的 "reviewer-a"。
+
+    若日后实现「按 turn 还原历史 entry skill」，本测试将失败，从而强制实现者
+    显式更新此处与 ADR 0016 文档化的边界（而非悄悄改变行为）。
+    """
+    import asyncio
+    from pathlib import Path
+
+    import taifeng
+    from taifeng.conversation.transcript import JsonlMessageStore
+    from taifeng.instructions.types import InstructionLayer
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.loop.submission import Rewind
+    from taifeng.skill.registry import FilesystemSkillRegistry
+    from taifeng.tool.builtins import (
+        make_call_skill_tool,
+        make_read_skill_tool,
+        make_run_script_tool,
+    )
+    from taifeng.tool.registry import ToolRegistry
+    from taifeng.tool.runtime import ToolCallRuntime
+
+    # ── 步骤 0：构造含两个 entry skill（reviewer-a / reviewer-b）的 skills 目录 ──
+    skills_dir = Path(str(tmp_path)) / "two_entry_skills"
+    sc = skills_dir / "style-checker"
+    sc.mkdir(parents=True)
+    (sc / "SKILL.md").write_text(
+        "---\nname: style-checker\ndescription: 代码风格审查\n"
+        "version: 1.0.0\ntype: atomic\n---\n# 风格审查\n按规范审查 diff。\n",
+        encoding="utf-8",
+    )
+    _write_entry_skill(skills_dir, "reviewer-a")
+    _write_entry_skill(skills_dir, "reviewer-b")
+
+    # ── 步骤 1：热态在 reviewer-a 下跑一个单圈 turn，持久化 transcript ──────────
+    hot_source = _EntrySkillEchoSource()
+    hot_client = MockClient(turns=[MockTurn(text="原推理收尾")])  # 单圈，无工具 → t1:it1
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,  # type: ignore[arg-type]
+        threads_dir=threads_dir,  # type: ignore[arg-type]
+        model_client=hot_client,
+        compressors=[],
+        instruction_layers=[
+            InstructionLayer(name="echo", source=hot_source, scope="session", priority=10),
+        ],
+    )
+    hot_engine = await pool.get_or_create(
+        session_id="s_entry_hot", entry_skill_id="reviewer-a"
+    )
+    hot_sub = await hot_engine.submit(taifeng.UserMessage(text="请审查代码"))
+    async for ev in hot_engine.subscribe_all():
+        if ev.submission_id != hot_sub:
+            continue
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if data.get("is_root"):
+                break
+    for _ in range(100):
+        if hot_engine.rewind_nodes():
+            break
+        await asyncio.sleep(0.01)
+    thread_id = hot_engine.thread_id
+    await pool.close()
+
+    # 热路径 resolve 确实以 reviewer-a 为锚点（边界对照基准）
+    assert "reviewer-a" in hot_source.seen_entry_ids, (
+        f"热 turn 的指令 resolve 应收到 entry_skill_id='reviewer-a'，"
+        f"实得 {hot_source.seen_entry_ids}"
+    )
+    assert "reviewer-b" not in hot_source.seen_entry_ids
+
+    # ── 步骤 2：物化 transcript ───────────────────────────────────────────────
+    cold_store = JsonlMessageStore(Path(str(threads_dir)))  # type: ignore[arg-type]
+    transcript = [it async for it in await cold_store.load_thread(thread_id)]
+    assert transcript, "transcript 不应为空"
+
+    # ── 步骤 3：用 reviewer-b 冷加载同一 thread（不跑任何 turn）─────────────────
+    snapshot = (await FilesystemSkillRegistry.load(skills_dir)).snapshot()  # type: ignore[arg-type]
+    entry_b = snapshot.get("reviewer-b")
+    assert entry_b is not None
+
+    tools = ToolRegistry()
+    tools.register(make_read_skill_tool())
+    tools.register(make_call_skill_tool())
+    tools.register(make_run_script_tool())
+
+    cold_source = _EntrySkillEchoSource()
+    cold_client = MockClient(turns=[MockTurn(text="COLD-ENTRY-REWIND-DONE")])
+    cold_engine = taifeng.AgentEngine(
+        entry_skill=entry_b,
+        skill_snapshot=snapshot,
+        tool_runtime=ToolCallRuntime(tools),
+        model_client=cold_client,
+        store=cold_store,
+        thread_id=thread_id,
+        session_id="s_entry_cold",
+        compressors=None,
+        initial_history=transcript,
+        instruction_layers=[
+            InstructionLayer(name="echo", source=cold_source, scope="session", priority=10),
+        ],
+    )
+
+    cold_nodes = cold_engine.rewind_nodes()
+    assert cold_nodes, "冷 engine 节点表不应为空"
+
+    # ── 步骤 4：冷 engine 提交 re_reason rewind，触发惰性 resolve ────────────────
+    cancel = CancellationToken(name="cold-entry-rewind-root")
+    run_task = asyncio.create_task(cold_engine.run(cancel))
+    it1 = next(n for n in cold_nodes if n.node_id == "t1:it1")
+    rw_sub_id = await cold_engine.submit(Rewind(node_id=it1.node_id, mode="re_reason"))
+
+    kinds: list[str] = []
+    text_parts: list[str] = []
+    async for ev in cold_engine.subscribe_all():
+        if ev.submission_id != rw_sub_id:
+            continue
+        kinds.append(ev.msg.kind)
+        data = ev.msg.data if hasattr(ev.msg, "data") else {}
+        if ev.msg.kind == "assistant_text" and data.get("delta"):
+            text_parts.append(str(data["delta"]))
+        if ev.msg.kind in ("turn_completed", "turn_failed") and data.get("is_root"):
+            break
+
+    await cold_engine.shutdown()
+    try:
+        await asyncio.wait_for(run_task, timeout=5.0)
+    except (TimeoutError, asyncio.CancelledError):
+        run_task.cancel()
+
+    # ── 步骤 5：核心断言 ──────────────────────────────────────────────────────
+    # 5a. rewind 流程未被破坏
+    assert "turn_rewound" in kinds, f"应发出 turn_rewound，实得 kinds={kinds}"
+    assert "COLD-ENTRY-REWIND-DONE" in "".join(text_parts)
+
+    # 5b. 边界锁定：冷 rewind 惰性 resolve 锚定【构造期】reviewer-b，绝非历史的 reviewer-a
+    assert cold_source.seen_entry_ids, (
+        "冷 rewind 应触发惰性 resolve（fetch 至少被调用一次）"
+    )
+    assert "reviewer-b" in cold_source.seen_entry_ids, (
+        f"冷 rewind resolve 应锚定构造期 entry_skill_id='reviewer-b'，"
+        f"实得 {cold_source.seen_entry_ids}"
+    )
+    assert "reviewer-a" not in cold_source.seen_entry_ids, (
+        "已知边界：冷 rewind 不还原历史 turn 的 entry skill 'reviewer-a'；"
+        f"若此断言失败，说明边界行为已变更，需同步更新 ADR 0016，"
+        f"实得 {cold_source.seen_entry_ids}"
+    )
+
+    # 5c. 回显文本进入 _last_resolved，佐证锚点为 reviewer-b
+    cold_texts = [r.text for r in cold_engine._last_resolved]  # type: ignore[attr-defined]
+    assert any("ENTRY_ECHO::reviewer-b" in t for t in cold_texts), (
+        f"_last_resolved 应含 reviewer-b 的回显文本，实得 {cold_texts}"
+    )
