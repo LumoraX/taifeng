@@ -24,49 +24,14 @@ import taifeng
 from taifeng.llm.providers import MockClient, MockTurn
 from taifeng.loop.submission import Rewind
 
-# ── 两个 skill:orchestrator(entry composite)+ analyzer(子 skill,entry:false)──
-
-ANALYZER_SKILL = """---
-name: analyzer
-description: 专科分析器
-version: 1.0.0
-type: atomic
----
-# 专科分析
-给定患者数据,产出一句结论。
-"""
-
-ORCHESTRATOR_SKILL = """---
-name: orchestrator
-description: 编排器
-version: 1.0.0
-type: composite
-entry: true
-model: mock-model
-child_skills: [analyzer]
-tool_names: []
-max_call_depth: 4
----
-# 编排器
-你先 call_skill("analyzer", ...) 取专科结论,再综合给最终建议。
-"""
+# ── skills 目录：磁盘单一真相，orchestrator(entry composite)+ analyzer(子 skill,entry:false)──
+# 不再用内联字符串常量，由 examples/turn_rewind/skills/ 目录直接提供 SKILL.md 文件。
+SKILLS_DIR = Path(__file__).parent / "skills"
 
 CALL_ANALYZER = (
     '{"skill_id":"analyzer","reason":"取专科分析结论",'
     '"args":{"patient":"病例X"}}'
 )
-
-
-def _write_skills(root: Path) -> Path:
-    """把两个 SKILL.md 落临时目录,返回 skills 目录。"""
-    skills = root / "skills"
-    (skills / "analyzer").mkdir(parents=True)
-    (skills / "analyzer" / "SKILL.md").write_text(ANALYZER_SKILL, encoding="utf-8")
-    (skills / "orchestrator").mkdir(parents=True)
-    (skills / "orchestrator" / "SKILL.md").write_text(
-        ORCHESTRATOR_SKILL, encoding="utf-8"
-    )
-    return skills
 
 
 async def _drive(engine: taifeng.AgentEngine, sub_id: str) -> str:
@@ -108,7 +73,7 @@ async def scenario_retry_tool() -> None:
     print("\n=== 场景 A：retry_tool 重跑自治链里的一次 call_skill ===")
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        skills = _write_skills(root)
+        # skills 来自磁盘固定目录，临时目录仅用于 threads_dir（会话存储）
         client = MockClient(turns=[
             # 一键跑完:orchestrator → call_skill(analyzer) → 综合
             MockTurn(text="先派发专科分析…", tool_calls=[
@@ -120,7 +85,7 @@ async def scenario_retry_tool() -> None:
             MockTurn(text="【综合】建议:常规随访(基于修订版)"),
         ])
         pool = await taifeng.EnginePool.create(
-            skills_dir=skills, threads_dir=root / "threads",
+            skills_dir=SKILLS_DIR, threads_dir=root / "threads",
             model_client=client, compressors=[],
         )
         engine = await pool.get_or_create(
@@ -148,7 +113,7 @@ async def scenario_re_reason() -> None:
     print("\n=== 场景 B：re_reason 回退到某圈 LLM 采样前,让它重新决定 ===")
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        skills = _write_skills(root)
+        # skills 来自磁盘固定目录，临时目录仅用于 threads_dir（会话存储）
         client = MockClient(turns=[
             MockTurn(text="先派发专科分析…", tool_calls=[
                 {"id": "a0", "name": "call_skill", "arguments": CALL_ANALYZER}]),
@@ -158,7 +123,7 @@ async def scenario_re_reason() -> None:
             MockTurn(text="【综合】重新判断:信息不足,先补检查再说"),
         ])
         pool = await taifeng.EnginePool.create(
-            skills_dir=skills, threads_dir=root / "threads",
+            skills_dir=SKILLS_DIR, threads_dir=root / "threads",
             model_client=client, compressors=[],
         )
         engine = await pool.get_or_create(
