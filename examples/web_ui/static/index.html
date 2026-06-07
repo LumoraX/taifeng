@@ -1034,8 +1034,9 @@ function setCardStatus(card, statusCls, statusText) {
 function showCardForm(handleId, data) {
   const card = expertCards[handleId];
   if (!card || card.formAnchor) return;
-  const pend = (data.pending || []).find(
-    (p) => p.detail && p.detail.response_schema) || (data.pending || [])[0];
+  // 只认带 detail 的挂起项；response_schema 可为空 {}（纯提示型 HITL，提交空 payload 续跑）。
+  // 不回退到无 detail 的挂起项 —— 否则会静默渲染一张无字段空表单（违反 no-silent-fallback）。
+  const pend = (data.pending || []).find((p) => p.detail);
   if (!pend) return;
   card.formAnchor = {
     thread_id: data.thread_id, request_id: pend.request_id,

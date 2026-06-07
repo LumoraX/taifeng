@@ -1281,6 +1281,9 @@ async def rewind(req: RewindRequest) -> dict[str, Any]:
 
     if req.demo_id not in DEMOS:
         raise HTTPException(404, f"unknown demo_id: {req.demo_id}")
+    # mode 是系统边界（前端传入）：显式白名单校验，非法值返回 422 而非抛进 Rewind 构造
+    if req.mode not in ("re_reason", "retry_tool"):
+        raise HTTPException(422, f"invalid rewind mode: {req.mode}")
     pool = _pools.get(req.demo_id)
     if pool is None:
         raise HTTPException(409, "no active pool for this demo")
