@@ -186,6 +186,22 @@ class DemoMeta:
     经 ``/api/resume`` 提交 ``Resume(thread, {request_id: payload})`` 续跑。
     （form_hitl demo 用）。"""
 
+    streams_detached: bool = False
+    """True 时事件桥走 detached 分支：不按 submission_id 过滤（spawn 事件
+    submission_id=handle_id 不被丢），退出谓词改为「根 turn 终态 ∧ 无存活 spawn ∧
+    无未触发 barrier ∧ 无在跑 then_thread」；且 ``/api/resume`` 不再另起 bridge
+    （chat bridge 仍存活，resume 续跑事件经它回流，避免重复推送）。
+    detached-spawn / turn-rewind 这类「根 turn 完成后仍有异步活动」的 demo 用。"""
+
+    wants_spawn_tools: bool = False
+    """True 时把 detached-spawn 的 4 个工具（spawn_skill / await_skills /
+    join_skill / kill_skill）作为 extra_tools 注入 pool，让 LLM 能并发分离发起
+    子 skill（multi_expert_consult demo 用）。"""
+
+    wants_rewind: bool = False
+    """True 时前端在根 turn 完成后拉 ``/api/rewind_nodes`` 渲染回访节点表，
+    支持点节点重跑（``/api/rewind``）。仅 turn_rewind demo 置 True。"""
+
 
 DEMOS: dict[str, DemoMeta] = {
     "code_review": DemoMeta(
