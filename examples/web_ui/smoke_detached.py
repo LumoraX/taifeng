@@ -25,6 +25,23 @@ import server  # noqa: E402,I001  examples/web_ui/server.py
 sys.path.insert(0, str(server.EXAMPLES_DIR / "multi_expert_consult"))
 from demo import _routing_client  # type: ignore  # noqa: E402
 
+from taifeng.llm.providers import MockClient, MockTurn  # noqa: E402
+
+CALL_ANALYZER = '{"skill_id":"analyzer","reason":"取分析","args":{}}'
+
+
+def _rewind_mock() -> MockClient:
+    """turn_rewind 用的固定 turns：跑完一次自治链 + 一次 retry_tool 重跑。"""
+    return MockClient(turns=[
+        MockTurn(text="派发分析…", tool_calls=[
+            {"id": "a0", "name": "call_skill", "arguments": CALL_ANALYZER}]),
+        MockTurn(text="【分析】风险偏高(初版)"),
+        MockTurn(text="【综合】建议:加强监测(初版)"),
+        # retry_tool 重跑 analyzer 用的后续 turns：
+        MockTurn(text="【分析】风险中等(修订)"),
+        MockTurn(text="【综合】建议:常规随访(修订)"),
+    ])
+
 
 def _check(cond: bool, msg: str) -> None:
     """断言：失败即打印并以非 0 退出（便于纳入本地校验）。"""
@@ -119,6 +136,48 @@ async def smoke_multi_expert() -> None:
     pump_task.cancel()
 
 
+async def smoke_turn_rewind() -> None:
+    """turn_rewind：chat 跑完自治链 → 取节点 → POST /api/rewind → 重跑回流。"""
+    demo_id, session_id = "turn_rewind", "smoke"
+    server._model_client = _rewind_mock()
+    q = _subscribe(demo_id, session_id)
+    sink: list[dict] = []
+    pump_task = asyncio.create_task(_pump(q, sink))
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        r = await client.post("/api/chat", json={
+            "message": "评估健康风险", "demo_id": demo_id, "session_id": session_id})
+        _check(r.status_code == 200, f"turn_rewind /api/chat 200（{r.status_code}）")
+
+        # 等根 turn 完成
+        for _ in range(500):
+            if any(e["kind"] == "turn_completed" and e["data"].get("is_root")
+                   for e in sink):
+                break
+            await asyncio.sleep(0.02)
+
+        nodes = (await client.get(
+            f"/api/rewind_nodes/{demo_id}/{session_id}")).json()["nodes"]
+        _check(len(nodes) > 0, f"rewind_nodes 非空（{len(nodes)}）")
+        disp = next((n for n in nodes
+                     if n["kind"] == "dispatch" and n["target_id"] == "call_skill"), None)
+        _check(disp is not None, "存在 call_skill 的 dispatch 节点")
+
+        before = len(sink)
+        rr = await client.post("/api/rewind", json={
+            "demo_id": demo_id, "session_id": session_id,
+            "node_id": disp["node_id"], "mode": "retry_tool"})
+        _check(rr.status_code == 200, f"/api/rewind 200（{rr.status_code}）")
+        for _ in range(500):
+            if any(e["kind"] == "turn_completed" and e["data"].get("is_root")
+                   for e in sink[before:]):
+                break
+            await asyncio.sleep(0.02)
+        reran = [e for e in sink[before:] if e["kind"] == "assistant_text"]
+        _check(len(reran) > 0, "rewind 重跑产生了新的 assistant_text 回流")
+    pump_task.cancel()
+
+
 async def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         server.STORAGE_DIR = Path(td) / "runs"  # 隔离存储到 tmp
@@ -126,6 +185,7 @@ async def main() -> None:
         server._llm_meta = {"provider": "mock", "model": "mock",
                             "context_window": 128_000}
         await smoke_multi_expert()
+        await smoke_turn_rewind()
     print("\n🎉 smoke_detached 全绿")
 
 
