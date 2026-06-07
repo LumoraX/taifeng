@@ -829,3 +829,190 @@ async def test_cold_then_new_turn_node_ids_no_collision(
     assert len(set(all_ids)) == len(all_ids), (
         f"node_id 出现重复！all_ids={all_ids}"
     )
+
+
+# ── Task 9：冷 rewind 惰性 resolve 指令层 ────────────────────────────────────
+
+
+async def test_cold_rewind_resolves_instructions(
+    skills_dir: object, threads_dir: object,
+) -> None:
+    """冷 engine 首次 rewind 前 _last_resolved 为空 → 惰性 resolve,re-run 带指令层。
+
+    设计说明（spec §7 lazy-on-rewind）：
+        - _last_resolved 在 _handle_rewind 时若为空且 _instruction_resolver 非 None
+          且 _history 非空，应惰性 resolve（以构造期 entry skill 为锚点）。
+        - 使用静态文本 InstructionLayer（source=str，scope="engine"）—— 永不发生
+          远程 fetch 失败，结果确定性强，适合 CI 场景。
+        - 热路径（正常 turn）在 resolve 后会把结果写入 _last_resolved；冷路径
+          （initial_history 注入、未跑任何 turn）此字段为空，rewind 须惰性补齐。
+
+    断言策略：
+        - 冷构造后 _last_resolved 为空（证明 bug 存在条件）；
+        - rewind 后 _last_resolved 非空，且含有静态层文本（证明惰性 resolve 生效）；
+        - rewind 后 turn_rewound + turn_completed 事件均正常发出（rewind 流程未破坏）。
+
+    注：热路径的 resolve 包含 engine/session/turn 三档；惰性 resolve 仅做
+    engine+session+turn 三档（与 _handle_user_message 路径完全对称），因此
+    静态 engine 层的文本必然出现在结果中。
+    """
+    import asyncio
+    from pathlib import Path
+
+    import taifeng
+    from taifeng.conversation.transcript import JsonlMessageStore
+    from taifeng.instructions.types import InstructionLayer
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.loop.submission import Rewind
+    from taifeng.skill.registry import FilesystemSkillRegistry
+    from taifeng.tool.builtins import (
+        make_call_skill_tool,
+        make_read_skill_tool,
+        make_run_script_tool,
+    )
+    from taifeng.tool.registry import ToolRegistry
+    from taifeng.tool.runtime import ToolCallRuntime
+
+    # 静态指令层文本（唯一性足够，避免误中 skill body 内容）
+    instruction_text = "COLD_REWIND_INSTRUCTION_SENTINEL_XYZ"
+
+    # ── 步骤 1：热跑一个含两圈的 turn，持久化 transcript ──────────────────
+    hot_client = MockClient(turns=[
+        MockTurn(text="圈1推理", tool_calls=[
+            {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
+        ]),
+        MockTurn(text="原收尾"),  # 圈 2，无工具
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,  # type: ignore[arg-type]
+        threads_dir=threads_dir,  # type: ignore[arg-type]
+        model_client=hot_client,
+        compressors=[],
+        # 热 pool 也注入同一指令层，使热路径的 _last_resolved 有值可参照
+        instruction_layers=[
+            InstructionLayer(
+                name="sentinel",
+                source=instruction_text,
+                scope="engine",
+                priority=10,
+            ),
+        ],
+    )
+    hot_engine = await pool.get_or_create(
+        session_id="s_instr_hot", entry_skill_id="code-reviewer"
+    )
+    hot_sub = await hot_engine.submit(taifeng.UserMessage(text="请审查代码"))
+    async for ev in hot_engine.subscribe_all():
+        if ev.submission_id != hot_sub:
+            continue
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if data.get("is_root"):
+                break
+    for _ in range(100):
+        if hot_engine.rewind_nodes():
+            break
+        await asyncio.sleep(0.01)
+
+    hot_last_resolved = hot_engine.instructions_snapshot()
+    assert hot_last_resolved, "热 engine 跑完 turn 后 instructions_snapshot() 不应为空"
+    hot_texts = [r.text for r in hot_last_resolved]
+    assert any(instruction_text in t for t in hot_texts), (
+        f"热路径 _last_resolved 应含 instruction_text，实得 texts={hot_texts}"
+    )
+    thread_id = hot_engine.thread_id
+    await pool.close()
+
+    # ── 步骤 2：从 store 物化 transcript ─────────────────────────────────
+    cold_store = JsonlMessageStore(Path(str(threads_dir)))  # type: ignore[arg-type]
+    transcript = [it async for it in await cold_store.load_thread(thread_id)]
+    assert transcript, "transcript 不应为空"
+
+    # ── 步骤 3：构造冷 engine（注入同一指令层，但不跑任何 turn）──────────
+    snapshot = (await FilesystemSkillRegistry.load(skills_dir)).snapshot()  # type: ignore[arg-type]
+    entry = snapshot.get("code-reviewer")
+    assert entry is not None
+
+    tools = ToolRegistry()
+    tools.register(make_read_skill_tool())
+    tools.register(make_call_skill_tool())
+    tools.register(make_run_script_tool())
+
+    cold_client = MockClient(turns=[
+        MockTurn(text="COLD-INSTR-REWIND-DONE"),  # re_reason 重推直接无工具收尾
+    ])
+    cold_engine = taifeng.AgentEngine(
+        entry_skill=entry,
+        skill_snapshot=snapshot,
+        tool_runtime=ToolCallRuntime(tools),
+        model_client=cold_client,
+        store=cold_store,
+        thread_id=thread_id,
+        session_id="s_instr_cold",
+        compressors=None,
+        initial_history=transcript,
+        instruction_layers=[
+            InstructionLayer(
+                name="sentinel",
+                source=instruction_text,
+                scope="engine",
+                priority=10,
+            ),
+        ],
+    )
+
+    # ── 步骤 4：冷构造后，_last_resolved 应为空（验证 bug 存在条件）────────
+    # 注：instructions_snapshot() 在 _last_resolved 为空时退回 _engine_scope_resolved；
+    # 而 warmup_engine_scope 未在构造时调用 → 两者皆空。
+    # 直接检查内部字段（测试白盒，验证 bug 先决条件）。
+    assert cold_engine._last_resolved == [], (  # type: ignore[attr-defined]
+        "冷 engine 构造后 _last_resolved 应为空（尚未跑任何 turn）"
+    )
+    cold_nodes = cold_engine.rewind_nodes()
+    assert cold_nodes, "冷 engine 节点表不应为空（冷重建应已成功）"
+
+    # ── 步骤 5：启动冷 engine，提交 re_reason rewind ──────────────────────
+    cancel = CancellationToken(name="cold-instr-rewind-root")
+    run_task = asyncio.create_task(cold_engine.run(cancel))
+
+    it1 = next(n for n in cold_nodes if n.node_id == "t1:it1")
+    rw_sub_id = await cold_engine.submit(Rewind(node_id=it1.node_id, mode="re_reason"))
+
+    # ── 步骤 6：消费事件到 root turn 终结 ────────────────────────────────
+    kinds: list[str] = []
+    text_parts: list[str] = []
+    async for ev in cold_engine.subscribe_all():
+        if ev.submission_id != rw_sub_id:
+            continue
+        kinds.append(ev.msg.kind)
+        data = ev.msg.data if hasattr(ev.msg, "data") else {}
+        if ev.msg.kind == "assistant_text" and data.get("delta"):
+            text_parts.append(str(data["delta"]))
+        if ev.msg.kind in ("turn_completed", "turn_failed") and data.get("is_root"):
+            break
+
+    await cold_engine.shutdown()
+    try:
+        await asyncio.wait_for(run_task, timeout=5.0)
+    except (TimeoutError, asyncio.CancelledError):
+        run_task.cancel()
+
+    # ── 步骤 7：核心断言 ──────────────────────────────────────────────────
+    # 7a. rewind 流程正常（turn_rewound + root turn_completed）
+    assert "turn_rewound" in kinds, (
+        f"应发出 turn_rewound 事件，实际 kinds={kinds}"
+    )
+    assert "COLD-INSTR-REWIND-DONE" in "".join(text_parts), (
+        f"重推应输出 'COLD-INSTR-REWIND-DONE'，实得: {''.join(text_parts)!r}"
+    )
+
+    # 7b. 惰性 resolve 生效：_last_resolved 已被填充，含有指令层文本
+    cold_resolved = cold_engine._last_resolved  # type: ignore[attr-defined]
+    assert cold_resolved, (
+        "冷 rewind 后 _last_resolved 应非空（惰性 resolve 应已生效）"
+    )
+    cold_texts = [r.text for r in cold_resolved]
+    assert any(instruction_text in t for t in cold_texts), (
+        f"冷 rewind 后 _last_resolved 应含 instruction_text，"
+        f"实得 texts={cold_texts}"
+    )

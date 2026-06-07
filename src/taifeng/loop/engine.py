@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -1690,7 +1691,34 @@ class AgentEngine:
             "cut_index": cut, "cache_anchor": self._cache_anchor_index,
         })))
 
-        # 8. 主动重推:截断后建新 root TurnRunner;retry_tool 先补跑悬空 call
+        # 8a. 冷 engine 惰性 resolve 指令层（spec §7 lazy-on-rewind）：
+        #   正常 turn 结束后 _last_resolved 已由 _handle_user_message 填充；
+        #   冷 engine（initial_history 注入、未跑任何 turn）_last_resolved 为空。
+        #   此处检测：resolver 存在 + _last_resolved 空 + history 非空 → 补一次
+        #   resolve，以构造期 entry skill 为锚点（已知限制：不还原历史 turn 里曾
+        #   使用的不同 entry skill 的指令层，v1 范围外）。
+        if (
+            self._instruction_resolver is not None
+            and not self._last_resolved
+            and self._history
+        ):
+            ctx = InstructionContext(
+                session_id=self._session_id,
+                thread_id=self._thread_id,
+                entry_skill_id=self._entry_skill.id,
+                turn_index=self._turn_index,
+                metadata=self._request_metadata,
+                cancel=None,
+            )
+            # fetch 失败时不阻塞 rewind：保留空列表继续（相当于无指令层）。
+            # 与热路径不同（热路径 fail-fast），此处降级为 best-effort，
+            # 因为 rewind 本身已经发出了 turn_rewound 事件，强制中止会破坏一致性。
+            with contextlib.suppress(InstructionFetchError):
+                self._last_resolved = await self._instruction_resolver.resolve(
+                    ("engine", "session", "turn"), ctx,
+                )
+
+        # 8b. 主动重推:截断后建新 root TurnRunner;retry_tool 先补跑悬空 call
         turn_cancel = root_cancel.child(f"sub:{sub.id}")
         self._pending[sub.id] = _PendingTurn(
             submission_id=sub.id, cancel=turn_cancel
