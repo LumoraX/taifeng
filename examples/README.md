@@ -37,7 +37,7 @@
 | --- | --- |
 | [turn_rewind/demo.py](turn_rewind/demo.py) | 把一次 root turn 拆成可寻址回访节点表；`Rewind(node_id, retry_tool)` 重跑自治链里的一次 `call_skill`；`Rewind(node_id, re_reason)` 回退到某圈采样前让 LLM 重新决定 |
 
-> 子 skill 全程 `entry: false`，绕开 entry/call_skill 互斥。契约见 [docs/architecture/capabilities/turn-rewind.md](../docs/architecture/capabilities/turn-rewind.md)，决策见 [ADR 0014](../docs/decisions/0014-turn-rewind.md)。与 [step_pipeline/](step_pipeline/)（业务层确定性编排）互为两种范式。
+> 子 skill 全程 `entry: false`，绕开 entry/call_skill 互斥。契约见 [docs/architecture/capabilities/turn-rewind.md](../docs/architecture/capabilities/turn-rewind.md)，决策见 [ADR 0014](../docs/decisions/0014-turn-rewind.md)。与 [step_pipeline/](step_pipeline/)（业务层确定性编排）互为两种范式。**已接入 web_ui**（demo_id `turn_rewind`，`wants_rewind=True`）；浏览器交互版见 [web_ui/](web_ui/)。
 
 运行：`PYTHONPATH=src uv run python examples/turn_rewind/demo.py`
 
@@ -47,7 +47,7 @@
 | --- | --- |
 | [multi_expert_consult/demo.py](multi_expert_consult/demo.py) | detached-spawn 完整闭环：orchestrator 一个 turn 内 `spawn_skill` 并发发起多个专家 + `await_skills` 登记 join-barrier；各专家在独立 child thread 上**错峰 HITL**（cardio 先恢复完成、metabolic 过一会才恢复）；两句柄全终态 → join-barrier 自动起 `joint-consult` 聚合 → 最终会诊报告。打印完整事件时间线 |
 
-> 专家 / 聚合器全程 `entry: false`（spawn 派发要求 target 非 entry，同 call_skill）。契约见 [docs/architecture/capabilities/detached-spawn.md](../docs/architecture/capabilities/detached-spawn.md)，决策见 [ADR 0015](../docs/decisions/0015-detached-skill-spawn.md)。与 [concurrent_fanout/](concurrent_fanout/)（批量同步收齐）、[step_pipeline/](step_pipeline/)（业务确定性编排）互为三种并发姿态。
+> 专家 / 聚合器全程 `entry: false`（spawn 派发要求 target 非 entry，同 call_skill）。契约见 [docs/architecture/capabilities/detached-spawn.md](../docs/architecture/capabilities/detached-spawn.md)，决策见 [ADR 0015](../docs/decisions/0015-detached-skill-spawn.md)。与 [concurrent_fanout/](concurrent_fanout/)（批量同步收齐）、[step_pipeline/](step_pipeline/)（业务确定性编排）互为三种并发姿态。**已接入 web_ui**（demo_id `multi_expert_consult`，`streams_detached=True` + `wants_spawn_tools=True`）；浏览器交互版见 [web_ui/](web_ui/)。
 
 运行：`PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py`
 
@@ -100,4 +100,4 @@
 | [mcp_basic/](mcp_basic/) | MCP stdio client 连外部 server，自动注册工具 |
 | [mcp_hitl/](mcp_hitl/) | MCP 工具调用走 permission gate |
 | [suspend_resume/](suspend_resume/) | 表单采集型 HITL 挂起 → 释放实例 → 跨实例重建 → Resume 续跑（R5 头条故事）|
-| [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）|
+| [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）；**含两个 detached 交互 demo**：`multi_expert_consult`（并发多专家 + 错峰 HITL + 联合会诊）和 `turn_rewind`（节点回访 + re_reason / retry_tool 重跑）。无 key 自动化 smoke：`PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py` |

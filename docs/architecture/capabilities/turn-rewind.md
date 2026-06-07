@@ -82,6 +82,10 @@ root TurnRunner SHALL 在每圈 `_sample_once` 采样前记一个 `iteration` �
 - **R4**：重推全程透传根 `CancellationToken`，子 skill 走 `cancel.child()`。
 - **R5**：截断**仅内存**，store JSONL append-only（旧 items 不物理删），rewind marker 留痕。
 
+## 演示 / 参考实现
+
+`examples/web_ui/`（demo_id `turn_rewind`）提供浏览器可交互的演示：自治链跑完后拉回访节点表，支持 re_reason / retry_tool 两种重跑模式，重跑事件经 detached bridge 实时回流前端。无 key 自动化 smoke：`examples/web_ui/smoke_detached.py`。
+
 ## 边界与暂不支持（v1）
 
 - 子 turn 内部节点不可寻址（只 root turn 入表）。
