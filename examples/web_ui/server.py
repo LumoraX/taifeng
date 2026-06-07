@@ -82,6 +82,12 @@ from taifeng.permission import (
 from taifeng.skill.scripts.python import PythonScriptExecutor
 from taifeng.skill.scripts.shell import ShellScriptExecutor
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+from taifeng.tool.builtins.spawn_skill import (
+    make_await_skills_tool,
+    make_join_skill_tool,
+    make_kill_skill_tool,
+    make_spawn_skill_tool,
+)
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent
@@ -446,6 +452,22 @@ DEMOS: dict[str, DemoMeta] = {
         # 派发；如果开启 HITL 会被弹 12 次太吵 —— 关掉 skill_dispatch 询问
         hitl_on_skill_dispatch=False,
     ),
+    "multi_expert_consult": DemoMeta(
+        demo_id="multi_expert_consult",
+        title="🩺 多专家会诊 (并发 spawn + 错峰 HITL + 联合会诊)",
+        description=(
+            "orchestrator 一个 turn 内对多个专科 spawn_skill（各自 detached child "
+            "thread），await_skills 登记 join-barrier；各专家错峰 HITL，全终态 → "
+            "barrier 自动起 joint-consult 聚合。演示 detached-spawn 完整闭环。"
+        ),
+        skills_dir=EXAMPLES_DIR / "multi_expert_consult" / "skills",
+        entry_skill_id="orchestrator",
+        sample_prompt="我最近血压偏高、体重也涨了，帮我看看身体情况。",
+        hitl_on_skill_dispatch=False,
+        streams_detached=True,
+        wants_spawn_tools=True,
+        wants_user_input_tool=True,
+    ),
     "compression_showcase": DemoMeta(
         demo_id="compression_showcase",
         title="🗜️ 上下文压缩演示 (1k 窗口)",
@@ -784,6 +806,14 @@ async def _get_or_create_pool(demo_id: str) -> taifeng.EnginePool:
         # opt-in 注入表单采集工具（form_hitl demo）：声明 tool_names 的 skill 才会用到
         if meta.wants_user_input_tool:
             extra_tools.append(make_request_user_input_tool())
+        # opt-in 注入 detached-spawn 四工具（multi_expert_consult demo）
+        if meta.wants_spawn_tools:
+            extra_tools.extend([
+                make_spawn_skill_tool(),
+                make_await_skills_tool(),
+                make_join_skill_tool(),
+                make_kill_skill_tool(),
+            ])
         pool = await taifeng.EnginePool.create(
             skills_dir=meta.skills_dir,
             storage_dir=demo_storage,
