@@ -64,7 +64,7 @@ async def _wait_count(sink: list[dict], kind: str, n: int, tries: int = 500) -> 
 
 
 async def smoke_multi_expert() -> None:
-    """multi_expert_consult：chat → 2× spawn_started（本阶段只验证到这）。"""
+    """multi_expert_consult 完整闭环：spawn → 错峰 resume → barrier 聚合。"""
     demo_id, session_id = "multi_expert_consult", "smoke"
     q = _subscribe(demo_id, session_id)
     sink: list[dict] = []
@@ -75,8 +75,47 @@ async def smoke_multi_expert() -> None:
             "message": "我血压偏高、体重也涨了，帮我看看。",
             "demo_id": demo_id, "session_id": session_id})
         _check(r.status_code == 200, f"/api/chat 200（实际 {r.status_code}）")
+
         spawned = await _wait_count(sink, "spawn_started", 2)
-        _check(len(spawned) >= 2, f"收到 2 条 spawn_started（实际 {len(spawned)}）")
+        _check(len(spawned) >= 2, f"2× spawn_started（实际 {len(spawned)}）")
+        handles = {e["data"]["skill_id"]: e["data"]["handle_id"] for e in spawned}
+        cardio_h = handles["cardio-expert"]
+        metab_h = handles["metabolic-expert"]
+
+        # 经 engine API 登记 barrier（真 LLM 走 await_skills 工具；mock 不能回放
+        # 运行时 handle_id，故此处直登记，等价于 LLM 自登记的效果）
+        pool = server._pools[demo_id]
+        engine = await pool.get_or_create(
+            session_id=f"{demo_id}:{session_id}", entry_skill_id="orchestrator")
+        await engine.set_join_barrier([cardio_h, metab_h],
+                                      then_skill_id="joint-consult")
+
+        async def resume_expert(handle_id: str, name: str) -> None:
+            susp = None
+            for _ in range(500):
+                susp = next((e for e in sink
+                             if e["kind"] == "spawn_suspended"
+                             and e["data"].get("handle_id") == handle_id), None)
+                if susp:
+                    break
+                await asyncio.sleep(0.02)
+            _check(susp is not None, f"{name} 出现 spawn_suspended")
+            tid = susp["data"]["thread_id"]
+            rid = susp["data"]["pending"][0]["request_id"]
+            rr = await client.post("/api/resume", json={
+                "demo_id": demo_id, "session_id": session_id,
+                "thread_id": tid, "request_id": rid,
+                "payload": {"answer": "知道了"}})
+            _check(rr.status_code == 200, f"{name} /api/resume 200（{rr.status_code}）")
+
+        # 错峰：先 cardio 跑到完成，再 metabolic
+        await resume_expert(cardio_h, "cardio")
+        await resume_expert(metab_h, "metabolic")
+
+        done = await _wait_count(sink, "spawn_completed", 2)
+        _check(len(done) >= 2, f"2× spawn_completed（实际 {len(done)}）")
+        fired = await _wait_count(sink, "join_barrier_fired", 1)
+        _check(len(fired) >= 1, "join_barrier_fired 出现")
     pump_task.cancel()
 
 
