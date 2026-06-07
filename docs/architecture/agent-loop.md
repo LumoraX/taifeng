@@ -412,17 +412,40 @@ TurnCompleted event
 
 ## turn-rewind：turn 内任意节点可寻址 rewind（turn-rewind 契约）
 
-一次 root turn 的执行轨迹被拆成一张**可寻址回访节点表**，业务侧可对任意节点直接 retry——既能重跑某一次 LLM loop 采样，也能重跑某一次工具 / `call_skill` 派发。子 skill 全程 `entry: false`，**绕开 entry/call_skill 互斥**（不放松 `cannot_call_entry_skill`）。详见 [turn-rewind 契约](capabilities/turn-rewind.md) 与 ADR 0014。
+一次 root turn 的执行轨迹被拆成一张**可寻址回访节点表**，业务侧可对任意节点直接 retry——既能重跑某一次 LLM loop 采样，也能重跑某一次工具 / `call_skill` 派发。子 skill 全程 `entry: false`，**绕开 entry/call_skill 互斥**（不放松 `cannot_call_entry_skill`）。详见 [turn-rewind 契约](capabilities/turn-rewind.md) 与 ADR 0014、ADR 0016。
 
-**记录（`loop/rewind.py` + `turn.py`，仅 root turn）**：每圈 `_sample_once` 采样前记一个 `iteration` 节点；每次工具 / `call_skill` 派发的 `function_call` 追加处记一个 `dispatch` 节点（两切点：`history_len` = 所属 iteration 采样前 = re_reason 切点；`inner_history_len` = fc 后 / fco 前 = retry_tool 切点）。`RewindCheckpoint` 只记 history 下标（append-only 不破，R5）；每记一个 emit `rewind_checkpoint_recorded`。turn 结束随状态回写 engine，`engine.rewind_nodes()` 只读暴露。`turn_root` 收敛进首个 iteration 节点 `it1`（冗余，不单列）。
+### 节点 ID 格式
 
-**重推（`engine._handle_rewind`）**：actor 模型下提交 `Rewind` 时上一 turn 已结束（engine 空闲），故「重推」= 截断 engine history（仅内存）+ 回退 `cache_anchor` + 落 rewind marker（store）+ emit `turn_rewound` + 建新 root TurnRunner 重跑：
+node_id 为 turn 限定格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其中 `k` = 到本 turn 为止的累积 `user_message` 数（1-based），由 `count_turns(history)` helper 从逻辑 history 算出，**不依赖 engine._turn_index**（后者冷加载不回填）。`RewindCheckpoint` 新增 `turn_index: int`（= k 值）。
+
+### 节点表产生（`derive_rewind_log` 为唯一产出方）
+
+节点表统一由 `derive_rewind_log(history)` 纯函数（`loop/rewind.py`）推导，是**冷加载 / 热 turn 结束 / CompactNow 三处的唯一产出方**：
+
+- **冷加载（engine `__init__`）**：
+  ```
+  self._history = reconstruct_logical_history(list(initial_history))  # 先重建逻辑 history
+  self._rewind_checkpoints = derive_rewind_log(self._history)         # 再推导全 turn 节点表
+  ```
+- **热 turn 结束 / CompactNow 回写**：先 `self._history = list(runner.history_buffer)`，再 `self._rewind_checkpoints = derive_rewind_log(self._history)`（重算覆写，不 extend）。
+
+热 turn 执行中的 live `RewindLog`（`turn.py`）仅用于 emit `rewind_checkpoint_recorded` 事件（R3），turn 结束后以 `derive_rewind_log` 重算覆写，二者由 `count_turns` 同一 helper 保证 node_id 一致（由奇偶校验测试锁死）。
+
+### 热 turn 记录流程（`loop/rewind.py` + `turn.py`，仅 root turn）
+
+每圈 `_sample_once` 采样前记一个 `iteration` 节点；每次工具 / `call_skill` 派发的 `function_call` 追加处记一个 `dispatch` 节点（两切点：`history_len` = 所属 iteration 采样前 = re_reason 切点；`inner_history_len` = fc 后 / fco 前 = retry_tool 切点）。`RewindCheckpoint` 只记 history 下标（append-only 不破，R5）；每记一个 emit `rewind_checkpoint_recorded`。`turn_root` 收敛进首个 iteration 节点 `t{k}:it1`（冗余，不单列）。
+
+### 重推（`engine._handle_rewind`）
+
+actor 模型下提交 `Rewind` 时上一 turn 已结束（engine 空闲），故「重推」= 截断 engine history（仅内存）+ 回退 `cache_anchor` + 落 rewind marker（store，payload 含 `cut_index`）+ emit `turn_rewound` + 建新 root TurnRunner 重跑：
 
 ```
 Rewind(node_id, mode, new_args?)
   → 查 checkpoint（缺 → rewind_rejected(unknown_node)）
   → retry_tool 仅 dispatch 节点（否则 rewind_rejected(mode_kind_mismatch)）
   → 活跃挂起 → rewind_rejected(turn_suspended)   # 挂起态 rewind v1 不支持
+  → 冷 engine 首次操作：_last_resolved 为空 + _history 非空
+      → 惰性按构造时 entry skill resolve 指令层（resolve 失败 → log warning，不 silent suppress）
   → 选截点：retry_tool=inner_history_len（保 fc）/ re_reason=history_len
   → 截断 history + 回退 anchor（锁内；store append-only，旧 items 不删）
   → re_reason：新 runner 从截点重采样（LLM 重决下游）
@@ -430,7 +453,7 @@ Rewind(node_id, mode, new_args?)
       _build_tool_context，含 dispatcher → call_skill 子 skill 也能重跑）→ 续推
 ```
 
-R2：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`reason="rewind"`），不计 `unexpected_cache_breaks`。
+R2：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`reason="rewind"`），不计 `unexpected_cache_breaks`。冷加载跨进程 cache 不可信，`__init__` 置 `_cache_anchor_index = -1`。
 
 ## 分离式 spawn + join-barrier（detached-spawn 契约）
 

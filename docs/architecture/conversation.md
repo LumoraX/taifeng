@@ -134,6 +134,28 @@ report = await rebuild_index(writer, directory, *, dry_run=False, sink=None)
 | 审计 / 投递 ES / Kafka / 异步 metric | `IndexHook` | ~10-50 |
 | 主存必须落 PG / 合规要求 | `MessageWriter` + `ThreadDirectory` | ~150-300 |
 
+## reconstruct_logical_history（冷加载逻辑 history 重建）
+
+`src/taifeng/conversation/reconstruct.py` 提供纯函数 `reconstruct_logical_history(raw)`，把 append-only transcript（`load_history` 返回的原始序列）重放成与热内存等价的逻辑 history。纯 CPU、无 IO。对干净 thread（无压缩、无 rewind）是恒等映射，向后兼容。
+
+**为什么需要它**：append-only 主存在两种情况下与热内存 history 发散：
+
+1. **压缩**：`SlidingWindow` / `Handoff` 把内存 history 替换成 `[head, placeholder, (salvage_note), tail]`，但只把 `compacted` placeholder **追加到 JSONL 末尾**，被替换的中间项**不删**（R5 append-only）。直接读 raw 会得到 `[head, middle(废弃), tail, placeholder@末尾]`，与内存结构性发散。
+2. **历史 rewind / rollback**：截断只动内存，被截掉的项仍留在 store，其后是 `rewind` / `rollback` marker + re-run 项。直接读 raw 会包含废弃尾部。
+
+**重放规则（按写入序扫一遍）**：
+
+| item kind / source | 动作 |
+| --- | --- |
+| `system_injection`，`source == memory_pre_evict`（压缩 salvage digest） | 暂存，等下一个 `compacted` 时挪到 placeholder 之后（复现热内存 `insert_at = summary_index + 1` 行为） |
+| `compacted`（带 `replaced_range=(s, e)`） | 把 `logical[s:e]` 折叠掉：`logical = logical[:s] + [placeholder] + ([salvage] if salvage else []) + logical[e:]` |
+| `system_injection`，`source ∈ {rewind, rollback}` | 截断信号：`logical = logical[:cut_index]`（`cut_index` 从 payload 读），**marker 本身不进 logical** |
+| 其余所有 item | `logical.append(item)` |
+
+**副作用：修正既存 resume 隐患**。冷加载（`initial_history`）和 `pool.py` resume 路径均改为先 `reconstruct_logical_history`，使压缩过的 thread resume 后**不再把废弃项重发给 LLM**（原先 resume 不崩故未被发现，但会在下次 pre-turn 重压前多发一轮废弃上下文）。
+
+**依赖契约（R5）**：`reconstruct` 依赖 `MessageStore.load_thread` 按写入顺序、完整吐回所有 `ResponseItem`（不去重 marker、不丢、不乱序）。默认 `JsonlMessageStore` 天然满足；自实现 DB store 时为协议红线。
+
 ## 关键决策与备选方案
 
 详见 ADR `docs/decisions/0008-store-protocol-decoupling.md`。

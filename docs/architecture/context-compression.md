@@ -319,6 +319,14 @@ class MemoryStore(Protocol):
 - **全 best-effort**：钩子异常不打断 turn。后端（向量 / KV / RAG）全在业务侧，内核只定协议（R1）。
 - 详见 `kernel-gap-analysis.md` [K3]，commit `1bd57b1`。
 
+## `replaced_range` 与冷加载消费
+
+`CompressionResult` 的 `replaced_range: tuple[int, int] | None` 字段（以及压缩 salvage note `system_injection(source=memory_pre_evict)`）会被 **`reconstruct_logical_history`**（`conversation/reconstruct.py`）在冷加载 / resume 时消费，把 append-only transcript 折叠回与热内存等价的逻辑 history。
+
+- **写路径不变**：压缩仍 append-only（placeholder 追加末尾，被替换项物理留存）；`replaced_range` 是 `CompressionResult` 的已有字段，只需确保内置策略正确填写。
+- **读路径修正**：冷加载 `initial_history` 和 pool resume 均先经 `reconstruct_logical_history`；此前直接读 raw 会把废弃的被压缩项重发给 LLM，现已修正（**既存 resume 隐患被顺带修复**）。
+- **自定义策略注意**：若自定义 `CompressionStrategy` 设 `success=True` 但 `summary_item_id=None` 并触发了 salvage note，会产生孤儿 note；`reconstruct` 在此情形下显式校验（不静默误配），作为系统边界。内置 `sliding` / `handoff` 不触发此边界（`summary_item_id` 有值时才追加 salvage）。
+
 ## 测试用例（M3 验收）
 
 > 全部已覆盖（`tests/loop/test_compaction_hardening.py` / `test_cache_break_reason.py` / `test_memory_swap.py` 及 `tests/` 下压缩测试）。
@@ -329,3 +337,4 @@ class MemoryStore(Protocol):
 - [x] 多策略按 priority 顺序触发
 - [x] cache_break 检测：预期内 `expected_invalidations++`，预期外 `unexpected_cache_breaks++` 并告警
 - [x] mid-turn 压缩失败时保留原 history（不截断），SlidingWindow 兜底
+- [x] 压缩 thread 冷加载：`reconstruct_logical_history` 正确消费 `replaced_range`，resume 后 LLM 不再收到废弃项（`tests/conversation/test_reconstruct.py`）

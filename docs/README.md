@@ -32,6 +32,8 @@
 15. [决策 0008：持久化层三协议拆分 + stdlib SQLite 索引](decisions/0008-store-protocol-decoupling.md)
 16. [决策 0009：SKILL.md scripts 运行时](decisions/0009-scripts-runtime.md)
 17. [决策 0010：闭合 permission gate 体系](decisions/0010-permission-gate-completeness.md)
+18. [决策 0011–0015](decisions/)（`empty-api-key-omits-auth` / `suspend-resume` / `composite-tool-only` / `turn-rewind` / `detached-skill-spawn`）
+19. [决策 0016：冷场景重建 —— 读时重建逻辑 history + 从 history 推导节点表（Supersedes #0014 node_id 段）](decisions/0016-cold-rewind-rebuild.md)
 
 ### 第四遍：对标差距与进度（architecture/ 差距分析）
 
