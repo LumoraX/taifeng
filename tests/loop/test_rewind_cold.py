@@ -111,29 +111,28 @@ async def _run_to_root_end(engine: object, text: str) -> None:
         await asyncio.sleep(0.01)
 
 
-async def test_parity_derive_equals_live_recording(
+async def test_parity_derive_equals_live_recorded_events(
     skills_dir, threads_dir
 ) -> None:
-    """奇偶校验：derive_rewind_log(history) ≡ 热路径 live RewindLog。
+    """奇偶校验：derive_rewind_log(history) ≡ turn.py 现场 live 记录事件序列。
 
-    构造一个包含多圈、多工具派发的热 turn：
-    - 圈 1：一次 read_skill 派发
-    - 圈 2：一次 read_skill 派发
-    - 圈 3：无工具，收尾（带文本）
+    Task 8 后 engine.rewind_nodes() 直接返回 derive_rewind_log(self._history)，
+    若继续与 rewind_nodes() 对比则变成 derive==derive 的同义反复，无法锁住
+    「derive 结果与 TurnRunner live 增量记录路径一致」这一约束。
 
-    热路径由 TurnRunner 现场 live 记录 rewind_log.checkpoints，
-    turn 结束后 engine._rewind_checkpoints 回写（Task 8 前）。
-    冷推导由 derive_rewind_log(engine.history_snapshot()) 独立推算。
+    本测试改为在 turn 开始前订阅事件流，收集所有 rewind_checkpoint_recorded
+    事件，与 turn 结束后 derive_rewind_log(history_snapshot()) 的输出逐字段比对。
+    这把 live 记录路径（turn.py emit 节点）作为独立真相源，即便 engine 改用
+    derive 做热路径回写也不会降低锁的有效性。
 
-    断言逐字段比较（除 cache_anchor 外，冷推导无 cache 信息置 -1）：
-    - node_id、kind、turn_index
-    - history_len、inner_history_len
-    - iteration_index、call_id、target_id
-    - args_digest（原始 args[:200]）
+    比对字段（事件 data 携带的字段子集）：
+    - node_id、kind、iteration_index、history_len、target_id
 
-    若二者任一字段不一致，说明 derive 逻辑有 bug（此时报告首个分歧
-    节点的 live vs derived 字段，禁止悄悄改 live 记录路径）。
+    注：事件不携带 inner_history_len / args_digest / call_id / turn_index，
+    故这些字段由其他单元测试（test_rewind_cold 的 pure derive 测试）覆盖。
     """
+    import asyncio
+
     import taifeng
     from taifeng.llm.providers import MockClient, MockTurn
 
@@ -166,92 +165,90 @@ async def test_parity_derive_equals_live_recording(
         session_id="s_parity", entry_skill_id="code-reviewer"
     )
 
-    # 执行热 turn 并等待节点表落地
-    await _run_to_root_end(engine, "请审查代码")
+    # ── 订阅事件流，在 turn 运行期间收集所有 rewind_checkpoint_recorded 事件 ──
+    sub_id = await engine.submit(taifeng.UserMessage(text="请审查代码"))
 
-    # ── 取热路径 live 记录与冷推导结果 ────────────────────────────────────
-    live = engine.rewind_nodes()           # 热路径 live 记录（Task 8 前）
-    history = engine.history_snapshot()    # 当前 in-memory history
-    derived = derive_rewind_log(history)   # 冷推导
+    # 每个 rewind_checkpoint_recorded 事件的 data 字段
+    live_event_data: list[dict] = []
+    async for ev in engine.subscribe_all():
+        if ev.submission_id != sub_id:
+            continue
+        if ev.msg.kind == "rewind_checkpoint_recorded":
+            # 采集 live 路径（turn.py 现场 emit）记录的字段
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            live_event_data.append(dict(data))
+        kind = ev.msg.kind
+        if kind in ("turn_completed", "turn_failed"):
+            event_data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if event_data.get("is_root"):
+                break
+
+    # 等节点表回写
+    for _ in range(100):
+        if engine.rewind_nodes():
+            break
+        await asyncio.sleep(0.01)
+
+    # ── 取 derive 推导结果（post-turn history）─────────────────────────────
+    derived = derive_rewind_log(engine.history_snapshot())
 
     # 基本数量断言（5 节点：3 iteration + 2 dispatch）
-    live_ids = [n.node_id for n in live]
-    assert len(live) == 5, (
-        f"热路径应有 5 个节点，实得 {len(live)}: {live_ids}"
+    assert len(live_event_data) == 5, (
+        f"live 事件应有 5 个 rewind_checkpoint_recorded，实得 {len(live_event_data)}: "
+        f"{[e['node_id'] for e in live_event_data]}"
     )
     derived_ids = [n.node_id for n in derived]
-    assert len(derived) == len(live), (
-        f"冷推导节点数({len(derived)}) ≠ 热路径({len(live)})\n"
-        f"live     node_ids: {live_ids}\n"
-        f"derived  node_ids: {derived_ids}"
+    assert len(derived) == len(live_event_data), (
+        f"冷推导节点数({len(derived)}) ≠ live 事件数({len(live_event_data)})\n"
+        f"derived node_ids: {derived_ids}\n"
+        f"live events node_ids: {[e['node_id'] for e in live_event_data]}"
     )
 
-    # ── 逐字段奇偶校验 ──────────────────────────────────────────────────
+    # ── 逐字段奇偶校验（事件携带字段子集）──────────────────────────────────
+    # 比对字段：node_id / kind / iteration_index / history_len / target_id
+    # 这些是 rewind_checkpoint_recorded 事件 data 中存在的全部字段，
+    # 足以锁定 derive 的 id 方案、切点坐标、派发目标与 live 路径一致。
     divergence_report: list[str] = []
-    for i, (d, lv) in enumerate(zip(derived, live, strict=True)):
+    for i, (d, ev_data) in enumerate(
+        zip(derived, live_event_data, strict=True)
+    ):
         # node_id 是核心定位键，必须完全一致
-        if d.node_id != lv.node_id:
+        if d.node_id != ev_data.get("node_id"):
             divergence_report.append(
                 f"[{i}] node_id 不一致: "
-                f"derived={d.node_id!r} live={lv.node_id!r}"
-            )
-        # turn_index：turn 序号（1-based 累积 user_message 数）
-        if d.turn_index != lv.turn_index:
-            divergence_report.append(
-                f"[{i}:{d.node_id}] turn_index 不一致: "
-                f"derived={d.turn_index} live={lv.turn_index}"
+                f"derived={d.node_id!r} live_event={ev_data.get('node_id')!r}"
             )
         # kind：iteration / dispatch
-        if d.kind != lv.kind:
+        if d.kind != ev_data.get("kind"):
             divergence_report.append(
                 f"[{i}:{d.node_id}] kind 不一致: "
-                f"derived={d.kind!r} live={lv.kind!r}"
-            )
-        # history_len：re_reason 截断切点（下标）
-        if d.history_len != lv.history_len:
-            divergence_report.append(
-                f"[{i}:{d.node_id}] history_len 不一致: "
-                f"derived={d.history_len} live={lv.history_len}"
-            )
-        # inner_history_len：retry_tool 切点（仅 dispatch）
-        if d.inner_history_len != lv.inner_history_len:
-            divergence_report.append(
-                f"[{i}:{d.node_id}] inner_history_len 不一致: "
-                f"derived={d.inner_history_len} "
-                f"live={lv.inner_history_len}"
+                f"derived={d.kind!r} live_event={ev_data.get('kind')!r}"
             )
         # iteration_index：所属采样圈序号
-        if d.iteration_index != lv.iteration_index:
+        if d.iteration_index != ev_data.get("iteration_index"):
             divergence_report.append(
                 f"[{i}:{d.node_id}] iteration_index 不一致: "
                 f"derived={d.iteration_index} "
-                f"live={lv.iteration_index}"
+                f"live_event={ev_data.get('iteration_index')}"
             )
-        # call_id：仅 dispatch
-        if d.call_id != lv.call_id:
+        # history_len：re_reason 截断切点（下标）
+        if d.history_len != ev_data.get("history_len"):
             divergence_report.append(
-                f"[{i}:{d.node_id}] call_id 不一致: "
-                f"derived={d.call_id!r} live={lv.call_id!r}"
+                f"[{i}:{d.node_id}] history_len 不一致: "
+                f"derived={d.history_len} "
+                f"live_event={ev_data.get('history_len')}"
             )
-        # target_id：工具 / call_skill 名称
-        if d.target_id != lv.target_id:
+        # target_id：工具 / call_skill 名称（iteration 为 None，dispatch 为 tool 名）
+        if d.target_id != ev_data.get("target_id"):
             divergence_report.append(
                 f"[{i}:{d.node_id}] target_id 不一致: "
-                f"derived={d.target_id!r} live={lv.target_id!r}"
+                f"derived={d.target_id!r} "
+                f"live_event={ev_data.get('target_id')!r}"
             )
-        # args_digest：原始 args[:200]
-        if d.args_digest != lv.args_digest:
-            divergence_report.append(
-                f"[{i}:{d.node_id}] args_digest 不一致: "
-                f"derived={d.args_digest!r} "
-                f"live={lv.args_digest!r}"
-            )
-        # 注：cache_anchor 冷推导置 -1，热路径为真实值，
-        # 故意跳过（非下标语义字段，不影响 rewind 正确性）
 
     # 若有分歧，打印完整报告再 fail（便于 controller 定位首个分歧）
     assert not divergence_report, (
-        "derive_rewind_log 与 live RewindLog 出现分歧！\n"
+        "derive_rewind_log 与 live rewind_checkpoint_recorded 事件出现分歧！\n"
         "首个分歧节点在报告第 1 条：\n"
         + "\n".join(divergence_report)
     )
@@ -655,4 +652,180 @@ async def test_cold_load_empty_history_empty_table(
     )
     assert cold_engine.history_snapshot() == [], (
         "空 initial_history 应产生空 history"
+    )
+
+
+# ── Task 8：冷加载后跑新 turn，t1/t2 前缀严格递增无重复 ─────────────────────
+
+
+async def test_cold_then_new_turn_node_ids_no_collision(
+    skills_dir: object, threads_dir: object
+) -> None:
+    """冷加载 1 个历史 turn → 跑新 turn → t1 / t2 前缀严格递增、无重复。
+
+    步骤：
+    1. 热跑第一 turn（圈 1 有 read_skill 派发，圈 2 收尾）；
+    2. 持久化 transcript，用该 transcript 构造冷 engine（initial_history）；
+    3. 启动冷 engine 的 run() task，向其提交第二条 UserMessage 跑完；
+    4. 断言：
+       - rewind_nodes() 同时含 t1: 与 t2: 前缀节点；
+       - 所有 node_id 无重复（set 长度 == list 长度）。
+
+    这是关键回归：热路径改为 derive 重算后，冷加载推导的 t1 节点
+    与新 turn 产出的 t2 节点共存，derive 在完整 history 上重算不会
+    因 _turn_index 偏差导致 id 碰撞或旧节点被覆盖。
+    """
+    import asyncio
+    from pathlib import Path
+
+    import taifeng
+    from taifeng.conversation.transcript import JsonlMessageStore
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.skill.registry import FilesystemSkillRegistry
+    from taifeng.tool.builtins import (
+        make_call_skill_tool,
+        make_read_skill_tool,
+        make_run_script_tool,
+    )
+    from taifeng.tool.registry import ToolRegistry
+    from taifeng.tool.runtime import ToolCallRuntime
+
+    # ── 步骤 1：热跑第一 turn ─────────────────────────────────────────────
+    hot_client = MockClient(turns=[
+        MockTurn(text="圈1推理", tool_calls=[
+            {
+                "id": "c1",
+                "name": "read_skill",
+                "arguments": '{"skill_id":"style-checker"}',
+            },
+        ]),
+        MockTurn(text="原收尾"),  # 圈 2，无工具
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,  # type: ignore[arg-type]
+        threads_dir=threads_dir,  # type: ignore[arg-type]
+        model_client=hot_client,
+        compressors=[],
+    )
+    hot_engine = await pool.get_or_create(
+        session_id="s_t1t2_hot", entry_skill_id="code-reviewer"
+    )
+
+    # 等待热 turn 完成 + 节点表落地
+    hot_sub = await hot_engine.submit(
+        taifeng.UserMessage(text="请审查第一轮")
+    )
+    async for ev in hot_engine.subscribe_all():
+        if ev.submission_id != hot_sub:
+            continue
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if data.get("is_root"):
+                break
+    for _ in range(100):
+        if hot_engine.rewind_nodes():
+            break
+        await asyncio.sleep(0.01)
+
+    t1_nodes = hot_engine.rewind_nodes()
+    assert t1_nodes, "热 engine 节点表不应为空"
+    assert all(n.node_id.startswith("t1:") for n in t1_nodes), (
+        f"第一 turn 节点应全部以 t1: 开头，实得: "
+        f"{[n.node_id for n in t1_nodes]}"
+    )
+    thread_id = hot_engine.thread_id
+    await pool.close()
+
+    # ── 步骤 2：从 store 物化 transcript，构造冷 engine ──────────────────
+    cold_store = JsonlMessageStore(
+        Path(str(threads_dir))  # type: ignore[arg-type]
+    )
+    transcript = [
+        it async for it in await cold_store.load_thread(thread_id)
+    ]
+    assert transcript, "transcript 不应为空"
+
+    snapshot = (
+        await FilesystemSkillRegistry.load(
+            skills_dir  # type: ignore[arg-type]
+        )
+    ).snapshot()
+    entry = snapshot.get("code-reviewer")
+    assert entry is not None
+
+    tools = ToolRegistry()
+    tools.register(make_read_skill_tool())
+    tools.register(make_call_skill_tool())
+    tools.register(make_run_script_tool())
+
+    # 冷 engine 的 MockClient：第二 turn 消费
+    cold_client = MockClient(turns=[
+        MockTurn(text="第二轮收尾"),  # 新 turn，无工具，直接收尾
+    ])
+    cold_engine = taifeng.AgentEngine(
+        entry_skill=entry,
+        skill_snapshot=snapshot,
+        tool_runtime=ToolCallRuntime(tools),
+        model_client=cold_client,
+        store=cold_store,
+        thread_id=thread_id,
+        session_id="s_t1t2_cold",
+        compressors=None,
+        initial_history=transcript,  # 冷重建：t1 节点由 derive 产出
+    )
+
+    cold_nodes_before = cold_engine.rewind_nodes()
+    assert cold_nodes_before, "冷 engine 构造后 t1 节点不应为空"
+    assert all(
+        n.node_id.startswith("t1:") for n in cold_nodes_before
+    ), (
+        f"冷加载后节点应全为 t1: 前缀，实得: "
+        f"{[n.node_id for n in cold_nodes_before]}"
+    )
+
+    # ── 步骤 3：启动冷 engine，提交第二条 UserMessage 跑完 ─────────────────
+    cancel = CancellationToken(name="t1t2-root")
+    run_task = asyncio.create_task(cold_engine.run(cancel))
+
+    warm_sub = await cold_engine.submit(
+        taifeng.UserMessage(text="请审查第二轮")
+    )
+    async for ev in cold_engine.subscribe_all():
+        if ev.submission_id != warm_sub:
+            continue
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if data.get("is_root"):
+                break
+
+    # 等节点表回写（含新 t2 节点）
+    for _ in range(100):
+        nodes_after = cold_engine.rewind_nodes()
+        if any(n.node_id.startswith("t2:") for n in nodes_after):
+            break
+        await asyncio.sleep(0.01)
+
+    # 关停冷 engine
+    await cold_engine.shutdown()
+    try:
+        await asyncio.wait_for(run_task, timeout=5.0)
+    except (TimeoutError, asyncio.CancelledError):
+        run_task.cancel()
+
+    # ── 步骤 4：断言 t1/t2 前缀共存，无重复 ────────────────────────────────
+    all_nodes = cold_engine.rewind_nodes()
+    all_ids = [n.node_id for n in all_nodes]
+
+    t1_ids = [nid for nid in all_ids if nid.startswith("t1:")]
+    t2_ids = [nid for nid in all_ids if nid.startswith("t2:")]
+
+    assert t1_ids, (
+        f"应含 t1: 节点（冷加载历史 turn），实得 all_ids={all_ids}"
+    )
+    assert t2_ids, (
+        f"应含 t2: 节点（新跑 turn），实得 all_ids={all_ids}"
+    )
+    # node_id 全局唯一：set 长度等于 list 长度
+    assert len(set(all_ids)) == len(all_ids), (
+        f"node_id 出现重复！all_ids={all_ids}"
     )

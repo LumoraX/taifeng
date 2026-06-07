@@ -800,8 +800,9 @@ class AgentEngine:
             # runner 直接改 history_buffer 引用 → 把 runner.history_buffer 倒回 engine
             self._history = list(runner.history_buffer)
             self._cache_anchor_index = runner.cache_anchor_index
-            # turn-rewind：回写本 root turn 的回访节点表(供 rewind_nodes / _handle_rewind)
-            self._rewind_checkpoints = list(runner.rewind_log.checkpoints)
+            # turn-rewind：对当前全量逻辑 history 重算节点表(derive 为唯一产出方)。
+            # 历史 turn 节点(冷加载推导的)+ 本 turn 新节点共存，turn 限定 id 不撞。
+            self._rewind_checkpoints = derive_rewind_log(self._history)
             # G-CACHE：读回本轮末的 prompt 指纹，作为下一轮的对比基线
             self._last_prompt_fingerprint = runner.last_prompt_fingerprint
             # G1c：读回累计压缩次数，跨 turn 持久
@@ -1575,8 +1576,9 @@ class AgentEngine:
         async with self._lock:
             self._history = list(runner.history_buffer)
             self._cache_anchor_index = runner.cache_anchor_index
-            # turn-rewind：回写本 root turn 的回访节点表(供 rewind_nodes / _handle_rewind)
-            self._rewind_checkpoints = list(runner.rewind_log.checkpoints)
+            # turn-rewind：对当前全量逻辑 history 重算节点表(derive 为唯一产出方)。
+            # CompactNow 路径：在压缩后 history 上重算，折叠语义与冷加载推导一致。
+            self._rewind_checkpoints = derive_rewind_log(self._history)
 
     # -----------------------------------------------------------------
     # Op handlers (rewind / rollback / update_budget / refresh_snapshot)
