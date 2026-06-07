@@ -1029,60 +1029,98 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
         _consoled_engines.add(id(engine))
         attach_console_sink(engine, color=False)
     sub_id = await engine.submit(taifeng.UserMessage(text=req.message))
-    asyncio.create_task(_bridge_events(req.demo_id, req.session_id, engine, sub_id))
+    asyncio.create_task(_bridge_events(
+        req.demo_id, req.session_id, engine, sub_id,
+        detached=meta.streams_detached))
     return {"submission_id": sub_id, "demo_id": req.demo_id, "session_id": req.session_id}
 
 
 async def _bridge_events(
     demo_id: str, session_id: str, engine: taifeng.AgentEngine, sub_id: str,
+    *, detached: bool = False,
 ) -> None:
     """把 engine 事件流翻译成 dict 推给前端订阅者。
 
-    **关键设计选择：subscribe_all 而非 subscribe(sub_id)**
+    **非 detached（默认）**：按 submission_id 过滤本提交事件；根 turn 终态或根
+    thread 挂起即退出（见 form_hitl / code_review 等 demo）。
 
-    ``engine.subscribe(sub_id)`` 在第一个 ``turn_completed`` 即退出（公共 API
-    契约，见 tests/skill/test_composite_e2e.py:11-13 注释）；但 composite skill
-    fan-out 场景下，**子 skill 的 turn_completed 比父 entry 先 emit**，会让
-    桥接早退 —— 后续 hitl_required / 其他子 turn 的 turn_started / assistant_text
-    / 父 turn 综合 assistant_text 全部丢失，前端 chat 区会停在第一个子 reviewer
-    完成那一刻不动（hitl_required 因为走 prompter 旁路直推 SSE 仍能看到，
-    但所有 engine 路径事件都没了）。
+    **detached**（streams_detached demo）：engine 已 session 隔离，故不按
+    submission_id 过滤（spawn 事件 submission_id=handle_id / barrier 事件
+    =barrier_id / resume 事件=resume sub.id 都要转发）。退出谓词纯事件驱动：
+    根 turn 终态 ∧ 无未触发 barrier ∧ 无在跑 then_thread —— 用 barrier 机制
+    追踪尚未完成的聚合 turn，``has_live_spawns()`` 不纳入：spawn 是否存活由
+    barrier 覆盖，多余的存活 spawn 不阻塞事件桥退出。
 
-    所以这里用 ``subscribe_all()`` 自己按 submission_id 过滤，并按 ``is_root``
-    字段判定何时退出（仅 outermost turn 完成才退；is_root 在 turn.py:192,218
-    总是会写入 data）。
+    退出后发送哨兵事件 ``{"kind": "_stream_end"}``，通知 SSE gen() 主动结束
+    streaming response（使 ASGITransport 能正常完成 handle_async_request，
+    保证测试 / 烟测中 client.stream() 的 __aenter__ 能解除阻塞）。
     """
     sub_key = f"{demo_id}:{session_id}"
+    # detached 退出谓词的 bookkeeping
+    root_done = False
+    open_barriers: set[str] = set()        # registered 未 fired 的 barrier
+    pending_then_threads: set[str] = set()  # fired 后聚合 turn 仍在跑的 then_thread
     try:
         async for ev in engine.subscribe_all():
-            # 不属于本 submission 的事件直接 skip（其他并发提交的会一起到来）
-            if ev.submission_id != sub_id:
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if not detached:
+                # ── 原有 per-submission 行为，保持不变 ──
+                if ev.submission_id != sub_id:
+                    continue
+                payload = {"kind": ev.msg.kind, "submission_id": ev.submission_id,
+                           "data": data}
+                for q in _event_subs.get(sub_key, []):
+                    q.put_nowait(payload)
+                if ev.msg.kind in ("turn_completed", "turn_failed") and data.get(
+                    "is_root", False
+                ):
+                    break
+                if ev.msg.kind == "turn_suspended" and (
+                    data.get("thread_id") == engine.thread_id
+                ):
+                    break
                 continue
-            payload = {
-                "kind": ev.msg.kind,
-                "submission_id": ev.submission_id,
-                "data": ev.msg.data if hasattr(ev.msg, "data") else {},
-            }
+
+            # ── detached 分支：转发全部本 session 事件 ──
+            payload = {"kind": ev.msg.kind, "submission_id": ev.submission_id,
+                       "data": data}
             for q in _event_subs.get(sub_key, []):
                 q.put_nowait(payload)
-            # 仅在「根 turn」收尾时退出桥接；子 turn 的 turn_completed 是父
-            # turn 执行窗口内的中间事件。兼容：旧事件未带 is_root 字段时不退出，
-            # 等同于"等到 engine 退订"的安全降级。
-            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+
+            # bookkeeping
             if ev.msg.kind in ("turn_completed", "turn_failed") and data.get(
                 "is_root", False
             ):
-                break
-            # 表单/审批型 HITL：根 thread 挂起即本次 submission 结束（等 Resume 另起
-            # submission 续跑）。根 turn_suspended 的 thread_id == engine.thread_id；
-            # 据此退出桥接，避免任务悬挂直到进程关停。子 thread 的 turn_suspended
-            # （thread_id≠根）只透传不退出——前端据它（reason=data/form）渲染表单。
-            if ev.msg.kind == "turn_suspended" and (
-                data.get("thread_id") == engine.thread_id
-            ):
+                root_done = True
+            elif ev.msg.kind == "join_barrier_registered":
+                bid = data.get("barrier_id")
+                if bid:
+                    open_barriers.add(bid)
+            elif ev.msg.kind == "join_barrier_fired":
+                bid = data.get("barrier_id")
+                if bid:
+                    open_barriers.discard(bid)
+                then_tid = data.get("then_thread_id")
+                if then_tid:
+                    pending_then_threads.add(then_tid)
+            elif ev.msg.kind in ("turn_completed", "turn_failed"):
+                # 聚合 turn（then_thread）跑完 → 解除其挂起标记
+                pending_then_threads.discard(data.get("thread_id"))
+
+            # 退出谓词：根 turn 终态 ∧ 无未触发 barrier ∧ 无在跑 then_thread
+            # 不等 has_live_spawns()=False：被 barrier 覆盖的 spawn 活动已由
+            # open_barriers / pending_then_threads 追踪，多余的 live spawn
+            # （挂起等 HITL）不应阻塞事件桥退出，否则 SSE gen 永不关闭。
+            if root_done and not open_barriers and not pending_then_threads:
                 break
     except Exception:
         logger.exception("event bridge failed for sub_key=%s", sub_key)
+    else:
+        # 仅在正常退出（非异常）时发送哨兵，通知 SSE gen 主动结束流
+        # 使 ASGITransport.handle_async_request() 能正常完成（response_complete.set()）
+        sentinel: dict[str, Any] = {"kind": "_stream_end"}
+        for q in _event_subs.get(sub_key, []):
+            q.put_nowait(sentinel)
 
 
 @app.get("/api/events/{demo_id}/{session_id}")
@@ -1120,7 +1158,12 @@ async def events(demo_id: str, session_id: str) -> StreamingResponse:
                 if stop_task in done:
                     break  # 进程关停：干净退出
                 if get_task in done:
-                    yield f"data: {json.dumps(get_task.result(), ensure_ascii=False)}\n\n"
+                    event = get_task.result()
+                    # 哨兵：detached bridge 正常退出后通知 gen 主动结束；
+                    # 不向客户端回传哨兵本体，gen 退出即触发 stream 结束。
+                    if event.get("kind") == "_stream_end":
+                        break
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 else:
                     yield ": keepalive\n\n"  # 15s 超时心跳
         except asyncio.CancelledError:
