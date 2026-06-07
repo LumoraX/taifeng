@@ -468,6 +468,21 @@ DEMOS: dict[str, DemoMeta] = {
         wants_spawn_tools=True,
         wants_user_input_tool=True,
     ),
+    "turn_rewind": DemoMeta(
+        demo_id="turn_rewind",
+        title="⏮ Turn 回退重跑 (retry_tool / re_reason)",
+        description=(
+            "orchestrator 自治链跑完后，可回退到任意回访节点重跑：retry_tool 重跑"
+            "一次 call_skill 换其输出、父基于新结论续推；re_reason 截到某圈采样前让 "
+            "LLM 重新决定。演示 addressable turn-rewind。"
+        ),
+        skills_dir=EXAMPLES_DIR / "turn_rewind" / "skills",
+        entry_skill_id="orchestrator",
+        sample_prompt="帮我评估这位患者的健康风险并给建议。",
+        hitl_on_skill_dispatch=False,
+        streams_detached=True,
+        wants_rewind=True,
+    ),
     "compression_showcase": DemoMeta(
         demo_id="compression_showcase",
         title="🗜️ 上下文压缩演示 (1k 窗口)",
