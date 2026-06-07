@@ -132,6 +132,13 @@ class RewindLog:
         self.checkpoints.append(cp)
         return cp
 
+    def reset_dispatch_seq(self) -> None:
+        """跨 turn 重置 dispatch 序号 —— disp 编号在每个 turn 内从 0 起。
+
+        derive_rewind_log 扫到新 turn(user_message)时调用。
+        """
+        self._dispatch_seq = 0
+
     def find(self, node_id: str) -> RewindCheckpoint | None:
         """按 node_id 查 checkpoint;不存在返回 None(调用方负责拒绝路径)。"""
         return next(
@@ -172,7 +179,7 @@ def derive_rewind_log(history: list[ResponseItem]) -> list[RewindCheckpoint]:
             iteration = 0
             cur_iter_history_len = None
             # 跨 turn 重置 dispatch 序号(turn 内 0-based,每 turn 从 0 起)
-            log._dispatch_seq = 0
+            log.reset_dispatch_seq()
 
         elif item.kind == "assistant_message":
             # 每次 LLM 采样输出:进入下一圈,记 iteration 节点

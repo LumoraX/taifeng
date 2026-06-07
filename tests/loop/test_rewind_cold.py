@@ -54,6 +54,13 @@ def test_derive_multi_turn_addressable():
     assert ids == ["t1:it1", "t2:it1"]
 
 
+def test_derive_multi_turn_dispatch_seq_restarts_per_turn():
+    """每 turn 的 dispatch 序号从 0 重启:[u,a,fc, u,a,fc] → disp 为 t1:disp0 / t2:disp0。"""
+    hist = [_u(), _a(), _fc("c1"), _u(), _a(), _fc("c2")]
+    disps = [n.node_id for n in derive_rewind_log(hist) if n.kind == "dispatch"]
+    assert disps == ["t1:disp0", "t2:disp0"]
+
+
 def test_derive_ignores_unknown_kinds_for_index():
     """spawn 等未知 kind 计入下标、不产节点,后续下标不偏移。"""
     from taifeng.conversation.models import spawn_item
