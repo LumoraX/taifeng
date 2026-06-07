@@ -155,11 +155,25 @@ def compacted(
     )
 
 
-def system_injection(text: str, *, thread_id: str, source: str) -> ResponseItem:
+def system_injection(
+    text: str,
+    *,
+    thread_id: str,
+    source: str,
+    extra: dict[str, Any] | None = None,
+) -> ResponseItem:
+    """系统注入项(marker / 指令 / digest)。
+
+    extra: 可选附加 payload(如 rewind/rollback marker 的 cut_index),合并进 payload。
+    不传则行为与旧版完全一致(向后兼容)。
+    """
+    payload: dict[str, Any] = {"text": text, "source": source}
+    if extra:
+        payload.update(extra)
     return ResponseItem(
         kind="system_injection",
         thread_id=thread_id,
-        payload={"text": text, "source": source},
+        payload=payload,
     )
 
 
