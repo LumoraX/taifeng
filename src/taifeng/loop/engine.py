@@ -21,6 +21,7 @@ from taifeng.conversation.models import (
     system_injection,
     user_message,
 )
+from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.conversation.store import MessageStore
 from taifeng.instructions.resolver import InstructionResolver
 from taifeng.instructions.source import InstructionFetchError
@@ -31,7 +32,6 @@ from taifeng.instructions.types import (
 )
 from taifeng.llm.client import ModelClient
 from taifeng.loop.cancellation import CancellationToken
-from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.loop.event import (
     EngineLog,
     EventMsg,

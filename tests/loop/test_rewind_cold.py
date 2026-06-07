@@ -362,18 +362,18 @@ async def test_cold_load_rebuilds_rewind_table(
     4. 验证 node_id 与热路径一致（冷推导坐标系自洽）。
     """
     import asyncio
+    from pathlib import Path
 
     import taifeng
-    from taifeng.llm.providers import MockClient, MockTurn
-    from pathlib import Path
     from taifeng.conversation.transcript import JsonlMessageStore
+    from taifeng.llm.providers import MockClient, MockTurn
     from taifeng.skill.registry import FilesystemSkillRegistry
-    from taifeng.tool.registry import ToolRegistry
     from taifeng.tool.builtins import (
         make_call_skill_tool,
         make_read_skill_tool,
         make_run_script_tool,
     )
+    from taifeng.tool.registry import ToolRegistry
     from taifeng.tool.runtime import ToolCallRuntime
 
     # ── 步骤 1：热跑一个 turn ──────────────────────────────────────────────
@@ -455,22 +455,175 @@ async def test_cold_load_rebuilds_rewind_table(
     )
 
 
-async def test_cold_load_empty_history_empty_table(
-    skills_dir: object, threads_dir: object
+async def test_cold_load_then_re_reason_executes(
+    skills_dir: object, threads_dir: object,
 ) -> None:
-    """空 initial_history → 空 history + 空节点表，不报错。"""
+    """冷加载后提交 re_reason Rewind → 实际执行成功，turn_rewound 事件可观测。
+
+    步骤：
+    1. 热跑一个含多圈的 turn（圈 1 有 read_skill 派发，圈 2 收尾）；
+    2. 从持久化 transcript 构造冷 engine（与热 engine 完全独立）；
+    3. 启动冷 engine 的 run() task；
+    4. 向冷 engine 提交 Rewind(node_id="t1:it1", mode="re_reason")；
+    5. 消费事件到 root turn 终结，断言：
+       - "turn_rewound" 事件被发出；
+       - rewound.data["node_id"] == "t1:it1"；
+       - rewound.data["mode"] == "re_reason"；
+       - 重推的 LLM 文本（"COLD-REDRIVE-DONE"）出现在文本流中。
+
+    这是端到端验证冷 rewind 不仅可寻址而且真正可执行的关键测试。
+    """
+    import asyncio
+    from pathlib import Path
+
     import taifeng
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.conversation.transcript import JsonlMessageStore
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.loop.submission import Rewind
     from taifeng.skill.registry import FilesystemSkillRegistry
-    from taifeng.tool.registry import ToolRegistry
     from taifeng.tool.builtins import (
         make_call_skill_tool,
         make_read_skill_tool,
         make_run_script_tool,
     )
+    from taifeng.tool.registry import ToolRegistry
     from taifeng.tool.runtime import ToolCallRuntime
-    from taifeng.conversation.transcript import JsonlMessageStore
+
+    # ── 步骤 1：热跑一个包含两圈的 turn ─────────────────────────────────
+    # 热跑的 MockClient：圈 1 有 read_skill 派发，圈 2 收尾
+    hot_client = MockClient(turns=[
+        MockTurn(text="圈1推理", tool_calls=[
+            {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
+        ]),
+        MockTurn(text="原收尾"),  # 圈 2，无工具
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,  # type: ignore[arg-type]
+        threads_dir=threads_dir,  # type: ignore[arg-type]
+        model_client=hot_client,
+        compressors=[],
+    )
+    hot_engine = await pool.get_or_create(
+        session_id="s_cold_rerun_hot", entry_skill_id="code-reviewer"
+    )
+
+    # 等待热 turn 完成 + 节点表落地
+    hot_sub = await hot_engine.submit(taifeng.UserMessage(text="请审查代码"))
+    async for ev in hot_engine.subscribe_all():
+        if ev.submission_id != hot_sub:
+            continue
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if data.get("is_root"):
+                break
+    for _ in range(100):
+        if hot_engine.rewind_nodes():
+            break
+        await asyncio.sleep(0.01)
+
+    hot_nodes = hot_engine.rewind_nodes()
+    assert hot_nodes, "热 engine 节点表不应为空"
+    thread_id = hot_engine.thread_id
+    await pool.close()
+
+    # ── 步骤 2：从 store 物化 transcript ─────────────────────────────────
+    cold_store = JsonlMessageStore(Path(str(threads_dir)))  # type: ignore[arg-type]
+    transcript = [it async for it in await cold_store.load_thread(thread_id)]
+    assert transcript, "transcript 不应为空"
+
+    # ── 步骤 3：构造冷 engine ─────────────────────────────────────────────
+    snapshot = (await FilesystemSkillRegistry.load(skills_dir)).snapshot()  # type: ignore[arg-type]
+    entry = snapshot.get("code-reviewer")
+    assert entry is not None
+
+    tools = ToolRegistry()
+    tools.register(make_read_skill_tool())
+    tools.register(make_call_skill_tool())
+    tools.register(make_run_script_tool())
+
+    # 冷 engine 的 MockClient：仅提供 rewind 重推消费的那一轮 LLM 回答
+    cold_client = MockClient(turns=[
+        MockTurn(text="COLD-REDRIVE-DONE"),  # re_reason 重推从 it1 截点采样，直接无工具收尾
+    ])
+    cold_engine = taifeng.AgentEngine(
+        entry_skill=entry,
+        skill_snapshot=snapshot,
+        tool_runtime=ToolCallRuntime(tools),
+        model_client=cold_client,
+        store=cold_store,
+        thread_id=thread_id,
+        session_id="s_cold_rerun_cold",
+        compressors=None,
+        initial_history=transcript,  # 冷重建触发
+    )
+
+    cold_nodes = cold_engine.rewind_nodes()
+    assert cold_nodes, "冷 engine 构造后节点表不应为空"
+
+    # ── 步骤 4：启动冷 engine，提交 re_reason rewind ─────────────────────
+    cancel = CancellationToken(name="cold-rerun-root")
+    run_task = asyncio.create_task(cold_engine.run(cancel))
+
+    # 取第一个 iteration 节点（t1:it1），用 re_reason 模式回访
+    it1 = next(n for n in cold_nodes if n.node_id == "t1:it1")
+    rw_sub_id = await cold_engine.submit(Rewind(node_id=it1.node_id, mode="re_reason"))
+
+    # ── 步骤 5：消费事件到 root turn 终结，断言可观测结果 ─────────────────
+    kinds: list[str] = []
+    text_parts: list[str] = []
+    rewound_data: dict = {}
+    async for ev in cold_engine.subscribe_all():
+        if ev.submission_id != rw_sub_id:
+            continue
+        kinds.append(ev.msg.kind)
+        data = ev.msg.data if hasattr(ev.msg, "data") else {}
+        if ev.msg.kind == "assistant_text" and data.get("delta"):
+            text_parts.append(str(data["delta"]))
+        if ev.msg.kind == "turn_rewound":
+            rewound_data = dict(data)
+        # root turn 终结（is_root=True 的 turn_completed 或 turn_failed）
+        if ev.msg.kind in ("turn_completed", "turn_failed") and data.get("is_root"):
+            break
+
+    # 关停冷 engine
+    await cold_engine.shutdown()
+    try:
+        await asyncio.wait_for(run_task, timeout=5.0)
+    except (TimeoutError, asyncio.CancelledError):
+        run_task.cancel()
+
+    # ── 核心断言：turn_rewound 被发出且字段正确 ──────────────────────────
+    assert "turn_rewound" in kinds, (
+        f"应发出 turn_rewound 事件，实际 kinds={kinds}"
+    )
+    assert rewound_data.get("node_id") == "t1:it1", (
+        f"rewound.node_id 应为 't1:it1'，实得 {rewound_data.get('node_id')!r}"
+    )
+    assert rewound_data.get("mode") == "re_reason", (
+        f"rewound.mode 应为 're_reason'，实得 {rewound_data.get('mode')!r}"
+    )
+    assert "COLD-REDRIVE-DONE" in "".join(text_parts), (
+        f"重推应走出新文本 'COLD-REDRIVE-DONE'，实得: {''.join(text_parts)!r}"
+    )
+
+
+async def test_cold_load_empty_history_empty_table(
+    skills_dir: object, threads_dir: object
+) -> None:
+    """空 initial_history → 空 history + 空节点表，不报错。"""
     from pathlib import Path
+
+    import taifeng
+    from taifeng.conversation.transcript import JsonlMessageStore
+    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.skill.registry import FilesystemSkillRegistry
+    from taifeng.tool.builtins import (
+        make_call_skill_tool,
+        make_read_skill_tool,
+        make_run_script_tool,
+    )
+    from taifeng.tool.registry import ToolRegistry
+    from taifeng.tool.runtime import ToolCallRuntime
 
     snapshot = (await FilesystemSkillRegistry.load(skills_dir)).snapshot()  # type: ignore[arg-type]
     entry = snapshot.get("code-reviewer")
