@@ -137,3 +137,71 @@ class RewindLog:
         return next(
             (c for c in self.checkpoints if c.node_id == node_id), None
         )
+
+
+def derive_rewind_log(history: list[ResponseItem]) -> list[RewindCheckpoint]:
+    """从逻辑 history(reconstruct 后)推导全 turn 可寻址节点表。
+
+    输入须是与热内存等价的逻辑 history(见 reconstruct_logical_history),故下标
+    与 engine 后续 _history[:cut] 截断同坐标系、自洽。纯 CPU、无副作用。
+
+    规则(按 ItemKind 扫一遍,见 spec §5.2):
+    - user_message: 进入新 turn k(=已见 user_message 数),重置 iteration/cur_iter_history_len
+    - assistant_message: 记 iteration 节点(history_len=本项下标,存入游标)
+    - function_call: 记 dispatch 节点(history_len=当前圈游标,inner=fc 下标+1)
+    - 其余 kind(含 compacted/system_injection/spawn/...): 计入下标、不产节点(default)
+
+    Args:
+        history: reconstruct 后的逻辑 ResponseItem 列表(与热内存坐标系一致)。
+
+    Returns:
+        按记录序排列的 RewindCheckpoint 列表。
+    """
+    log = RewindLog()
+    # 当前累积 user_message 数 = turn 序号 k(1-based)
+    k = 0
+    # 本 turn 内 1-based 采样圈序号
+    iteration = 0
+    # 当前圈采样前 history 长度(dispatch 节点的 re_reason 归一切点)
+    cur_iter_history_len: int | None = None
+
+    for idx, item in enumerate(history):
+        if item.kind == "user_message":
+            # 新 turn 开始:递增 turn 序号,重置圈内状态
+            k += 1
+            iteration = 0
+            cur_iter_history_len = None
+            # 跨 turn 重置 dispatch 序号(turn 内 0-based,每 turn 从 0 起)
+            log._dispatch_seq = 0
+
+        elif item.kind == "assistant_message":
+            # 每次 LLM 采样输出:进入下一圈,记 iteration 节点
+            iteration += 1
+            # iteration 节点的 history_len = 本项下标(采样前 buffer 长度)
+            cur_iter_history_len = idx
+            log.record_iteration(
+                turn_index=k,
+                iteration_index=iteration,
+                history_len=idx,
+                cache_anchor=-1,  # 冷推导无 cache anchor 信息,用 -1 占位
+            )
+
+        elif item.kind == "function_call":
+            # 工具派发:dispatch 节点;re_reason 切点归一到所属圈采样前
+            # 无前导 assistant(turn 刚开始就有 fc)时退化为 fc 自身下标
+            base = cur_iter_history_len if cur_iter_history_len is not None else idx
+            log.record_dispatch(
+                turn_index=k,
+                iteration_index=max(iteration, 1),  # 防御:fc 前无 assistant 时退化到第 1 圈
+                iteration_history_len=base,
+                cache_anchor=-1,  # 冷推导无 cache anchor 信息
+                call_id=item.payload["call_id"],
+                target_id=item.payload["name"],
+                # inner_history_len = fc 追加后长度(fc 下标+1),即 retry_tool 切点
+                inner_history_len=idx + 1,
+                args_digest=item.payload["arguments"][:200],
+            )
+        # 其余 kind(compacted / system_injection / spawn / suspension / ...):
+        # 只占下标(idx 已累积),不产节点
+
+    return log.checkpoints
