@@ -1047,13 +1047,9 @@ async def _bridge_events(
     **detached**（streams_detached demo）：engine 已 session 隔离，故不按
     submission_id 过滤（spawn 事件 submission_id=handle_id / barrier 事件
     =barrier_id / resume 事件=resume sub.id 都要转发）。退出谓词纯事件驱动：
-    根 turn 终态 ∧ 无未触发 barrier ∧ 无在跑 then_thread —— 用 barrier 机制
-    追踪尚未完成的聚合 turn，``has_live_spawns()`` 不纳入：spawn 是否存活由
-    barrier 覆盖，多余的存活 spawn 不阻塞事件桥退出。
-
-    退出后发送哨兵事件 ``{"kind": "_stream_end"}``，通知 SSE gen() 主动结束
-    streaming response（使 ASGITransport 能正常完成 handle_async_request，
-    保证测试 / 烟测中 client.stream() 的 __aenter__ 能解除阻塞）。
+    根 turn 终态 ∧ ``engine.has_live_spawns()`` 为假 ∧ 无未触发 barrier ∧
+    无在跑 then_thread —— 保证 spawn 后台活动（含挂起待 HITL 的专家）与 join-barrier
+    触发的 joint-consult 输出都不会被提前截断。
     """
     sub_key = f"{demo_id}:{session_id}"
     # detached 退出谓词的 bookkeeping
@@ -1107,20 +1103,13 @@ async def _bridge_events(
                 # 聚合 turn（then_thread）跑完 → 解除其挂起标记
                 pending_then_threads.discard(data.get("thread_id"))
 
-            # 退出谓词：根 turn 终态 ∧ 无未触发 barrier ∧ 无在跑 then_thread
-            # 不等 has_live_spawns()=False：被 barrier 覆盖的 spawn 活动已由
-            # open_barriers / pending_then_threads 追踪，多余的 live spawn
-            # （挂起等 HITL）不应阻塞事件桥退出，否则 SSE gen 永不关闭。
-            if root_done and not open_barriers and not pending_then_threads:
+            # 退出谓词：含 has_live_spawns()，故挂起待 HITL 的专家会让 bridge
+            # 保持存活，其 resume 续跑事件经同一 bridge 回流（Task 6 不另起 bridge 的前提）。
+            if (root_done and not engine.has_live_spawns()
+                    and not open_barriers and not pending_then_threads):
                 break
     except Exception:
         logger.exception("event bridge failed for sub_key=%s", sub_key)
-    else:
-        # 仅在正常退出（非异常）时发送哨兵，通知 SSE gen 主动结束流
-        # 使 ASGITransport.handle_async_request() 能正常完成（response_complete.set()）
-        sentinel: dict[str, Any] = {"kind": "_stream_end"}
-        for q in _event_subs.get(sub_key, []):
-            q.put_nowait(sentinel)
 
 
 @app.get("/api/events/{demo_id}/{session_id}")
@@ -1158,12 +1147,7 @@ async def events(demo_id: str, session_id: str) -> StreamingResponse:
                 if stop_task in done:
                     break  # 进程关停：干净退出
                 if get_task in done:
-                    event = get_task.result()
-                    # 哨兵：detached bridge 正常退出后通知 gen 主动结束；
-                    # 不向客户端回传哨兵本体，gen 退出即触发 stream 结束。
-                    if event.get("kind") == "_stream_end":
-                        break
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(get_task.result(), ensure_ascii=False)}\n\n"
                 else:
                     yield ": keepalive\n\n"  # 15s 超时心跳
         except asyncio.CancelledError:
