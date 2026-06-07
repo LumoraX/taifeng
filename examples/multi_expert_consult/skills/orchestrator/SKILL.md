@@ -4,7 +4,6 @@ description: 多专家会诊编排器（并发分离发起 + join-barrier 聚合
 version: 1.0.0
 type: composite
 entry: true
-model: mock-model
 child_skills: [cardio-expert, metabolic-expert, joint-consult]
 tool_names: [spawn_skill, await_skills, join_skill, kill_skill]
 max_call_depth: 3

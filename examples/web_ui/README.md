@@ -1,10 +1,10 @@
 # Taifeng Web UI Demo
 
-类似 openclaw 的 chat + 数据流可视化最简实现。顶部下拉一键切换 **16 套** skill 演示包，浏览器实时看 LLM agent 的 EventMsg、tool call、HITL 审批、会话级可观测指标，并可续接历史会话。
+类似 openclaw 的 chat + 数据流可视化最简实现。顶部下拉一键切换 **18 套** skill 演示包，浏览器实时看 LLM agent 的 EventMsg、tool call、HITL 审批、会话级可观测指标，并可续接历史会话。
 
 web_ui 的设计原则：**它只是一个「基础能力」展台 —— 不重写任何 skill，直接加载各独立 demo（`examples/<name>/skills`）的现成 skill 目录**。每加一种内核用法，就在 [server.py](server.py) 的 `DEMOS` 里注册一项（必要时给 `DemoMeta` 加一个旋钮），把该用法「汇总」进来。
 
-## 内置 demo 包（16）
+## 内置 demo 包（18）
 
 按演示主题分组。每个 demo 内部独立 `EnginePool`（lazy 创建）+ 独立权限策略 + 独立持久化目录；切换下拉即换 demo，UI 自动清屏 + 重连 SSE + 重置指标。
 
@@ -44,11 +44,19 @@ web_ui 的设计原则：**它只是一个「基础能力」展台 —— 不重
 | 🪝 **hooks_showcase** | `task-runner` | 业务钩子 `pre/post_skill_dispatch` 按**运行时 args** 拦截（scope=all 拒、recent 放）→ emit `skill_dispatch_hook_denied` | ❌ 静默 |
 | 🔌 **mcp_showcase** | `market-assistant` | taifeng 作为 **MCP client**：spawn 外部 MCP server 子进程 + 注册其工具远程调用（跨进程）| ❌ 静默 |
 
+### E. detached spawn / turn rewind（异步活动持续到根 turn 之后）
+
+| Demo | 入口 skill | 演示什么 | HITL? |
+| --- | --- | --- | --- |
+| 🏥 **multi_expert_consult** | `orchestrator` | detached-spawn 完整闭环：一个 turn 内并发 spawn 多个专家 + join-barrier；各专家**错峰独立 HITL**；全终态后 barrier 自动触发联合会诊聚合 | ✅ 各专家独立 |
+| ⏪ **turn_rewind** | `orchestrator` | 自治链跑完后拉**回访节点表**；`re_reason` 截到某圈采样前重判；`retry_tool` 保留派发决定仅重跑该 call_skill；重跑事件实时回流 | ❌ 静默 |
+
 **覆盖的 agent pattern**：
 - **拓扑**：并行收敛（`travel_planner`）/ 声明式编排（`orchestration`）/ LLM 自主并发（`concurrent_fanout`）/ 严格串行（`research_assistant`）/ 并行+决策（`product_review`）
 - **HITL / 权限四态**：全弹（`code_review`）/ 按 skill 精细（`selective_approval`）/ 全通过+红线（`permission_showcase`）/ 子 turn 收紧（`subagent_isolation`）
 - **context 机制**：懒加载（`read_skill_lazy`）/ 多轮工具（`numeric_loop`）/ 自动压缩（`compression_showcase`）
 - **扩展点**：指令分层（`instructions`）/ 进程内钩子（`hooks_showcase`）/ 跨进程 MCP（`mcp_showcase`）
+- **detached 异步**：并发多专家+错峰HITL+join-barrier聚合（`multi_expert_consult`）/ 根 turn 后节点回访重跑（`turn_rewind`）
 
 ## 全局能力（贯穿所有 demo，非单个 demo）
 
@@ -201,6 +209,8 @@ skills 目录满足 SKILL.md 标准（至少一个 `entry: true`）即可 ——
 | 指令分层注入 | `instruction_layers` | instructions |
 | 进程内业务钩子 | `hook_runner_factory` | hooks_showcase |
 | 连接外部 MCP server | `mcp_connect` | mcp_showcase |
+| detached spawn（并发专家+join-barrier）| `streams_detached=True` + `wants_spawn_tools=True` | multi_expert_consult |
+| 根 turn 节点回访重跑 | `streams_detached=True` + `wants_rewind=True` | turn_rewind |
 
 ## 想验证什么
 
@@ -226,16 +236,70 @@ skills 目录满足 SKILL.md 标准（至少一个 `entry: true`）即可 ——
 | 历史会话续接（resume）| 聊完 → 「历史」下拉选该 thread → 载入对话续聊（server 重启后仍可恢复，证明持久化）|
 | 跨 session 隔离 | 改 session id 输入框 → 同 demo 不同 session 各自维护独立对话历史 |
 | 跨 demo 隔离 | 切换下拉 → 各 demo 用独立 EnginePool + storage（`.runs/<demo_id>/`） |
+| 并发多专家+错峰 HITL | multi_expert_consult → 看 spawn 卡片各自挂起/恢复，时间轴 `spawn_suspended/completed` 交错；两专家全终态后 `join_barrier_fired` → 联合会诊报告出现 |
+| turn rewind re_reason | turn_rewind → 自治链跑完后点某 iteration 节点"重推理"→ 新路径事件追加时间轴，旧路径保留 |
+| turn rewind retry_tool | turn_rewind → 点某 dispatch 节点"重跑工具"→ 该工具被重跑，output 替换，LLM 从新结果续推 |
+
+## detached 交互 demo（multi_expert_consult / turn_rewind）
+
+这两个 demo 演示「**异步活动持续到根 turn 之后**」的内核能力，使用一套独立的 `DemoMeta` 开关控制。
+
+### DemoMeta 三开关
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `streams_detached` | `bool`（默认 `False`）| 事件桥走 detached 分支：不按 `submission_id` 过滤，退出谓词改为「根 turn 终态 ∧ 无存活 spawn（`has_live_spawns()` 为假）∧ 无未触发 barrier ∧ 无在跑 then_thread」，保证 spawn 后台活动（含挂起待 HITL 专家）产生的事件继续回流前端 |
+| `wants_spawn_tools` | `bool`（默认 `False`）| 启动时向 engine 注入四个 spawn 内置工具：`spawn_skill / await_skills / join_skill / kill_skill`；`multi_expert_consult` 置 `True` |
+| `wants_rewind` | `bool`（默认 `False`）| 前端在根 turn 完成后拉 `/api/rewind_nodes` 渲染回访节点表，支持点节点重跑（`/api/rewind`）；`turn_rewind` 置 `True` |
+
+### 事件桥 detached 分支与 /api/resume 不另起 bridge 的原因
+
+普通 demo 的 chat bridge 按 `submission_id` 过滤事件并在「根 turn 终态且非 is_root」时退出。detached demo 的 bridge 改走 detached 分支：
+
+- **不按 submission_id 过滤**：spawn child thread 的事件（`spawn_started / spawn_suspended / spawn_completed / join_barrier_fired` 等）的 submission_id 与根 turn 不同，若过滤则前端看不到这些事件。
+- **退出谓词事件驱动**：根 turn 终态 ∧ `engine.has_live_spawns()` 为假 ∧ 无未触发 barrier ∧ 无在跑 then_thread —— 满足四个条件才关闭 SSE 流，确保所有后台专家（含挂起等待 HITL 的）产生的事件都能到达前端。
+- **`/api/resume` 不另起第二条 bridge**：detached demo 的 chat bridge 靠 `has_live_spawns()`（挂起态 spawn 也计入）保持存活，resume 续跑事件经同一条 bridge 回流。若 `/api/resume` 再起一条 bridge，同一批事件会重复推送到前端，因此 detached demo 的 resume 端点仅提交 `Resume` Op，不建新 bridge。
+
+### 新增 API 端点
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /api/rewind_nodes/{demo_id}/{session_id}` | 返回当前 session 最近一次 root turn 的回访节点表（`RewindCheckpoint` 列表），含 `node_id / kind / history_len / call_id / target_id / args_digest` 等字段；`turn_rewind` demo 专用 |
+| `POST /api/rewind` | 提交 `Rewind` Op 重跑某节点；body: `{demo, session, node_id, mode: "re_reason"|"retry_tool", new_args?}`；重跑产生的事件经 detached bridge 回流前端 |
+
+### multi_expert_consult —— 前端交互
+
+- **每专家一张卡**：orchestrator 发出 `spawn_started` 后前端为每个 spawn 渲染独立卡片，卡片内显示 `handle_id / skill_id / child_thread_id` 及实时状态徽章（running / suspended / done）。
+- **卡内并发独立表单**：每张卡内嵌一个独立 HITL 表单，某专家挂起时只有该卡内弹出 Resume 按钮，另一专家不受影响（错峰 HITL）。
+- **spawn / barrier 事件时间线**：右侧事件流对 `spawn_started / spawn_suspended / spawn_completed / join_barrier_registered / join_barrier_fired` 分色标注，完整展现并发与聚合过程。
+- **联合会诊报告区**：`join_barrier_fired` 后 `joint-consult` skill 产出的 assistant 消息单独渲染在报告区，与各专家卡区分。
+
+### turn_rewind —— 前端交互
+
+- **回访节点表**：根 turn 完成后前端自动请求 `/api/rewind_nodes`，渲染节点列表（`iteration` 节点显示采样圈编号、`dispatch` 节点显示被派发的工具/skill）。
+- **re_reason**：对任意节点点击"重推理"，截到该节点采样前，LLM 重新决定后续路径；产生的新事件实时追加到时间轴。
+- **retry_tool**：对 `dispatch` 节点点击"重跑工具"（可选填 `new_args`），保留 LLM 的派发决定只重跑该 call，换出 output 后续推；结果差异在时间轴可见。
+
+### 无 key 自动化 smoke
+
+```bash
+PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py
+# 预期末行：🎉 smoke_detached 全绿
+```
+
+**实现要点**：smoke 用 MockClient + `httpx.AsyncClient(transport=ASGITransport(app))`，不启动真实服务器；SSE 事件订阅通过进程内 `server._event_subs` 队列直接注入，绕开 `ASGITransport` 对长连 SSE 的缓冲限制。无需 API key。`await_skills`-via-LLM 路径（LLM 自主调用 `await_skills` 工具）依赖真实 LLM 决策，仅浏览器人工验证覆盖。
 
 ## 文件
 
 ```
 examples/web_ui/
 ├── README.md          本文件
-├── server.py          FastAPI app（15 个 DEMOS 注册 + per-demo pool + SSE 桥接
-│                       + HITL + /api/threads resume 端点 + MCP client 生命周期）
+├── server.py          FastAPI app（18 个 DEMOS 注册 + per-demo pool + SSE 桥接
+│                       + HITL + /api/threads resume 端点 + MCP client 生命周期
+│                       + /api/rewind_nodes + /api/rewind）
+├── smoke_detached.py  detached demo 无 key 自动化 smoke（MockClient + in-process queue）
 ├── static/
 │   └── index.html     单文件 UI（demo 下拉 + 历史下拉 + chat + 可观测面板
-│                       + 时间轴 + HITL modal）
+│                       + 时间轴 + HITL modal + detached 专家卡 + 回访节点表）
 └── .runs/<demo_id>/   每个 demo 独立 JSONL 落盘（.gitignore 自动排除）
 ```

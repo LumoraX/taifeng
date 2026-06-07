@@ -111,6 +111,10 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 - **R4**：重推全程透传根 `CancellationToken`，子 skill 走 `cancel.child()`；`reconstruct` / `derive` 均为同步纯 CPU，无长操作，不需要 cancel。
 - **R5**：截断**仅内存**，store JSONL append-only（旧 items 不物理删），rewind / rollback marker 持久化 `cut_index`（additive payload 字段）；`reconstruct_logical_history` 只读 history，不写 store。冷重建依赖 `MessageStore.load_thread` 的「保序 + 完整」语义（协议红线，见「冷场景重建」Requirement）。
 
+## 演示 / 参考实现
+
+`examples/web_ui/`（demo_id `turn_rewind`）提供浏览器可交互的演示：自治链跑完后拉回访节点表，支持 re_reason / retry_tool 两种重跑模式，重跑事件经 detached bridge 实时回流前端。无 key 自动化 smoke：`examples/web_ui/smoke_detached.py`。
+
 ## 边界与暂不支持（v1）
 
 - 子 turn 内部节点不可寻址（只 root turn 入表）。

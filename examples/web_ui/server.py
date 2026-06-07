@@ -82,6 +82,12 @@ from taifeng.permission import (
 from taifeng.skill.scripts.python import PythonScriptExecutor
 from taifeng.skill.scripts.shell import ShellScriptExecutor
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+from taifeng.tool.builtins.spawn_skill import (
+    make_await_skills_tool,
+    make_join_skill_tool,
+    make_kill_skill_tool,
+    make_spawn_skill_tool,
+)
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent
@@ -185,6 +191,22 @@ class DemoMeta:
     实现表单型 HITL：调用即挂起 turn，前端据 ``response_schema`` 渲染表单，用户填写后
     经 ``/api/resume`` 提交 ``Resume(thread, {request_id: payload})`` 续跑。
     （form_hitl demo 用）。"""
+
+    streams_detached: bool = False
+    """True 时事件桥走 detached 分支：不按 submission_id 过滤（spawn 事件
+    submission_id=handle_id 不被丢），退出谓词改为「根 turn 终态 ∧ 无存活 spawn ∧
+    无未触发 barrier ∧ 无在跑 then_thread」；且 ``/api/resume`` 不再另起 bridge
+    （chat bridge 仍存活，resume 续跑事件经它回流，避免重复推送）。
+    detached-spawn / turn-rewind 这类「根 turn 完成后仍有异步活动」的 demo 用。"""
+
+    wants_spawn_tools: bool = False
+    """True 时把 detached-spawn 的 4 个工具（spawn_skill / await_skills /
+    join_skill / kill_skill）作为 extra_tools 注入 pool，让 LLM 能并发分离发起
+    子 skill（multi_expert_consult demo 用）。"""
+
+    wants_rewind: bool = False
+    """True 时前端在根 turn 完成后拉 ``/api/rewind_nodes`` 渲染回访节点表，
+    支持点节点重跑（``/api/rewind``）。仅 turn_rewind demo 置 True。"""
 
 
 DEMOS: dict[str, DemoMeta] = {
@@ -429,6 +451,37 @@ DEMOS: dict[str, DemoMeta] = {
         # numeric_loop 的工具调用本质是同一 skill 内的 run_script，不涉及子 skill
         # 派发；如果开启 HITL 会被弹 12 次太吵 —— 关掉 skill_dispatch 询问
         hitl_on_skill_dispatch=False,
+    ),
+    "multi_expert_consult": DemoMeta(
+        demo_id="multi_expert_consult",
+        title="🩺 多专家会诊 (并发 spawn + 错峰 HITL + 联合会诊)",
+        description=(
+            "orchestrator 一个 turn 内对多个专科 spawn_skill（各自 detached child "
+            "thread），await_skills 登记 join-barrier；各专家错峰 HITL，全终态 → "
+            "barrier 自动起 joint-consult 聚合。演示 detached-spawn 完整闭环。"
+        ),
+        skills_dir=EXAMPLES_DIR / "multi_expert_consult" / "skills",
+        entry_skill_id="orchestrator",
+        sample_prompt="我最近血压偏高、体重也涨了，帮我看看身体情况。",
+        hitl_on_skill_dispatch=False,
+        streams_detached=True,
+        wants_spawn_tools=True,
+        wants_user_input_tool=True,
+    ),
+    "turn_rewind": DemoMeta(
+        demo_id="turn_rewind",
+        title="⏮ Turn 回退重跑 (retry_tool / re_reason)",
+        description=(
+            "orchestrator 自治链跑完后，可回退到任意回访节点重跑：retry_tool 重跑"
+            "一次 call_skill 换其输出、父基于新结论续推；re_reason 截到某圈采样前让 "
+            "LLM 重新决定。演示 addressable turn-rewind。"
+        ),
+        skills_dir=EXAMPLES_DIR / "turn_rewind" / "skills",
+        entry_skill_id="orchestrator",
+        sample_prompt="帮我评估这位患者的健康风险并给建议。",
+        hitl_on_skill_dispatch=False,
+        streams_detached=True,
+        wants_rewind=True,
     ),
     "compression_showcase": DemoMeta(
         demo_id="compression_showcase",
@@ -768,6 +821,14 @@ async def _get_or_create_pool(demo_id: str) -> taifeng.EnginePool:
         # opt-in 注入表单采集工具（form_hitl demo）：声明 tool_names 的 skill 才会用到
         if meta.wants_user_input_tool:
             extra_tools.append(make_request_user_input_tool())
+        # opt-in 注入 detached-spawn 四工具（multi_expert_consult demo）
+        if meta.wants_spawn_tools:
+            extra_tools.extend([
+                make_spawn_skill_tool(),
+                make_await_skills_tool(),
+                make_join_skill_tool(),
+                make_kill_skill_tool(),
+            ])
         pool = await taifeng.EnginePool.create(
             skills_dir=meta.skills_dir,
             storage_dir=demo_storage,
@@ -922,6 +983,19 @@ class ResumeFormRequest(BaseModel):
     """用户填写的表单答案，直接成为该 call 的 function_call_output。"""
 
 
+class RewindRequest(BaseModel):
+    """节点重跑：回退到 root turn 录下的某回访节点并主动重推。"""
+
+    demo_id: str
+    session_id: str = "default"
+    node_id: str
+    """目标回访节点（来自 /api/rewind_nodes）。"""
+    mode: str = "re_reason"
+    """``re_reason``（截到采样前重新决定）/ ``retry_tool``（仅 dispatch 节点，重跑该工具）。"""
+    new_args: dict[str, Any] | None = None
+    """仅 retry_tool + dispatch 节点有意义：替换重跑入参。"""
+
+
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -953,6 +1027,8 @@ async def list_demos() -> dict[str, Any]:
                 "hitl_on_skill_dispatch": m.hitl_on_skill_dispatch,
                 "policy_preview": _build_policy_config(m),
                 "loaded": m.demo_id in _pools,
+                "streams_detached": m.streams_detached,
+                "wants_rewind": m.wants_rewind,
             }
             for m in DEMOS.values()
         ],
@@ -983,57 +1059,84 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
         _consoled_engines.add(id(engine))
         attach_console_sink(engine, color=False)
     sub_id = await engine.submit(taifeng.UserMessage(text=req.message))
-    asyncio.create_task(_bridge_events(req.demo_id, req.session_id, engine, sub_id))
+    asyncio.create_task(_bridge_events(
+        req.demo_id, req.session_id, engine, sub_id,
+        detached=meta.streams_detached))
     return {"submission_id": sub_id, "demo_id": req.demo_id, "session_id": req.session_id}
 
 
 async def _bridge_events(
     demo_id: str, session_id: str, engine: taifeng.AgentEngine, sub_id: str,
+    *, detached: bool = False,
 ) -> None:
     """把 engine 事件流翻译成 dict 推给前端订阅者。
 
-    **关键设计选择：subscribe_all 而非 subscribe(sub_id)**
+    **非 detached（默认）**：按 submission_id 过滤本提交事件；根 turn 终态或根
+    thread 挂起即退出（见 form_hitl / code_review 等 demo）。
 
-    ``engine.subscribe(sub_id)`` 在第一个 ``turn_completed`` 即退出（公共 API
-    契约，见 tests/skill/test_composite_e2e.py:11-13 注释）；但 composite skill
-    fan-out 场景下，**子 skill 的 turn_completed 比父 entry 先 emit**，会让
-    桥接早退 —— 后续 hitl_required / 其他子 turn 的 turn_started / assistant_text
-    / 父 turn 综合 assistant_text 全部丢失，前端 chat 区会停在第一个子 reviewer
-    完成那一刻不动（hitl_required 因为走 prompter 旁路直推 SSE 仍能看到，
-    但所有 engine 路径事件都没了）。
-
-    所以这里用 ``subscribe_all()`` 自己按 submission_id 过滤，并按 ``is_root``
-    字段判定何时退出（仅 outermost turn 完成才退；is_root 在 turn.py:192,218
-    总是会写入 data）。
+    **detached**（streams_detached demo）：engine 已 session 隔离，故不按
+    submission_id 过滤（spawn 事件 submission_id=handle_id / barrier 事件
+    =barrier_id / resume 事件=resume sub.id 都要转发）。退出谓词纯事件驱动：
+    根 turn 终态 ∧ ``engine.has_live_spawns()`` 为假 ∧ 无未触发 barrier ∧
+    无在跑 then_thread —— 保证 spawn 后台活动（含挂起待 HITL 的专家）与 join-barrier
+    触发的 joint-consult 输出都不会被提前截断。
     """
     sub_key = f"{demo_id}:{session_id}"
+    # detached 退出谓词的 bookkeeping
+    root_done = False
+    open_barriers: set[str] = set()        # registered 未 fired 的 barrier
+    pending_then_threads: set[str] = set()  # fired 后聚合 turn 仍在跑的 then_thread
     try:
         async for ev in engine.subscribe_all():
-            # 不属于本 submission 的事件直接 skip（其他并发提交的会一起到来）
-            if ev.submission_id != sub_id:
+            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+            if not detached:
+                # ── 原有 per-submission 行为，保持不变 ──
+                if ev.submission_id != sub_id:
+                    continue
+                payload = {"kind": ev.msg.kind, "submission_id": ev.submission_id,
+                           "data": data}
+                for q in _event_subs.get(sub_key, []):
+                    q.put_nowait(payload)
+                if ev.msg.kind in ("turn_completed", "turn_failed") and data.get(
+                    "is_root", False
+                ):
+                    break
+                if ev.msg.kind == "turn_suspended" and (
+                    data.get("thread_id") == engine.thread_id
+                ):
+                    break
                 continue
-            payload = {
-                "kind": ev.msg.kind,
-                "submission_id": ev.submission_id,
-                "data": ev.msg.data if hasattr(ev.msg, "data") else {},
-            }
+
+            # ── detached 分支：转发全部本 session 事件 ──
+            payload = {"kind": ev.msg.kind, "submission_id": ev.submission_id,
+                       "data": data}
             for q in _event_subs.get(sub_key, []):
                 q.put_nowait(payload)
-            # 仅在「根 turn」收尾时退出桥接；子 turn 的 turn_completed 是父
-            # turn 执行窗口内的中间事件。兼容：旧事件未带 is_root 字段时不退出，
-            # 等同于"等到 engine 退订"的安全降级。
-            data = ev.msg.data if hasattr(ev.msg, "data") else {}
+
+            # bookkeeping
             if ev.msg.kind in ("turn_completed", "turn_failed") and data.get(
                 "is_root", False
             ):
-                break
-            # 表单/审批型 HITL：根 thread 挂起即本次 submission 结束（等 Resume 另起
-            # submission 续跑）。根 turn_suspended 的 thread_id == engine.thread_id；
-            # 据此退出桥接，避免任务悬挂直到进程关停。子 thread 的 turn_suspended
-            # （thread_id≠根）只透传不退出——前端据它（reason=data/form）渲染表单。
-            if ev.msg.kind == "turn_suspended" and (
-                data.get("thread_id") == engine.thread_id
-            ):
+                root_done = True
+            elif ev.msg.kind == "join_barrier_registered":
+                bid = data.get("barrier_id")
+                if bid:
+                    open_barriers.add(bid)
+            elif ev.msg.kind == "join_barrier_fired":
+                bid = data.get("barrier_id")
+                if bid:
+                    open_barriers.discard(bid)
+                then_tid = data.get("then_thread_id")
+                if then_tid:
+                    pending_then_threads.add(then_tid)
+            elif ev.msg.kind in ("turn_completed", "turn_failed"):
+                # 聚合 turn（then_thread）跑完 → 解除其挂起标记
+                pending_then_threads.discard(data.get("thread_id"))
+
+            # 退出谓词：含 has_live_spawns()，故挂起待 HITL 的专家会让 bridge
+            # 保持存活，其 resume 续跑事件经同一 bridge 回流（Task 6 不另起 bridge 的前提）。
+            if (root_done and not engine.has_live_spawns()
+                    and not open_barriers and not pending_then_threads):
                 break
     except Exception:
         logger.exception("event bridge failed for sub_key=%s", sub_key)
@@ -1134,13 +1237,65 @@ async def resume_form(req: ResumeFormRequest) -> dict[str, Any]:
         thread_id=req.thread_id,
         resolutions={req.request_id: req.payload},
     ))
-    asyncio.create_task(
-        _bridge_events(req.demo_id, req.session_id, engine, sub_id)
-    )
+    # detached demo 的 chat bridge 仍存活（has_live_spawns 含 suspended），resume
+    # 续跑事件经它回流；再起一条会重复推送，故仅非 detached demo 才另起 bridge。
+    if not meta.streams_detached:
+        asyncio.create_task(
+            _bridge_events(req.demo_id, req.session_id, engine, sub_id)
+        )
     logger.info(
         "form resume: demo=%s thread=%s rid=%s keys=%s",
         req.demo_id, req.thread_id, req.request_id, list(req.payload.keys()),
     )
+    return {"submission_id": sub_id, "demo_id": req.demo_id}
+
+
+@app.get("/api/rewind_nodes/{demo_id}/{session_id}")
+async def rewind_nodes(demo_id: str, session_id: str) -> dict[str, Any]:
+    """列出当前 session engine 的回访节点（turn-rewind 前端节点表数据源）。"""
+    if demo_id not in DEMOS:
+        raise HTTPException(404, f"unknown demo_id: {demo_id}")
+    pool = _pools.get(demo_id)
+    if pool is None:
+        return {"nodes": []}
+    meta = DEMOS[demo_id]
+    engine = await pool.get_or_create(
+        session_id=f"{demo_id}:{session_id}", entry_skill_id=meta.entry_skill_id)
+    nodes = [
+        {
+            "node_id": cp.node_id,
+            "kind": cp.kind,
+            "target_id": cp.target_id,
+            "args_digest": cp.args_digest,
+            "iteration_index": cp.iteration_index,
+        }
+        for cp in engine.rewind_nodes()
+    ]
+    return {"nodes": nodes}
+
+
+@app.post("/api/rewind")
+async def rewind(req: RewindRequest) -> dict[str, Any]:
+    """提交 Rewind op 重跑某节点；重跑事件经 detached bridge 回流前端。"""
+    from taifeng.loop.submission import Rewind
+
+    if req.demo_id not in DEMOS:
+        raise HTTPException(404, f"unknown demo_id: {req.demo_id}")
+    # mode 是系统边界（前端传入）：显式白名单校验，非法值返回 422 而非抛进 Rewind 构造
+    if req.mode not in ("re_reason", "retry_tool"):
+        raise HTTPException(422, f"invalid rewind mode: {req.mode}")
+    pool = _pools.get(req.demo_id)
+    if pool is None:
+        raise HTTPException(409, "no active pool for this demo")
+    meta = DEMOS[req.demo_id]
+    engine = await pool.get_or_create(
+        session_id=f"{req.demo_id}:{req.session_id}",
+        entry_skill_id=meta.entry_skill_id)
+    sub_id = await engine.submit(Rewind(
+        node_id=req.node_id, mode=req.mode, new_args=req.new_args))  # type: ignore[arg-type]
+    asyncio.create_task(_bridge_events(
+        req.demo_id, req.session_id, engine, sub_id, detached=True))
+    logger.info("rewind: demo=%s node=%s mode=%s", req.demo_id, req.node_id, req.mode)
     return {"submission_id": sub_id, "demo_id": req.demo_id}
 
 

@@ -216,6 +216,10 @@ running → done | error | cancelled
 - **R4**：每个 spawn `cancel.child(f"spawn:{handle_id}")`；`kill_spawn` 杀单个，兄弟 spawn 不受影响；`pool.close()` / `release(force=True)` 级联取消全部 detached child。
 - **R5**：`spawn` / `join_barrier` / `join_barrier_fired` 三类 ResponseItem 落父 thread（append-only，不改已有 items）；child threads 自带 suspend-resume；进程重启后 `rebuild_from_history` 重建 registry + barriers + fired 集合，suspended 专家可继续 Resume，done 专家结果可读，barrier 幂等触发。
 
+## 演示 / 参考实现
+
+`examples/web_ui/`（demo_id `multi_expert_consult`）提供浏览器可交互的完整演示：orchestrator 一个 turn 内并发 spawn 多专家、错峰 HITL、join-barrier 自动触发联合会诊。无 key 自动化 smoke：`examples/web_ui/smoke_detached.py`。
+
 ## v1 边界
 
 | 限制 | 描述 |
