@@ -33,7 +33,7 @@ PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py
 | `skills/joint-consult/SKILL.md` | atomic 聚合器：种子参数带**全部专家句柄终态**（含取消 / 失败，不静默丢），综合成最终报告 |
 | `demo.py` | 用 `RoutingMockClient` 按 body 标记路由，串行 staggered resume 两个专家，订阅 `subscribe_all` 打印时间线 |
 
-> 专家 / 聚合器**都是非 entry**：spawn 派发要求 target 非 entry（同 call_skill；见 ADR 0006 entry / call_skill 互斥）。orchestrator 才是 entry，把它们列进白名单。
+> 本 demo 专家 / 聚合器用**非 entry**（一种设计选择，非硬性要求）。注意 spawn 与 call_skill 不同：**spawn 目标可为 entry skill**（spawn 把目标作为独立根分离发起，`DispatchPolicy.check(allow_entry_target=True)` 跳过「不可调 entry」门，与 `set_join_barrier` 的 then_skill 同理）。两者仍要求 target 在 caller 白名单内。
 
 ## 三种并发姿态对照
 

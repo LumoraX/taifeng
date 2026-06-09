@@ -153,7 +153,18 @@ class DispatchPolicy:
         stack: CallStack,
         caller: SkillDefinition,
         target: SkillDefinition | None,
+        *,
+        allow_entry_target: bool = False,
     ) -> DispatchVerdict:
+        """派发准入裁决。
+
+        ``allow_entry_target``（detached spawn 专用）：``call_skill`` 是把目标作为
+        **嵌套子调用**阻塞父 turn，调 entry skill 语义错误故默认拒绝；而 ``spawn_skill``
+        是把目标作为**独立 child thread**分离发起（等价于另起一个根），调 entry skill
+        恰是其正当用法（与 ``set_join_barrier`` 的 ``then_skill`` 已豁免 entry 同理）。
+        故 spawn 路径传 ``True`` 跳过「不可调 entry」门，其余四层（存在 / 深度 / 环 /
+        白名单）仍照常裁决。
+        """
         if target is None:
             return DispatchVerdict.reject("unknown_skill", stack.path())
 
@@ -172,7 +183,7 @@ class DispatchPolicy:
                 "not_in_whitelist", [caller.id, target.id]
             )
 
-        if target.entry:
+        if target.entry and not allow_entry_target:
             return DispatchVerdict.reject(
                 "cannot_call_entry_skill", [caller.id, target.id]
             )

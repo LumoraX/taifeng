@@ -46,8 +46,9 @@
 | 文件 | 演示内容 |
 | --- | --- |
 | [multi_expert_consult/demo.py](multi_expert_consult/demo.py) | detached-spawn 完整闭环：orchestrator 一个 turn 内 `spawn_skill` 并发发起多个专家 + `await_skills` 登记 join-barrier；各专家在独立 child thread 上**错峰 HITL**（cardio 先恢复完成、metabolic 过一会才恢复）；两句柄全终态 → join-barrier 自动起 `joint-consult` 聚合 → 最终会诊报告。打印完整事件时间线 |
+| [multi_expert_consult/nested_hitl_demo.py](multi_expert_consult/nested_hitl_demo.py) | **嵌套专科错峰 HITL**（真实 MDT 拓扑）：被 spawn 的专科是 composite 且 `call_skill` 编排**子 skill**，由子 skill `request_user_input` 挂起 → spawn 子 thread 以 `CHILD_SKILL` 嵌套挂起 → `Resume` 走 `resume_spawn_nested` 续跑链（下探 leaf 核销 + 逐层回填 + 重跑根）→ spawn_completed。区别于 `demo.py` 的 tool-only 专科（直接 DATA 挂起） |
 
-> 专家 / 聚合器全程 `entry: false`（spawn 派发要求 target 非 entry，同 call_skill）。契约见 [docs/architecture/capabilities/detached-spawn.md](../docs/architecture/capabilities/detached-spawn.md)，决策见 [ADR 0015](../docs/decisions/0015-detached-skill-spawn.md)。与 [concurrent_fanout/](concurrent_fanout/)（批量同步收齐）、[step_pipeline/](step_pipeline/)（业务确定性编排）互为三种并发姿态。**已接入 web_ui**（demo_id `multi_expert_consult`，`streams_detached=True` + `wants_spawn_tools=True`）；浏览器交互版见 [web_ui/](web_ui/)。
+> 本 demo 专家 / 聚合器用 `entry: false`（一种设计选择）。注意 **spawn 目标可为 entry skill**（spawn 是独立根，与 call_skill 不同；详见契约 `allow_entry_target`），并非硬性要求非 entry。契约见 [docs/architecture/capabilities/detached-spawn.md](../docs/architecture/capabilities/detached-spawn.md)，决策见 [ADR 0015](../docs/decisions/0015-detached-skill-spawn.md)。与 [concurrent_fanout/](concurrent_fanout/)（批量同步收齐）、[step_pipeline/](step_pipeline/)（业务确定性编排）互为三种并发姿态。**已接入 web_ui**（demo_id `multi_expert_consult`，`streams_detached=True` + `wants_spawn_tools=True`）；浏览器交互版见 [web_ui/](web_ui/)。
 
 运行：`PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py`
 

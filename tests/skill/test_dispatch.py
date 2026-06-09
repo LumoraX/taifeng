@@ -66,13 +66,40 @@ def test_dispatch_reject_unknown_target() -> None:
 
 
 def test_dispatch_reject_entry_target() -> None:
-    """不能调用另一个 entry skill。"""
+    """call_skill（嵌套子调用）不能调用另一个 entry skill（默认 allow_entry_target=False）。"""
     caller = _mk("p", child=frozenset({"c"}), entry=True)
     target = _mk("c", entry=True, child=frozenset({"x"}))
     stack = CallStack().push("p", "call_p")
     v = DispatchPolicy().check(stack=stack, caller=caller, target=target)
     assert not v.allowed
     assert v.reason == "cannot_call_entry_skill"
+
+
+def test_dispatch_allow_entry_target_for_spawn() -> None:
+    """detached spawn（allow_entry_target=True）可以分离发起一个 entry skill。
+
+    spawn 把目标作为独立 child thread（等价于另起一个根），调 entry skill 是正当用法；
+    其余四层（存在 / 深度 / 环 / 白名单）仍照常裁决。
+    """
+    caller = _mk("p", child=frozenset({"c"}), entry=True)
+    target = _mk("c", entry=True, child=frozenset({"x"}))
+    stack = CallStack().push("p", "spawn_p")
+    v = DispatchPolicy().check(
+        stack=stack, caller=caller, target=target, allow_entry_target=True,
+    )
+    assert v.allowed
+
+
+def test_dispatch_allow_entry_target_still_enforces_whitelist() -> None:
+    """allow_entry_target 只跳过 entry 门——白名单等其余裁决仍生效。"""
+    caller = _mk("p", child=frozenset({"c"}), entry=True)
+    target = _mk("other", entry=True)  # 不在 caller.child_skills 白名单
+    stack = CallStack().push("p", "spawn_p")
+    v = DispatchPolicy().check(
+        stack=stack, caller=caller, target=target, allow_entry_target=True,
+    )
+    assert not v.allowed
+    assert v.reason == "not_in_whitelist"
 
 
 def test_dispatch_reject_call_skill_from_tool_only_composite() -> None:

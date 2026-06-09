@@ -1183,6 +1183,7 @@ class AgentEngine:
     async def _resume_leaf_thread(
         self, sub: Submission, leaf_tid: str, leaf_skill_id: str,
         resolutions: dict[str, Any], root_cancel: CancellationToken,
+        *, submission_id: str | None = None,
     ) -> str | None:
         """核销 leaf 子 thread 的用户挂起 + 续跑该子 turn，返回回传父的结果字符串。
 
@@ -1215,7 +1216,8 @@ class AgentEngine:
         if plan.abort:
             # system_retry abort：子 turn 在挂起点终止，不续跑 → 视为失败回传父
             return f"sub_skill_aborted: {record.record_id}"
-        outcome = await self._run_thread_turn(sub, leaf_tid, leaf_skill_id, root_cancel)
+        outcome = await self._run_thread_turn(
+            sub, leaf_tid, leaf_skill_id, root_cancel, submission_id=submission_id)
         if outcome.end_reason == "suspended":
             # 子续跑又挂起：本层 emit 了 turn_suspended，续跑链中止（等下次 Resume）
             return None
@@ -1225,6 +1227,7 @@ class AgentEngine:
     async def _resume_parent_level(
         self, sub: Submission, parent_tid: str, parent_skill_id: str,
         call_id: str | None, child_result: str, root_cancel: CancellationToken,
+        *, submission_id: str | None = None,
     ) -> str | None:
         """回填父 thread 中 call_id 对应 call_skill 的 output，续跑父 turn。
 
@@ -1271,11 +1274,75 @@ class AgentEngine:
             data={"record_id": record.record_id,
                   "request_ids": sorted(record.request_ids())})))
         outcome = await self._run_thread_turn(
-            sub, parent_tid, parent_skill_id, root_cancel)
+            sub, parent_tid, parent_skill_id, root_cancel,
+            submission_id=submission_id)
         if outcome.end_reason == "suspended":
             return None
         return outcome.final_text if outcome.success else (
             f"sub_skill_failed: {outcome.error or outcome.end_reason}")
+
+    async def _build_spawn_resume_chain(
+        self, root_tid: str, root_skill_id: str
+    ) -> list[tuple[str, str, str | None]] | None:
+        """自 spawn 子 thread 沿 CHILD_SKILL pending 向下串到最深 leaf 的续跑链。
+
+        与 ``_build_resume_chain``（自 engine 根下探到指定 leaf）的差异：detached spawn
+        子 thread **不挂在 engine 根的 CHILD_SKILL 链上**（它是独立根），故续跑链须**以
+        spawn 子 thread 为根**重建，并一路下探到「无 CHILD_SKILL pending」的那层（即真正
+        持有用户 DATA/FORM 挂起的 leaf）——业务侧只知道 spawn 子 thread（SpawnSuspended.
+        thread_id），不知道 leaf 具体是哪个，故按链下探自动定位。
+
+        Returns:
+            ``[(根tid, 根skill, None), …, (leaftid, leafskill, 父callid)]``；
+            root_tid 自身无活跃挂起 → None（无可续）。
+        """
+        chain: list[tuple[str, str, str | None]] = [(root_tid, root_skill_id, None)]
+        cur_items = await self._load_thread_items(root_tid)
+        for _ in range(self._max_total_spawns_guard()):
+            record = self._find_active_suspension_in(cur_items)
+            if record is None:
+                # 根层无挂起 → 无可续；非根层到底但断链（坏数据）→ 也 None（禁静默兜底）
+                return None
+            nxt = self._next_child_link(record)
+            if nxt is None:
+                return chain  # 本层无 CHILD_SKILL pending → 即 leaf（用户挂起所在层）
+            child_tid, child_skill_id, call_id = nxt
+            chain.append((child_tid, child_skill_id, call_id))
+            cur_items = await self._load_thread_items(child_tid)
+        return None  # 超出深度守卫（异常链）
+
+    async def _settle_call_skill_output(
+        self, sub: Submission, thread_id: str, call_id: str, child_result: str
+    ) -> bool:
+        """在 thread 上回填 call_id 对应 call_skill 的 function_call_output + 落 resolved-marker
+        核销该层 CHILD_SKILL 挂起。
+
+        供 spawn 嵌套续跑链在**重跑 spawn 子 thread 前**补齐其 call_skill gap（= 正常
+        run_sub_skill 的成功回传）。与 ``_resume_parent_level`` 非根分支同语义，但**不**重跑
+        该 thread（重跑交由 spawn 驱动经 ``_build_child_runner`` + ``_finalize_spawn`` 完成，
+        以保持 detached 根语义 + 句柄终态回写 + join-barrier 触发）。
+
+        Returns:
+            True 补齐成功；该 thread 无活跃挂起 → False（调用方拒绝，禁静默）。
+        """
+        items = await self._load_thread_items(thread_id)
+        record = self._find_active_suspension_in(items)
+        if record is None:
+            return False
+        is_error = child_result.startswith(
+            ("sub_skill_failed:", "sub_skill_aborted:"))
+        out = function_call_output(
+            call_id=call_id, output=child_result,
+            thread_id=thread_id, is_error=is_error)
+        marker = system_injection(
+            text=f"suspend_resolved:{record.record_id}",
+            thread_id=thread_id, source="suspend_resolved")
+        await self._store.append(out)
+        await self._store.append(marker)
+        await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
+            data={"record_id": record.record_id,
+                  "request_ids": sorted(record.request_ids())})))
+        return True
 
     async def _load_thread_items(self, thread_id: str) -> list[ResponseItem]:
         """load_thread → list（子 thread resume 需要按当前持久态重建历史）。"""
@@ -1313,7 +1380,7 @@ class AgentEngine:
 
     async def _run_thread_turn(
         self, sub: Submission, thread_id: str, entry_skill_id: str,
-        root_cancel: CancellationToken,
+        root_cancel: CancellationToken, *, submission_id: str | None = None,
     ) -> Any:
         """为指定（非根）thread 构造 TurnRunner 并续跑一轮，返回 TurnOutcome。
 
@@ -1321,6 +1388,11 @@ class AgentEngine:
         续跑链携带的 entry_skill_id 经 snapshot 解析（不依赖 store.get_metadata）。
         turn 内若再挂起会 emit turn_suspended 并落新 SuspensionRecord
         （续跑链据 end_reason=='suspended' 中止）。
+
+        ``submission_id``：续跑事件的归因 submission。默认 None → 用本次 Resume 的
+        ``sub.id``（根 thread 续跑链语义）。**spawn 嵌套续跑链**显式传 spawn 子 thread id：
+        使被 spawn 的专科 subtree 续跑事件归因到与首发一致的 child_thread（业务侧按
+        submission_id 分轨，否则 leaf 子步文本会错挂到 Resume submission，丢轨）。
         """
         from taifeng.loop.turn import TurnRunner
         from taifeng.skill.dispatch import CallStack
@@ -1345,7 +1417,7 @@ class AgentEngine:
             dispatch_policy=self._dispatch_policy,
             budget=self._budget,
             thread_id=thread_id,
-            submission_id=sub.id,
+            submission_id=submission_id or sub.id,
             emit=self._emit,
             cancel=turn_cancel,
             hooks=self._hooks,

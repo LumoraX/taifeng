@@ -145,8 +145,11 @@ class SpawnDriver:
             skill_id=eng._entry_skill.id,  # noqa: SLF001
             call_id=f"spawn_entry_{secrets.token_hex(4)}",
         )
+        # detached spawn 把目标作为独立 child thread 分离发起（非嵌套子调用），调 entry
+        # skill 是其正当用法（专科 skill 多为 entry）→ allow_entry_target=True 跳过 entry 门。
         verdict = eng._dispatch_policy.check(  # noqa: SLF001
-            stack, eng._entry_skill, target  # noqa: SLF001
+            stack, eng._entry_skill, target,  # noqa: SLF001
+            allow_entry_target=True,
         )
         if not verdict.allowed:
             raise ValueError(f"dispatch_rejected: {verdict.reason}")
@@ -363,7 +366,7 @@ class SpawnDriver:
 
         与 call_skill 子链 resume（_handle_child_resume）的根本差异：detached spawn 的
         父 turn 早已结束，不存在「父 call_skill 等回填」的续跑链 —— 子 thread 是独立根
-        turn。因此本路径只做三步，不上溯父：
+        turn。因此**直接挂起**（DATA/FORM/permission 落在 spawn 子 thread 自身）只做三步：
           1. 在【子 thread 的 load_thread 历史】上找活跃挂起，核销 resolutions、补 gap
              （复用 SuspensionResolver + _apply_plan_on_thread，与 leaf resume 同语义；
              SuspensionResolver 已强制全量 resume，杜绝部分 resume 违例）。
@@ -372,6 +375,12 @@ class SpawnDriver:
           3. _finalize_spawn 回写句柄 + emit SpawnCompleted/SpawnSuspended/SpawnFailed
              —— 与 _drive_spawn 收尾完全一致：再次挂起则 handle 重新标 suspended（可再
              resume），从而支持多轮错峰 HITL。
+
+        **嵌套挂起**（被 spawn 的 composite 专科其子 skill 在执行中 request_user_input
+        挂起 → spawn 子 thread 自身的活跃挂起 reason==CHILD_SKILL，内核内部态、非用户可直
+        接 resolve）：转 ``resume_spawn_nested`` 走「以 spawn 子 thread 为根的续跑链」——
+        下探 leaf 核销用户挂起、逐层回填父 call_skill output，再重跑 spawn 子 thread +
+        finalize（详见该方法）。
 
         兜底：任何意外异常落 handle error + emit SpawnFailed（不静默、不卡 suspended）。
         K1 slot 不在此再占/再放 —— detached slot 由首发 _drive_spawn 的 finally 持有到
@@ -398,6 +407,13 @@ class SpawnDriver:
                         "reason": "no_active_suspension",
                         "record_id": None, "detail": {}}),
                 ))
+                return
+            # 嵌套错峰 HITL：spawn 子 thread 的活跃挂起是 CHILD_SKILL（其子 skill 在执行中
+            # request_user_input 挂起 → 本层随之内核态挂起）。用户可答的 DATA/FORM 挂起埋在
+            # 更深的 leaf 子 thread，本层 record 不能直接交 SuspensionResolver（reason=
+            # child_skill 非用户可 resolve）→ 转嵌套续跑链。
+            if eng._next_child_link(record) is not None:  # noqa: SLF001
+                await self.resume_spawn_nested(sub, handle)
                 return
             try:
                 # SuspensionResolver.plan 强制全量配齐该 record 的全部 pending，
@@ -458,6 +474,118 @@ class SpawnDriver:
         except Exception as e:  # noqa: BLE001
             logger.exception(
                 "detached spawn resume crashed: %s", handle.handle_id)
+            self._spawn_handles.set_result(
+                handle.handle_id, status="error", result=str(e))
+            await eng._emit(EventMsg(  # noqa: SLF001
+                submission_id=handle.handle_id,
+                msg=SpawnFailed(data={
+                    "handle_id": handle.handle_id, "error": str(e)}),
+            ))
+
+    async def resume_spawn_nested(
+        self, sub: Submission, handle: SpawnHandle
+    ) -> None:
+        """续跑【嵌套挂起】的 detached spawn：被 spawn 的 composite 专科其子 skill 挂起，
+        spawn 子 thread 以 CHILD_SKILL 内核态挂起 —— 走「以 spawn 子 thread 为根的续跑链」。
+
+        机制（对账 ``_handle_child_resume``，但根换成 spawn 子 thread、且根层重跑走 spawn
+        驱动而非 engine 根续跑）：
+          1. ``_build_spawn_resume_chain``：自 spawn 子 thread 沿 CHILD_SKILL pending 下探到
+             持有用户 DATA/FORM 挂起的 leaf，得 ``[(spawn子tid, 专科, None), …, (leaf, …)]``。
+          2. ``_resume_leaf_thread``：用用户 resolutions 核销 leaf 真实挂起 + 续跑 leaf turn，
+             拿回传父的结果串。leaf 又挂起 / 核销被拒 → 已各自 emit，句柄保持 suspended、不动。
+          3. 中间各父层（若链 > 2）：``_resume_parent_level`` 逐层回填 call_skill output + 续跑。
+          4. spawn 子 thread（链根）：``_settle_call_skill_output`` 回填其 call_skill output +
+             核销其 CHILD_SKILL 挂起 → 句柄回 running → ``_build_child_runner`` 重跑（保持
+             detached 独立根语义）→ ``_finalize_spawn`` 回写句柄 + emit 终态（再挂起 → 可再
+             resume，支持多轮错峰 HITL）。
+
+        归因：第 2、3 步续跑事件显式归到 **spawn 子 thread submission**（非本次 Resume sub.id），
+        与首发一致 —— 业务侧按 submission_id 分轨，否则 leaf 子步文本会错挂到 Resume 轨（丢轨）。
+
+        兜底：任何意外异常落 handle error + emit SpawnFailed（不静默、不卡 suspended）。
+        """
+        eng = self._engine
+        assert isinstance(sub.op, Resume)
+        op = sub.op
+        child_tid = handle.child_thread_id
+        try:
+            # 1. 自 spawn 子 thread 为根，沿 CHILD_SKILL pending 下探到 leaf
+            chain = await eng._build_spawn_resume_chain(  # noqa: SLF001
+                child_tid, handle.skill_id)
+            if chain is None or len(chain) < 2:
+                await eng._emit(EventMsg(  # noqa: SLF001
+                    submission_id=sub.id,
+                    msg=SuspensionResolveRejected(data={
+                        "reason": "no_active_suspension",
+                        "record_id": None, "detail": {}}),
+                ))
+                return
+
+            assert eng._root_cancel is not None  # engine.run 已启动  # noqa: SLF001
+            cancel = eng._root_cancel.child(  # noqa: SLF001
+                f"spawn_resume:{handle.handle_id}")
+            # 续跑期间登记取消 token：覆盖首发遗留旧 token（kill 命中当前续跑子树）。
+            self._spawn_cancels[handle.handle_id] = cancel
+
+            # 2. leaf：核销用户挂起 + 续跑（事件归 spawn 子 thread submission，保持分轨一致）
+            leaf_tid, leaf_skill, _ = chain[-1]
+            child_result = await eng._resume_leaf_thread(  # noqa: SLF001
+                sub, leaf_tid, leaf_skill, op.resolutions, cancel,
+                submission_id=child_tid)
+            if child_result is None:
+                # leaf 核销被拒（已 emit Rejected）或 leaf 又挂起（已 emit turn_suspended）
+                # → 句柄保持 suspended，等下一轮 Resume，不动状态、不上溯。
+                return
+
+            # 3. 中间父层（链 > 2 时）：逐层回填 call_skill output + 续跑父 turn，直到 spawn 子层
+            for level in range(len(chain) - 2, 0, -1):
+                parent_tid, parent_skill, _ = chain[level]
+                call_id = chain[level + 1][2]  # 本层指向下一层的 call_skill call_id
+                cont = await eng._resume_parent_level(  # noqa: SLF001
+                    sub, parent_tid, parent_skill, call_id, child_result, cancel,
+                    submission_id=child_tid)
+                if cont is None:
+                    return  # 中途某层又挂起 → 链中止，句柄保持 suspended
+                child_result = cont
+
+            # 4. spawn 子 thread（链根）：回填其 call_skill output（指向 chain[1]）+ 核销本层
+            #    CHILD_SKILL 挂起 → 句柄回 running → 重跑 detached 根 turn → finalize。
+            root_call_id = chain[1][2]  # spawn 子 thread 内指向下一层的 call_skill call_id
+            if root_call_id is None:
+                # CHILD_SKILL pending 缺 related_call_id（坏数据）→ 无法回填，显式拒绝。
+                await eng._emit(EventMsg(  # noqa: SLF001
+                    submission_id=sub.id,
+                    msg=SuspensionResolveRejected(data={
+                        "reason": "child_skill_missing_call_id",
+                        "record_id": None, "detail": {}}),
+                ))
+                return
+            ok = await eng._settle_call_skill_output(  # noqa: SLF001
+                sub, child_tid, root_call_id, child_result)
+            if not ok:
+                await eng._emit(EventMsg(  # noqa: SLF001
+                    submission_id=sub.id,
+                    msg=SuspensionResolveRejected(data={
+                        "reason": "no_active_suspension",
+                        "record_id": None, "detail": {}}),
+                ))
+                return
+            self._spawn_handles.set_result(
+                handle.handle_id, status="running", result=None)
+            target = eng._snapshot.get(handle.skill_id)  # noqa: SLF001
+            if target is None:
+                raise RuntimeError(f"spawn_resume_skill_missing: {handle.skill_id}")
+            resumed_history = await eng._load_thread_items(child_tid)  # noqa: SLF001
+            runner = eng._build_child_runner(  # noqa: SLF001
+                target, child_tid, resumed_history[0], cancel,
+                history=resumed_history)
+            outcome = await runner.run()
+            # 与 _drive_spawn / resume_spawn 收尾一致：回写句柄 + emit 终态 + 检查 join-barrier。
+            await self._finalize_spawn(handle.handle_id, child_tid, outcome)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(
+                "detached spawn nested resume crashed: %s", handle.handle_id)
             self._spawn_handles.set_result(
                 handle.handle_id, status="error", result=str(e))
             await eng._emit(EventMsg(  # noqa: SLF001

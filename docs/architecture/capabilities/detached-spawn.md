@@ -75,7 +75,7 @@ running → done | error | cancelled
 
 调用前经过三道门控（任一失败 → ValueError / SpawnLimitError，不建 child thread）：
 1. **unknown_skill**：skill_id 不在 snapshot → `ValueError`
-2. **DispatchPolicy.check**：白名单 / 深度 / 环 / 不能 call entry skill → `ValueError("dispatch_rejected: <reason>")`
+2. **DispatchPolicy.check（`allow_entry_target=True`）**：白名单 / 深度 / 环 → `ValueError("dispatch_rejected: <reason>")`。**spawn 目标可为 entry skill**——spawn 把目标作为**独立 child thread** 分离发起（等价于另起一个根），调 entry skill 恰是其正当用法，故 spawn 路径传 `allow_entry_target=True` 跳过 call_skill 的「不可调 entry」门（与 `set_join_barrier` 的 `then_skill` 豁免 entry 同理）；其余三层照常裁决。
 3. **K1 SpawnSlotRegistry**：并发 running spawn 已达 `max_concurrent_spawns` 或累计达 `max_total_spawns` → `SpawnLimitError`
 
 成功后追加 `spawn` ResponseItem 到父 thread（冷恢复用），emit `spawn_started`。
@@ -93,8 +93,9 @@ running → done | error | cancelled
 | --- | --- |
 | 未知 skill_id | `ValueError`，不建 child thread |
 | 非白名单 / 超深度 / 成环 | `ValueError("dispatch_rejected: <reason>")` |
-| 不能 call entry skill | `ValueError("dispatch_rejected: cannot_call_entry_skill")` |
 | 并发 K1 超限 | `SpawnLimitError` → 上层转 `SkillSpawnRejected` 事件 |
+
+> 注：`call_skill` 的「不能 call entry skill」门**不**适用于 spawn（spawn 是独立根，调 entry 合法，见上 `allow_entry_target=True`）。
 
 ### Requirement: 各自独立 HITL — staggered Resume 路由
 
@@ -110,9 +111,23 @@ running → done | error | cancelled
 - 复用 `_build_child_runner`（call_stack 为空 → 子 turn 是**独立根 turn**，无 DispatchPolicy entry 门控）
 - 复用 `_finalize_spawn`（终态回调 + barrier 检查，与首发路径完全一致）
 
-**关键**：不复用 `_handle_child_resume`，因为后者假设父 turn 此刻仍挂在 `CHILD_SKILL` pending gap 上并需要沿链回填；detached spawn 的父 turn 早已结束，不存在这条链。
+**关键**：直接挂起（DATA/FORM/permission 落在 spawn 子 thread 自身）不复用 `_handle_child_resume`，因为后者假设父 turn 此刻仍挂在 `CHILD_SKILL` pending gap 上并需要沿链回填；detached spawn 的父 turn 早已结束，不存在这条链。
 
 再次挂起（多轮 HITL）→ 句柄重标 `suspended`，可再 `Resume`（无限轮次，直到终态）。
+
+#### Requirement: 嵌套挂起（CHILD_SKILL）经 `resume_spawn_nested` 续跑
+
+被 spawn 的专科是 **composite 且通过 `call_skill` 编排子 skill** 时，其**子 skill** 在执行中 `request_user_input` 挂起 → spawn 子 thread 自身的活跃挂起 `reason==CHILD_SKILL`（内核内部态、非用户可直接 resolve），用户可答的 DATA/FORM 挂起埋在更深的 leaf 子 thread。
+
+此时 `resume_spawn` 经 `_next_child_link(record)` 检测到本层是 CHILD_SKILL → 转 `resume_spawn_nested`，走「以 spawn 子 thread 为根的续跑链」：
+1. `_build_spawn_resume_chain`：自 spawn 子 thread 沿 CHILD_SKILL pending 下探到持有用户挂起的 leaf（深度守卫 1024，坏数据/断链 → None 不静默兜底）。
+2. `_resume_leaf_thread`：用用户 resolutions 核销 leaf 真实挂起 + 续跑 leaf（leaf 又挂起 / 被拒 → 句柄保持 suspended，不动）。
+3. 中间各父层（链 > 2）：`_resume_parent_level` 逐层回填 call_skill output + 续跑。
+4. spawn 子 thread（链根）：`_settle_call_skill_output` 回填其 call_skill output + 核销 CHILD_SKILL 挂起 → 句柄回 running → `_build_child_runner` 重跑 → `_finalize_spawn`（终态 + barrier 检查）。
+
+**归因（R3 分轨）**：第 2–4 步续跑事件显式归到 **spawn 子 thread submission**（非本次 Resume `sub.id`），与首发一致——业务侧按 submission_id 分轨，否则 leaf 子步文本会错挂到 Resume 轨。
+
+> 缺这条会导致：`resume_spawn` 把 CHILD_SKILL record 直接交 `SuspensionResolver` → `unhandled_suspend_reason: child_skill` → Rejected → 句柄永久卡 suspended（嵌套错峰 HITL 死锁）。是真实 MDT 拓扑（专科=编排子 skill 的 composite）的硬伤。
 
 #### Scenario: 错峰 HITL
 
@@ -210,7 +225,7 @@ running → done | error | cancelled
 
 ## R1–R5 影响
 
-- **R1**：`SpawnHandle` / `JoinBarrier` / 4 个 LLM 工具全通用，无业务概念；spawn 目标为 entry:false child skill（与 `call_skill` 相同规则，专家 skill 不应是 entry）；业务侧通过 `ctx.extras["spawn_coordinator"]` 经 engine 注入的协调器接口使用。
+- **R1**：`SpawnHandle` / `JoinBarrier` / 4 个 LLM 工具全通用，无业务概念；spawn 目标须在 caller 白名单内，但**可为 entry skill**（`allow_entry_target=True`，与 `call_skill` 不同——spawn 是独立根，调 entry 合法）；业务侧通过 `ctx.extras["spawn_coordinator"]` 经 engine 注入的协调器接口使用。
 - **R2**：spawn 仅往父 history **尾部**追加 `spawn` ResponseItem（同 tool_call，不动 head）；child thread 有独立 cache 生命周期；spawn 本身不触发压缩。suspended spawn 释放其 K1 并发 slot（不计入 `max_concurrent_spawns`，只有 running 的 spawn 占 slot），即 HITL 等待期不消耗并发额度。
 - **R3**：7 类事件（spawn_started / suspended / completed / failed / cancelled / join_barrier_registered / join_barrier_fired）均入 `EventMsg`，经 `TelemetrySink` 可观测。
 - **R4**：每个 spawn `cancel.child(f"spawn:{handle_id}")`；`kill_spawn` 杀单个，兄弟 spawn 不受影响；`pool.close()` / `release(force=True)` 级联取消全部 detached child。
