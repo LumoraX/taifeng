@@ -56,10 +56,10 @@
 
 | 能力 | 一句话 | 入口（API / Op） | 示例 | 契约 |
 | --- | --- | --- | --- | --- |
-| **本地 budget 主动压缩** | 到达配置 `context_window` 上限即主动压缩，**不依赖 provider 报 overflow** | `budget=ContextBudget(...)` / `compressors=` | [capability_matrix.py](../examples/real_llm/capability_matrix.py)（compression 场景，需 key）· [tests/context/test_compaction.py](../tests/context/test_compaction.py)（mock） | [context-compression.md](architecture/context-compression.md) |
-| **Handoff 压缩** | codex 范式 LLM-to-LLM 接力摘要 + 质量审计 + 健康回滚 | `HandoffCompactionStrategy` | [tests/context/test_compaction.py](../tests/context/test_compaction.py) | [context-compression.md](architecture/context-compression.md) |
-| **滑窗压缩** | 保尾 N 条 + 图像 marker | `SlidingWindowStrategy` | [tests/context/test_compaction.py](../tests/context/test_compaction.py) | [context-compression.md](architecture/context-compression.md) |
-| **overflow 有界自愈** | provider 判超长（本地估算偏低漏网窗口）→ 强制压缩一次 + 重采样一次，不硬失败丢 turn | 自动（配了 `compressors` 即生效）/ `provider_retry` 事件 | mock 覆盖（[test_turn_overflow_recovery](../tests/loop/test_turn_overflow_recovery.py)） | [reactive-compaction-recovery.md](architecture/capabilities/reactive-compaction-recovery.md) 🧪 |
+| **本地 budget 主动压缩** | 到达配置 `context_window` 上限即主动压缩，**不依赖 provider 报 overflow** | `budget=ContextBudget(...)` / `compressors=` | [compression_showcase/demo.py](../examples/compression_showcase/demo.py)（mock） | [context-compression.md](architecture/context-compression.md) |
+| **Handoff 压缩** | codex 范式 LLM-to-LLM 接力摘要 + 质量审计 + 健康回滚 | `HandoffCompactionStrategy` | [overflow_demo.py](../examples/compression_showcase/overflow_demo.py)（mock）· [capability_matrix.py](../examples/real_llm/capability_matrix.py)（需 key） | [context-compression.md](architecture/context-compression.md) |
+| **滑窗压缩** | 保尾 N 条 + 图像 marker | `SlidingWindowStrategy` | [compression_showcase/demo.py](../examples/compression_showcase/demo.py)（mock） | [context-compression.md](architecture/context-compression.md) |
+| **overflow 有界自愈** | provider 判超长（本地估算偏低漏网窗口）→ 强制压缩一次 + 重采样一次，不硬失败丢 turn | 自动（配了 `compressors` 即生效）/ `provider_retry` 事件 | [overflow_demo.py](../examples/compression_showcase/overflow_demo.py)（mock） | [reactive-compaction-recovery.md](architecture/capabilities/reactive-compaction-recovery.md) 🧪 |
 | **手动触发压缩** | 业务侧主动压一次 | `CompactNow` Op | — | [context-compression.md](architecture/context-compression.md) |
 | **cache 友好契约** | 每次压缩显式标注 `cache_invalidated` / `anchor_preserved_until`；mid-turn 只动 tail | `CompressionResult` / `cache_break_detected` 事件 | [observability/](../examples/observability/) | [context-compression.md](architecture/context-compression.md) |
 | **运行时改预算** | turn 间动态调 context_window | `UpdateBudget` Op | — | [configurable-knobs.md](configurable-knobs.md) |

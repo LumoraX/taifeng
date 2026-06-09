@@ -114,6 +114,15 @@
 
 > **三种并发姿态对照**：`concurrent_fanout`（批量同步收齐）↔ `multi_expert_consult`（detached 异步 + join-barrier）↔ `step_pipeline`（业务确定性编排）。
 
-### skill 包（无独立运行脚本，被其他 demo / 测试复用）
+### 上下文压缩
 
-`compression_showcase/skills`（压缩场景 skill 包，被 [real_llm/capability_matrix.py](real_llm/capability_matrix.py) 压缩场景 + `tests/context/` 复用）、`form_hitl/skills`（纯提示型 HITL 表单 skill 包，被 web_ui 复用）。这两个目录**只含 skills/**，无 demo 入口脚本。
+| 文件 | 演示内容 | 需要 key |
+| --- | --- | --- |
+| [compression_showcase/demo.py](compression_showcase/demo.py) | 本地 budget 到顶**主动压缩**（极小 1024 window + sliding 兜底，phase=pre_turn），不依赖 provider 报错 | 否（Mock） |
+| [compression_showcase/overflow_demo.py](compression_showcase/overflow_demo.py) | provider 判超长 → **overflow 有界自愈**（强制压缩一次 + 重采样一次，phase=overflow，发 `provider_retry`） | 否（Mock） |
+
+> 真实 LLM handoff 摘要压缩见 [real_llm/capability_matrix.py](real_llm/capability_matrix.py) 的 compression 场景。
+
+### skill 包（无独立运行脚本，被其他 demo 复用）
+
+`form_hitl/skills` —— 纯提示型 HITL 表单 skill 包，被 web_ui 复用，**只含 skills/**，无 demo 入口脚本。
