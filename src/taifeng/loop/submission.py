@@ -59,6 +59,20 @@ class InjectSystemMessage(BaseModel):
     source: str = "business"
 
 
+class InjectUserInput(BaseModel):
+    """运行中 turn 的增量用户输入（mid-turn steering，B1）。
+
+    区别于 ``InjectSystemMessage``（注 system 注记、不影响活跃 turn）：本 Op 把用户
+    文本投进 ``submission_id`` 对应**活跃 turn** 的 pending 队列，在该 turn 下一个
+    迭代边界并入 prompt，不中止 turn、不丢已跑迭代；无活跃 turn 则文本落历史但
+    不起新 turn（codex inject_no_new_turn）。
+    """
+
+    kind: Literal["inject_user_input"] = "inject_user_input"
+    submission_id: str
+    text: str
+
+
 class ThreadRollback(BaseModel):
     """回滚最近 N 轮对话。
 
@@ -161,6 +175,7 @@ Op = Union[
     CancelTurn,
     CompactNow,
     InjectSystemMessage,
+    InjectUserInput,
     ThreadRollback,
     UpdateBudget,
     RefreshSnapshot,

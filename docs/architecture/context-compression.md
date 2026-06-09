@@ -107,6 +107,8 @@ class CompressionStrategy(Protocol):
 
 ### 1. HandoffCompactionStrategy (codex 范式)
 
+> **model 解析**：摘要 LLM 调用的 `ApiRequest.model = self._model or ""`——`model=None`（默认，pool 默认 compressors 不传）时用**空字符串**让 provider 取构造默认 model，与采样路径（`turn.py` 的 `entry_skill.model or ""`）一致。**不要用 "auto" 占位**——在不认 "auto" 的网关（如 new-api distributor）会 `model_not_found`，导致真实压缩（含 A1 force_compress）全部失败（真实 LLM 验证 `examples/real_llm/p0_verify.py` 发现的缺陷）。
+
 ```python
 # src/taifeng/context/strategies/handoff.py
 
@@ -300,6 +302,44 @@ class CompressionOrchestrator:
             if strat.should_trigger(ctx):
                 return await strat.compress(ctx, injection)
         return None
+
+    async def force_compress(
+        self,
+        ctx: CompressionContext,
+        injection: InitialContextInjection,
+    ) -> CompressionResult | None:
+        """无视 should_trigger，以最高优先级策略强制压缩（无策略→None）。"""
+        if not self._strategies:
+            return None
+        return await self._strategies[0].compress(ctx, injection)
+```
+
+## Overflow 反应式自愈（A1，reactive-compaction-recovery）
+
+本地 token 估算是「乐观」的（多模态、provider 计费差异、模板膨胀都会偏低），存在
+「本地没到阈值、provider 已判超长」的窗口。此前该窗口下 `ContextOverflowError`
+直接**硬失败丢整个 turn**；现改为一次有界自愈（参照 openclaw
+`pendingCompactionRetry`）：
+
+```
+_sample_once 采样 → provider 抛 ContextOverflowError
+  └─ except LLMError：isinstance(ContextOverflowError) ∧ 未自愈过 ∧ 有压缩器
+       ├─ emit ProviderRetry(reason=context_overflow)
+       ├─ _maybe_compress(phase="overflow", force=True, bypass_trigger=True)
+       │     └─ orchestrator.force_compress（绕过 should_trigger，因本地估算偏低
+       │        必致 should_trigger 返回 None）；DO_NOT_INJECT 保 cache anchor
+       └─ return await _sample_once(iteration)   # 单次重采样
+  └─ 二次仍 overflow → _overflow_recovered=True → 硬失败（context_window）
+```
+
+要点：
+
+- **有界一次**：`TurnRunner._overflow_recovered`（run() 入口 reset）保证每 turn 至多自愈一次——防压缩-重试死循环，二次 overflow 说明确定性超长应快速暴露。
+- **无压缩器不浪费重采样**：`self.compressors is None` 时直接落硬失败。
+- **压缩失败退化**：force_compress 返回 None / 配对完整性回滚（G1b）→ history 不变 → 重采样再 overflow → 有界硬失败（不引入新失败模式）。
+- **Cache 友好（R2）**：phase=overflow 走 mid-turn 注入语义（DO_NOT_INJECT），`CompressionResult.cache_invalidated` 如实标注；不动 head。
+- **可观测（R3）**：`provider_retry` + 一对 phase=overflow 的 `compaction_started/completed`。
+- 契约见 [`capabilities/reactive-compaction-recovery.md`](capabilities/reactive-compaction-recovery.md)。
 ```
 
 ## K3 长期记忆 swap 接口（MemoryStore）

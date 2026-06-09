@@ -224,3 +224,43 @@ async def test_orchestrator_picks_highest_priority() -> None:
     result = await orch.maybe_compress(ctx, InitialContextInjection.BEFORE_LAST_USER_MESSAGE)
     assert result is not None
     assert result.success
+
+
+@pytest.mark.asyncio
+async def test_force_compress_bypasses_should_trigger() -> None:
+    """force_compress 无视 should_trigger，低估算下仍以最高优先级策略压缩。
+
+    这是 A1 reactive-compaction-recovery 的底座：overflow 成因是「本地估算偏低、
+    provider 已判超长」，此时 should_trigger 必返回 None，必须有一条绕过阈值的强制路径。
+    """
+    client = MockClient(
+        turns=[
+            MockTurn(
+                text="## 进度\n- x\n## 决策\n- y",
+                usage=TokenUsage(input_tokens=400, output_tokens=20),
+            )
+        ]
+    )
+    handoff = HandoffCompactionStrategy(model_client=client, model="mock-model")
+    sliding = SlidingWindowStrategy()
+    budget = ContextBudget(context_window=100000, soft_limit_ratio=0.85, preserve_tail_messages=2)
+    items = [user_message(f"msg-{i} {'x' * 100}", thread_id="t") for i in range(8)]
+    # 低估算：远低于 soft/hard limit → 两策略 should_trigger 均返回 None（常规路径压不动）
+    ctx = CompressionContext(
+        history=items,
+        token_estimate=100,
+        budget=budget,
+        cache_anchor_index=-1,
+        phase="mid_turn",
+        available_injections=frozenset({InitialContextInjection.DO_NOT_INJECT}),
+    )
+    assert handoff.should_trigger(ctx) is None
+    assert sliding.should_trigger(ctx) is None
+    # 强制路径：取最高优先级策略（handoff priority=100 > sliding=10）执行压缩
+    orch = CompressionOrchestrator([sliding, handoff])
+    result = await orch.force_compress(ctx, InitialContextInjection.DO_NOT_INJECT)
+    assert result is not None
+    assert result.success
+    # 无策略 → None（调用方据此退化为硬失败）
+    empty = CompressionOrchestrator([])
+    assert await empty.force_compress(ctx, InitialContextInjection.DO_NOT_INJECT) is None

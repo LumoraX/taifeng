@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from taifeng.context.budget import ContextBudget
@@ -48,6 +48,7 @@ from taifeng.loop.event import (
     SuspensionResolveRejected,
     TurnFailed,
     TurnRewound,
+    UserInputInjected,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
 from taifeng.loop.rewind import RewindCheckpoint, count_turns, derive_rewind_log
@@ -57,6 +58,7 @@ from taifeng.loop.submission import (
     CancelTurn,
     CompactNow,
     InjectSystemMessage,
+    InjectUserInput,
     Op,
     RefreshSnapshot,
     Resume,
@@ -82,6 +84,9 @@ logger = logging.getLogger(__name__)
 class _PendingTurn:
     submission_id: str
     cancel: CancellationToken
+    # B1 midturn-input-steering：注入队列。engine 处理 InjectUserInput Op 时 append，
+    # 与对应活跃 TurnRunner.pending_input 共享同一 list 引用，runner 迭代边界 drain。
+    pending_input: list[ResponseItem] = field(default_factory=list)
 
 
 class AgentEngine:
@@ -547,6 +552,33 @@ class AgentEngine:
                     self._history.append(item)
                     await self._store.append(item)
                     continue
+                if isinstance(sub.op, InjectUserInput):
+                    # B1 midturn-input-steering：投进活跃 turn 的 pending 队列（下一
+                    # 迭代边界 drain 并入）；无活跃 turn → 落历史不起新 turn。
+                    target = self._pending.get(sub.op.submission_id)
+                    item = user_message(sub.op.text, thread_id=self._thread_id)
+                    if target is not None:
+                        # 活跃 turn：入共享队列，由 runner drain 时落 store + emit
+                        target.pending_input.append(item)
+                        delivered = True
+                    else:
+                        # 无活跃 turn：engine 落历史 + 持久化，不创建 TurnRunner
+                        self._history.append(item)
+                        await self._store.append(item)
+                        delivered = False
+                    await self._emit(
+                        EventMsg(
+                            submission_id=sub.id,
+                            msg=UserInputInjected(
+                                data={
+                                    "submission_id": sub.op.submission_id,
+                                    "delivered": delivered,
+                                    "text_preview": sub.op.text[:80],
+                                }
+                            ),
+                        )
+                    )
+                    continue
                 if isinstance(sub.op, CompactNow):
                     # 走 manual 路径 —— 启动一个不带 user message 的特殊 turn
                     await self._run_compact_now(sub.id, sub.op, cancel)
@@ -762,6 +794,13 @@ class AgentEngine:
             max_iterations=self._max_iterations,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(self._history),
+            # B1 midturn-input-steering：与活跃 _PendingTurn 共享注入队列（同一 list
+            # 引用：engine 主循环 append、runner 迭代边界 drain）
+            pending_input=(
+                self._pending[submission_id].pending_input
+                if submission_id in self._pending
+                else []
+            ),
             cache_anchor_index=self._cache_anchor_index,
             instructions=list(resolved_for_turn),
             permission_policy=self._permission_policy,

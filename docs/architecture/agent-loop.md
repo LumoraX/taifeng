@@ -540,6 +540,18 @@ join-barrier（全终态触发）：
 
 结论：HITL 等待期不消耗并发额度，可支持大量错峰 HITL 并发场景。
 
+## mid-turn steering：运行中 turn 注入用户输入（midturn-input-steering 契约）
+
+`UserMessage` 经 `asyncio.create_task(self._run_turn_for(...))` 派发 —— turn 跑在独立 task，**不阻塞 Op 主循环**。据此支持「运行中 turn 不打断地插话」：
+
+- **Op**：`InjectUserInput{submission_id, text}`（区别于 `InjectSystemMessage` 注 system 注记）。
+- **共享队列**：`_PendingTurn.pending_input` 与对应 `TurnRunner.pending_input` 是同一 list 引用（`_run_turn` 构造时从 `self._pending[submission_id]` 取）。engine 主循环 append、runner drain，同 event loop 协作式调度无需锁。
+- **drain seam**：`TurnRunner._drain_pending_input` 在迭代循环顶部（`_maybe_compress(pre_turn)` 前、成对 fc/output 已闭合的安全点）把 pending 转 user_message 并入 history + emit `UserInputInjected{delivered:true}`。
+- **无活跃 turn 退化**：主循环找不到 `_pending[submission_id]` → 文本落历史不起新 turn（codex `inject_no_new_turn`），emit `delivered:false`。
+- **R4**：drain 前 `cancel.is_cancelled` 守卫，已取消 turn 不并入（文本由 engine 收尾落历史，不丢，R5）。
+
+完整契约见 [`capabilities/midturn-input-steering.md`](capabilities/midturn-input-steering.md)。
+
 ## turn 的终止结局：含 suspended（suspend-resume）
 
 `run_turn` 现有四种 `end_reason`（写进 `TurnCompleted.data["end_reason"]`，业务侧据此路由）：

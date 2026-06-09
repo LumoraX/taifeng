@@ -14,7 +14,7 @@ from taifeng.context.budget import ContextBudget
 from taifeng.context.injection import InitialContextInjection
 from taifeng.conversation.models import ResponseItem
 
-CompressionPhase = Literal["pre_turn", "mid_turn", "manual"]
+CompressionPhase = Literal["pre_turn", "mid_turn", "manual", "overflow"]
 
 
 @dataclass(frozen=True)
@@ -87,3 +87,26 @@ class CompressionOrchestrator:
             if strat.should_trigger(ctx):
                 return await strat.compress(ctx, injection)
         return None
+
+    async def force_compress(
+        self,
+        ctx: CompressionContext,
+        injection: InitialContextInjection,
+    ) -> CompressionResult | None:
+        """无视 should_trigger，以最高优先级策略强制压缩。
+
+        为何绕过 should_trigger：各策略按**本地 token 估算**判阈值，而
+        overflow 反应式自愈（A1）的成因恰是「本地估算偏低、provider 已判超长」——
+        此时 should_trigger 必返回 None，maybe_compress 压不动。本路径直接取最高
+        优先级策略执行压缩，覆盖该窗口。无任何策略时返回 None（调用方据此退化硬失败）。
+
+        Args:
+            ctx: 压缩上下文。
+            injection: 初始上下文注入语义（overflow 自愈走 DO_NOT_INJECT 保 cache anchor）。
+
+        Returns:
+            最高优先级策略的压缩结果；无策略时 None。
+        """
+        if not self._strategies:
+            return None
+        return await self._strategies[0].compress(ctx, injection)

@@ -52,6 +52,7 @@ from taifeng.loop.event import (
     ContextBudgetExceeded,
     EventMsg,
     PreCompactHookSkipped,
+    ProviderRetry,
     ResourceLimitExceeded,
     SkillDispatched,
     SkillReturned,
@@ -64,6 +65,7 @@ from taifeng.loop.event import (
     TurnFailed,
     TurnStarted,
     TurnSuspended,
+    UserInputInjected,
 )
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.rewind import RewindLog, count_turns
@@ -247,6 +249,12 @@ class TurnRunner:
     _is_root: bool = False
     # turn-rewind retry_tool：非 None 时,采样前先补跑该悬空 call(末尾留 fc、无 fco)
     _seed_pending_call_id: str | None = None
+    # A1 reactive-compaction-recovery：本 turn 是否已发生过 overflow 自愈（有界一次）。
+    # run() 入口 reset，防实例复用残留。二次 overflow 即硬失败。
+    _overflow_recovered: bool = False
+    # B1 midturn-input-steering：与 engine._PendingTurn 共享的注入队列。engine 处理
+    # InjectUserInput Op 时 append，run() 迭代边界 _drain_pending_input 并入 history。
+    pending_input: list[ResponseItem] = field(default_factory=list)
 
     # 挂起 id / 时间戳工厂（R1：src 内不取系统时钟 / 随机；业务侧注入，测试可固定）。
     # None → __post_init__ 兜底默认（secrets / time）。
@@ -380,6 +388,8 @@ class TurnRunner:
         final_text = ""
         end_reason = "completed"
         error_msg: str | None = None
+        # A1：每 turn 重置 overflow 自愈标志（防实例复用残留）
+        self._overflow_recovered = False
         suspension: Any = None  # SuspensionRecord | None;命中挂起点时落盘后赋值
         try:
             # B 声明式编排：entry 声明了 orchestration → 纯编排器路径（不采样 LLM）
@@ -398,6 +408,10 @@ class TurnRunner:
                     iterations += 1
                     # 同步当前迭代序号 → 挂起时落 SuspensionRecord.turn_index
                     self._current_iteration = iterations
+
+                    # B1 midturn-input-steering：迭代边界排空注入队列（成对 fc/output
+                    # 已闭合的安全点），把运行中收到的用户输入并入 history 再采样。
+                    await self._drain_pending_input()
 
                     # pre-turn 压缩判断
                     await self._maybe_compress(phase="pre_turn")
@@ -432,6 +446,10 @@ class TurnRunner:
                     await self._maybe_compress(phase="mid_turn")
                 else:
                     end_reason = "max_iterations"
+                # B1：turn 收尾补一次 drain —— 最后一轮采样期间晚到、未及在迭代起始
+                # 消费的注入也要落历史（R5 不丢用户输入；它们没影响本 turn 后续采样，
+                # 但已并入 history、下个 turn 可见）。仅正常退出路径；异常路径走 except。
+                await self._drain_pending_input()
         except _BatchSuspend as bs:
             # 工具批次命中挂起点：落 SuspensionRecord，turn 终结于 suspended（非失败）。
             # 必须在宽 except Exception 之前捕获，否则会被分类成 TurnFailed（吞错类问题）。
@@ -714,6 +732,27 @@ class TurnRunner:
                                 )
                             )
         except LLMError as e:
+            # A1 reactive-compaction-recovery：provider 判「上下文超长」→ 有界自愈
+            # （强制压缩一次 + 重采样一次）。本 turn 至多一次；无压缩器则不浪费重采样，
+            # 直接落到下方硬失败。二次 overflow 说明压缩无效（确定性超长），快速暴露。
+            from taifeng.llm.errors import ContextOverflowError
+
+            if (
+                isinstance(e, ContextOverflowError)
+                and not self._overflow_recovered
+                and self.compressors is not None
+            ):
+                self._overflow_recovered = True
+                await self._emit(
+                    ProviderRetry(
+                        data={"reason": "context_overflow", "iteration": iteration}
+                    )
+                )
+                await self._maybe_compress(
+                    phase="overflow", force=True, bypass_trigger=True
+                )
+                # 单次重采样：递归深度恒为 1（标志已置 True，二次必走硬失败）
+                return await self._sample_once(iteration)
             if _should_suspend_on_error(e):
                 # 可恢复错误且重试已耗尽 → 转 SYSTEM_RETRY 挂起,等业务侧 resume 重跑同次 sample。
                 # 该 SuspendSignal 穿透回 run_turn 的 except SuspendSignal(Task 7 已加),落盘挂起。
@@ -988,12 +1027,46 @@ class TurnRunner:
             raw=u.raw,
         )
 
-    async def _maybe_compress(self, *, phase: str, force: bool = False) -> None:
+    async def _drain_pending_input(self) -> None:
+        """B1：把 pending_input 队列并入 history（迭代边界调用）。
+
+        取出全部 pending（保留提交顺序），逐条追加 history_buffer + store.append +
+        emit ``UserInputInjected{delivered:true}``，并清空队列。turn 已取消则不并入
+        （留给 engine 收尾落历史，不丢用户输入，R5）。
+
+        副作用：history_buffer / store 追加；pending_input 清空；emit 事件。
+        """
+        if not self.pending_input or self.cancel.is_cancelled:
+            return
+        # 同 event loop 协作式调度：取出 + 清空在无 await 的同步段完成，避免与
+        # engine 主循环 append 竞态（无需锁）。
+        drained = list(self.pending_input)
+        self.pending_input.clear()
+        for item in drained:
+            self.history_buffer.append(item)
+            await self.store.append(item)
+            preview = str(item.payload.get("text", ""))[:80]
+            await self._emit(
+                UserInputInjected(
+                    data={
+                        "submission_id": self.submission_id,
+                        "delivered": True,
+                        "text_preview": preview,
+                    }
+                )
+            )
+
+    async def _maybe_compress(
+        self, *, phase: str, force: bool = False, bypass_trigger: bool = False
+    ) -> None:
         """触发压缩判断。
 
         Args:
-            phase: pre_turn / mid_turn / manual
-            force: 跳过阈值检查（manual 路径业务侧主动触发时为 True）
+            phase: pre_turn / mid_turn / manual / overflow
+            force: 跳过 budget 阈值预检（manual / overflow 路径为 True）
+            bypass_trigger: 走 orchestrator.force_compress 绕过各策略 should_trigger
+                （A1 overflow 自愈：本地估算偏低、provider 已判超长，should_trigger
+                必返回 None，必须强制压缩）。
         """
         if self.compressors is None:
             return
@@ -1036,7 +1109,7 @@ class TurnRunner:
 
         injection = (
             InitialContextInjection.DO_NOT_INJECT
-            if phase == "mid_turn"
+            if phase in ("mid_turn", "overflow")
             else InitialContextInjection.BEFORE_LAST_USER_MESSAGE
         )
 
@@ -1053,7 +1126,11 @@ class TurnRunner:
                 data={"phase": phase, "strategy": "auto", "token_estimate": tokens}
             )
         )
-        result = await self.compressors.maybe_compress(ctx, injection)
+        # bypass_trigger：overflow 自愈走强制路径（绕过 should_trigger）
+        if bypass_trigger:
+            result = await self.compressors.force_compress(ctx, injection)
+        else:
+            result = await self.compressors.maybe_compress(ctx, injection)
         if result is None:
             return
         # G1b：压缩成功，但若产物相对原 history 引入了新的 tool 配对孤儿 → 回滚

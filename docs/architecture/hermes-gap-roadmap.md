@@ -1,6 +1,7 @@
 # 引擎能力对比差距路线图
 
-> 最近更新：2026-05-30（K1–K7 内核子系统全补齐；P0/P1/P2 + K 双清零）
+> 最近更新：2026-06-09（第三轮对比分析：发现 6 项新缺口并立 openspec change；A1 已落地）
+> 上一版：2026-05-30（K1–K7 内核子系统全补齐；P0/P1/P2 + K 双清零）
 > 上游对比：codex (Rust) / claw-code (Rust) / hermes-agent (Python) / openclaw (TS)
 > 本地参照路径：`<opensource>/{codex, claw-code, hermes-agent, openclaw}`
 > 用途：下次会话直接 Read 本文，按优先级挑一项开新 change。
@@ -125,6 +126,22 @@ hermes `agent/memory_provider.py` 已证明它**可以 R1-clean**：一个纯协
    K3 swap 内存层级（`1bd57b1`，即原 MemoryProvider 升格）/ K4 总线流控（`630c738`）/
    K5 取消终态守卫（`bc09ad9`）/ K6 /proc 自省（`aadced5`）/ K7 谱系持久。详见 `kernel-gap-analysis.md`。
    **能力缺口（P0/P1/P2）与内核子系统（K1–K7）至此双双清零**；后续为可选增强（业务侧 builtin / userspace 工具）。
+
+## 第三轮对比分析（2026-06-09，codex / openclaw / hermes 新提交）
+
+上轮「双清零」后再扫一遍，聚焦**上次清零后上游新增、或之前判 userspace 但可重审**的机制。发现 6 项 R1-clean 缺口，已各立 openspec change（`openspec/changes/<id>/`）：
+
+| change | 缺口 | 优先级 | 状态 |
+| --- | --- | --- | --- |
+| `reactive-compaction-recovery` | A1 ContextOverflow → 强制压缩 + 单次重采样自愈（替代硬失败丢 turn） | P0 | ✅ **已落地**（`force_compress` + 有界自愈 + `ProviderRetry`；`tests/loop/test_turn_overflow_recovery.py` 全绿） |
+| `midturn-input-steering` | B1 运行中 turn 不打断地注入用户输入（codex `inject.rs`/`input_queue.rs`） | P0 | ✅ **已落地**（`InjectUserInput` Op + `pending_input` 共享队列 + `_drain_pending_input` 迭代边界排空 + `UserInputInjected`；`tests/loop/test_midturn_steering.py` 全绿。B1 是 D1 的 seam 底座） |
+| `compaction-surgical-trim` | A2 cache-TTL soft/hard 剪枝 + A3 tool-result 去重（handoff 之外更便宜一档） | P1 | 📋 proposal |
+| `turn-resource-guards` | C1 denial 断路器（codex `guardian`）+ C2 IterationBudget 分层/refund（hermes） | P1 | 📋 proposal |
+| `peer-mailbox-messaging` | D1 活体 agent 间 mailbox + 唤醒空闲 + wait-peer（codex `multi_agents_v2`） | P1 | 📋 proposal（依赖 B1） |
+| `postcompact-state-reinjection` | E1 压缩后 pinned 状态重注入钩子（hermes todo 穿越压缩） | P1 | 📋 proposal |
+
+**核实关闭**：C3（子 agent 触发 HITL 阻塞主 actor，hermes `delegate_tool.py` 的 ThreadPoolExecutor 死锁）→ **taifeng 不存在**：单 event-loop async + suspend/resume 释放实例 + `subagent_approval_mode=auto_deny`，无线程模型死锁。
+**未纳入（P2 backlog）**：A4 多模态重载荷驱逐、A5 压缩相对增量基线、E2 ContextEngine 可插拔 slot、E3 prewarm / cancel-reason 带内。
 
 ## 引用入口
 

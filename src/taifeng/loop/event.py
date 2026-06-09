@@ -28,6 +28,8 @@ MsgKind = Literal[
     "compaction_started",
     "compaction_completed",
     "cache_break_detected",
+    "provider_retry",
+    "user_input_injected",
     "permission_prompt_timeout",
     "skill_dispatch_hook_denied",
     "skill_dispatch_permission_denied",
@@ -172,6 +174,28 @@ class CompactionCompleted(_Msg):
 class CacheBreakDetected(_Msg):
     kind: Literal["cache_break_detected"] = "cache_break_detected"
     """data = {"unexpected": bool, "reason": str, "token_drop": int}"""
+
+
+class ProviderRetry(_Msg):
+    """A1：provider 以「上下文超长」拒绝采样 → 触发有界自愈（强制压缩 + 重采样）。
+
+    紧随其后会出现一对 phase=overflow 的 compaction_started / compaction_completed
+    （承载 compaction_attempted(trigger=context_overflow) 语义），以及重采样事件。
+    """
+
+    kind: Literal["provider_retry"] = "provider_retry"
+    """data = {"reason": str, "iteration": int}；reason 当前取值 context_overflow。"""
+
+
+class UserInputInjected(_Msg):
+    """B1：InjectUserInput 投递结果。
+
+    delivered=true → 投进活跃 turn 的 pending 队列（下一迭代边界并入 prompt）；
+    false → 无活跃 turn，文本落历史但未起新 turn（codex inject_no_new_turn）。
+    """
+
+    kind: Literal["user_input_injected"] = "user_input_injected"
+    """data = {"submission_id": str, "delivered": bool, "text_preview": str}"""
 
 
 class CompactionDegradationWarning(_Msg):
@@ -572,6 +596,8 @@ Msg = Union[
     CompactionIntegrityRolledBack,
     ContextBudgetExceeded,
     CacheBreakDetected,
+    ProviderRetry,
+    UserInputInjected,
     PermissionPromptTimeout,
     SkillDispatchHookDenied,
     SkillDispatchPermissionDenied,

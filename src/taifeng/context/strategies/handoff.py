@@ -302,7 +302,11 @@ class HandoffCompactionStrategy:
             content = f"{feedback}\n\n{content}"
         cancel = CancellationToken(name="compact")
         request = ApiRequest(
-            model=self._model or "auto",
+            # 对齐采样路径（turn.py 用 entry_skill.model or ""）：空字符串让 provider
+            # 用其构造时配置的默认 model。此前的 "auto" 占位在不认 "auto" 的网关
+            # （如 new-api distributor）会 model_not_found，导致真实压缩失败（含 A1
+            # force_compress 走的同一路径）。mock 显式传 model，不受影响。
+            model=self._model or "",
             system_prompt=[HANDOFF_SYSTEM_PROMPT_ZH],
             messages=[ApiMessage(role="user", content=content)],
             tools=[],

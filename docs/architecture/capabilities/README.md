@@ -27,6 +27,8 @@
 | [telemetry-otel](telemetry-otel.md) | `OtelSinkConfig` / `OtelTelemetrySink`、EventMsg→OTel 映射表、PII 过滤、预建 counter、fire-and-forget |
 | [turn-rewind](turn-rewind.md) | turn 内可寻址回访节点表（iteration / dispatch）、`Rewind` Op（re_reason / retry_tool 两切点）、`RewindCheckpoint`、`rewind_nodes()`、3 类事件、拒绝路径、R2 expected / R5 append-only |
 | [detached-spawn](detached-spawn.md) | 分离式并发 spawn + join-barrier：`spawn_skill`（立即返回句柄、不阻塞）、独立 child thread 各自独立 HITL（staggered Resume 路由）、`JoinBarrier`（全终态自动聚合）、engine keepalive 引用计数、`kill_spawn` 隔离取消、K1 slot 仅计 running、冷恢复 rebuild、7 类事件、4 个 LLM 工具 |
+| [reactive-compaction-recovery](reactive-compaction-recovery.md) | overflow 有界自愈：`force_compress`（绕 should_trigger）、`_maybe_compress(phase=overflow, bypass_trigger)`、`_overflow_recovered` 有界一次、`ProviderRetry` 事件、无压缩器/压缩失败退化、R2 cache-aware / R4 取消 |
+| [midturn-input-steering](midturn-input-steering.md) | 运行中 turn 注入用户输入：`InjectUserInput` Op、`_PendingTurn.pending_input` 共享队列、`_drain_pending_input` 迭代边界排空、无活跃 turn 退化（codex inject_no_new_turn）、`UserInputInjected{delivered}` 事件、tool 配对保护 / R4 取消守卫 |
 
 ### 持久化（对应 [conversation.md](../conversation.md)）
 | 契约 | 覆盖 |
