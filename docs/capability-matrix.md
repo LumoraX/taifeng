@@ -108,6 +108,49 @@
 
 ---
 
+## 专题：多轨并发可观测（前端怎么展示「多个 skill 并发执行」）
+
+> 典型场景：多专家会诊——编排 skill 在一个 turn 内并发 `spawn_skill` 起多个专家（高血压 / 肺结节 …），各专家独立跑、错峰 HITL、最后 join-barrier 聚合成会诊报告。**前端要把每条并发轨的流式输出、工具调用、HITL 状态各自分开渲染。**
+>
+> 内核已提供全部所需信息，**不需要业务方改内核**。归轨键就是 **`EventMsg.submission_id`**。
+
+**分轨映射：**
+
+| 轨道 | 该轨事件的 `submission_id` | 映射来源 |
+| --- | --- | --- |
+| 编排入口 turn | 用户提交返回的 `sub_id` | `engine.submit(UserMessage)` 返回值 |
+| 每个并发专家 child | = 该专家的 `child_thread_id` | `spawn_started.data = {handle_id, skill_id, child_thread_id}` |
+| 联合会诊聚合 turn | = `then_thread_id` | `join_barrier_fired.data = {barrier_id, then_thread_id}` |
+
+**为什么成立（源码锚点）：**
+- `_build_child_runner` 用 `submission_id=child_thread_id` 构造每个并发子 runner（[`src/taifeng/loop/engine.py`](../src/taifeng/loop/engine.py)）；
+- 每条事件都封 `EventMsg(submission_id=self.submission_id, ...)`（[`src/taifeng/loop/turn.py`](../src/taifeng/loop/turn.py)）。
+- ⇒ `turn_started` / `assistant_text`(增量) / `tool_call_started` / `tool_call_completed` / `skill_dispatched` 都带所属轨道的 `submission_id`，**并发专家的流式输出天然可分开**。
+
+**前端分轨投影配方（伪码）：**
+
+```python
+tracks = {}                         # submission_id -> 轨道视图
+async for ev in engine.subscribe_all():
+    m, sid = ev.msg, ev.submission_id
+    if m.kind == "spawn_started":   # 注册一条专家轨：child_thread_id 即该轨的 submission_id
+        tracks[m.data["child_thread_id"]] = {"skill": m.data["skill_id"], "state": "running"}
+    elif m.kind == "spawn_suspended":
+        tracks[m.data["thread_id"]]["state"] = "hitl_waiting"   # 该轨进入错峰 HITL
+    elif m.kind == "join_barrier_fired":
+        tracks[m.data["then_thread_id"]] = {"skill": "consultation", "state": "running"}
+    # 流式正文按 sid 归轨渲染
+    elif m.kind in ("assistant_text", "tool_call_started", "tool_call_completed"):
+        tracks.setdefault(sid, {"skill": "?", "state": "running"})
+        render_into_track(sid, m)   # 高血压轨 / 肺结节轨 / 会诊轨各自更新
+```
+
+**完整事件清单：** 7 类 spawn/join 生命周期事件 `spawn_started / spawn_suspended / spawn_completed / spawn_failed / spawn_cancelled / join_barrier_registered / join_barrier_fired`（字段见 [`src/taifeng/loop/event.py`](../src/taifeng/loop/event.py)）。端到端时间线 demo：[multi_expert_consult/](../examples/multi_expert_consult/)；浏览器多轨实时渲染参考实现：[web_ui/](../examples/web_ui/)（含 `multi_expert_consult` 交互 demo）。契约：[detached-spawn.md](architecture/capabilities/detached-spawn.md)。
+
+> 业务侧（如 qiuben）在 SSE 层把 `submission_id` 改名为 `track_id` 做多轨投影即可——内核不感知业务轨道语义（R1）。
+
+---
+
 ## 接入入口速查
 
 ### EnginePool.create 全参数
