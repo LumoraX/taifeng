@@ -1,6 +1,11 @@
 # 使用指南
 
-> M1–M3 已实现的真实 API。
+> 本文档讲**怎么写代码把 taifeng 接进来**——安装 + 三层使用粒度 + 各能力的代码骨架。
+>
+> 想先确定「某个功能 tf 有没有 / 落地了没 / 入口是哪个」，先看 [**能力总览矩阵 capability-matrix.md**](capability-matrix.md)；
+> 想查某个参数的字段级语义，看 [configurable-knobs.md](configurable-knobs.md)。
+>
+> 下面的代码骨架覆盖常用能力；**完整能力清单（含 suspend/resume、turn-rewind、detached-spawn 多专家会诊、MCP server、结构化输出、overflow 自愈、mid-turn steering 等）以 [能力矩阵](capability-matrix.md) 为准**，每条都带对应 example 与契约链接。
 
 ## 安装
 
@@ -540,3 +545,22 @@ pool = await EnginePool.create(..., script_executors={"shell": FirejailScriptExe
 ### 完整可运行示例
 
 参见 `examples/basic/skill_with_script.py`：shell + python 两类 executor 共存，端到端跑完三轮 turn。
+
+---
+
+## 更多能力（本文档未逐一展开代码骨架）
+
+以下能力均已落地、有可跑示例，代码接法见对应 example，能力定位与入口一览见 [能力总览矩阵](capability-matrix.md)：
+
+| 能力 | example | 契约 |
+| --- | --- | --- |
+| HITL 挂起 / 跨实例 Resume | [suspend_resume/](../examples/suspend_resume/) | [suspend-resume.md](architecture/capabilities/suspend-resume.md) |
+| turn 回访重跑（rewind） | [turn_rewind/](../examples/turn_rewind/) | [turn-rewind.md](architecture/capabilities/turn-rewind.md) |
+| 分离式并发 spawn + 联合会诊 | [multi_expert_consult/](../examples/multi_expert_consult/) | [detached-spawn.md](architecture/capabilities/detached-spawn.md) |
+| 并发 fan-out / 声明式编排 | [concurrent_fanout/](../examples/concurrent_fanout/) · [orchestration/](../examples/orchestration/) | [skill-orchestration.md](architecture/capabilities/skill-orchestration.md) |
+| mid-turn 输入注入（steering） | [web_ui/](../examples/web_ui/) | [midturn-input-steering.md](architecture/capabilities/midturn-input-steering.md) |
+| overflow 有界自愈 | [test_turn_overflow_recovery](../tests/loop/test_turn_overflow_recovery.py) | [reactive-compaction-recovery.md](architecture/capabilities/reactive-compaction-recovery.md) |
+| 内核旋钮 K1–K4 | [kernel_knobs/](../examples/kernel_knobs/) · [memory/](../examples/memory/) | [configurable-knobs.md §1.0](configurable-knobs.md) |
+| taifeng 作为 MCP server / client | [mcp_basic/](../examples/mcp_basic/) · [mcp_showcase/](../examples/mcp_showcase/) | [mcp-server.md](architecture/capabilities/mcp-server.md) |
+| OTel 接入 | （见 [overview.md §R3](architecture/overview.md) OTLP 接入段） | [telemetry-otel.md](architecture/capabilities/telemetry-otel.md) |
+| Web 实时可观测面板（参考实现） | [web_ui/](../examples/web_ui/) | — |

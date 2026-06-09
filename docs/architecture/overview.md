@@ -86,7 +86,7 @@ src/taifeng/
 │                         #   + mock + _shared.py（错误分类 / SSE / usage 统一）
 │
 ├── loop/         # §1.2 主循环部分
-│   ├── submission.py     # Submission / Op（9 种）
+│   ├── submission.py     # Submission / Op（12 种，全集见 docs/capability-matrix.md）
 │   ├── event.py          # EventMsg（输出事件总线）
 │   ├── engine.py         # AgentEngine —— 主 actor（注入 entry_skill）
 │   ├── pool.py           # EnginePool —— 多 thread engine 复用 + resume
@@ -264,4 +264,6 @@ native 路径优势：
 | **M4** | 首个生产接入 | 🟡 待开始 —— 宿主业务把既有编排改造为 Taifeng 客户端 |
 | **M5** | Telemetry / 增强 | ✅ 完成 —— OTel sink、SKILL.md 文件 watcher 热更、MCP server、声明式编排均已落地 |
 
-> 当前测试：全量 `PYTHONPATH=src uv run pytest tests/` **610 passed**。能力完善度（P0/P1/P2 清零）见 `hermes-gap-roadmap.md`，内核子系统进度（K1–K4 已落地、K5 待补）见 `kernel-gap-analysis.md`。
+> 当前测试：全量 `PYTHONPATH=src uv run pytest tests/` **759 passed**。能力完善度（P0/P1/P2 清零）见 `hermes-gap-roadmap.md`，内核子系统进度（K1–K4 已落地、K5 待补）见 `kernel-gap-analysis.md`。
+>
+> **业务方接入先看 [`docs/capability-matrix.md`](../capability-matrix.md)**——能力总览矩阵（能做什么 / 落地状态 / 入口 API / 示例 / 契约一表打尽）。
