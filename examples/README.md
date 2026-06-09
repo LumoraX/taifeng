@@ -101,3 +101,19 @@
 | [mcp_hitl/](mcp_hitl/) | MCP 工具调用走 permission gate |
 | [suspend_resume/](suspend_resume/) | 表单采集型 HITL 挂起 → 释放实例 → 跨实例重建 → Resume 续跑（R5 头条故事）|
 | [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）；**含两个 detached 交互 demo**：`multi_expert_consult`（并发多专家 + 错峰 HITL + 联合会诊）和 `turn_rewind`（节点回访 + re_reason / retry_tool 重跑）。无 key 自动化 smoke：`PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py` |
+
+### 编排 / 并发范式 + 懒加载（skill-as-context）
+
+| 目录 | 演示内容 | 需要 key |
+| --- | --- | --- |
+| [read_skill_lazy/](read_skill_lazy/) | `read_skill` 懒加载：子 skill 列表只给 id+description，LLM 按需拉 body（skill-as-context 范式核心，cache 友好） | 否（Mock） |
+| [orchestration/](orchestration/) | 声明式编排三原语 parallel / serial / when（执行器不采样 LLM，确定性跑） | 否（Mock） |
+| [concurrent_fanout/](concurrent_fanout/) | LLM 在一条消息里 fan-out 多个 `call_skill` 批量同步并发收齐 | 否（Mock） |
+| [step_pipeline/](step_pipeline/) | 业务层确定性步级编排（与自治链互为两种范式，见目录内 README） | 否（Mock） |
+| [dual_track/](dual_track/) | 同一批核心步骤 skill 既走自治链、又走业务编排步级 retry（wrapper 双轨，见目录内 README） | **是** |
+
+> **三种并发姿态对照**：`concurrent_fanout`（批量同步收齐）↔ `multi_expert_consult`（detached 异步 + join-barrier）↔ `step_pipeline`（业务确定性编排）。
+
+### skill 包（无独立运行脚本，被其他 demo / 测试复用）
+
+`compression_showcase/skills`（压缩场景 skill 包，被 [real_llm/capability_matrix.py](real_llm/capability_matrix.py) 压缩场景 + `tests/context/` 复用）、`form_hitl/skills`（纯提示型 HITL 表单 skill 包，被 web_ui 复用）。这两个目录**只含 skills/**，无 demo 入口脚本。
