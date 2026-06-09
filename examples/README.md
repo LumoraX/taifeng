@@ -61,6 +61,7 @@
 | [real_llm/with_hooks.py](real_llm/with_hooks.py) | PreToolUse hook 真实拦截 + permission gate |
 | [real_llm/kernel_knobs.py](real_llm/kernel_knobs.py) | 内核旋钮 K1–K4 在真实 token 流下成立（K2 OOM 用真实 usage 触顶 + K3 memory 钩子真触发） |
 | [real_llm/capability_matrix.py](real_llm/capability_matrix.py) | **能力矩阵** —— 10 个能力场景逐个真实 LLM 跑测，输出成败矩阵 + R3 可观测完整性审计（所有事件 kind 是否都有专用渲染） |
+| [real_llm/nested_spawn_hitl.py](real_llm/nested_spawn_hitl.py) | **嵌套 spawn 错峰 HITL 续跑** 真实 LLM 验证：专科 call_skill 子 skill → 子 skill request_user_input 嵌套挂起（CHILD_SKILL）→ Resume → `resume_spawn_nested` 续跑链跑到终态（补 capability_matrix 不覆盖的 spawn+挂起+续跑盲区） |
 
 运行前：`export LLM_BOOTSTRAP_PROVIDER=openai LLM_BOOTSTRAP_API_KEY=sk-...`
 运行：`PYTHONPATH=src uv run python examples/real_llm/<file>.py`
