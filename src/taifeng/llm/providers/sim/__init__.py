@@ -24,10 +24,18 @@ from taifeng.llm.providers.sim.script import (
     SimScriptExhausted,
     SimTurn,
 )
+from taifeng.llm.providers.sim.server import (
+    RecordedRequest,
+    RequestLedger,
+    SimServerState,
+)
 
 __all__ = [
+    "RecordedRequest",
     "RequestContractValidator",
+    "RequestLedger",
     "SimContractViolation",
+    "SimServerState",
     "SimExpect",
     "SimFault",
     "SimFinish",
