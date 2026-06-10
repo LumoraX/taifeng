@@ -136,7 +136,7 @@ hermes `agent/memory_provider.py` 已证明它**可以 R1-clean**：一个纯协
 | `reactive-compaction-recovery` | A1 ContextOverflow → 强制压缩 + 单次重采样自愈（替代硬失败丢 turn） | P0 | ✅ **已落地**（`force_compress` + 有界自愈 + `ProviderRetry`；`tests/loop/test_turn_overflow_recovery.py` 全绿） |
 | `midturn-input-steering` | B1 运行中 turn 不打断地注入用户输入（codex `inject.rs`/`input_queue.rs`） | P0 | ✅ **已落地**（`InjectUserInput` Op + `pending_input` 共享队列 + `_drain_pending_input` 迭代边界排空 + `UserInputInjected`；`tests/loop/test_midturn_steering.py` 全绿。B1 是 D1 的 seam 底座） |
 | `compaction-surgical-trim` | A2 cache-TTL soft/hard 剪枝 + A3 tool-result 去重（handoff 之外更便宜一档） | P1 | ✅ **已落地**（`SurgicalTrimStrategy` 三 pass + `CompressionResult.detail` 透传；`tests/context/test_surgical_trim.py` 17 用例全绿） |
-| `turn-resource-guards` | C1 denial 断路器（codex `guardian`）+ C2 IterationBudget 分层/refund（hermes） | P1 | 📋 proposal |
+| `turn-resource-guards` | C1 denial 断路器（codex `guardian`）+ C2 IterationBudget 分层/refund（hermes） | P1 | ✅ **已落地**（`DenialBreaker` 单次断路 + `IterationBudget` 子派生独立 + `refunds_iteration`；单元 11 + e2e 3 全绿，行为等价由全量回归守护） |
 | `peer-mailbox-messaging` | D1 活体 agent 间 mailbox + 唤醒空闲 + wait-peer（codex `multi_agents_v2`） | P1 | 📋 proposal（依赖 B1） |
 | `postcompact-state-reinjection` | E1 压缩后 pinned 状态重注入钩子（hermes todo 穿越压缩） | P1 | 📋 proposal |
 

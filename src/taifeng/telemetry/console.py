@@ -51,6 +51,8 @@ _KIND_TAG = {
     "permission_prompt_timeout": ("perm", _Colors.RED, "⏱"),
     "skill_dispatch_hook_denied": ("hook", _Colors.RED, "✗"),
     "skill_dispatch_permission_denied": ("perm", _Colors.RED, "✗"),
+    # turn-resource-guards：连续拒绝断路器触发（红色 —— turn 提前终止）
+    "denial_circuit_open": ("perm", _Colors.RED, "⊘"),
     "turn_completed": ("turn", _Colors.GREEN, "✓"),
     "turn_failed": ("turn", _Colors.RED, "✗"),
     # turn_suspended 是独立终结态(挂起等待 Resume)——黄色 ⏸ 与完成/失败区分

@@ -72,6 +72,7 @@ MsgKind = Literal[
     "spawn_cancelled",
     "join_barrier_registered",
     "join_barrier_fired",
+    "denial_circuit_open",
 ]
 
 
@@ -159,6 +160,16 @@ class ResourceLimitExceeded(_Msg):
 
     kind: Literal["resource_limit_exceeded"] = "resource_limit_exceeded"
     """data = {"limit_kind": str, "used": int, "limit": int, "scope": str}"""
+
+
+class DenialCircuitOpen(_Msg):
+    """turn 内 permission/hook 连续拒绝越阈值 → 断路器触发，turn 提前终止。
+
+    data = {"consecutive": int, "recent": int, "window_size": int,
+            "last_denied_target": str}（target 仅名字，不带 args 正文）
+    """
+
+    kind: Literal["denial_circuit_open"] = "denial_circuit_open"
 
 
 class CompactionStarted(_Msg):
@@ -590,6 +601,7 @@ Msg = Union[
     SkillReturned,
     SkillSpawnRejected,
     ResourceLimitExceeded,
+    DenialCircuitOpen,
     CompactionStarted,
     CompactionCompleted,
     CompactionDegradationWarning,

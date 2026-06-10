@@ -540,6 +540,15 @@ join-barrier（全终态触发）：
 
 结论：HITL 等待期不消耗并发额度，可支持大量错峰 HITL 并发场景。
 
+### 资源护栏的另两条正交维（turn-resource-guards）
+
+K1（广度）/ K2（token）之外，turn 级还有两条 opt-in 护栏（默认零变化）：
+
+- **denial 断路器**：`denial_breaker_config`（`DenialBreakerConfig{max_consecutive_denials, max_recent_denials, window_size}`）注入后，TurnRunner 每 turn 新建 `DenialBreaker`，在工具配对回填处统一观察 `ToolResult.data["reason"] ∈ {hook_denied, permission_denied}` 计数（成功重置 consecutive）；越阈值 emit `denial_circuit_open` **恰好一次** + 迭代边界以同名 `end_reason` 提前终止（当轮 fc/output 已配对落史，无孤儿）。防「被拒后在 max_iterations 内空转重试」。
+- **迭代预算分层**：裸计数器已抽成 `IterationBudget`（consume/refund/child）。`run_sub_skill` 派生子 turn 传 `budget.child()` —— 子独立预算、不回写父（父子总和可超父 cap，hermes 对标的有意语义；全局硬顶用 K2）。`ToolSpec.refunds_iteration=True` 的工具成功轮 `refund(1)` 不耗外层步数（spec 静态声明，LLM 不可触发；内核不为既有工具默认开启）。
+
+完整契约见 [`capabilities/turn-resource-guards.md`](capabilities/turn-resource-guards.md)。
+
 ## mid-turn steering：运行中 turn 注入用户输入（midturn-input-steering 契约）
 
 `UserMessage` 经 `asyncio.create_task(self._run_turn_for(...))` 派发 —— turn 跑在独立 task，**不阻塞 Op 主循环**。据此支持「运行中 turn 不打断地插话」：
@@ -558,7 +567,7 @@ join-barrier（全终态触发）：
 
 | end_reason | 含义 | 后续 |
 | --- | --- | --- |
-| `completed` | 正常结束（含 max_iterations / resource_limit 等收尾） | — |
+| `completed` | 正常结束（含 max_iterations / resource_limit / denial_circuit_open 等护栏收尾） | — |
 | `cancelled` | `CancelTurn` 中止 | — |
 | `error` | 未捕获异常 / 确定性 LLMError 硬失败 | TurnFailed 配方 |
 | **`suspended`** | turn 中途挂起（人类输入类 / 系统态），实例可释放 | 业务侧凭 `thread_id` 提交 `Resume` 续跑 |

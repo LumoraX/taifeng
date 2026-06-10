@@ -71,6 +71,10 @@ class ToolCallRuntime:
         self._registry = registry
         self._rwlock = _RwLock()
 
+    def spec_for(self, name: str) -> ToolSpec | None:
+        """按名取注册的 ToolSpec（turn 层读 refunds_iteration 等静态声明用）。"""
+        return self._registry.get(name)
+
     async def dispatch(
         self,
         *,

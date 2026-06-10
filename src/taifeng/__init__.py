@@ -89,7 +89,9 @@ from taifeng.loop import (
     UpdateInstructions,
     UserMessage,
 )
+from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.engine import AgentEngine
+from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.pool import EnginePool
 from taifeng.loop.submission import Resume
 from taifeng.loop.turn import TurnOutcome, TurnRunner
@@ -153,6 +155,9 @@ __all__ = [
     "CompressionOrchestrator",
     "CompressionResult",
     "CompressionStrategy",
+    "DenialBreaker",
+    "DenialBreakerConfig",
+    "IterationBudget",
     "ContextBudget",
     "DirectoryError",
     "DispatchPolicy",

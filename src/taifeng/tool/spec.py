@@ -73,6 +73,13 @@ class ToolSpec:
     timeout_seconds: float = 60.0
     """单次执行超时。超时后 cancel 触发 + 抛 TimeoutError。"""
 
+    refunds_iteration: bool = False
+    """True → 该工具调用**成功**后向外层 turn 迭代预算退还一步（不耗 max_iterations）。
+
+    用于「内部批量调用」类内置工具（对标 hermes execute_code 的 refund 语义）。
+    仅 spec 静态声明 + 内核 dispatch 路径生效，不暴露为 LLM 可触发语义；
+    失败轮照常计费。本内核不为任何既有内置工具默认开启（使用方决策）。"""
+
     def to_ref(self) -> ToolSpecRef:
         return ToolSpecRef(
             name=self.name,

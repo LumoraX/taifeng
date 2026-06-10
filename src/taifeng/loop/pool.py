@@ -137,6 +137,7 @@ class EnginePool:
         dispatch_policy: DispatchPolicy | None = None,
         hooks: Any = None,
         max_iterations: int | None = None,
+        denial_breaker_config: Any = None,
         max_parallel_tool_calls: int = 1,
         instruction_layers: list[Any] | None = None,
         hook_runner: HookRunner | None = None,
@@ -162,6 +163,8 @@ class EnginePool:
         self._dispatch_policy = dispatch_policy or DispatchPolicy()
         self._hooks = hooks
         self._max_iterations = max_iterations
+        # turn-resource-guards：denial 断路器配置，透传到每个 AgentEngine。
+        self._denial_breaker_config = denial_breaker_config
         # 单 turn 内一批 tool call 的最大并发；默认 1=串行。透传到 AgentEngine。
         self._max_parallel_tool_calls = max_parallel_tool_calls
         # Phase 0: instruction_layers 仅占位存储 + 透传到 AgentEngine
@@ -209,6 +212,7 @@ class EnginePool:
         dispatch_policy: DispatchPolicy | None = None,
         hooks: Any = None,
         max_iterations: int | None = None,
+        denial_breaker_config: Any = None,
         max_parallel_tool_calls: int = 1,
         auto_watch_skills: bool = False,
         watch_poll_interval_seconds: float = 1.0,
@@ -297,6 +301,7 @@ class EnginePool:
             dispatch_policy=dispatch_policy,
             hooks=hooks,
             max_iterations=max_iterations,
+            denial_breaker_config=denial_breaker_config,
             max_parallel_tool_calls=max_parallel_tool_calls,
             instruction_layers=instruction_layers,
             hook_runner=hook_runner,
@@ -423,6 +428,7 @@ class EnginePool:
                 budget=self._budget,
                 hooks=self._hooks,
                 max_iterations=self._max_iterations,
+                denial_breaker_config=self._denial_breaker_config,
                 max_parallel_tool_calls=self._max_parallel_tool_calls,
                 instruction_layers=self._instruction_layers,
                 script_executors=self._script_executors,

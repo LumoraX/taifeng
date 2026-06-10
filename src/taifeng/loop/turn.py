@@ -41,6 +41,8 @@ from taifeng.llm.errors import (
 from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.cancellation import CancellationToken
+from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
+from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.event import (
     AssistantReasoning,
     AssistantText,
@@ -54,6 +56,7 @@ from taifeng.loop.event import (
     PreCompactHookSkipped,
     ProviderRetry,
     ResourceLimitExceeded,
+    DenialCircuitOpen,
     SkillDispatched,
     SkillReturned,
     RewindCheckpointRecorded,
@@ -200,6 +203,12 @@ class TurnRunner:
     cache_anchor_index: int = -1
     # 单 turn 内最大循环（LLM ↔ tool 配对次数）；超过强制 max_iterations 结束
     max_iterations: int = DEFAULT_MAX_INNER_ITERATIONS
+    # turn-resource-guards：迭代预算（None → run() 按 max_iterations 自建）。
+    # run_sub_skill 派生子 turn 时传 budget.child()（独立实例，不回写父）。
+    iteration_budget: IterationBudget | None = None
+    # turn-resource-guards：denial 断路器配置（None=不启用，零行为变化）。
+    # 实例为 turn 级生命周期（run() 新建、turn 结束即弃），见 denial_breaker.py。
+    denial_breaker_config: DenialBreakerConfig | None = None
     # 单 turn 内一批 tool call 的最大并发数；默认 1 = 严格串行（等同历史行为，零回归）
     max_parallel_tool_calls: int = 1
     # turn-级累积 usage
@@ -276,6 +285,8 @@ class TurnRunner:
         )
         self._now_factory = self.now_factory or (lambda: int(_time.time()))
         self._current_iteration = 0
+        # DenialBreaker 实例在 run() 起点按 config 新建（turn 级生命周期）
+        self._denial_breaker: DenialBreaker | None = None
 
     async def _emit(self, msg) -> None:
         try:
@@ -384,7 +395,15 @@ class TurnRunner:
         writeback_baseline = len(self.history_buffer)
         await self._prefetch_memory()
 
+        # turn-resource-guards：迭代预算（默认 cap=max_iterations，行为等价）+
+        # denial 断路器（config=None 时不启用，零变化）
+        if self.iteration_budget is None:
+            self.iteration_budget = IterationBudget(cap=self.max_iterations)
+        iter_budget = self.iteration_budget
+        if self.denial_breaker_config is not None:
+            self._denial_breaker = DenialBreaker(self.denial_breaker_config)
         iterations = 0
+        rounds = 0  # 圈序号（单调，refund 不回退）—— 供挂起/rewind 节点定位
         final_text = ""
         end_reason = "completed"
         error_msg: str | None = None
@@ -403,11 +422,16 @@ class TurnRunner:
                 # turn-rewind retry_tool：先补跑被保留的悬空 call,再进采样循环。
                 if self._seed_pending_call_id is not None:
                     await self._complete_seed_call(self._seed_pending_call_id)
-                while iterations < self.max_iterations:
+                while True:
                     self.cancel.raise_if_cancelled()
-                    iterations += 1
+                    if not iter_budget.consume():
+                        end_reason = "max_iterations"
+                        break
+                    rounds += 1
+                    # 报告值 = 预算净消费（refund 后回落）；无 refund 时与 rounds 恒等
+                    iterations = iter_budget.spent
                     # 同步当前迭代序号 → 挂起时落 SuspensionRecord.turn_index
-                    self._current_iteration = iterations
+                    self._current_iteration = rounds
 
                     # B1 midturn-input-steering：迭代边界排空注入队列（成对 fc/output
                     # 已闭合的安全点），把运行中收到的用户输入并入 history 再采样。
@@ -417,7 +441,7 @@ class TurnRunner:
                     await self._maybe_compress(phase="pre_turn")
 
                     # 单轮采样
-                    round_text, had_tool_calls = await self._sample_once(iterations)
+                    round_text, had_tool_calls = await self._sample_once(rounds)
                     if round_text:
                         final_text += round_text
 
@@ -434,6 +458,9 @@ class TurnRunner:
                         end_reason = "resource_limit_exceeded"
                         break
 
+                    # refund 可能在本圈 dispatch 后发生 → 报告值取净消费
+                    iterations = iter_budget.spent
+
                     if not had_tool_calls:
                         # 无后续 tool call → 本 turn 自然终止。空内容也视为正常终止：
                         # 决策——只有 LLM **显式报错**（如 provider 上报的 content_filter）
@@ -442,10 +469,14 @@ class TurnRunner:
                         end_reason = "completed"
                         break
 
+                    # turn-resource-guards：断路器闩锁已置（本圈 deny 记账触发）→
+                    # 迭代边界提前终止——当轮 fc/output 已配对落史，无孤儿（K5 一致）。
+                    if self._denial_breaker is not None and self._denial_breaker.opened:
+                        end_reason = "denial_circuit_open"
+                        break
+
                     # mid-turn 压缩判断
                     await self._maybe_compress(phase="mid_turn")
-                else:
-                    end_reason = "max_iterations"
                 # B1：turn 收尾补一次 drain —— 最后一轮采样期间晚到、未及在迭代起始
                 # 消费的注入也要落历史（R5 不丢用户输入；它们没影响本 turn 后续采样，
                 # 但已并入 history、下个 turn 可见）。仅正常退出路径；异常路径走 except。
@@ -890,11 +921,37 @@ class TurnRunner:
             )
             self.history_buffer.append(fco_item)
             await self.store.append(fco_item)
+            # turn-resource-guards：单点观察 deny/success 记账 + refunds_iteration 退还
+            await self._note_tool_outcome(req.name, outcome.result)
 
         if suspended_pending:
             # 整批挂起 pending 上抛给 run()/run_turn 聚合落一条 SuspensionRecord。
             raise _BatchSuspend(tuple(suspended_pending))
         return assistant_text, True
+
+    async def _note_tool_outcome(self, name: str, result: Any) -> None:
+        """配对回填后的单点记账（turn-resource-guards）。
+
+        - DenialBreaker：``ToolResult.data["reason"] ∈ {hook_denied,
+          permission_denied}`` 计 deny（含 HITL ask 超时产生的 deny —— 它就是
+          deny 结果）；成功结果重置 consecutive。其他 error 中性（不计任何一边）。
+          恰好越阈值那次 emit ``denial_circuit_open``（单次闩锁）。
+        - refund：spec 静态声明 ``refunds_iteration`` 且本次**成功** → 外层迭代
+          预算退还一步（失败轮照常计费；不暴露为 LLM 可触发语义）。
+        """
+        deny_reason = result.data.get("reason") if result.is_error else None
+        if self._denial_breaker is not None:
+            if deny_reason in ("hook_denied", "permission_denied"):
+                if self._denial_breaker.record_denial(name):
+                    await self._emit(
+                        DenialCircuitOpen(data=self._denial_breaker.snapshot())
+                    )
+            elif not result.is_error:
+                self._denial_breaker.record_success()
+        if not result.is_error and self.iteration_budget is not None:
+            spec = self.tool_runtime.spec_for(name)
+            if spec is not None and spec.refunds_iteration:
+                self.iteration_budget.refund(1)
 
     def _build_tool_context(self, call_id: str, iteration: int) -> ToolContext:
         """为单条 tool call 构造 ToolContext（独立 cancel.child）。
@@ -1336,6 +1393,14 @@ class TurnRunner:
             turn_index=self.turn_index,
             script_executors=self.script_executors,
             max_iterations=self.max_iterations,
+            # turn-resource-guards：子 turn 独立迭代预算（默认 cap=父初始 cap，
+            # 不回写父——hermes 对标的有意语义）+ 断路器配置继承（子自建实例）
+            iteration_budget=(
+                self.iteration_budget.child()
+                if self.iteration_budget is not None
+                else None
+            ),
+            denial_breaker_config=self.denial_breaker_config,
             max_parallel_tool_calls=self.max_parallel_tool_calls,
             # G4a: 子 turn 继承同一运行时能力快照
             capabilities=self.capabilities,

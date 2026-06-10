@@ -29,6 +29,7 @@
 | [detached-spawn](detached-spawn.md) | 分离式并发 spawn + join-barrier：`spawn_skill`（立即返回句柄、不阻塞）、独立 child thread 各自独立 HITL（staggered Resume 路由）、`JoinBarrier`（全终态自动聚合）、engine keepalive 引用计数、`kill_spawn` 隔离取消、K1 slot 仅计 running、冷恢复 rebuild、7 类事件、4 个 LLM 工具 |
 | [reactive-compaction-recovery](reactive-compaction-recovery.md) | overflow 有界自愈：`force_compress`（绕 should_trigger）、`_maybe_compress(phase=overflow, bypass_trigger)`、`_overflow_recovered` 有界一次、`ProviderRetry` 事件、无压缩器/压缩失败退化、R2 cache-aware / R4 取消 |
 | [compaction-surgical-trim](compaction-surgical-trim.md) | 手术刀档就地剪枝：dedup → soft-trim → hard-clear 三 pass、只改写 output payload 永不删条（配对安全）、cache-TTL 对齐触发、glob deny 优先、`CompressionResult.detail` 明细透传、幂等占位符守卫 |
+| [turn-resource-guards](turn-resource-guards.md) | turn 级资源护栏：`DenialBreaker`（连续/滑窗 deny 单次断路、`denial_circuit_open`）、`IterationBudget`（consume/refund/child 分层派生，父子独立）、`ToolSpec.refunds_iteration`、单点记账 `_note_tool_outcome` |
 | [midturn-input-steering](midturn-input-steering.md) | 运行中 turn 注入用户输入：`InjectUserInput` Op、`_PendingTurn.pending_input` 共享队列、`_drain_pending_input` 迭代边界排空、无活跃 turn 退化（codex inject_no_new_turn）、`UserInputInjected{delivered}` 事件、tool 配对保护 / R4 取消守卫 |
 
 ### 持久化（对应 [conversation.md](../conversation.md)）
