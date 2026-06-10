@@ -62,6 +62,8 @@ _KIND_TAG = {
     "turn_failed": ("turn", _Colors.RED, "✗"),
     # turn_suspended 是独立终结态(挂起等待 Resume)——黄色 ⏸ 与完成/失败区分
     "turn_suspended": ("turn", _Colors.YELLOW, "⏸"),
+    # turn-rewind 回访节点录制（R3 审计补：此前落 `?` 兜底渲染）
+    "rewind_checkpoint_recorded": ("rwnd", _Colors.GRAY, "⊙"),
     "engine_log": ("eng ", _Colors.GRAY, "·"),
     "shutdown": ("eng ", _Colors.GRAY, "⏹"),
 }

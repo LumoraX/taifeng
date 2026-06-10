@@ -27,9 +27,11 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 # examples/ 进 sys.path，import 共享 bootstrap
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from _drivers import DRIVERS  # noqa: E402
 from _ledger import LedgerWriter, R3Audit, ScenarioRecord  # noqa: E402
 from _provider_bootstrap import (  # noqa: E402
     ProviderBootstrapError,
@@ -51,6 +53,14 @@ from taifeng.skill.scripts.python import PythonScriptExecutor  # noqa: E402
 from taifeng.skill.scripts.shell import ShellScriptExecutor  # noqa: E402
 from taifeng.telemetry.console import _KIND_TAG, attach_console_sink  # noqa: E402
 from taifeng.telemetry.jsonl_sink import attach_jsonl_sink  # noqa: E402
+from taifeng.tool.builtins import (  # noqa: E402
+    make_await_skills_tool,
+    make_join_skill_tool,
+    make_kill_skill_tool,
+    make_request_user_input_tool,
+    make_send_message_tool,
+    make_spawn_skill_tool,
+)
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent
 
@@ -73,7 +83,20 @@ class Scenario:
     expect: set[str]              # 期望出现的关键事件 kind（判定能力是否真触发）
     sliding: bool = False         # 挂 SlidingWindow 压缩器
     ctx_window: int | None = None  # 覆盖 context_window（小窗逼出压缩）
+    driver: str | None = None      # 多步编排剧本（_drivers.DRIVERS 键；None=单 prompt）
+    tools: tuple[str, ...] = ()    # 需注册的 extra_tools 工厂名
+    pool_kwargs: dict[str, Any] = field(default_factory=dict)  # EnginePool.create 追加参数
 
+
+# Scenario.tools → extra_tools 工厂映射
+TOOL_FACTORIES = {
+    "request_user_input": make_request_user_input_tool,
+    "spawn_skill": make_spawn_skill_tool,
+    "await_skills": make_await_skills_tool,
+    "join_skill": make_join_skill_tool,
+    "kill_skill": make_kill_skill_tool,
+    "send_message": make_send_message_tool,
+}
 
 # 能力矩阵 —— skill 包与 web_ui DEMOS 同源；prompt 取代表性输入
 SCENARIOS: list[Scenario] = [
@@ -117,6 +140,38 @@ SCENARIOS: list[Scenario] = [
              "帮我规划 9 月 12-15 日从北京到巴黎的 3 天旅行。",
              capability="三路 fan-out（航班/酒店/活动）+ 综合",
              expect={"skill_dispatched", "turn_completed"}),
+    # ── P0 高发链路（driver 多步编排）──
+    Scenario("suspend_resume", "real_llm/skills_extra/suspend_resume", "intake-assistant",
+             "",  # driver 自行提交
+             capability="HITL 挂起 → Resume 续跑（R5）",
+             expect={"turn_suspended", "suspension_resolved", "turn_completed"},
+             driver="suspend_resume", tools=("request_user_input",)),
+    Scenario("turn_rewind", "turn_rewind", "orchestrator",
+             "",
+             capability="turn 回访重跑（Rewind re_reason）",
+             expect={"rewind_checkpoint_recorded", "turn_completed"},
+             driver="turn_rewind"),
+    Scenario("spawn_join", "multi_expert_consult", "orchestrator",
+             "",
+             capability="分离式并发 spawn + 错峰 HITL + join-barrier 聚合",
+             expect={"spawn_started", "spawn_suspended", "spawn_completed",
+                     "join_barrier_fired"},
+             driver="spawn_join",
+             tools=("spawn_skill", "await_skills", "join_skill", "kill_skill",
+                    "request_user_input")),
+    Scenario("peer_messaging", "real_llm/skills_extra/peer_messaging",
+             "research-coordinator",
+             "",
+             capability="谱系 peer 消息投递（spawn + send_message）",
+             expect={"spawn_started", "peer_message_sent", "spawn_completed",
+                     "turn_completed"},
+             driver="peer_messaging",
+             tools=("spawn_skill", "send_message", "await_skills")),
+    Scenario("kernel_knobs", "real_llm/skills_extra/kernel_knobs", "budget-analyst",
+             "请按口径分析：某部门年度预算 1200 万元，Q3 实际支出 410 万元，是否超支？",
+             capability="K2 会话 token 天花板真实触发（resource_limit）",
+             expect={"resource_limit_exceeded"},
+             pool_kwargs={"max_session_tokens": 200}),
 ]
 
 
@@ -142,6 +197,7 @@ class Result:
     kinds: Counter = field(default_factory=Counter)
     grants: int = 0
     duration_s: float = 0.0
+    events: list = field(default_factory=list)  # driver 模式的全量 EventMsg（轮询用）
 
 
 async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
@@ -168,11 +224,39 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
         script_executors={"shell": ShellScriptExecutor(),
                           "python": PythonScriptExecutor()},
         permission_policy=policy,
+        extra_tools=[TOOL_FACTORIES[n]() for n in sc.tools],
+        **sc.pool_kwargs,
     )
     engine = await pool.get_or_create(session_id="s", entry_skill_id=sc.entry)
     # 三路采集：console（人读）+ JsonlSink（机读落盘）+ 内存计数
     attach_console_sink(engine, color=False)
     attach_jsonl_sink(engine, logs_dir / f"{sc.demo_id}.jsonl")
+
+    if sc.driver is not None:
+        # driver 模式：subscribe_all 全量采集（spawn 子轨事件不挂在父 submission 上），
+        # 编排剧本轮询 res.events 推进；超时整体兜底
+        async def _collect_all() -> None:
+            async for ev in engine.subscribe_all():
+                res.kinds[ev.msg.kind] += 1
+                res.events.append(ev.msg)
+                if ev.msg.kind == "turn_failed" and not res.error:
+                    res.error = str(ev.msg.data.get("error", ""))[:140]
+
+        collector = asyncio.create_task(_collect_all())
+        try:
+            await asyncio.wait_for(DRIVERS[sc.driver](engine, res), timeout=420.0)
+            await asyncio.sleep(0.2)  # 事件总线 flush
+            res.completed = res.kinds.get("turn_completed", 0) > 0
+            res.failed = res.kinds.get("turn_failed", 0) > 0
+        except TimeoutError as exc:
+            res.error = res.error or f"driver 超时/等待失败: {exc}"
+        finally:
+            collector.cancel()
+            res.grants = prompter.grants
+            res.duration_s = time.monotonic() - started
+            await pool.close()
+            await asyncio.sleep(0.05)
+        return res
 
     sub = await engine.submit(taifeng.UserMessage(text=sc.prompt))
     try:
