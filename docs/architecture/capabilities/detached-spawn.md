@@ -8,8 +8,10 @@
 
 决策记录：[ADR 0015](../../decisions/0015-detached-skill-spawn.md)
 
-实现：
-- `src/taifeng/loop/spawn_driver.py`（`SpawnDriver`：spawn 状态 + 核心逻辑）
+实现（四模块，状态由 `SpawnDriver` 单一持有，子协调器无状态、持 driver 引用，见 spawn-module-structure 契约）：
+- `src/taifeng/loop/spawn_driver.py`（`SpawnDriver`：运行态四表 + 发起/驱动/终态收敛 + 查询/终止/保活 + 公共入口转发器）
+- `src/taifeng/loop/spawn_resume.py`（`SpawnResumeChain`：错峰续跑链——直接挂起核销重跑 / 嵌套挂起下探回填）
+- `src/taifeng/loop/spawn_barrier.py`（`JoinBarrierCoordinator`：join-barrier 登记/重查/触发 + 冷恢复重建）
 - `src/taifeng/loop/spawn_handle.py`（`SpawnHandle`、`SpawnHandleRegistry`、`JoinBarrier`）
 - `src/taifeng/loop/engine.py`（薄转发层：`spawn_skill / set_join_barrier / spawn_status / kill_spawn / has_live_spawns`）
 - `src/taifeng/loop/event.py`（7 类新事件）

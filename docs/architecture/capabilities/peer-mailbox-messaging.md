@@ -4,7 +4,7 @@
 
 同一 engine 谱系内(root thread + 全部 spawn child threads)**活体 agent 间点对点消息**——补齐 actor 通信的最后一块:此前父子只有单向 fork/join(spawn 句柄 + join-barrier),sibling 专家间、child→parent 在运行期**无法互通**。参照 codex `multi_agents_v2`(`MessageDeliveryMode{QueueOnly, TriggerTurn}` / `wait_agent` timeout 强制 / 禁止 TriggerTurn 打 root)。
 
-第三轮对比分析 P1 缺口 D1。实现:`loop/spawn_driver.py`(`deliver_peer_message` / `_wake_peer_turn` / `wait_spawn_terminal` / `_live_runners`)、`loop/engine.py`(薄转发 + `SendToPeer` Op 分支)、`loop/submission.py`(`SendToPeer`)、`tool/builtins/{send_message,wait_peer}.py`、`loop/event.py`(4 事件)。
+第三轮对比分析 P1 缺口 D1。实现:`loop/peer_mailbox.py`(`PeerMailbox`:`deliver_peer_message` / `_wake_peer_turn` / `wait_spawn_terminal`;`_live_runners` 表由 `loop/spawn_driver.py` 的 `SpawnDriver` 单一持有,公共入口经其同名转发器暴露)、`loop/engine.py`(薄转发 + `SendToPeer` Op 分支)、`loop/submission.py`(`SendToPeer`)、`tool/builtins/{send_message,wait_peer}.py`、`loop/event.py`(4 事件)。
 
 ## 数据契约
 

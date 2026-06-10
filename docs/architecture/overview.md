@@ -98,7 +98,10 @@ src/taifeng/
 │   ├── tool_batch.py     # dispatch_batch —— 一批 tool call 三段式并发派发
 │   ├── orchestration_exec.py # 声明式编排执行器（检测到 orchestration 则跳过 LLM 采样）
 │   ├── spawn.py          # K1 SpawnSlotRegistry —— 广度准入（fork-bomb 防护）
-│   ├── spawn_driver.py   # detached spawn 协调 + peer-mailbox（点对点投递/唤醒/wait）
+│   ├── spawn_driver.py   # detached spawn 协调器（状态单一持有 + 发起/驱动/终态收敛 + 查询/终止）
+│   ├── spawn_resume.py   # 挂起 spawn 错峰续跑链（直接核销重跑 / 嵌套下探回填）
+│   ├── spawn_barrier.py  # join-barrier 生命周期（登记/重查/触发聚合）+ 冷恢复重建
+│   ├── peer_mailbox.py   # peer-mailbox：谱系内点对点投递 / TriggerTurn 唤醒 / wait_peer
 │   ├── prompt.py         # build_prompt + history ↔ api messages 转换
 │   └── cancellation.py   # 父子 CancellationToken
 │
