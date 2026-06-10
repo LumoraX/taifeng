@@ -46,6 +46,21 @@ class SuspensionRecord:
         """
         return {p.request_id for p in self.pending}
 
+    @property
+    def expires_at(self) -> int | None:
+        """record 级到期时刻 = created_at + 各 pending ttl 的最小值。
+
+        record 级一次性裁决(与 SuspensionResolver 全量 resume 对齐,杜绝
+        「半个 record 已过期」的部分 resume 违例),故取 min。全部 pending
+        未声明 ttl → None(永不过期,与历史行为一致)。派生属性而非存储字段:
+        真相来源是 pending 的 ttl_seconds(已随 to_item 落盘),冷热一致(R5)。
+
+        Returns:
+            壁钟到期时刻(秒);None = 永不过期。
+        """
+        ttls = [p.ttl_seconds for p in self.pending if p.ttl_seconds is not None]
+        return self.created_at + min(ttls) if ttls else None
+
     def to_item(self) -> ResponseItem:
         """序列化为 suspension ResponseItem（落 JSONL）。
 
@@ -66,6 +81,9 @@ class SuspensionRecord:
                     "payload_schema": p.payload_schema,
                     "related_call_id": p.related_call_id,
                     "detail": p.detail,
+                    # suspension-ttl:随 pending 落盘(真相来源),expires_at 冷热可derive
+                    "ttl_seconds": p.ttl_seconds,
+                    "on_expire": p.on_expire,
                 }
                 for p in self.pending
             ],
@@ -101,6 +119,9 @@ class SuspensionRecord:
                 payload_schema=d.get("payload_schema") or {},
                 related_call_id=d.get("related_call_id"),
                 detail=d.get("detail") or {},
+                # suspension-ttl:旧 JSONL 无这两字段 → 默认 None/abort(永不过期,前向兼容)
+                ttl_seconds=d.get("ttl_seconds"),
+                on_expire=d.get("on_expire") or "abort",
             )
             for d in p["pending"]
         )
