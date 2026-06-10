@@ -27,6 +27,7 @@ from taifeng.context import (
     NullMemoryStore,
     PromptCacheStats,
     SlidingWindowStrategy,
+    SurgicalTrimStrategy,
 )
 from taifeng.conversation import (
     DirectoryError,
@@ -195,6 +196,7 @@ __all__ = [
     "SkillRegistry",
     "SkillSnapshot",
     "SlidingWindowStrategy",
+    "SurgicalTrimStrategy",
     "SqliteThreadDirectory",
     "Submission",
     "SuspendReason",

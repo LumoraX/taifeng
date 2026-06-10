@@ -52,6 +52,10 @@ class CompressionResult:
     """失败原因（成功时为 None）。"""
     quality_warnings: tuple[str, ...] = ()
     """非致命的摘要质量警告（如缺失必备分段）；成功也可能带警告，供 telemetry。"""
+    detail: dict[str, int] = field(default_factory=dict)
+    """策略自报的结构化明细计数（如 surgical_trim 的 deduped / soft_trimmed /
+    hard_cleared）。默认空 dict —— 既有策略零改动兼容；turn 组装
+    ``compaction_completed`` 事件时透传（R3 机读，不编码进 reason 字符串）。"""
 
 
 @runtime_checkable

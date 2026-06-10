@@ -201,8 +201,30 @@ class SlidingWindowStrategy:
     priority = 10                      # 最低优先级
 ```
 
-> 当前 `context/strategies/` **仅导出 `HandoffCompactionStrategy` 与 `SlidingWindowStrategy` 两个策略**。
-> 工具结果超长截断走 `context/truncate.py::truncate_middle`（保头尾 + 省略计数，G6b），不是独立 CompressionStrategy。
+### 3. SurgicalTrimStrategy（手术刀档，A2+A3）
+
+介于「滑窗整条丢弃」与「LLM 摘要」之间的**就地有损剪枝**——全程 LLM-free（这正是「便宜」的来源）。参照 openclaw `pruner.ts`（soft/hard 分级 + cache-TTL 对齐）与 hermes `context_compressor.py`（md5 去重）。
+
+```python
+class SurgicalTrimStrategy:
+    """dedup → soft-trim → hard-clear 三 pass，按 ratio 分级启用。"""
+
+    name = "surgical_trim"
+    priority = 20                      # 推荐最高 —— 最便宜先试，剪不够下一轮自然落 handoff
+```
+
+- **只改写 `function_call_output` 的 payload、永不删条目**：fc/output 配对与条目顺序天然不变（不触发 G1b 配对回滚），resume 重放结构稳定（R5）。工具名经 `call_id` 回溯配对 fc 解析；孤儿 output 视为不可剪（不猜测）。
+- **三 pass**：① 去重（恒启用，`md5[:12]` 反扫保最新，≥ `min_dedup_chars` 才参与）；② soft-trim（`soft_trim_ratio ≤ ratio < hard_clear_ratio`，truncate_middle 头尾截断）；③ hard-clear（`ratio ≥ hard_clear_ratio`，整体换含原始长度的占位符）。占位符前缀（`[duplicate` / `[pruned:`）是幂等守卫——二次 compress 零改写、`reason="nothing_to_trim"`。
+- **窗口（R2）**：常规 = `[cache_anchor_index, len − protect_tail_messages)`；仅 `allow_head_clear=True` 且 pre_turn 时 hard-clear 可越 anchor（跳过开头 system_injection 引导段），越过则如实标 `cache_invalidated=True`。
+- **cache-TTL 对齐触发（opt-in）**：`cache_ttl_seconds` 启用后，距上次成功剪枝不足 ttl 时 `should_trigger` 返回 None——把有损动作对齐到 prompt cache 反正要过期的时刻。时间源 `clock` 注入（默认 `time.monotonic`），自管 `_last_trim_at`，不依赖 `PromptCacheStats`。
+- **glob 选择性**：工具名 `fnmatch` allow/deny（deny 优先），「哪些工具可剪」由业务注入（R1）。
+- **明细透出（R3）**：`CompressionResult.detail = {"deduped", "soft_trimmed", "hard_cleared"}`，turn 组装 `compaction_completed` 事件时透传（既有策略为空 dict）。
+- **取消（R4）**：pass 边界 `await asyncio.sleep(0)` 协作检查点（`CompressionContext` 不携带 CancellationToken、context/ 不反向依赖 loop/——外部 task 取消在边界生效）。
+
+契约：[capabilities/compaction-surgical-trim.md](capabilities/compaction-surgical-trim.md)。demo：`examples/compression_showcase/surgical_demo.py`（mock 可跑）。
+
+> `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim 三档谱系**。
+> 单条工具结果的超长截断仍走 `context/truncate.py::truncate_middle`（G6b，被 surgical soft-trim 复用），不是独立 CompressionStrategy。
 
 ## tool_use / tool_result 边界保护
 

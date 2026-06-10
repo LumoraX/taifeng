@@ -1152,6 +1152,7 @@ class TurnRunner:
                             "cache_invalidated": False,
                             "removed_count": 0,
                             "reason": "integrity_rolled_back",
+                            "detail": {},
                         }
                     )
                 )
@@ -1200,6 +1201,9 @@ class TurnRunner:
                     "cache_invalidated": result.cache_invalidated,
                     "removed_count": result.removed_item_count,
                     "reason": result.reason,
+                    # 策略自报明细（如 surgical_trim 的 deduped/soft/hard 计数）；
+                    # 既有策略为空 dict —— R3 机读透传，不编码进 reason
+                    "detail": result.detail,
                 }
             )
         )

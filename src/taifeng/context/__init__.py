@@ -21,7 +21,11 @@ from taifeng.context.compressor import (
 )
 from taifeng.context.injection import InitialContextInjection
 from taifeng.context.memory import MemoryStore, NullMemoryStore
-from taifeng.context.strategies import HandoffCompactionStrategy, SlidingWindowStrategy
+from taifeng.context.strategies import (
+    HandoffCompactionStrategy,
+    SlidingWindowStrategy,
+    SurgicalTrimStrategy,
+)
 
 __all__ = [
     "CacheBreakEvent",
@@ -39,6 +43,7 @@ __all__ = [
     "InitialContextInjection",
     "PromptCacheStats",
     "SlidingWindowStrategy",
+    "SurgicalTrimStrategy",
     "estimate_history_tokens",
     "estimate_item_tokens",
     "estimate_text_tokens",

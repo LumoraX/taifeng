@@ -1,9 +1,14 @@
-"""压缩策略实现 —— HandoffCompactionStrategy / SlidingWindowStrategy。
+"""压缩策略实现 —— Handoff / Sliding / SurgicalTrim 三档谱系。
 
 设计文档：docs/architecture/context-compression.md §内置策略
 """
 
 from taifeng.context.strategies.handoff import HandoffCompactionStrategy
 from taifeng.context.strategies.sliding import SlidingWindowStrategy
+from taifeng.context.strategies.surgical_trim import SurgicalTrimStrategy
 
-__all__ = ["HandoffCompactionStrategy", "SlidingWindowStrategy"]
+__all__ = [
+    "HandoffCompactionStrategy",
+    "SlidingWindowStrategy",
+    "SurgicalTrimStrategy",
+]

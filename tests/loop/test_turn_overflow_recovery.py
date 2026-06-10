@@ -237,3 +237,45 @@ async def test_overflow_recovery_is_cache_aware(skills_dir: Path) -> None:
     completed_evs = [m for m in events if m.kind == "compaction_completed"]
     assert completed_evs
     assert all(m.data.get("cache_invalidated") is False for m in completed_evs)
+
+
+@pytest.mark.asyncio
+async def test_compaction_completed_carries_strategy_detail(skills_dir: Path) -> None:
+    """3.1 接线：surgical_trim 的 detail 计数经 compaction_completed.data 透传（R3）。
+
+    overflow 自愈 force_compress 走 SurgicalTrimStrategy（最高优先级唯一策略）：
+    history 含两份相同大 tool output → dedup 1 条 + hard-clear 1 条，事件 detail 可机读。
+    """
+    from taifeng.context.strategies.surgical_trim import SurgicalTrimStrategy
+    from taifeng.conversation.models import function_call, function_call_output
+
+    events: list = []
+    big = "Z" * 4_000
+    history = [user_message("分析", thread_id="t")]
+    for cid in ("c1", "c2"):
+        history.append(function_call(cid, "read_file", "{}", thread_id="t"))
+        history.append(
+            function_call_output(call_id=cid, output=big, thread_id="t")
+        )
+    history += [user_message(f"pad{i}", thread_id="t") for i in range(4)]
+
+    # hard 档必触发（默认 budget=200k 下 ratio 由 estimate 决定 → 直接调低阈值）
+    strat = SurgicalTrimStrategy(
+        soft_trim_ratio=0.0, hard_clear_ratio=0.0, min_dedup_chars=64,
+        protect_tail_messages=2,
+    )
+    client = _OverflowThenOkClient(fail_times=1)
+    runner = await _make_runner(
+        skills_dir,
+        model_client=client,
+        compressors=CompressionOrchestrator([strat]),
+        history=history,
+        events=events,
+    )
+    outcome = await runner.run()
+
+    assert outcome.success
+    done = [m for m in events if m.kind == "compaction_completed"]
+    assert done, "未发出 compaction_completed"
+    detail = done[0].data.get("detail")
+    assert detail == {"deduped": 1, "soft_trimmed": 0, "hard_cleared": 1}

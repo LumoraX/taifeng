@@ -11,7 +11,7 @@
 | `threads_dir` | (必填) | JSONL 持久化目录 | — |
 | `model_client` | (必填) | `ModelClient` 实现（OpenAICompat / Anthropic / Gemini / DeepSeek / LiteLLM / Mock 任选其一，详见 §1.3） | codex `ModelClient` |
 | `extra_tools` | `[]` | 额外注册的 `ToolSpec` | claw-code custom tools |
-| `compressors` | `[Handoff, Sliding]` | `CompressionStrategy` 列表；空列表禁用压缩 | codex `CompactionConfig` |
+| `compressors` | `[Handoff, Sliding]` | `CompressionStrategy` 列表；空列表禁用压缩。内置三档谱系：`SurgicalTrimStrategy`（手术刀就地剪枝，推荐最高优先级，参数见 [capabilities/compaction-surgical-trim.md](architecture/capabilities/compaction-surgical-trim.md)）/ `HandoffCompactionStrategy`（LLM 摘要）/ `SlidingWindowStrategy`（滑窗兜底） | codex `CompactionConfig` |
 | `budget` | `ContextBudget()` 默认 200k window / 0.85 soft / 0.95 hard / 4 tail | 整体 token 预算 | claw-code `auto_compaction_input_tokens_threshold` |
 | `dispatch_policy` | `DispatchPolicy()` | call_skill 派发策略 | — |
 | `hooks` | `None` | `HookRunner`（PreToolUse/PostToolUse/PreCompact） | claw-code hooks |
