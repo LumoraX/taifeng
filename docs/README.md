@@ -9,6 +9,7 @@
 1. [**能力总览矩阵 capability-matrix.md**](capability-matrix.md) —— 能做什么 / 落地状态 / 入口 API / 示例 / 契约，一表打尽
 2. [使用指南 usage.md](usage.md) —— 安装 + 三层使用粒度 + 各能力代码骨架
 3. [可配置参数清单 configurable-knobs.md](configurable-knobs.md) —— 构造时参数 + 运行时 Op + 内核旋钮字段级说明
+4. [真实 LLM 验证台账 real-llm-ledger.md](real-llm-ledger.md) —— 逐场景真实 key 回归结果（自动生成，勿手编辑；红线见 CLAUDE.md §测试约束）
 
 ## 阅读顺序（理解设计 / 改内核）
 
