@@ -638,17 +638,24 @@ def _rec(*reqs):
                             turn_index=1, pending=tuple(reqs), created_at=1)
 
 
-def test_resolver_rejects_incomplete():
+def test_resolver_accepts_subset_rejects_empty():
+    """request 级核销(multi-pending-partial-resume):子集合法、只裁决子集;空集仍拒。"""
     import pytest
 
     from taifeng.suspend.reason import PendingRequest, SuspendReason
     from taifeng.suspend.resolver import ResolveError, SuspensionResolver
     rec = _rec(
-        PendingRequest(request_id="r1", reason=SuspendReason.FORM),
-        PendingRequest(request_id="r2", reason=SuspendReason.FORM),
+        PendingRequest(request_id="r1", reason=SuspendReason.FORM,
+                       related_call_id="c1"),
+        PendingRequest(request_id="r2", reason=SuspendReason.FORM,
+                       related_call_id="c2"),
     )
+    # 子集:只裁决 r1,r2 保持活跃(由 engine 判定全量达成)
+    plan = SuspensionResolver().plan(rec, {"r1": {"x": 1}})
+    assert plan.direct_outputs == {"c1": {"x": 1}}
+    # 空集:显式拒绝(禁静默)
     with pytest.raises(ResolveError):
-        SuspensionResolver().validate(rec, {"r1": {"x": 1}})   # 缺 r2
+        SuspensionResolver().validate(rec, {})
 
 
 def test_resolver_rejects_unknown():

@@ -123,7 +123,8 @@ class _AllEventsRecorder:
                 got = [e for e in self._events if e.submission_id == sub_id]
                 for e in got:
                     k = e.msg.kind
-                    if k in ("turn_suspended", "suspension_resolve_rejected"):
+                    if k in ("turn_suspended", "suspension_resolve_rejected",
+                             "suspension_partially_resolved"):
                         return got
                     if k in ("turn_completed", "turn_failed") and e.msg.data.get("is_root"):
                         return got
@@ -264,8 +265,9 @@ async def test_nested_grandchild_suspension_propagates_to_root(tmp_path: Path, t
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_child_multi_pending_requires_full_resolution(tmp_path: Path, threads_dir):
-    """子内 danger×2 同批挂起：只 resolve 1 个被拒（禁部分 resume）；两个都给则都执行回填。"""
+async def test_child_multi_pending_partial_then_complete(tmp_path: Path, threads_dir):
+    """子内 danger×2 同批挂起(request 级核销):先 resolve 1 个 → 部分核销(record
+    仍活跃、子不续跑);补齐另 1 个 → 全量达成、两 tool 都执行回填、根完成。"""
     import taifeng
     from taifeng.llm.providers import MockTurn
     from taifeng.llm.providers.mock import RoutingMockClient
@@ -314,18 +316,21 @@ async def test_child_multi_pending_requires_full_resolution(tmp_path: Path, thre
     related = {p.related_call_id for p in leaf_rec.pending}
     assert related == {"call_a", "call_b"}, f"两 pending 应分别关联 call_a/call_b，实得 {related}"
 
-    # （a）部分 resume：只给一个 req_id → 被拒（incomplete_or_extra_resolutions），record 不消费
-    bad_sub = await engine.submit(Resume(
+    # （a）子集 resume(multi-pending-partial-resume)：只给一个 req_id → 部分核销:
+    # 该 call 的 tool 已执行回填,record 仍活跃、子不续跑
+    part_sub = await engine.submit(Resume(
         thread_id=leaf_tid, resolutions={req_ids[0]: {"granted": True}}))
-    bad_events = await recorder.wait_terminal(bad_sub)
-    reject = [ev for ev in bad_events if ev.msg.kind == "suspension_resolve_rejected"]
-    assert reject, f"部分 resume 必须被拒，实得 {[e.msg.kind for e in bad_events]}"
-    assert "incomplete_or_extra" in reject[0].msg.data["reason"]
+    part_events = await recorder.wait_terminal(part_sub)
+    partial = [ev for ev in part_events
+               if ev.msg.kind == "suspension_partially_resolved"]
+    assert partial, f"子集 resume 应部分核销,实得 {[e.msg.kind for e in part_events]}"
+    assert partial[0].msg.data["remaining_request_ids"] == [req_ids[1]], \
+        "剩余 pending 应恰为未提交的那个 request_id"
 
-    # （b）全量 resume：两个都批 → 两 tool 都执行 + 子续跑回传 → 根完成
+    # （b）补齐剩余 → 全量达成 → 两 tool 都执行 + 子续跑回传 → 根完成
     ok_sub = await engine.submit(Resume(
         thread_id=leaf_tid,
-        resolutions={req_ids[0]: {"granted": True}, req_ids[1]: {"granted": True}}))
+        resolutions={req_ids[1]: {"granted": True}}))
     ok_events = await recorder.wait_terminal(ok_sub)
     kinds = [ev.msg.kind for ev in ok_events]
     await pool.close()
@@ -391,7 +396,7 @@ async def test_child_resume_rejects_bad_request_id_and_double_resume(tmp_path: P
     bad_events = await recorder.wait_terminal(bad_sub)
     reject = [ev for ev in bad_events if ev.msg.kind == "suspension_resolve_rejected"]
     assert reject, f"错误 req_id 必须被拒，实得 {[e.msg.kind for e in bad_events]}"
-    assert "incomplete_or_extra" in reject[0].msg.data["reason"]
+    assert "unknown_request_ids" in reject[0].msg.data["reason"]
     # record 未被消费：仍有一条活跃 suspension（无 suspend_resolved marker 核销）
     items_after_bad = [it async for it in await pool.store.load_thread(leaf_tid)]
     assert not any(it.kind == "system_injection"

@@ -59,6 +59,7 @@ MsgKind = Literal[
     # suspend-resume 生命周期事件
     "turn_suspended",
     "suspension_resolved",
+    "suspension_partially_resolved",
     "suspension_resolve_rejected",
     # turn-rewind 回访节点生命周期
     "rewind_checkpoint_recorded",
@@ -374,6 +375,20 @@ class SuspensionResolved(_Msg):
     kind: Literal["suspension_resolved"] = "suspension_resolved"
 
 
+class SuspensionPartiallyResolved(_Msg):
+    """多 pending record 的部分核销(multi-pending-partial-resume)。
+
+    record 含多个 pending(如 parallel 批多子同时挂起)时,Resume 按 request 级
+    核销:本事件表示本次只结算了一部分,record 仍活跃、父 turn 不续跑——直到
+    全部 pending 核销才落整体 resolved-marker + emit suspension_resolved + 续跑。
+
+    data = {"record_id": str, "thread_id": str,
+            "resolved_request_ids": list[str], "remaining_request_ids": list[str]}
+    """
+
+    kind: Literal["suspension_partially_resolved"] = "suspension_partially_resolved"
+
+
 class SuspensionResolveRejected(_Msg):
     """Resume 被拒（resolution 不全 / 多余、record 已消费、payload 不符 schema 等）。
 
@@ -683,6 +698,7 @@ Msg = Union[
     PreCompactHookSkipped,
     TurnSuspended,
     SuspensionResolved,
+    SuspensionPartiallyResolved,
     SuspensionResolveRejected,
     SuspensionExpired,
     ThreadResumed,

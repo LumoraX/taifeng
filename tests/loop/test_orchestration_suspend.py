@@ -352,3 +352,200 @@ async def test_orch_second_user_message_full_redispatch(
     await engine.submit(taifeng.loop.Shutdown())
     await asyncio.wait_for(task, timeout=5.0)
     await pool.close()
+
+
+def _asker_named(name: str, mark: str) -> str:
+    """生成带独立路由 marker 的问询子技能(multi-pending 测试用,A/B 两份)。"""
+    return (
+        "---\n"
+        f"name: {name}\ndescription: 问询子技能{name}\nversion: 1.0.0\n"
+        "type: composite\nmodel: mock-model\n"
+        "tool_names: [request_user_input]\nmax_call_depth: 2\n"
+        f"---\n# 问询 {mark}\n先问人。\n"
+    )
+
+
+def _two_asker_routes() -> dict:
+    """A/B 两个问询子的 Mock 路由:各先挂起再收尾。"""
+    return {
+        "ASKA_MARK": [
+            MockTurn(text="问A", tool_calls=[
+                {"id": "qa", "name": "request_user_input",
+                 "arguments": '{"prompt": "A?"}'}]),
+            MockTurn(text="ASKA_DONE"),
+        ],
+        "ASKB_MARK": [
+            MockTurn(text="问B", tool_calls=[
+                {"id": "qb", "name": "request_user_input",
+                 "arguments": '{"prompt": "B?"}'}]),
+            MockTurn(text="ASKB_DONE"),
+        ],
+    }
+
+
+async def _two_asker_pool(tmp_path, threads_dir, session_id: str):
+    """搭 parallel:[aska, askb] 双问询编排;返回 (pool, engine)。"""
+    import taifeng as tf
+    skills = tmp_path / "s"
+    _write(skills, "flow", _entry(
+        "orchestration:\n  steps:\n    - parallel: [aska, askb]\n",
+        ["aska", "askb"]))
+    _write(skills, "aska", _asker_named("aska", "ASKA_MARK"))
+    _write(skills, "askb", _asker_named("askb", "ASKB_MARK"))
+    client = RoutingMockClient(routes=_two_asker_routes())
+    pool = await tf.EnginePool.create(
+        skills_dir=skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], extra_tools=[make_request_user_input_tool()],
+        max_parallel_tool_calls=2)
+    engine = await pool.get_or_create(session_id=session_id, entry_skill_id="flow")
+    return pool, engine
+
+
+async def _leaf_request_id(pool, tid: str) -> str:
+    """取 leaf 子 thread 活跃挂起的(唯一)request_id。"""
+    items = [it async for it in await pool.store.load_thread(tid)]
+    recs = [it for it in items if it.kind == "suspension"]
+    return SuspensionRecord.from_item(recs[-1]).pending[0].request_id
+
+
+async def _suspend_both(engine, events) -> tuple[str, str]:
+    """提交首发消息等双子同挂;返回 (leaf_a_tid, leaf_b_tid)。"""
+    import taifeng as tf
+    await engine.submit(tf.UserMessage(text="开始"))
+    assert await _wait(lambda: _root_suspended(events, engine.thread_id) is not None)
+    pendings = _root_suspended(events, engine.thread_id)["pending"]
+    assert len(pendings) == 2, f"双子应同挂同一 record,实得 {len(pendings)}"
+    assert all(p["reason"] == SuspendReason.CHILD_SKILL.value for p in pendings)
+    by_skill = {p["detail"]["skill_id"]: p["detail"]["sub_thread_id"]
+                for p in pendings}
+    return by_skill["aska"], by_skill["askb"]
+
+
+def _root_completed_count(events) -> int:
+    return sum(1 for m in events
+               if m.kind == "turn_completed" and m.data.get("is_root"))
+
+
+@pytest.mark.asyncio
+async def test_orch_parallel_two_suspended_staggered_resume(
+    tmp_path, threads_dir,
+) -> None:
+    """parallel 双子同挂错峰 Resume(multi-pending-partial-resume)——先 B 后 A。
+
+    覆盖:① 直接 Resume 第二个挂起子不被拒(续跑链 DFS 寻址,旧实现只取首个
+    pending 单路下探 → no_active_suspension);② 部分核销事件 + 父不续跑;
+    ③ 末位核销 → 父重入全量重放零派发、无重复 fc、双子输出保留(旧实现单
+    Resume 误整体核销 → B 被新建 thread 从头重跑 + 同 call_id 双 fc)。"""
+    from collections import Counter
+
+    pool, engine = await _two_asker_pool(tmp_path, threads_dir, "orch-2sus")
+    events: list = []
+    task = asyncio.create_task(_watch_all(engine, events))
+    await asyncio.sleep(0)
+    leaf_a, leaf_b = await _suspend_both(engine, events)
+
+    # ① 先 Resume 第二个挂起子 B(DFS 寻址) → ② 部分核销,父不续跑
+    await engine.submit(Resume(
+        thread_id=leaf_b,
+        resolutions={await _leaf_request_id(pool, leaf_b): {"answer": "B答"}}))
+    assert await _wait(lambda: any(
+        m.kind == "suspension_partially_resolved" for m in events)), \
+        "B 先核销应得部分核销事件(而非整体结算或 no_active_suspension 拒绝)"
+    assert not any(m.kind == "suspension_resolve_rejected" for m in events), \
+        "直接 Resume 第二个挂起子不应被拒"
+    assert _root_completed_count(events) == 0, "仍有 A 未结,父不得续跑"
+
+    # ③ 末位核销 A → 父重入全量重放 → 完成
+    await engine.submit(Resume(
+        thread_id=leaf_a,
+        resolutions={await _leaf_request_id(pool, leaf_a): {"answer": "A答"}}))
+    assert await _wait(lambda: _root_completed_count(events) == 1)
+
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    fc_dup = {cid: n for cid, n in Counter(
+        str(it.payload.get("call_id")) for it in items
+        if it.kind == "function_call").items() if n > 1}
+    assert not fc_dup, f"出现重复 fc(误整体核销致重派发的旧 bug): {fc_dup}"
+    outputs = [str(it.payload.get("output", "")) for it in items
+               if it.kind == "function_call_output"]
+    assert any("ASKA_DONE" in o for o in outputs)
+    assert any("ASKB_DONE" in o for o in outputs), \
+        f"B 应原 thread 续跑回填真实输出,实得 {outputs}"
+    counts = [m.data["count"] for m in events if m.kind == "tool_batch_dispatched"]
+    assert counts[-1] == 0, f"父重入应全量重放零派发,实得 {counts}"
+
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_orch_partial_then_expire_remaining(tmp_path, threads_dir) -> None:
+    """A 已答、B 以到期哨兵裁决(等价 TTL fire 对剩余 pending 的 expire-abort):
+    B 回填 error 输出、父全量达成续跑,A 真实输出保留(spec「A 已答 B 超时」)。"""
+    from taifeng.suspend.resolver import EXPIRE_SENTINEL
+
+    pool, engine = await _two_asker_pool(tmp_path, threads_dir, "orch-expire")
+    events: list = []
+    task = asyncio.create_task(_watch_all(engine, events))
+    await asyncio.sleep(0)
+    leaf_a, leaf_b = await _suspend_both(engine, events)
+
+    # A 人工补答 → 部分核销
+    await engine.submit(Resume(
+        thread_id=leaf_a,
+        resolutions={await _leaf_request_id(pool, leaf_a): {"answer": "A答"}}))
+    assert await _wait(lambda: any(
+        m.kind == "suspension_partially_resolved" for m in events))
+
+    # B 到期哨兵(内核 TTL fire 的等价提交)→ expire-abort → 父全量达成续跑
+    await engine.submit(Resume(
+        thread_id=leaf_b,
+        resolutions={await _leaf_request_id(pool, leaf_b): {EXPIRE_SENTINEL: True}}))
+    assert await _wait(lambda: _root_completed_count(events) == 1), \
+        "B 到期裁决后父应全量达成并续跑完成"
+
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    outputs = {str(it.payload.get("call_id")): it for it in items
+               if it.kind == "function_call_output"}
+    a_out = [it for cid, it in outputs.items() if "aska" in cid]
+    b_out = [it for cid, it in outputs.items() if "askb" in cid]
+    assert a_out and "ASKA_DONE" in str(a_out[0].payload.get("output"))
+    assert b_out and b_out[0].payload.get("is_error"), \
+        "B 的回填应为 error 输出(sub_skill_aborted)"
+
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_orch_concurrent_resume_single_settlement(
+    tmp_path, threads_dir,
+) -> None:
+    """双子背靠背并发 Resume:per-record 结算锁保证恰一次全量结算、恰一次父重入
+    (无双跑、无双双 partial 死锁),且 record 级 suspension_resolved 恰一次。"""
+    pool, engine = await _two_asker_pool(tmp_path, threads_dir, "orch-race")
+    events: list = []
+    task = asyncio.create_task(_watch_all(engine, events))
+    await asyncio.sleep(0)
+    leaf_a, leaf_b = await _suspend_both(engine, events)
+    root_record_id = _root_suspended(events, engine.thread_id)["record_id"]
+    rid_a = await _leaf_request_id(pool, leaf_a)
+    rid_b = await _leaf_request_id(pool, leaf_b)
+
+    # 背靠背提交,不等第一条收尾 → 两条续跑链并发竞争同一父 record
+    await engine.submit(Resume(thread_id=leaf_a, resolutions={rid_a: {"answer": "A答"}}))
+    await engine.submit(Resume(thread_id=leaf_b, resolutions={rid_b: {"answer": "B答"}}))
+
+    assert await _wait(lambda: _root_completed_count(events) >= 1), \
+        "并发 Resume 不得双双判 partial 卡死(必须有一条链完成全量结算)"
+    await asyncio.sleep(0.2)  # 留出潜在双重续跑暴露窗口
+    assert _root_completed_count(events) == 1, "父重入必须恰一次(结算锁防双跑)"
+    resolved = [m for m in events if m.kind == "suspension_resolved"
+                and m.data["record_id"] == root_record_id]
+    assert len(resolved) == 1, f"根 record 整体核销必须恰一次,实得 {len(resolved)}"
+
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()

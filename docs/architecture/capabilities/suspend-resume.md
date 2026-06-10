@@ -66,7 +66,7 @@
 `Resume` SHALL 是 pydantic discriminated Op（`kind="resume"`），加入 `loop/submission.py` 的 `Op` Union：
 
 - `thread_id: str` —— 要续跑的 thread
-- `resolutions: dict[str, Any]` —— `{request_id: payload}`；**必须一次补齐该挂起 record 的全部 pending**（不允许部分 resume）
+- `resolutions: dict[str, Any]` —— `{request_id: payload}`；可为该 record request_ids 的**非空子集**（request 级核销,multi-pending-partial-resume）——子集只裁决子集,整体 marker 与续跑在全部 pending 核销后才发生;空集 / 未知 request_id 显式拒绝
 
 payload 形状由对应 `PendingRequest.reason` 决定：
 
@@ -85,16 +85,15 @@ payload 形状由对应 `PendingRequest.reason` 决定：
 - `resample: bool` —— system_retry → 重跑 sample（resource_limit **不置此位**：重建续跑即继续循环）
 - `abort: bool` —— system_retry / resource_limit `action=abort`
 
-`ResolveError`（普通 `Exception`，**不进 LLMError 体系**）在：resolutions 不全 / 多余、人类输入类 pending 缺 `related_call_id`、未知 reason 时抛出（禁 silent fallback）。
+`ResolveError`（普通 `Exception`，**不进 LLMError 体系**）在：resolutions 为空 / 含未知 request_id、人类输入类 pending 缺 `related_call_id`、未知 reason 时抛出（禁 silent fallback）。`plan` 只裁决 resolutions 覆盖到的 pending（request 级核销）。
 
-### Requirement: 三个 EventMsg（R3 可观测）
-
-新增三个 `EventMsg.msg` variant：
+### Requirement: 挂起事件族 EventMsg（R3 可观测）
 
 | kind | 触发 | data 形状 |
 | --- | --- | --- |
 | `turn_suspended` | turn 挂起的契约事件类型（定义并导出，业务可构造 / 匹配） | `{thread_id, record_id, pending: [{request_id, reason, payload_schema, related_call_id, detail}], cache_invalidated}` |
-| `suspension_resolved` | `Resume` 成功配对、turn 续跑 | `{record_id, request_ids: list[str]}` |
+| `suspension_resolved` | record **全部** pending 核销、turn 续跑 | `{record_id, request_ids: list[str]}` |
+| `suspension_partially_resolved` | 多 pending record 的子集核销（record 仍活跃,不续跑） | `{record_id, thread_id, resolved_request_ids, remaining_request_ids}` |
 | `suspension_resolve_rejected` | `Resume` 被拒（resolution 不全 / 多余、无活跃挂起、ResolveError 等） | `{reason: str, record_id: str \| None, detail: dict}` |
 
 > 当前实现：挂起结局**经独立终结态 `turn_suspended` 在事件流上被观测**（`run_turn` 终结 emit 在 `end_reason == "suspended"` 时发 `TurnSuspended` 而非 `TurnCompleted`，业务侧据此与 `completed` / `cancelled` / `error` 区分）；`TurnOutcome.end_reason` 仍为 `"suspended"`（返回值不变，供 `_handle_resume` 等内部路径判定）。`suspension_resolved` / `suspension_resolve_rejected` 由 `AgentEngine._handle_resume` 直接 emit。
@@ -175,7 +174,18 @@ Resume(thread_id, resolutions)
 
 ### Requirement: 多挂起点并存 + batch resume
 
-同一 turn 一批 tool call 可同时命中多个挂起点（如 permission + form 同批）。`dispatch_batch` **不 fail-fast**，整批收集所有 `SuspendSignal`，聚合为**一条** `SuspensionRecord`（多个 pending 共享 `record_id`）。resume 用 `{request_id: payload}` 一次补齐全部。
+同一 turn 一批 tool call 可同时命中多个挂起点（如 permission + form 同批,或编排 parallel 多子同挂）。`dispatch_batch` **不 fail-fast**，整批收集所有 `SuspendSignal`，聚合为**一条** `SuspensionRecord`（多个 pending 共享 `record_id`）。
+
+**request 级核销（multi-pending-partial-resume）**：每个 pending 的核销状态由 history 推导——`related_call_id` 在该 record 的 suspension item **之后**已有配对 fco 即已核销（gap 回填即凭据,零新增落盘状态,R5）。Resume 可按子集错峰提交：
+
+- 子集核销 → emit `suspension_partially_resolved {record_id, thread_id, resolved_request_ids, remaining_request_ids}`,record 仍活跃、**不落 marker、父 turn 不续跑**（record 级 barrier）;
+- 全部 pending 核销 → 落整体 resolved-marker + emit `suspension_resolved` + 续跑（此时编排重放对全部子命中,零重派发）;
+- 嵌套续跑链按提交的 thread_id 在**全部** CHILD_SKILL pending 分支中 DFS 寻址（已核销分支的子 thread 无活跃挂起 → 自然死路回溯）,不再只取首个 pending 单路下探;
+- 并发续跑链（双子同时 Resume / 同时到期）对同一 record 的「判定剩余 → 落 marker → 续跑」经 **per-record 结算锁**串行化,保证恰一次整体结算、恰一次父重入;
+- TTL 到期哨兵只对**剩余未核销** pending 生成裁决,已核销的跳过（A 已答 B 超时 → 仅 B expire-abort,A 真实输出保留）;
+- `related_call_id=None` 的 pending（护栏挂起）无 fco 凭据,设计上独占 record,不参与部分核销。
+
+单 pending record 行为与此前完全一致（全量核销 = 部分核销的退化情形,无 `suspension_partially_resolved`）。
 
 ### Requirement: 子 thread resume 续跑链（call_skill 嵌套挂起）
 
@@ -197,13 +207,17 @@ Resume(thread_id, resolutions)
 - **WHEN** 父 `call_skill` 派子，子内 `permission` 挂起 → `Resume(thread_id=<子 thread>, resolutions={req: {granted: true}})`
 - **THEN** `turn_suspended` 携子 thread_id（≠ 根）；resume 后 `suspension_resolved`（leaf + 父各一）、子续跑输出落子 thread、被挂起 call 补回 `function_call_output`、整个 submission 以根 `turn_completed(is_root=True)` 收尾
 
-### Requirement: 禁部分 resume
+### Requirement: resolutions 边界校验（request 级核销下）
 
-`SuspensionResolver.validate` SHALL 要求 `set(resolutions.keys()) == record.request_ids()`。缺某 pending 的 id、或带不存在的 id → `ResolveError` → emit `suspension_resolve_rejected`（禁 silent fallback；分批由业务侧攒齐再提交，避免半挂起态）。
+`SuspensionResolver.validate` SHALL 要求 resolutions 为 `record.request_ids()` 的**非空子集**：空集 → `ResolveError(empty_resolutions)`;含不存在的 id → `ResolveError(unknown_request_ids)` → emit `suspension_resolve_rejected`（禁 silent fallback）。子集提交合法,语义见「多挂起点并存」节。
 
-#### Scenario: 部分 / 多余 resolution 被拒
-- **WHEN** resolutions 缺一个 pending 的 request_id，或含 record 没有的 id
-- **THEN** `ResolveError(incomplete_or_extra_resolutions: missing=... extra=...)` → `suspension_resolve_rejected`
+#### Scenario: 空集 / 未知 id 被拒
+- **WHEN** resolutions 为空,或含 record 没有的 request_id
+- **THEN** `ResolveError` → `suspension_resolve_rejected`,record 不被消费
+
+#### Scenario: 子集错峰核销
+- **WHEN** parallel 双子同挂(一条 record 两 pending),先 Resume 其一
+- **THEN** `suspension_partially_resolved`,record 仍活跃;补齐另一个后整体结算并续跑
 
 ### Requirement: 幂等（resolved-marker + 重复 resume 拒绝）
 

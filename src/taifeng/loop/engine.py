@@ -45,6 +45,7 @@ from taifeng.loop.event import (
     RewindRejected,
     RewindTableRebuilt,
     SuspensionExpired,
+    SuspensionPartiallyResolved,
     SuspensionResolved,
     SuspensionResolveRejected,
     TurnFailed,
@@ -190,6 +191,10 @@ class AgentEngine:
         # suspension-ttl：record_id → 到期定时任务。挂起落盘(turn_suspended)武装,
         # 人工 Resume 核销(suspension_resolved)/ shutdown 取消;先核销者胜。
         self._ttl_timers: dict[str, asyncio.Task[None]] = {}
+        # multi-pending-partial-resume:per-record 结算锁——并发续跑链(双子同时
+        # Resume/到期)对同一父 record 的「判定剩余 → 落 marker → 续跑」必须串行,
+        # 否则可能双双判 partial(无人续跑)或双双 settle(双重续跑)
+        self._settle_locks: dict[str, asyncio.Lock] = {}
         # config-consistency-fixes C2: 把 event_queue_size kwarg 真正生效
         # 之前此 kwarg 收下后未存到 self，subscribe / subscribe_all 内仍硬编码 1024
         self._event_queue_size = event_queue_size
@@ -598,11 +603,15 @@ class AgentEngine:
                     "reasons": sorted({p.reason.value for p in record.pending}),
                 }),
             ))
-            # 内核签发到期裁决:全量 request_id 配齐哨兵 payload(全量 resume 语义)
+            # 内核签发到期裁决:只对**未核销** pending 配哨兵(request 级核销下,
+            # 已部分结算的 pending 再发哨兵会产生重复 fco)
+            pending_left = self._unsettled_pendings(record, items)
+            if not pending_left:
+                return
             await self.submit(Resume(
                 thread_id=thread_id,
                 resolutions={
-                    rid: {EXPIRE_SENTINEL: True} for rid in record.request_ids()
+                    p.request_id: {EXPIRE_SENTINEL: True} for p in pending_left
                 },
             ))
         except asyncio.CancelledError:
@@ -1285,13 +1294,30 @@ class AgentEngine:
         for call_id in plan.execute_tool_call_ids:
             await self._execute_resumed_tool(call_id)
 
-        # 4. 落 resolved-marker（幂等：下次 _find_active_suspension 会跳过本 record）
-        marker = system_injection(
-            text=f"suspend_resolved:{record.record_id}",
-            thread_id=self._thread_id, source="suspend_resolved")
-        async with self._lock:
-            self._history.append(marker)
-        await self._store.append(marker)
+        # 3.5 + 4. record 级结算判定(per-record 锁串行化并发 Resume)+ 落 marker:
+        # 仍有未核销 pending → 部分核销,不落 marker、不续跑(record 级 barrier)
+        async with self._settle_lock(record.record_id):
+            active = self._find_active_suspension()
+            if active is None or active.record_id != record.record_id:
+                return  # 并发 Resume 已抢先全量结算
+            remaining = [
+                p for p in self._unsettled_pendings(record, list(self._history))
+                if p.request_id not in op.resolutions]
+            if remaining:
+                await self._emit(EventMsg(
+                    submission_id=sub.id,
+                    msg=SuspensionPartiallyResolved(data={
+                        "record_id": record.record_id, "thread_id": self._thread_id,
+                        "resolved_request_ids": sorted(op.resolutions.keys()),
+                        "remaining_request_ids": sorted(
+                            p.request_id for p in remaining)})))
+                return
+            marker = system_injection(
+                text=f"suspend_resolved:{record.record_id}",
+                thread_id=self._thread_id, source="suspend_resolved")
+            async with self._lock:
+                self._history.append(marker)
+            await self._store.append(marker)
 
         # 5. emit resolved
         await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
@@ -1374,26 +1400,42 @@ class AgentEngine:
         Returns:
             [(根tid, 根skill, None), …, (leaftid, leafskill, 父callid)]；
             根/中途无指向 leaf 的活跃 CHILD_SKILL 挂起 → None（找不到挂起，调用方拒绝）。
+
+        多 pending record(parallel 批多子同挂,multi-pending-partial-resume):
+        按 DFS 遍历**全部** CHILD_SKILL 分支寻址 leaf——已核销分支的子 thread 无
+        活跃挂起 → 自然死路回溯,不再"只取首个 pending 单路下探"。
         """
-        chain: list[tuple[str, str, str | None]] = [
-            (self._thread_id, self._entry_skill.id, None)
-        ]
-        cur_tid, cur_items = self._thread_id, list(self._history)
-        # 至多沿链下探 spawn 深度上限的层数（防御性，正常链很短）
-        for _ in range(self._max_total_spawns_guard()):
-            if cur_tid == leaf_thread_id:
-                return chain
-            record = self._find_active_suspension_in(cur_items)
+        from taifeng.suspend.reason import SuspendReason
+
+        async def descend(
+            tid: str, items: list[ResponseItem], depth: int,
+        ) -> list[tuple[str, str, str | None]] | None:
+            """返回自 tid 之下到 leaf 的链段(不含 tid 本层);找不到 → None。"""
+            if tid == leaf_thread_id:
+                return []
+            if depth <= 0:
+                return None  # 超出深度守卫(异常链)
+            record = self._find_active_suspension_in(items)
             if record is None:
-                return None  # 本层无活跃挂起 → 链断（找不到 leaf）
-            nxt = self._next_child_link(record)
-            if nxt is None:
-                return None  # 本层挂起无 CHILD_SKILL pending → 到底但非目标 leaf
-            child_tid, child_skill_id, call_id = nxt
-            chain.append((child_tid, child_skill_id, call_id))
-            cur_tid = child_tid
-            cur_items = await self._load_thread_items(child_tid)
-        return None  # 超出深度守卫（异常链）
+                return None  # 本层无活跃挂起 → 链断
+            for pend in record.pending:
+                if pend.reason is not SuspendReason.CHILD_SKILL:
+                    continue
+                child_tid = pend.detail.get("sub_thread_id")
+                child_skill = pend.detail.get("skill_id")
+                if not (isinstance(child_tid, str) and isinstance(child_skill, str)):
+                    continue
+                child_items = await self._load_thread_items(child_tid)
+                rest = await descend(child_tid, child_items, depth - 1)
+                if rest is not None:
+                    return [(child_tid, child_skill, pend.related_call_id), *rest]
+            return None  # 全部分支均不含 leaf
+
+        rest = await descend(
+            self._thread_id, list(self._history), self._max_total_spawns_guard())
+        if rest is None:
+            return None
+        return [(self._thread_id, self._entry_skill.id, None), *rest]
 
     def _max_total_spawns_guard(self) -> int:
         """续跑链下探的最大层数守卫（取 spawn 总配额上界 + 余量，避免坏数据死循环）。"""
@@ -1447,6 +1489,21 @@ class AgentEngine:
 
         # 补 gap（在子 thread 上）：form/data 直填、permission deny 填 error、allow 执行 tool
         await self._apply_plan_on_thread(leaf_tid, leaf_skill_id, record, plan)
+        # request 级核销:leaf record 仍有未核销 pending → 部分核销,不落 marker、
+        # 不续跑 leaf(链中止,句柄/父层保持挂起等后续 Resume)
+        items_after = await self._load_thread_items(leaf_tid)
+        remaining = [p for p in self._unsettled_pendings(record, items_after)
+                     if p.request_id not in resolutions]
+        if remaining:
+            await self._emit(EventMsg(
+                submission_id=sub.id,
+                msg=SuspensionPartiallyResolved(data={
+                    "record_id": record.record_id, "thread_id": leaf_tid,
+                    "resolved_request_ids": sorted(resolutions.keys()),
+                    "remaining_request_ids": sorted(
+                        p.request_id for p in remaining)})))
+            return None
+        await self._append_resolved_marker(leaf_tid, record.record_id)
         await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
             data={"record_id": record.record_id,
                   "request_ids": sorted(record.request_ids())})))
@@ -1485,31 +1542,55 @@ class AgentEngine:
         out = function_call_output(
             call_id=call_id, output=child_result,
             thread_id=parent_tid, is_error=is_error)
-        marker = system_injection(
-            text=f"suspend_resolved:{record.record_id}",
-            thread_id=parent_tid, source="suspend_resolved")
+        # 1) 先回填本子的 fco(call_id 唯一,并发链各回各的,无冲突)
         if is_root:
-            # 根：回填进 self._history（续跑机制依赖）+ store，再走既有根续跑
             async with self._lock:
                 self._history.append(out)
-                self._history.append(marker)
-            await self._store.append(out)
+        await self._store.append(out)
+
+        # 2) record 级结算判定:per-record 锁串行化并发续跑链(双子同时 Resume/
+        #    到期),判定基于锁内 fresh 状态——否则可能双双判 partial(无人续跑父)
+        #    或双双 settle(双重续跑)
+        async with self._settle_lock(record.record_id):
+            fresh = (list(self._history) if is_root
+                     else await self._load_thread_items(parent_tid))
+            active = self._find_active_suspension_in(fresh)
+            if active is None or active.record_id != record.record_id:
+                return None  # 并发链已抢先全量结算并续跑 → 本链到此为止
+            remaining = self._unsettled_pendings(record, fresh)
+            if remaining:
+                # request 级核销:仍有未核销 pending → 不落 marker、不续跑父 turn
+                # (record 级 barrier,等错峰 Resume 结清)
+                await self._emit(EventMsg(
+                    submission_id=sub.id,
+                    msg=SuspensionPartiallyResolved(data={
+                        "record_id": record.record_id, "thread_id": parent_tid,
+                        "resolved_request_ids": [
+                            p.request_id for p in record.pending
+                            if p.related_call_id == call_id],
+                        "remaining_request_ids": sorted(
+                            p.request_id for p in remaining)})))
+                return None
+            # 全量达成:锁内落 marker(并发链经 fresh 重读可见,不会二次结算)
+            marker = system_injection(
+                text=f"suspend_resolved:{record.record_id}",
+                thread_id=parent_tid, source="suspend_resolved")
+            if is_root:
+                async with self._lock:
+                    self._history.append(marker)
             await self._store.append(marker)
-            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
-                data={"record_id": record.record_id,
-                      "request_ids": sorted(record.request_ids())})))
+        await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
+            data={"record_id": record.record_id,
+                  "request_ids": sorted(record.request_ids())})))
+        if is_root:
+            # 根：续跑(重入重放已回填的全部子输出)
             turn_cancel = root_cancel.child(f"sub:{sub.id}")
             self._pending[sub.id] = _PendingTurn(
                 submission_id=sub.id, cancel=turn_cancel)
             await self._build_and_run_runner(
                 sub.id, turn_cancel, list(self._last_resolved or []))
             return None  # 根是终点，链结束
-        # 非根祖先：落 output + marker 到其 thread，续跑该祖先 turn
-        await self._store.append(out)
-        await self._store.append(marker)
-        await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
-            data={"record_id": record.record_id,
-                  "request_ids": sorted(record.request_ids())})))
+        # 非根祖先：续跑该祖先 turn
         outcome = await self._run_thread_turn(
             sub, parent_tid, parent_skill_id, root_cancel,
             submission_id=submission_id)
@@ -1519,7 +1600,8 @@ class AgentEngine:
             f"sub_skill_failed: {outcome.error or outcome.end_reason}")
 
     async def _build_spawn_resume_chain(
-        self, root_tid: str, root_skill_id: str
+        self, root_tid: str, root_skill_id: str,
+        resolutions: dict[str, Any] | None = None,
     ) -> list[tuple[str, str, str | None]] | None:
         """自 spawn 子 thread 沿 CHILD_SKILL pending 向下串到最深 leaf 的续跑链。
 
@@ -1529,28 +1611,56 @@ class AgentEngine:
         持有用户 DATA/FORM 挂起的 leaf）——业务侧只知道 spawn 子 thread（SpawnSuspended.
         thread_id），不知道 leaf 具体是哪个，故按链下探自动定位。
 
+        多 pending record(multi-pending-partial-resume):resolutions 非 None 时
+        以「resolutions 的 request_id 子集落在哪层 record」为 leaf 判据 DFS 寻址
+        (多个挂起分支错峰 Resume 时按提交内容精确定位);匹配不到则回退
+        「首个可达的无 CHILD_SKILL 层」旧语义,核销不符由 ResolveError 显式拒绝。
+
         Returns:
             ``[(根tid, 根skill, None), …, (leaftid, leafskill, 父callid)]``；
             root_tid 自身无活跃挂起 → None（无可续）。
         """
-        chain: list[tuple[str, str, str | None]] = [(root_tid, root_skill_id, None)]
-        cur_items = await self._load_thread_items(root_tid)
-        for _ in range(self._max_total_spawns_guard()):
-            record = self._find_active_suspension_in(cur_items)
-            if record is None:
-                # 根层无挂起 → 无可续；非根层到底但断链（坏数据）→ 也 None（禁静默兜底）
-                return None
-            nxt = self._next_child_link(record)
-            if nxt is None:
-                return chain  # 本层无 CHILD_SKILL pending → 即 leaf（用户挂起所在层）
-            child_tid, child_skill_id, call_id = nxt
-            chain.append((child_tid, child_skill_id, call_id))
-            cur_items = await self._load_thread_items(child_tid)
-        return None  # 超出深度守卫（异常链）
+        from taifeng.suspend.reason import SuspendReason
+
+        async def descend(
+            tid: str, depth: int, *, match: bool,
+        ) -> list[tuple[str, str, str | None]] | None:
+            """返回自 tid 之下到 leaf 的链段(不含 tid);本层即 leaf → []。"""
+            items = await self._load_thread_items(tid)
+            record = self._find_active_suspension_in(items)
+            if record is None or depth <= 0:
+                return None  # 无活跃挂起(死路/已核销分支)或超深度
+            if (match and resolutions is not None
+                    and set(resolutions) <= record.request_ids()):
+                return []  # 本层 record 即裁决目标
+            branches = [
+                pend for pend in record.pending
+                if pend.reason is SuspendReason.CHILD_SKILL
+                and isinstance(pend.detail.get("sub_thread_id"), str)
+                and isinstance(pend.detail.get("skill_id"), str)
+            ]
+            for pend in branches:
+                child_tid = str(pend.detail["sub_thread_id"])
+                rest = await descend(child_tid, depth - 1, match=match)
+                if rest is not None:
+                    return [(child_tid, str(pend.detail["skill_id"]),
+                             pend.related_call_id), *rest]
+            if not match and not branches:
+                return []  # 旧语义:无 CHILD_SKILL pending 即 leaf
+            return None
+
+        guard = self._max_total_spawns_guard()
+        rest = await descend(root_tid, guard, match=True)
+        if rest is None:
+            # 回退旧语义(resolutions 与任何层都不符 → 让 leaf 层 ResolveError 显式拒)
+            rest = await descend(root_tid, guard, match=False)
+        if rest is None:
+            return None
+        return [(root_tid, root_skill_id, None), *rest]
 
     async def _settle_call_skill_output(
         self, sub: Submission, thread_id: str, call_id: str, child_result: str
-    ) -> bool:
+    ) -> str:
         """在 thread 上回填 call_id 对应 call_skill 的 function_call_output + 落 resolved-marker
         核销该层 CHILD_SKILL 挂起。
 
@@ -1560,26 +1670,42 @@ class AgentEngine:
         以保持 detached 根语义 + 句柄终态回写 + join-barrier 触发）。
 
         Returns:
-            True 补齐成功；该 thread 无活跃挂起 → False（调用方拒绝，禁静默）。
+            "settled" 全量核销(可重跑)/ "partial" 部分核销(其余 pending 未结,
+            句柄保持挂起)/ "missing" 该 thread 无活跃挂起(调用方拒绝,禁静默)。
         """
         items = await self._load_thread_items(thread_id)
         record = self._find_active_suspension_in(items)
         if record is None:
-            return False
+            return "missing"
         is_error = child_result.startswith(
             ("sub_skill_failed:", "sub_skill_aborted:"))
         out = function_call_output(
             call_id=call_id, output=child_result,
             thread_id=thread_id, is_error=is_error)
-        marker = system_injection(
-            text=f"suspend_resolved:{record.record_id}",
-            thread_id=thread_id, source="suspend_resolved")
         await self._store.append(out)
-        await self._store.append(marker)
+        # record 级结算判定(per-record 锁 + fresh 重读,与 _resume_parent_level 同理)
+        async with self._settle_lock(record.record_id):
+            fresh = await self._load_thread_items(thread_id)
+            active = self._find_active_suspension_in(fresh)
+            if active is None or active.record_id != record.record_id:
+                return "partial"  # 并发链已抢先结算 → 本链不再重跑
+            remaining = self._unsettled_pendings(record, fresh)
+            if remaining:
+                await self._emit(EventMsg(
+                    submission_id=sub.id,
+                    msg=SuspensionPartiallyResolved(data={
+                        "record_id": record.record_id, "thread_id": thread_id,
+                        "resolved_request_ids": [
+                            p.request_id for p in record.pending
+                            if p.related_call_id == call_id],
+                        "remaining_request_ids": sorted(
+                            p.request_id for p in remaining)})))
+                return "partial"
+            await self._append_resolved_marker(thread_id, record.record_id)
         await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
             data={"record_id": record.record_id,
                   "request_ids": sorted(record.request_ids())})))
-        return True
+        return "settled"
 
     async def _load_thread_items(self, thread_id: str) -> list[ResponseItem]:
         """load_thread → list（子 thread resume 需要按当前持久态重建历史）。"""
@@ -1609,9 +1735,13 @@ class AgentEngine:
         for call_id in plan.execute_tool_call_ids:
             await self._execute_resumed_tool_on_thread(
                 thread_id, entry_skill_id, call_id)
-        # 落 resolved-marker 核销 leaf 记录
+        # resolved-marker 不在此签发:request 级核销下由调用方在
+        # 全部 pending 核销后经 _append_resolved_marker 落定(单一签发点)。
+
+    async def _append_resolved_marker(self, thread_id: str, record_id: str) -> None:
+        """落 record 级 resolved-marker(request 级核销全量达成时的唯一非根签发点)。"""
         marker = system_injection(
-            text=f"suspend_resolved:{record.record_id}",
+            text=f"suspend_resolved:{record_id}",
             thread_id=thread_id, source="suspend_resolved")
         await self._store.append(marker)
 
@@ -1805,6 +1935,39 @@ class AgentEngine:
         if record.record_id in resolved_ids:
             return None
         return record
+
+    def _settle_lock(self, record_id: str) -> asyncio.Lock:
+        """取 record 级结算锁(惰性创建;record 终结后残留的空锁可忽略不计)。"""
+        lock = self._settle_locks.get(record_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._settle_locks[record_id] = lock
+        return lock
+
+    @staticmethod
+    def _unsettled_pendings(
+        record: SuspensionRecord, items: list[ResponseItem],
+    ) -> list[Any]:
+        """返回 record 中尚未核销的 pending(request 级核销的推导真相,R5)。
+
+        判据:pending 的 related_call_id 在该 record 的 suspension item **之后**
+        已有配对 function_call_output 即视为已核销(gap 回填即核销凭据)——
+        以 suspension item 为锚而非全量扫描,避免历史轮次同 call_id(编排合成
+        call_id 跨 turn 相同)误判。related_call_id=None 的 pending(护栏挂起,
+        设计上独占 record)无 fco 凭据,恒视为未核销(由整批裁决一次性结算)。
+        """
+        pos = -1
+        for i, it in enumerate(items):
+            if (it.kind == "suspension"
+                    and it.payload.get("record_id") == record.record_id):
+                pos = i
+        settled_call_ids = {
+            str(it.payload.get("call_id")) for it in items[pos + 1:]
+            if it.kind == "function_call_output"
+        }
+        return [p for p in record.pending
+                if p.related_call_id is None
+                or p.related_call_id not in settled_call_ids]
 
     async def _execute_resumed_tool(self, call_id: str) -> None:
         """resume 时对一个被批准的挂起 tool call 真正执行，回填 function_call_output。

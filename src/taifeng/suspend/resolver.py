@@ -3,7 +3,9 @@
 产出 ResolvePlan 告诉 turn/engine 续跑时该做什么:执行哪些 tool call(permission allow)、
 哪些 call_id 直接回填 output(form/data)、哪些 call_id 回填 error output(permission deny)、
 是否重跑 sample(system_retry)、是否中止(system_retry abort)。
-不允许部分 resume:resolutions 必须与 record.request_ids() 精确相等(见 spec §6)。
+核销是 **request 级**(multi-pending-partial-resume):resolutions 可为 record
+request_ids 的非空子集,仅裁决子集;空集 / 未知 request_id 仍显式拒绝。
+整体 resolved-marker 与续跑由调用方(engine)在全部 pending 核销后落定。
 """
 from __future__ import annotations
 
@@ -47,15 +49,19 @@ class SuspensionResolver:
     """挂起配对器(无状态)。"""
 
     def validate(self, record: SuspensionRecord, resolutions: dict[str, Any]) -> None:
-        """校验 resolutions 与 record 精确匹配;不匹配抛 ResolveError(禁部分 resume)。"""
+        """校验 resolutions 是 record request_ids 的非空子集;违例抛 ResolveError。
+
+        request 级核销(multi-pending-partial-resume):子集 = 仅裁决该子集,
+        其余 pending 保持活跃(由 engine 判定全量达成后才落 marker / 续跑)。
+        空集与未知 request_id 仍显式拒绝(禁静默)。
+        """
         want = record.request_ids()
         got = set(resolutions.keys())
-        if got != want:
-            missing = want - got
-            extra = got - want
-            raise ResolveError(
-                f"incomplete_or_extra_resolutions: missing={sorted(missing)} extra={sorted(extra)}"
-            )
+        if not got:
+            raise ResolveError("empty_resolutions")
+        extra = got - want
+        if extra:
+            raise ResolveError(f"unknown_request_ids: extra={sorted(extra)}")
 
     def plan(self, record: SuspensionRecord, resolutions: dict[str, Any]) -> ResolvePlan:
         """校验后产出续跑计划。
@@ -65,7 +71,10 @@ class SuspensionResolver:
         """
         self.validate(record, resolutions)
         plan = ResolvePlan()
+        # request 级核销:只裁决 resolutions 覆盖到的 pending,其余保持活跃
         for p in record.pending:
+            if p.request_id not in resolutions:
+                continue
             payload = resolutions[p.request_id]
             # suspension-ttl:内核到期哨兵 → 按 pending 的 on_expire 裁决
             if _is_expire_payload(payload):

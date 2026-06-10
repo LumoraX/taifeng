@@ -40,6 +40,7 @@ from taifeng.loop.event import (
     SpawnFailed,
     SpawnStarted,
     SpawnSuspended,
+    SuspensionPartiallyResolved,
     SuspensionResolved,
     SuspensionResolveRejected,
 )
@@ -448,9 +449,27 @@ class SpawnDriver:
                         "record_id": record.record_id, "detail": {}}),
                 ))
                 return
-            # 补 gap + 落 resolved-marker 核销本 record（复用与 leaf resume 同一机制）
+            # 补 gap（复用与 leaf resume 同一机制；marker 由全量达成判定后签发）
             await eng._apply_plan_on_thread(  # noqa: SLF001
                 child_tid, handle.skill_id, record, plan)
+            # request 级核销:仍有未核销 pending → 部分核销,句柄保持 suspended
+            items_after = await eng._load_thread_items(child_tid)  # noqa: SLF001
+            remaining = [
+                pend for pend in eng._unsettled_pendings(  # noqa: SLF001
+                    record, items_after)
+                if pend.request_id not in op.resolutions]
+            if remaining:
+                await eng._emit(EventMsg(  # noqa: SLF001
+                    submission_id=sub.id,
+                    msg=SuspensionPartiallyResolved(data={
+                        "record_id": record.record_id, "thread_id": child_tid,
+                        "resolved_request_ids": sorted(op.resolutions.keys()),
+                        "remaining_request_ids": sorted(
+                            pend.request_id for pend in remaining)}),
+                ))
+                return
+            await eng._append_resolved_marker(  # noqa: SLF001
+                child_tid, record.record_id)
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=sub.id,
                 msg=SuspensionResolved(data={
@@ -537,7 +556,7 @@ class SpawnDriver:
         try:
             # 1. 自 spawn 子 thread 为根，沿 CHILD_SKILL pending 下探到 leaf
             chain = await eng._build_spawn_resume_chain(  # noqa: SLF001
-                child_tid, handle.skill_id)
+                child_tid, handle.skill_id, op.resolutions)
             if chain is None or len(chain) < 2:
                 await eng._emit(EventMsg(  # noqa: SLF001
                     submission_id=sub.id,
@@ -586,15 +605,19 @@ class SpawnDriver:
                         "record_id": None, "detail": {}}),
                 ))
                 return
-            ok = await eng._settle_call_skill_output(  # noqa: SLF001
+            settle = await eng._settle_call_skill_output(  # noqa: SLF001
                 sub, child_tid, root_call_id, child_result)
-            if not ok:
+            if settle == "missing":
                 await eng._emit(EventMsg(  # noqa: SLF001
                     submission_id=sub.id,
                     msg=SuspensionResolveRejected(data={
                         "reason": "no_active_suspension",
                         "record_id": None, "detail": {}}),
                 ))
+                return
+            if settle == "partial":
+                # spawn 子层 record 还有其他挂起子未结(parallel 多子错峰):
+                # 句柄保持 suspended,等后续 Resume 结清再重跑
                 return
             self._spawn_handles.set_result(
                 handle.handle_id, status="running", result=None)
