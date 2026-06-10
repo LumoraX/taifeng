@@ -383,6 +383,19 @@ class SuspensionResolveRejected(_Msg):
     kind: Literal["suspension_resolve_rejected"] = "suspension_resolve_rejected"
 
 
+class SuspensionExpired(_Msg):
+    """挂起 record 到期，内核自动裁决（suspension-ttl，R3 可观测）。
+
+    随后的续跑 / 终态沿用既有 resume 事件族（suspension_resolved / turn_* /
+    spawn_*），record_id 贯通可归因「挂起为何自行动作」。
+
+    data = {"record_id": str, "thread_id": str, "on_expire": str,
+            "reasons": list[str]}   # 该 record 各 pending 的 reason
+    """
+
+    kind: Literal["suspension_expired"] = "suspension_expired"
+
+
 class ThreadResumed(_Msg):
     """EnginePool 从已有 thread_id 恢复了 engine —— history 已注入。
 
@@ -671,6 +684,7 @@ Msg = Union[
     TurnSuspended,
     SuspensionResolved,
     SuspensionResolveRejected,
+    SuspensionExpired,
     ThreadResumed,
     SubagentPolicyOverridden,
     TurnCompleted,

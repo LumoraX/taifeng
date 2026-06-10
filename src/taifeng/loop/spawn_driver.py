@@ -358,6 +358,13 @@ class SpawnDriver:
         # all_terminal 不满足 → 不触发),检查是否凑齐某 barrier 的全终态条件。
         await self._check_barriers(handle_id)
 
+    def suspended_handles(self) -> list[SpawnHandle]:
+        """当前 suspended 状态句柄的只读快照(suspension-ttl 冷重武装枚举用)。"""
+        return [
+            h for h in self._spawn_handles.handles.values()
+            if h.status == "suspended"
+        ]
+
     def match_suspended_spawn(self, thread_id: str) -> SpawnHandle | None:
         """若 thread_id 命中某个【当前挂起】的 detached spawn 句柄，返回该句柄。
 

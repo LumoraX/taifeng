@@ -12,7 +12,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.budget import (
     ContextBudget,
@@ -224,6 +224,11 @@ class TurnRunner:
     # None → 模块默认 ConservativeFailurePolicy（复刻历史判据，零行为变化）；
     # 子 runner（call_skill / spawn）继承父实例。业务侧经 EnginePool 注入。
     failure_policy: FailureDispositionPolicy | None = None
+    # suspension-ttl:内核自产挂起(SYSTEM_RETRY / RESOURCE_LIMIT)的存活期声明。
+    # None(默认)= 永不过期;无人值守部署可配 ttl + on_expire="retry" 实现
+    # 「限流/触顶到期自动续跑」。业务挂起(request_user_input)的 ttl 在工具工厂声明。
+    failure_suspend_ttl_seconds: int | None = None
+    failure_suspend_on_expire: Literal["abort", "retry"] = "abort"
     # 单 turn 内一批 tool call 的最大并发数；默认 1 = 严格串行（等同历史行为，零回归）
     max_parallel_tool_calls: int = 1
     # turn-级累积 usage
@@ -353,6 +358,9 @@ class TurnRunner:
         raise SuspendSignal(PendingRequest(
             request_id=self._suspend_id_factory(),
             reason=SuspendReason.RESOURCE_LIMIT,
+            # suspension-ttl:内核挂起按构造期声明的存活期(默认永不过期)
+            ttl_seconds=self.failure_suspend_ttl_seconds,
+            on_expire=self.failure_suspend_on_expire,
             payload_schema={
                 "type": "object",
                 "properties": {"action": {"enum": ["retry", "abort"]}},
@@ -680,6 +688,9 @@ class TurnRunner:
                         # 挂起本身不动 head / 不压缩 → 同进程续跑可保 anchor；但跨进程
                         # （tier-2）resume 必失 provider cache。此字段对业务是保守警示，取 True。
                         "cache_invalidated": True,
+                        # suspension-ttl:record 级到期时刻(None=永不过期)。engine 据此
+                        # 武装到期定时器;事件流经 engine._emit,所有层级 turn 统一覆盖。
+                        "expires_at": suspension.expires_at,
                     }
                 )
             )
@@ -922,6 +933,9 @@ class TurnRunner:
                     PendingRequest(
                         request_id=self._suspend_id_factory(),
                         reason=SuspendReason.SYSTEM_RETRY,
+                        # suspension-ttl:内核挂起按构造期声明的存活期(默认永不过期)
+                        ttl_seconds=self.failure_suspend_ttl_seconds,
+                        on_expire=self.failure_suspend_on_expire,
                         payload_schema={
                             "type": "object",
                             "properties": {"action": {"enum": ["retry", "abort"]}},
@@ -1534,6 +1548,8 @@ class TurnRunner:
             denial_breaker_config=self.denial_breaker_config,
             # failure-suspension-policy: 子 turn 继承父的失败处置裁决 policy
             failure_policy=self.failure_policy,
+            failure_suspend_ttl_seconds=self.failure_suspend_ttl_seconds,
+            failure_suspend_on_expire=self.failure_suspend_on_expire,
             max_parallel_tool_calls=self.max_parallel_tool_calls,
             # G4a: 子 turn 继承同一运行时能力快照
             capabilities=self.capabilities,

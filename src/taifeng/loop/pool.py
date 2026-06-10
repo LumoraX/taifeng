@@ -9,7 +9,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.budget import ContextBudget
 from taifeng.context.compressor import CompressionOrchestrator, CompressionStrategy
@@ -139,6 +139,9 @@ class EnginePool:
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
         failure_policy: Any = None,
+        failure_suspend_ttl_seconds: int | None = None,
+        failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
+        now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         instruction_layers: list[Any] | None = None,
         hook_runner: HookRunner | None = None,
@@ -170,6 +173,10 @@ class EnginePool:
         self._denial_breaker_config = denial_breaker_config
         # failure-suspension-policy：失败处置裁决 policy,透传到每个 AgentEngine。
         self._failure_policy = failure_policy
+        self._failure_suspend_ttl_seconds = failure_suspend_ttl_seconds
+        self._failure_suspend_on_expire = failure_suspend_on_expire
+        # suspension-ttl：壁钟工厂(测试可注入固定时钟),透传到每个 AgentEngine。
+        self._now_factory = now_factory
         # 单 turn 内一批 tool call 的最大并发；默认 1=串行。透传到 AgentEngine。
         self._max_parallel_tool_calls = max_parallel_tool_calls
         # Phase 0: instruction_layers 仅占位存储 + 透传到 AgentEngine
@@ -222,6 +229,9 @@ class EnginePool:
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
         failure_policy: Any = None,
+        failure_suspend_ttl_seconds: int | None = None,
+        failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
+        now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         auto_watch_skills: bool = False,
         watch_poll_interval_seconds: float = 1.0,
@@ -314,6 +324,9 @@ class EnginePool:
             max_iterations=max_iterations,
             denial_breaker_config=denial_breaker_config,
             failure_policy=failure_policy,
+            failure_suspend_ttl_seconds=failure_suspend_ttl_seconds,
+            failure_suspend_on_expire=failure_suspend_on_expire,
+            now_factory=now_factory,
             max_parallel_tool_calls=max_parallel_tool_calls,
             instruction_layers=instruction_layers,
             hook_runner=hook_runner,
@@ -444,6 +457,9 @@ class EnginePool:
                 max_iterations=self._max_iterations,
                 denial_breaker_config=self._denial_breaker_config,
                 failure_policy=self._failure_policy,
+                failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
+                failure_suspend_on_expire=self._failure_suspend_on_expire,
+                now_factory=self._now_factory,
                 max_parallel_tool_calls=self._max_parallel_tool_calls,
                 instruction_layers=self._instruction_layers,
                 script_executors=self._script_executors,

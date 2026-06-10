@@ -19,8 +19,17 @@ from taifeng.suspend.signal import SuspendSignal
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 
-def make_request_user_input_tool() -> ToolSpec:
-    """构造 request_user_input ToolSpec(注册进内置工具表)。"""
+def make_request_user_input_tool(
+    *, ttl_seconds: int | None = None
+) -> ToolSpec:
+    """构造 request_user_input ToolSpec(注册进内置工具表)。
+
+    Args:
+        ttl_seconds: 问询挂起的存活期(suspension-ttl)。None(默认)= 永不过期;
+            正整数 = 到期由内核自动 abort(DATA 挂起无法替用户造数据,on_expire
+            恒为 abort)。**业务构造期声明,不暴露为 LLM 可控参数**(R1:存活期
+            是业务策略);非法值由 PendingRequest 构造期校验拦截。
+    """
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         # 边界校验:prompt 必填非空(系统边界,禁静默占位)
@@ -40,6 +49,8 @@ def make_request_user_input_tool() -> ToolSpec:
                 payload_schema=response_schema,  # 不透明透传
                 related_call_id=ctx.call_id,
                 detail={"prompt": prompt, "response_schema": response_schema},
+                # suspension-ttl:业务构造期声明的存活期;DATA 到期只能 abort(默认值)
+                ttl_seconds=ttl_seconds,
             ),
         )
 

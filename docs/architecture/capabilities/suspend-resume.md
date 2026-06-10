@@ -41,6 +41,8 @@
 - `payload_schema: dict[str, Any] = {}` —— JSON Schema，业务/前端据此渲染表单或审批 UI
 - `related_call_id: str | None = None` —— 关联的 `function_call` call_id；**人类输入类必有**，系统态为 `None`
 - `detail: dict[str, Any] = {}` —— 不透明上下文（scope / target / command / failure_class 等）；**taifeng 不解析其 keys（R1）**
+- `ttl_seconds: int | None = None` —— 挂起存活期（suspension-ttl）。None = 永不过期；**构造期禁 ≤0（含 -1 哨兵）**
+- `on_expire: Literal["abort", "retry"] = "abort"` —— 到期裁决动作；`"retry"` 仅 SYSTEM_RETRY / RESOURCE_LIMIT 合法（人类输入类无法替用户造数据，构造期拦截）
 
 ### Requirement: `SuspensionRecord` + `suspension` ResponseItem 编码
 
@@ -139,6 +141,29 @@ Resume(thread_id, resolutions)
 - spawn 链零新增：被 spawn 的子 turn 裁决挂起 → 既有 `_finalize_spawn` suspended 分支（句柄 suspended + `SpawnSuspended(thread_id)`，join-barrier 视为未结算不触发）→ 既有 `Resume(thread_id)` + `match_suspended_spawn` 路由续跑；abort → `SpawnFailed` 终态，barrier 推进。
 - ContextOverflow 的一次自愈（强制压缩 + 重采样）发生在 policy 判定**之前**，不受 policy 影响。
 - 已知边界：声明式编排路径（`run_orchestrated_turn`）不经 `_sample_once` 主循环，policy 对其不生效（由 change `orchestration-suspension-propagation` 处理）。
+
+### Requirement: 挂起存活期与到期自动裁决（suspension-ttl）
+
+挂起 SHALL 可声明存活期并由内核到期自动裁决，无人值守部署不死锁：
+
+- **声明**：业务挂起经 `make_request_user_input_tool(ttl_seconds=...)` 工厂参数（DATA，到期恒 abort）；内核自产挂起（SYSTEM_RETRY / RESOURCE_LIMIT）经 `EnginePool.create(failure_suspend_ttl_seconds=..., failure_suspend_on_expire=...)`。LLM SHALL NOT 可控 ttl（R1：存活期是业务策略）。
+- **record 级生效**：`SuspensionRecord.expires_at` 为派生属性 = `created_at + min(各 pending ttl)`（全 None → None）；到期对整个 record 一次性裁决（与全量 resume 语义对齐）。真相在 pending 序列化字段，冷热一致（R5），旧 JSONL 无字段 → 永不过期（前向兼容）。
+- **武装**：engine 借唯一事件总线簿记——`turn_suspended`（data 含 `expires_at`）武装 asyncio 定时器，`suspension_resolved` 撤销（**先核销者胜**：触发时重读活跃挂起验证 record_id，已核销 no-op）；shutdown 取消全部（R4）。所有层级 turn（根 / call_skill 子链 / spawn 子 thread）的挂起事件都流经 engine emit，热路径单点全覆盖。
+- **冷重武装**：engine.run 启动时扫根 history + 挂起态 spawn 句柄的子 thread：已过期立即裁决、未过期按剩余壁钟时长重武装。v1 边界：深层 call_skill leaf 的 ttl 仅热路径覆盖（冷恢复后该 leaf 再次挂起时重新武装）。
+- **裁决 = 内核签发等价 Resume**：到期 emit `suspension_expired`（data `{record_id, thread_id, on_expire, reasons}`，R3）后以 `EXPIRE_SENTINEL`（`{"__expired__": true}`）payload 提交公共 `Resume` Op——root / 嵌套 / spawn 三条续跑链零改动复用。resolver 对哨兵按 pending 裁决：系统位按 `on_expire`（SYSTEM_RETRY retry → resample；RESOURCE_LIMIT retry → 重建续跑；abort → 终止）；人类输入类 / CHILD_SKILL → 悬空 fc 回填 `suspension_expired` error output（保配对，R5）+ 整体 abort。哨兵是内核内部形态，业务伪造等价于自行 deny/abort，无能力增益。
+- **时钟**：`now_factory` 构造期注入（默认 `time.time`，测试可固定）；壁钟回拨仅影响触发时刻不影响裁决正确性。
+
+#### Scenario: 到期 retry 自动续跑
+- **WHEN** SYSTEM_RETRY 挂起声明 ttl + on_expire="retry"，无人 Resume 至到期
+- **THEN** emit `suspension_expired` 后自动按 retry 续跑，事件流与人工 Resume retry 一致
+
+#### Scenario: 挂起 spawn 轨到期 abort 解除 barrier 占用
+- **WHEN** 挂起的 spawn 子专科 record 到期且 on_expire="abort"
+- **THEN** 句柄落 error、emit `SpawnFailed`，join-barrier 按全终态条件继续
+
+#### Scenario: 人工先到则到期失效
+- **WHEN** 用户在 ttl 内提交 Resume 核销 record
+- **THEN** 定时器撤销 / 触发时验证已核销 no-op，不重复裁决
 
 #### Scenario: permission allow resume 执行 tool
 - **WHEN** `Resume(resolutions={req: {"granted": true}})`，该 pending 是 permission
