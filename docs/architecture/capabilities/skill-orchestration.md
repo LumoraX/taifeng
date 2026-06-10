@@ -66,7 +66,7 @@ composite skill 可在 SKILL.md 声明子步骤的并行/顺序/条件编排；�
 
 编排批内子 skill 挂起 SHALL 正确上浮：`_execute_leaf` 按 `DispatchOutcome.suspend` 二分——完成子照常 (fc, fco) 配对回填；挂起子 SHALL 只追加悬空 fc（占位文本 `"<suspended>"` SHALL NOT 入史）；批内任一挂起 → 抛 `_BatchSuspend` 由 run() 既有路径落盘挂起，编排 turn 以 suspended 终结（与 LLM 路径混合批语义同形）。
 
-resume 重入 SHALL 以确定性 call_id（`orch_{entry}_{step_idx}_{sid}_{idx}`）为坐标重放：history 中已配对（含 gap 回填）的子直接复用 output 不重派发，已完成段零派发跳过；when 段判定与 upstream 注入由重放输出重建；`tool_batch_dispatched.count` SHALL 仅计实际派发数（重放命中率可观测）。上层链路（detached spawn 的编排 entry / call_skill 子链）SHALL 复用既有挂起路由，零新增机制。
+resume 重入 SHALL 以确定性 call_id（`orch_{entry}_{step_idx}_{sid}_{idx}`）为坐标重放，扫描区间 SHALL 限定**本 turn**（history 最后一条 `user_message` 之后，含 gap 回填；无锚点不重放）：区间内已配对的子直接复用 output 不重派发，已完成段零派发跳过；历史轮次的同 call_id 配对 SHALL NOT 命中——call_id 不含 turn 维度，越界命中会使同 thread 第二条 UserMessage 整轮零派发复读旧答案（orch-replay-turn-scope）；when 段判定与 upstream 注入由重放输出重建；`tool_batch_dispatched.count` SHALL 仅计实际派发数（重放命中率可观测）。上层链路（detached spawn 的编排 entry / call_skill 子链）SHALL 复用既有挂起路由，零新增机制。
 
 已知退化：压缩吃掉已完成段的配对 → 重放找不到坐标 → 该子重派发（幂等性由子 skill 自身语义决定）；编排 turn 不采样 LLM、history 短，实际触发概率低。
 
@@ -77,6 +77,10 @@ resume 重入 SHALL 以确定性 call_id（`orch_{entry}_{step_idx}_{sid}_{idx}`
 #### Scenario: 重入零派发重放
 - **WHEN** 两段编排在第二段挂起，Resume(leaf) 后重入
 - **THEN** 第一段 call_id 命中重放、`tool_batch_dispatched.count == 0`，第二段续跑至编排完成
+
+#### Scenario: 第二条 UserMessage 全量重新派发
+- **WHEN** 编排 entry 正常完成第一轮后，同 thread 提交第二条不同输入
+- **THEN** 第二轮全部子重新派发（count 为全量），第一轮 fco 不被复用
 
 #### Scenario: when 判定重放一致
 - **WHEN** when 段 then 分支挂起后 Resume 重入

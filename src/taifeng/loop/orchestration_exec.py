@@ -129,12 +129,27 @@ async def _resolve_when(
 
 
 def _replay_paired_output(runner: TurnRunner, call_id: str) -> str | None:
-    """重放查询:history 中该 call_id 已有 function_call_output → 返回其 output。
+    """重放查询:**本 turn 区间内**该 call_id 已有 function_call_output → 返回其 output。
 
     resume 重入幂等的坐标即确定性 call_id(orch_{entry}_{step}_{sid}_{idx});
     gap 回填(挂起子被 Resume 补的 output)同样命中。无配对 → None(需派发)。
+
+    扫描区间限定最后一条 user_message 之后:call_id 不含 turn 维度,同一 entry
+    的每一轮 call_id 完全相同——若全量扫描,同 thread 第二条 UserMessage 会命中
+    第一轮的 fco,整轮零派发复读旧答案。本 turn 的全部 fc/fco(含挂起后 gap 回填)
+    都追加在该 turn 的 user_message 之后,区间即精确的重放作用域;无 user_message
+    锚点(理论不可达,编排 turn 必有种子输入)→ 不重放,宁可重派发不可错命中。
     """
-    for item in runner.history_buffer:
+    items = runner.history_buffer
+    start: int | None = None
+    # 反向定位本 turn 起点(最后一条 user_message)
+    for i in range(len(items) - 1, -1, -1):
+        if items[i].kind == "user_message":
+            start = i + 1
+            break
+    if start is None:
+        return None
+    for item in items[start:]:
         if (item.kind == "function_call_output"
                 and item.payload.get("call_id") == call_id):
             return str(item.payload.get("output", ""))

@@ -302,3 +302,53 @@ async def test_orch_when_branch_replay_consistent(
     await engine.submit(taifeng.loop.Shutdown())
     await asyncio.wait_for(task, timeout=5.0)
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_orch_second_user_message_full_redispatch(
+    tmp_path: Path, threads_dir: Path,
+) -> None:
+    """同 thread 第二条 UserMessage 必须全量重新派发(重放 turn 作用域,
+    orch-replay-turn-scope):call_id 不含 turn 维度,若重放越过本 turn 的
+    user_message 锚点,第二轮会命中第一轮 fco → 整轮零派发、复读旧答案、
+    新输入被静默忽略(verify 2026-06-10 P0)。"""
+    skills = tmp_path / "s"
+    _write(skills, "flow", _entry(
+        "orchestration:\n  steps:\n    - serial: [plain]\n", ["plain"]))
+    _write(skills, "plain", _PLAIN)
+    # 两个脚本:第二轮若被误重放(零派发),ANSWER_TWO 永不产生 → 断言可抓
+    client = RoutingMockClient(routes={
+        "PLAIN_MARK": [MockTurn(text="ANSWER_ONE"), MockTurn(text="ANSWER_TWO")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills, threads_dir=threads_dir, model_client=client,
+        compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="orch-2nd", entry_skill_id="flow")
+    events: list = []
+    task = asyncio.create_task(_watch_all(engine, events))
+    await asyncio.sleep(0)
+
+    def _completed_count() -> int:
+        return sum(1 for m in events
+                   if m.kind == "turn_completed" and m.data.get("is_root"))
+
+    await engine.submit(taifeng.UserMessage(text="第一问"))
+    assert await _wait(lambda: _completed_count() == 1), "第一轮应正常完成"
+    await engine.submit(taifeng.UserMessage(text="第二问"))
+    assert await _wait(lambda: _completed_count() == 2), "第二轮应正常完成"
+
+    # 第二轮必须真实派发:两轮各产生一条独立 fco
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    outputs = [str(it.payload.get("output", "")) for it in items
+               if it.kind == "function_call_output"]
+    assert any("ANSWER_ONE" in o for o in outputs), f"第一轮输出缺失: {outputs}"
+    assert any("ANSWER_TWO" in o for o in outputs), \
+        f"第二轮被误重放(零派发复读第一轮),outputs={outputs}"
+    # 派发计数:两轮 tool_batch_dispatched 都应为全量 1(出现 0 = 越界重放命中)
+    counts = [m.data["count"] for m in events if m.kind == "tool_batch_dispatched"]
+    assert counts == [1, 1], f"两轮都应实际派发,实得 {counts}"
+
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
