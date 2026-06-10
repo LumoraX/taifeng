@@ -13,9 +13,9 @@
 
 ## 数据契约
 
-### Requirement: `SuspendReason` 五值枚举
+### Requirement: `SuspendReason` 六值枚举
 
-`SuspendReason` SHALL 是 `enum.StrEnum`，取且仅取以下五值（决定 resume 续跑语义）：
+`SuspendReason` SHALL 是 `enum.StrEnum`，取且仅取以下六值（决定 resume 续跑语义）：
 
 | 值 | 语义 | resume 续跑动作 |
 | --- | --- | --- |
@@ -23,6 +23,7 @@
 | `form` | 等用户填表 | payload 直接成该 call 的 `function_call_output` |
 | `data` | 等外部数据 | 同 `form`，payload 直接成 `function_call_output` |
 | `system_retry` | 限流 / 配额 / 余额 / 鉴权 / 可恢复网络错 | `action=retry`（默认）→ 重跑同次 sample；`action=abort` → turn 终止不续跑 |
+| `resource_limit` | 资源护栏触顶（`max_iterations` / `resource_limit_exceeded` / `denial_circuit_open`）被失败处置 policy 裁决为挂起 | `action=retry` → 重建 runner 自迭代边界**继续采样循环**（无悬空 fc、**不 resample**；IterationBudget / DenialBreaker 随重建按原 cap 重置）；`action=abort` → 与 system_retry abort 同语义。非法 action 显式 `ResolveError`。`detail` 携带 `{end_reason, guard_snapshot?}` |
 | `child_skill` | `call_skill` 派发的子 skill 内部挂起 → 父的 `call_skill` 随之挂起 | **非用户可直接 resolve**：由 engine 续跑链内部核销——先续跑子 thread 拿结果，再回填本 `call_skill` 的 `function_call_output`（见下「子 thread resume 续跑链」） |
 
 `StrEnum` 保证 JSON 序列化为字符串（`reason.value`），跨进程 `from_item` 还原稳定。`child_skill` pending 的 `related_call_id` = 父 `call_skill` 的 call_id，`detail` 携带 `{sub_thread_id, skill_id}`（子 thread + 子 entry skill）。
@@ -70,6 +71,7 @@ payload 形状由对应 `PendingRequest.reason` 决定：
 - `permission`：`{"granted": bool, "reason"?: str, "remember_until"?: str}`
 - `form` / `data`：任意 JSON（直接成 `function_call_output`）
 - `system_retry`：`{"action": "retry" | "abort"}`
+- `resource_limit`：`{"action": "retry" | "abort"}`（与 system_retry 同形；非法 action 显式拒绝）
 
 ### Requirement: `ResolvePlan` + `SuspensionResolver`
 
@@ -78,8 +80,8 @@ payload 形状由对应 `PendingRequest.reason` 决定：
 - `execute_tool_call_ids: list[str]` —— permission allow → resume 时执行 tool
 - `direct_outputs: dict[str, Any]` —— call_id → output（form / data）
 - `deny_outputs: dict[str, str]` —— call_id → deny reason（permission deny）
-- `resample: bool` —— system_retry → 重跑 sample
-- `abort: bool` —— system_retry `action=abort`
+- `resample: bool` —— system_retry → 重跑 sample（resource_limit **不置此位**：重建续跑即继续循环）
+- `abort: bool` —— system_retry / resource_limit `action=abort`
 
 `ResolveError`（普通 `Exception`，**不进 LLMError 体系**）在：resolutions 不全 / 多余、人类输入类 pending 缺 `related_call_id`、未知 reason 时抛出（禁 silent fallback）。
 
@@ -124,7 +126,19 @@ Resume(thread_id, resolutions)
 - **permission allow**（`granted=true`）：resume 时**真正执行**该挂起 tool（`engine._execute_resumed_tool`，复用 `tool_runtime.dispatch`，走 RwLock），回填 `function_call_output`。执行前调 `PermissionPolicy.preapprove(call_id)` 一次性放行，避免 `SuspendingPrompter` 二次挂起（防无限挂）。
 - **permission deny**（`granted=false`）：回填 `is_error=True` 的 `function_call_output`（`permission_denied: <reason>`），让模型据此改写后续。
 - **form / data**：`resolutions[request_id]` 直接 JSON 序列化成该 `related_call_id` 的 `function_call_output`（`is_error=False`），**不重跑 tool**。
-- **system_retry**：`action=retry`（默认）→ 不动 history，重跑那次 `_sample_once`（获全新 retry 预算）；`action=abort` → turn 终止不续跑。retry 自动机制：`_sample_once` 命中可恢复错误先走 `RetryConfig`（默认 `max_attempts=3`）自动退避重试；**3 次耗尽**或确定性"等外部介入"类（`provider_auth` / `provider_quota` / `provider_balance`）才转 `SYSTEM_RETRY` 挂起。`ContentFilter` / `ContextOverflow` / `InvalidRequest` 这类确定性失败**不挂起**，照旧硬失败（resume 也救不回）。
+- **system_retry**：`action=retry`（默认）→ 不动 history，重跑那次 `_sample_once`（获全新 retry 预算）；`action=abort` → turn 终止不续跑。retry 自动机制：`_sample_once` 命中可恢复错误先走 `RetryConfig`（默认 `max_attempts=3`）自动退避重试；**3 次耗尽**或确定性"等外部介入"类（`provider_auth` / `provider_quota` / `provider_balance`）才转 `SYSTEM_RETRY` 挂起。`ContentFilter` / `ContextOverflow` / `InvalidRequest` 这类确定性失败在**默认（保守）policy** 下不挂起、照旧硬失败；注入 `SuspendByDefaultPolicy` 后同样转 `SYSTEM_RETRY` 挂起（裁决权见下「失败处置裁决 policy」）。
+- **resource_limit**：`action=retry` → 重建 runner 以挂起点 history 继续采样循环（挂起发生在迭代边界、fc/output 已配对，无 resample 语义；IterationBudget / DenialBreaker 随 runner 重建按原 cap 重新起算——每轮 retry 都需显式 Resume，人在环、无无界自动循环）；`action=abort` → 与 system_retry abort 同形。
+
+### Requirement: 失败处置裁决 policy（FailureDispositionPolicy）
+
+「失败落挂起还是终态」SHALL 由可注入的 `FailureDispositionPolicy` 协议裁决（`decide(ctx: FailureContext) -> FailureDisposition{SUSPEND, TERMINAL}`，同步纯函数、禁 IO）。`FailureContext` 携带 `origin`（`llm_error` / `guard_trip`）、`failure_class`、`end_reason`、`error_kind`、`retryable`、`is_root`、`iteration`，无业务概念（R1）。
+
+- 判定点恰好两处：`_sample_once` 的 LLMError 重试耗尽处（origin=`llm_error` → SUSPEND 落 `SYSTEM_RETRY`）；`run()` 三个护栏 break 点（origin=`guard_trip` → SUSPEND 落 `RESOURCE_LIMIT`）。cancelled 不进 policy（取消非失败）。
+- 内置两个实现：`ConservativeFailurePolicy`（**默认**，retryable / 等外部介入类挂起、其余终态——复刻历史判据零变化）；`SuspendByDefaultPolicy`（一切失败挂起，「失败默认非终态、人裁决终态」——仅适合有人值守或有自动决策器的部署）。
+- 注入链：`EnginePool.create(failure_policy=...)` → `AgentEngine` → 全部 TurnRunner 构造点（含 resume / rewind 重建）；子 runner（call_skill / spawn）继承父实例。
+- spawn 链零新增：被 spawn 的子 turn 裁决挂起 → 既有 `_finalize_spawn` suspended 分支（句柄 suspended + `SpawnSuspended(thread_id)`，join-barrier 视为未结算不触发）→ 既有 `Resume(thread_id)` + `match_suspended_spawn` 路由续跑；abort → `SpawnFailed` 终态，barrier 推进。
+- ContextOverflow 的一次自愈（强制压缩 + 重采样）发生在 policy 判定**之前**，不受 policy 影响。
+- 已知边界：声明式编排路径（`run_orchestrated_turn`）不经 `_sample_once` 主循环，policy 对其不生效（由 change `orchestration-suspension-propagation` 处理）。
 
 #### Scenario: permission allow resume 执行 tool
 - **WHEN** `Resume(resolutions={req: {"granted": true}})`，该 pending 是 permission

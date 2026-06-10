@@ -45,6 +45,9 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
 ### Requirement: 配置注入（R1）
 - 阈值/上限全部构造期注入；断路器只消费 deny 结果、不改 `PermissionPolicy` 裁决路径。
 
+### Requirement: 触顶经失败处置 policy 判定（failure-suspension-policy）
+- 三类护栏触顶（`max_iterations` / `resource_limit_exceeded` / `denial_circuit_open`）在终结 turn 前经注入的 `FailureDispositionPolicy` 判定（`origin="guard_trip"`）：TERMINAL → 既有 end_reason 终结路径（默认 policy 恒 TERMINAL，零行为变化）；SUSPEND → 改落 `RESOURCE_LIMIT` 挂起（detail 携带 `end_reason` + 护栏快照，断路触发时 `denial_circuit_open` 事件仍恰好一次）。retry 续跑时预算与断路器随 runner 重建按原 cap 重置。完整契约见 [suspend-resume.md](suspend-resume.md) §失败处置裁决 policy。
+
 ## R1–R5 影响
 
 - **R1**：✅ 计数与记账无业务语义；阈值业务注入。
