@@ -603,6 +603,124 @@ async def test_join_barrier_with_failed_expert(expert_skills, threads_dir):
 
 
 # ---------------------------------------------------------------------------
+# spawn-terminal-single-convergence: _settle_failed 失败终态唯一收敛点。
+#   终态幂等(已终态句柄 no-op、终态事件恰好一次)+ barrier 故障隔离
+#   (suppress 兜底场景仅记日志;正常控制流向上抛,禁 silent fallback)。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_settle_failed_idempotent_on_terminal(expert_skills, threads_dir):
+    """_settle_failed 终态幂等:已 cancelled 句柄二次失败收敛 no-op——状态不被
+    覆盖为 error、不再 emit 第二条终态事件(spec: 失败收敛终态幂等)。"""
+    from taifeng.tool.builtins.request_user_input import (
+        make_request_user_input_tool,
+    )
+
+    client = RoutingMockClient(routes={
+        "EXPERT_A_MARK": [
+            MockTurn(text="A 提问", tool_calls=[
+                {"id": "call_a", "name": "request_user_input",
+                 "arguments": '{"prompt": "需要补充"}'}]),
+        ],
+        "ORCH_MARK": [MockTurn(text="orch idle")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=expert_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], extra_tools=[make_request_user_input_tool()])
+    engine = await pool.get_or_create(
+        session_id="settle-idem", entry_skill_id="orchestrator")
+    events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev.msg)
+            if ev.msg.kind == "shutdown":
+                break
+
+    task = asyncio.create_task(watch())
+    await asyncio.sleep(0)
+    a = (await engine.spawn_skill(
+        skill_id="expert-a", args={}, reason="A"))["handle_id"]
+    assert await _wait(
+        lambda: engine.spawn_status([a])[a]["status"] == "suspended")
+    await engine.kill_spawn(a)  # suspended-kill → cancelled 终态
+    assert engine.spawn_status([a])[a]["status"] == "cancelled"
+    # 已终态句柄二次失败收敛 → no-op(白盒直调唯一收敛点)
+    await engine._spawn._settle_failed(a, "boom")  # noqa: SLF001
+    assert engine.spawn_status([a])[a]["status"] == "cancelled"
+    await asyncio.sleep(0.05)
+    assert not any(
+        m.kind == "spawn_failed" and m.data.get("handle_id") == a
+        for m in events), "已终态句柄不得再 emit spawn_failed"
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_settle_failed_barrier_error_isolation(expert_skills, threads_dir):
+    """_settle_failed 的 barrier 故障隔离:suppress(except 兜底场景)下重查
+    抛错仅记日志不外抛——句柄已落 error、spawn_failed 已发;非 suppress
+    (正常控制流,如 abort 裁决)下抛错向上传播(禁 silent fallback)。"""
+    from taifeng.tool.builtins.request_user_input import (
+        make_request_user_input_tool,
+    )
+
+    ask = {"id": "call_a", "name": "request_user_input",
+           "arguments": '{"prompt": "需要补充"}'}
+    client = RoutingMockClient(routes={
+        # 两次 spawn 各消费一个挂起 turn
+        "EXPERT_A_MARK": [MockTurn(text="问1", tool_calls=[dict(ask)]),
+                          MockTurn(text="问2", tool_calls=[dict(ask, id="c2")])],
+        "ORCH_MARK": [MockTurn(text="orch idle")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=expert_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], extra_tools=[make_request_user_input_tool()])
+    engine = await pool.get_or_create(
+        session_id="settle-iso", entry_skill_id="orchestrator")
+    events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev.msg)
+            if ev.msg.kind == "shutdown":
+                break
+
+    task = asyncio.create_task(watch())
+    await asyncio.sleep(0)
+    a = (await engine.spawn_skill(
+        skill_id="expert-a", args={}, reason="A"))["handle_id"]
+    b = (await engine.spawn_skill(
+        skill_id="expert-a", args={}, reason="B"))["handle_id"]
+    assert await _wait(
+        lambda: engine.spawn_status([a])[a]["status"] == "suspended")
+    assert await _wait(
+        lambda: engine.spawn_status([b])[b]["status"] == "suspended")
+    driver = engine._spawn  # noqa: SLF001
+
+    # 注入 barrier 重查故障(模拟聚合 skill 随 snapshot 热更消失)
+    async def boom(changed_handle_id=None):
+        raise RuntimeError("join_barrier_skill_missing: gone")
+
+    driver._check_barriers = boom  # noqa: SLF001
+    # suppress(兜底场景):不外抛;句柄已收敛 error、spawn_failed 已发
+    await driver._settle_failed(a, "crash", suppress_barrier_errors=True)
+    assert engine.spawn_status([a])[a]["status"] == "error"
+    await asyncio.sleep(0.05)
+    assert any(m.kind == "spawn_failed" and m.data.get("handle_id") == a
+               for m in events)
+    # 非 suppress(正常控制流):向上抛;句柄状态/事件仍已完成(故障仅在重查)
+    with pytest.raises(RuntimeError, match="join_barrier_skill_missing"):
+        await driver._settle_failed(b, "crash2")
+    assert engine.spawn_status([b])[b]["status"] == "error"
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
+
+
+# ---------------------------------------------------------------------------
 # Task 9: LLM 入口 —— spawn_skill / await_skills / join_skill / kill_skill 四工具。
 #         LLM 在一个 turn 内调用工具发起 detached spawn，工具转发到 engine spawn API。
 # ---------------------------------------------------------------------------

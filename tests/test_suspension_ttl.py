@@ -382,7 +382,7 @@ version: 1.0.0
 type: composite
 entry: true
 model: mock-model
-child_skills: [ttl-expert]
+child_skills: [ttl-expert, ttl-fast]
 max_call_depth: 3
 ---
 # 宿主 TTL_HOST_MARK
@@ -402,11 +402,34 @@ max_call_depth: 2
 先问人再下结论。
 """
 
+_SPAWN_FAST = """---
+name: ttl-fast
+description: 速诊专家
+version: 1.0.0
+type: atomic
+---
+# 速诊 TTL_FAST_MARK
+直接给结论。
+"""
+
+_SPAWN_CONSULT = """---
+name: ttl-consult
+description: 聚合会诊
+version: 1.0.0
+type: atomic
+---
+# 会诊 TTL_CONSULT_MARK
+综合各专家终态出报告。
+"""
+
 
 @pytest.fixture
 def ttl_spawn_skills(tmp_path):
     skills = tmp_path / "ttl_spawn_skills"
-    for sub, body in (("ttl-host", _SPAWN_HOST), ("ttl-expert", _SPAWN_EXPERT)):
+    for sub, body in (
+        ("ttl-host", _SPAWN_HOST), ("ttl-expert", _SPAWN_EXPERT),
+        ("ttl-fast", _SPAWN_FAST), ("ttl-consult", _SPAWN_CONSULT),
+    ):
         d = skills / sub
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(body, encoding="utf-8")
@@ -422,8 +445,8 @@ async def _wait_status(engine, hid: str, want: str, tries: int = 200) -> bool:
 
 
 async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_dir):
-    """挂起的 spawn 子专科到期(DATA,on_expire=abort)→ 句柄 error + SpawnFailed
-    (解除 barrier 占用,无人值守不死锁)。"""
+    """挂起的 spawn 子专科到期(DATA,on_expire=abort)→ 句柄 error + SpawnFailed,
+    且解除 barrier 占用(单句柄 barrier 在 abort 终态后触发,无人值守不死锁)。"""
     client = RoutingMockClient(routes={
         "TTL_EXPERT_MARK": [
             MockTurn(text="问", tool_calls=[
@@ -431,6 +454,7 @@ async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_d
                  "arguments": '{"prompt": "补充?"}'}]),
             MockTurn(text="不应被采样"),
         ],
+        "TTL_CONSULT_MARK": [MockTurn(text="会诊综合 CONSULT_DONE")],
         "TTL_HOST_MARK": [MockTurn(text="host idle")],
     })
     pool = await taifeng.EnginePool.create(
@@ -453,6 +477,8 @@ async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_d
 
     h = await engine.spawn_skill(skill_id="ttl-expert", args={}, reason="t")
     hid = h["handle_id"]
+    # 登记单句柄 barrier:验证 abort 终态确实解除 barrier 占用(非名义覆盖)
+    await engine.set_join_barrier([hid], then_skill_id="ttl-consult")
     # 挂起(SpawnSuspended)后定时器立即到期 → 自动 abort → 句柄 error
     assert await _wait_status(engine, hid, "error"), \
         f"到期 abort 后句柄应 error,实为 {engine.spawn_status([hid])[hid]}"
@@ -460,7 +486,78 @@ async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_d
     assert "suspension_expired" in kinds
     failed = [m for m in events if m.kind == "spawn_failed"
               and m.data.get("handle_id") == hid]
-    assert failed, "到期 abort 应 emit SpawnFailed(barrier 可推进)"
+    assert failed, "到期 abort 应 emit SpawnFailed"
+    # abort 终态 → barrier 全终态重查 → 触发(修复前漏调重查,此处永等不到)
+    for _ in range(200):
+        if any(m.kind == "join_barrier_fired" for m in events):
+            break
+        await asyncio.sleep(0.02)
+    assert any(m.kind == "join_barrier_fired" for m in events), \
+        "abort 终态后单句柄 barrier 应触发"
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
+
+
+async def test_spawn_abort_recheck_fires_join_barrier(ttl_spawn_skills, threads_dir):
+    """业务命中路径忠实重放(spawn-terminal-single-convergence):双专科会诊,
+    挂起专科 TTL 到期 abort(spawn_failed)后 join-barrier 必须重查并触发聚合
+    (会诊)turn —— 修复前 resume_spawn 的 plan.abort 分支漏调 _check_barriers,
+    barrier 永不触发、会诊挂死。"""
+    import json
+
+    client = RoutingMockClient(routes={
+        "TTL_EXPERT_MARK": [
+            MockTurn(text="问", tool_calls=[
+                {"id": "q1", "name": "request_user_input",
+                 "arguments": '{"prompt": "补充?"}'}]),
+        ],
+        "TTL_FAST_MARK": [MockTurn(text="速诊结论 FAST_DONE")],
+        "TTL_CONSULT_MARK": [MockTurn(text="会诊综合 CONSULT_DONE")],
+        "TTL_HOST_MARK": [MockTurn(text="host idle")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=ttl_spawn_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[],
+        extra_tools=[make_request_user_input_tool(ttl_seconds=60)],
+        now_factory=_future_now,
+    )
+    engine = await pool.get_or_create(session_id="ttl-jb", entry_skill_id="ttl-host")
+    fired: dict = {"v": None}
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind == "join_barrier_fired":
+                fired["v"] = dict(ev.msg.data)
+            if ev.msg.kind == "shutdown":
+                break
+
+    task = asyncio.create_task(watch())
+    await asyncio.sleep(0)
+
+    a = (await engine.spawn_skill(
+        skill_id="ttl-fast", args={}, reason="速诊"))["handle_id"]
+    b = (await engine.spawn_skill(
+        skill_id="ttl-expert", args={}, reason="问询"))["handle_id"]
+    # 登记时 b 尚未终态 → 登记期的立即检查不触发,触发只能依赖 abort 终态后的重查
+    await engine.set_join_barrier([a, b], then_skill_id="ttl-consult")
+    # b 挂起后定时器立即到期 → 自动 abort → 句柄 error;a 速诊 → done
+    assert await _wait_status(engine, b, "error"), \
+        f"到期 abort 后句柄应 error,实为 {engine.spawn_status([b])[b]}"
+    assert await _wait_status(engine, a, "done")
+    # 核心断言:abort 终态使句柄集全终态 → barrier 重查触发(修复前永不触发)
+    for _ in range(200):
+        if fired["v"] is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert fired["v"] is not None, \
+        "abort 终态后 join-barrier 应重查触发聚合 turn,实际未触发(会诊挂死)"
+    # 聚合种子含两专家终态:a done / b error(失败专家不被静默丢弃)
+    items = [it async for it in await pool.store.load_thread(
+        fired["v"]["then_thread_id"])]
+    payload = json.loads(items[0].payload["text"])
+    assert payload[a]["status"] == "done"
+    assert payload[b]["status"] == "error"
     await engine.submit(taifeng.loop.Shutdown())
     await asyncio.wait_for(task, timeout=5.0)
     await pool.close()

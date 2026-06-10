@@ -173,6 +173,32 @@ running → done | error | cancelled
 - **THEN** barrier 在最后一个到达终态时仍触发
 - **AND** 聚合 args 含 `{A: {status:"error", result:{...error info...}}, B:..., C:...}`（不静默丢 A）
 
+### Requirement: 终态写入单点收敛
+
+句柄终态写入必须经唯一收敛点完成「状态回写 + 终态事件 emit + barrier 重查」三件套，禁止任何路径手写其中一件（历史事故：abort 裁决分支漏调 barrier 重查 → 被等待句柄虽落终态但聚合 turn 永不触发、会诊挂死）：
+
+| 终态 | 唯一收敛点 | 覆盖路径 |
+| --- | --- | --- |
+| done / suspended / cancelled / error（驱动正常退栈） | `_finalize_spawn` | 首发 `_drive_spawn`、续跑 `resume_spawn(_nested)`、peer-wake `_drive_woken_turn` 收尾 |
+| cancelled（挂起句柄被 kill，无 live runner 驱动 finalize） | `kill_spawn` 内联 | suspended-kill |
+| error（abort 裁决 / 各驱动宽 except 兜底） | `_settle_failed` | `resume_spawn` 的 `plan.abort` 分支（TTL 到期 / 人工 abort）；`_drive_spawn` / `resume_spawn` / `resume_spawn_nested` / `_drive_woken_turn` 四处宽 except |
+
+三个收敛点均实施**终态幂等**守卫：已终态句柄再收敛是 no-op（不覆盖状态、不重复 emit、不重复 barrier 重查），每个句柄的终态事件对外**恰好一次**。
+
+`_settle_failed` 的 barrier 故障隔离：barrier 重查自身抛错（如聚合 skill 随 snapshot 热更消失）时——except 兜底场景（`suppress_barrier_errors=True`）仅 `logger.exception` 记日志不外抛（原始异常已记录、句柄终态与 `spawn_failed` 已完成，不得逃出后台 task 成为 unhandled）；正常控制流（abort 裁决）向上传播，禁 silent fallback。
+
+#### Scenario: TTL 到期 abort 后 barrier 推进
+
+- **GIVEN** barrier 登记了 handles `[A, B]`，A 已 done、B 挂起
+- **WHEN** B 的挂起 TTL 到期自动 abort（或人工 abort 裁决）→ B 落 error + emit `spawn_failed`
+- **THEN** barrier 因句柄集全终态被重查触发，emit `join_barrier_fired` 并启动聚合 turn（聚合 args 含 B 的 error 终态）
+
+#### Scenario: 已终态句柄二次失败收敛
+
+- **GIVEN** 句柄 A 已 cancelled
+- **WHEN** 对 A 再次失败收敛
+- **THEN** 状态保持 cancelled，不再 emit 任何终态事件
+
 ### Requirement: engine keepalive 保活
 
 `has_live_spawns()` 为 `True`（即有 status ∈ {running, suspended} 的句柄）时，`pool.release(session_id)`（非 force）是**空操作**——engine 继续缓存运行，不释放。

@@ -271,15 +271,11 @@ class SpawnDriver:
                 self._live_runners.pop(child_thread_id, None)
             await self._finalize_spawn(handle_id, child_thread_id, outcome)
         except Exception as e:  # noqa: BLE001
-            # 兜底：不让句柄卡死在 running。记日志（不静默）+ 落 error + emit。
+            # 兜底：不让句柄卡死在 running。记日志（不静默）+ 单点收敛失败终态
+            # （含 join-barrier 重查；barrier 自身故障抑制为日志，不逃出后台 task）。
             logger.exception("detached spawn driver crashed: %s", handle_id)
-            self._spawn_handles.set_result(
-                handle_id, status="error", result=str(e)
-            )
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle_id,
-                msg=SpawnFailed(data={"handle_id": handle_id, "error": str(e)}),
-            ))
+            await self._settle_failed(
+                handle_id, str(e), suppress_barrier_errors=True)
         finally:
             # K1：detached 语义下手动占用的 slot 在子 task 收尾时释放。
             eng._spawn_registry.release_manual()  # noqa: SLF001
@@ -358,6 +354,54 @@ class SpawnDriver:
         # join-barrier:本 spawn 进入终态(含 suspended——但 suspended 非终态,
         # all_terminal 不满足 → 不触发),检查是否凑齐某 barrier 的全终态条件。
         await self._check_barriers(handle_id)
+
+    async def _settle_failed(
+        self,
+        handle_id: str,
+        error: str,
+        *,
+        suppress_barrier_errors: bool = False,
+    ) -> None:
+        """失败终态的**唯一收敛点**:回写 error + emit SpawnFailed + barrier 重查。
+
+        (spawn-terminal-single-convergence)任何使句柄进入 error 终态的路径
+        ——abort 裁决 / 驱动·续跑·唤醒的宽 except 兜底——必须走本方法,禁止
+        各自手写三件套。历史事故:abort 分支漏调 ``_check_barriers``,被等待的
+        句柄虽落终态但 barrier 永不重查 → 聚合(会诊)turn 永不触发、下游挂死。
+
+        终态幂等(对齐 ``_finalize_spawn`` 守卫):已终态句柄 no-op——不覆盖
+        状态、不重复 emit、不重复 barrier 重查;终态事件对外恰好一次。
+
+        Args:
+            handle_id: 要收敛的 spawn 句柄 id。
+            error: 失败原因串(落入句柄 result 与 SpawnFailed.error)。
+            suppress_barrier_errors: True(仅限 except 兜底场景)时 barrier
+                重查自身抛错只 ``logger.exception`` 记日志、不外抛——此时原始
+                异常已记录、句柄终态与 SpawnFailed 已完成,barrier 配置故障
+                (如聚合 skill 随 snapshot 热更消失)不得逃出后台 task 成为
+                unhandled exception;False(正常控制流,如 abort 裁决分支)
+                时自然向上传播,禁 silent fallback。
+        """
+        eng = self._engine
+        # 终态幂等:已收敛句柄不二次处理(终态事件恰好一次)。
+        if self._spawn_handles.is_terminal(handle_id):
+            return
+        self._spawn_handles.set_result(handle_id, status="error", result=error)
+        await eng._emit(EventMsg(  # noqa: SLF001
+            submission_id=handle_id,
+            msg=SpawnFailed(data={"handle_id": handle_id, "error": error}),
+        ))
+        # join-barrier:本句柄进入 error 终态,可能凑齐某 barrier 的全终态条件。
+        try:
+            await self._check_barriers(handle_id)
+        except Exception:
+            if not suppress_barrier_errors:
+                raise
+            # 兜底场景:句柄已收敛、事件已发,仅 barrier 触发这一独立故障被
+            # 显式记录(冷恢复 rebuild_from_history 末尾补查可兜底)。
+            logger.exception(
+                "join-barrier recheck failed after spawn settled error: %s",
+                handle_id)
 
     def suspended_handles(self) -> list[SpawnHandle]:
         """当前 suspended 状态句柄的只读快照(suspension-ttl 冷重武装枚举用)。"""
@@ -483,16 +527,11 @@ class SpawnDriver:
             self._spawn_handles.set_result(
                 handle.handle_id, status="running", result=None)
             if plan.abort:
-                # system_retry abort：子 turn 在挂起点终止 → 视为失败终态（与 leaf 一致）。
-                self._spawn_handles.set_result(
-                    handle.handle_id, status="error",
-                    result=f"spawn_aborted: {record.record_id}")
-                await eng._emit(EventMsg(  # noqa: SLF001
-                    submission_id=handle.handle_id,
-                    msg=SpawnFailed(data={
-                        "handle_id": handle.handle_id,
-                        "error": f"spawn_aborted: {record.record_id}"}),
-                ))
+                # abort 裁决（TTL 到期 / 人工）：子 turn 在挂起点终止 → 失败终态
+                # 单点收敛（含 join-barrier 重查——否则被等待的句柄虽落终态但
+                # barrier 永不触发，聚合/会诊 turn 挂死）。
+                await self._settle_failed(
+                    handle.handle_id, f"spawn_aborted: {record.record_id}")
                 return
 
             # 2. 以补齐后的子 thread 历史重建 detached 子 TurnRunner，续跑至终态。
@@ -520,13 +559,9 @@ class SpawnDriver:
         except Exception as e:  # noqa: BLE001
             logger.exception(
                 "detached spawn resume crashed: %s", handle.handle_id)
-            self._spawn_handles.set_result(
-                handle.handle_id, status="error", result=str(e))
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle.handle_id,
-                msg=SpawnFailed(data={
-                    "handle_id": handle.handle_id, "error": str(e)}),
-            ))
+            # 失败终态单点收敛（barrier 故障抑制为日志，不覆盖原始异常路径）。
+            await self._settle_failed(
+                handle.handle_id, str(e), suppress_barrier_errors=True)
 
     async def resume_spawn_nested(
         self, sub: Submission, handle: SpawnHandle
@@ -640,13 +675,9 @@ class SpawnDriver:
         except Exception as e:  # noqa: BLE001
             logger.exception(
                 "detached spawn nested resume crashed: %s", handle.handle_id)
-            self._spawn_handles.set_result(
-                handle.handle_id, status="error", result=str(e))
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle.handle_id,
-                msg=SpawnFailed(data={
-                    "handle_id": handle.handle_id, "error": str(e)}),
-            ))
+            # 失败终态单点收敛（barrier 故障抑制为日志，不覆盖原始异常路径）。
+            await self._settle_failed(
+                handle.handle_id, str(e), suppress_barrier_errors=True)
 
     def spawn_status(self, handle_ids: list[str]) -> dict[str, dict[str, Any]]:
         """查询一批 spawn 句柄的状态 / 结果（业务侧轮询 / join 检查用）。
@@ -929,13 +960,9 @@ class SpawnDriver:
             await self._finalize_spawn(handle.handle_id, child_tid, outcome)
         except Exception as e:  # noqa: BLE001
             logger.exception("peer wake driver crashed: %s", handle.handle_id)
-            self._spawn_handles.set_result(
-                handle.handle_id, status="error", result=str(e))
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle.handle_id,
-                msg=SpawnFailed(data={
-                    "handle_id": handle.handle_id, "error": str(e)}),
-            ))
+            # 失败终态单点收敛（barrier 故障抑制为日志，不逃出后台 task）。
+            await self._settle_failed(
+                handle.handle_id, str(e), suppress_barrier_errors=True)
         finally:
             eng._spawn_registry.release_manual()  # noqa: SLF001
 

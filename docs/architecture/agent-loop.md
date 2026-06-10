@@ -496,15 +496,22 @@ child task 运行（独立 TurnRunner @ child thread）：
               → _check_barriers（每次终态均检查）
   → HITL 挂起 → 挂起 record 落 child thread → emit spawn_suspended{handle_id, thread_id, pending}
               → task 退栈，K1 slot 释放（suspended 不占并发额度）
-  → 错误      → emit spawn_failed
-  → 取消      → emit spawn_cancelled
+  → 错误      → emit spawn_failed → _check_barriers
+  → 取消      → emit spawn_cancelled → _check_barriers
 
 Resume(thread_id=<child_thread_id>, resolutions=...)
   → engine 先查 SpawnHandleRegistry：命中挂起态 → SpawnDriver.resume_spawn（专用路径）
   → SuspensionResolver 全量 resume（禁部分 resume）
   → _build_child_runner（call_stack 为空 → 独立根 turn）→ 续跑
   → 终态 → _finalize_spawn → _check_barriers
+  → abort 裁决（TTL 到期 / 人工）→ _settle_failed → emit spawn_failed → _check_barriers
   → 再挂起 → 句柄重标 suspended，可再 Resume（多轮 HITL）
+
+终态写入单点收敛：done/suspended/cancelled/error 经 _finalize_spawn；
+suspended-kill 经 kill_spawn 内联；abort 裁决与各驱动宽 except 兜底经
+_settle_failed —— 三个收敛点均「回写 + emit + _check_barriers」成套 + 终态
+幂等（终态事件恰好一次），禁止任何路径手写三件套（详见 detached-spawn 契约
+§终态写入单点收敛）。
 
 join-barrier（全终态触发）：
   set_join_barrier(handle_ids=[A,B,C], then_skill_id="joint-review")
