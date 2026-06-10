@@ -186,7 +186,7 @@ pool = await taifeng.EnginePool.create(
 
 ### 内置工具全集（`make_*_tool()`，按需 `extra_tools=` 注册）
 
-`read_skill` · `call_skill` · `file_read` · `file_write` · `shell_exec` · `apply_patch` · `http_request` · `run_in_background` · `wait_for_task` · `run_script` · `request_user_input` · `spawn_skill` · `await_skills` · `join_skill` · `kill_skill` · `send_message` · `wait_peer`
+`read_skill` · `call_skill` · `file_read` · `file_write` · `shell_exec` · `apply_patch` · `http_request` · `run_in_background` · `wait_for_task` · `run_script` · `request_user_input` · `spawn_skill` · `await_skills` · `join_skill` · `kill_skill` · `send_message` · `wait_peer` · `todo_write`
 
 ### 公共 API 符号
 

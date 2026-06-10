@@ -138,7 +138,7 @@ hermes `agent/memory_provider.py` 已证明它**可以 R1-clean**：一个纯协
 | `compaction-surgical-trim` | A2 cache-TTL soft/hard 剪枝 + A3 tool-result 去重（handoff 之外更便宜一档） | P1 | ✅ **已落地**（`SurgicalTrimStrategy` 三 pass + `CompressionResult.detail` 透传；`tests/context/test_surgical_trim.py` 17 用例全绿） |
 | `turn-resource-guards` | C1 denial 断路器（codex `guardian`）+ C2 IterationBudget 分层/refund（hermes） | P1 | ✅ **已落地**（`DenialBreaker` 单次断路 + `IterationBudget` 子派生独立 + `refunds_iteration`；单元 11 + e2e 3 全绿，行为等价由全量回归守护） |
 | `peer-mailbox-messaging` | D1 活体 agent 间 mailbox + 唤醒空闲 + wait-peer（codex `multi_agents_v2`） | P1 | ✅ **已落地**（`deliver_peer_message` 双模式 + `SendToPeer` Op + `send_message`/`wait_peer` 工具 + 4 peer 事件；拓扑路径寻址 deferred） |
-| `postcompact-state-reinjection` | E1 压缩后 pinned 状态重注入钩子（hermes todo 穿越压缩） | P1 | ✅ 已落地（todo builtin 范例留 P2） |
+| `postcompact-state-reinjection` | E1 压缩后 pinned 状态重注入钩子（hermes todo 穿越压缩） | P1 | ✅ 已落地（todo builtin 范例亦已落地：`TodoStore` + `todo_write`） |
 
 **核实关闭**：C3（子 agent 触发 HITL 阻塞主 actor，hermes `delegate_tool.py` 的 ThreadPoolExecutor 死锁）→ **taifeng 不存在**：单 event-loop async + suspend/resume 释放实例 + `subagent_approval_mode=auto_deny`，无线程模型死锁。
 **未纳入（P2 backlog）**：A4 多模态重载荷驱逐、A5 压缩相对增量基线、E2 ContextEngine 可插拔 slot、E3 prewarm / cancel-reason 带内。

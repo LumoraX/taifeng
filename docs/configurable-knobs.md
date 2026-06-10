@@ -741,6 +741,19 @@ pool = await EnginePool.create(
 
 业务侧程序化投递走 `engine.submit(SendToPeer(target_thread_id=…, text=…, mode=…))` 或直调 `engine.deliver_peer_message(...)`，与工具完全同一路径。
 
+### 6.6 todo builtin（pinned-state 官方范例）
+
+`TodoStore`（实现 `PinnedStateSource`）+ `make_todo_write_tool(store)`（`todo_write`，整表替换语义）。装配 = 同一实例双注入：
+
+```python
+store = TodoStore()                       # max_chars 可调（默认 2000）
+pool = await EnginePool.create(
+    ...,
+    extra_tools=[make_todo_write_tool(store)],
+    pinned_state_sources=[store],         # 清单自动穿越压缩
+)
+```
+
 | 工具名 | 对应 engine API | 输入 schema | 输出 |
 | --- | --- | --- | --- |
 | `spawn_skill` | `engine.spawn_skill(skill_id, args, reason)` | `{skill_id, args?, reason}` | `{handle_id, child_thread_id}` |

@@ -60,4 +60,8 @@
 
 `tests/context/test_pinned_state.py`（8：注册序/同名拒绝/注销/截断/预算丢弃/None 跳过/异常捕获）、`tests/loop/test_pinned_reinjection.py`（5：尾部注入 + 持久化 + 事件契约/三 source 预算溢出/None+异常混合/全 None 零噪声/压缩失败不注入）、`tests/loop/test_pinned_engine_wiring.py`（4 e2e：构造期注入 + CompactNow/运行时增删/R5 resume 存活/K3 双钩子叠加顺序）、`tests/loop/test_turn_overflow_recovery.py`（overflow 自愈路径 phase=overflow 注入）。零注册零变化由全量回归守护。
 
-> 范例 todo builtin（hermes `todo_tool.py` 对标）为 P2 独立 change，不在本能力内。demo：`examples/compression_showcase/pinned_demo.py`（mock 可跑）。
+## 内置范例:todo builtin(已落地)
+
+`tool/builtins/todo.py`:`TodoStore`(直接实现本协议,name="todo",空清单渲染 None)+ `make_todo_write_tool(store)`(`todo_write` 工具,**整表替换**语义对标 Claude Code TodoWrite,入参违例 bad_args 显式拒绝,`parallel_safe=False`)。装配 = 同一实例双注入:`extra_tools=[make_todo_write_tool(store)]` + `pinned_state_sources=[store]` —— LLM 自管清单自动穿越压缩,无新增事件。不做持久化(进程内状态;R5 由注入项落史保证)、不默认注册。测试 `tests/tool/test_todo_builtin.py`(8)。
+
+> demo:`examples/compression_showcase/pinned_demo.py`(业务自实现 source)与 `todo_demo.py`(内置 todo builtin),均 mock 可跑。
