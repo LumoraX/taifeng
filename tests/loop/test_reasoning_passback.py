@@ -1,0 +1,225 @@
+"""reasoning-content-passback 回归:落史 + prompt 重建回传 + provider 组装。
+
+thinking 模型(deepseek-v4/r 系等)要求带 tool_calls 的 assistant 消息续传时
+回传 reasoning_content;本组测试覆盖三层:
+1. 落史:reasoning item 与 assistant message 配对落史(顺序/零变化/无产出不落)
+2. 重建:history_to_api_messages 把 reasoning 附到紧随其后首条 assistant 消息
+3. 组装:openai_compat / litellm 把 ApiMessage.reasoning 翻译为 reasoning_content
+"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+
+import taifeng
+from taifeng.conversation.models import (
+    ResponseItem,
+    assistant_message,
+    function_call,
+    function_call_output,
+    reasoning,
+    user_message,
+)
+from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.types import ApiMessage, ApiRequest
+from taifeng.loop.prompt import history_to_api_messages
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+TID = "t-test"
+
+
+# === 1. 落史 =================================================================
+
+
+@pytest.mark.asyncio
+async def test_reasoning_persisted_before_assistant(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """thinking 轮落史顺序:reasoning → assistant_message → function_call。"""
+    client = MockClient(turns=[
+        MockTurn(reasoning="先想清楚要读哪个 skill", text="", tool_calls=[
+            {"id": "c0", "name": "read_skill", "arguments": '{"skill_id": "style-checker"}'},
+        ]),
+        MockTurn(reasoning="读完了,可以给结论", text="结论如下。"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s1", entry_skill_id="code-reviewer")
+    sub_id = await engine.submit(taifeng.UserMessage(text="请审查"))
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            assert ev.msg.kind == "turn_completed"
+            break
+
+    gen = await pool.store.load_thread(engine.thread_id)
+    items = [it async for it in gen]
+    await pool.close()
+
+    kinds = [it.kind for it in items]
+    # 第一轮:reasoning 紧邻其配对 assistant message 之前,fc/fco 在其后
+    assert kinds[:5] == [
+        "user_message", "reasoning", "assistant_message",
+        "function_call", "function_call_output",
+    ]
+    # 第二轮同样配对;reasoning 全文 = 全部 delta 拼接
+    r_items = [it for it in items if it.kind == "reasoning"]
+    assert [it.payload["text"] for it in r_items] == [
+        "先想清楚要读哪个 skill", "读完了,可以给结论",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_reasoning_zero_change(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """非 thinking 模型(无 reasoning_delta):不落 reasoning item,history 与旧版一致。"""
+    client = MockClient(turns=[MockTurn(text="直接回答。")])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s1", entry_skill_id="code-reviewer")
+    sub_id = await engine.submit(taifeng.UserMessage(text="你好"))
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            break
+
+    gen = await pool.store.load_thread(engine.thread_id)
+    items = [it async for it in gen]
+    await pool.close()
+    assert all(it.kind != "reasoning" for it in items)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_without_output_not_persisted(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """纯 reasoning 无产出轮(text 空且无 tool_calls):不落——没有可关联的 assistant 消息。"""
+    client = MockClient(turns=[MockTurn(reasoning="只想不说", text="")])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s1", entry_skill_id="code-reviewer")
+    sub_id = await engine.submit(taifeng.UserMessage(text="嗯"))
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind in ("turn_completed", "turn_failed"):
+            break
+
+    gen = await pool.store.load_thread(engine.thread_id)
+    items = [it async for it in gen]
+    await pool.close()
+    assert all(it.kind != "reasoning" for it in items)
+
+
+# === 2. prompt 重建回传 ======================================================
+
+
+def _tool_call_history() -> list[ResponseItem]:
+    """挂起恢复续跑的典型史:reasoning → assistant(空文本) → fc → fco。"""
+    return [
+        user_message("帮我查一下", thread_id=TID),
+        reasoning("我需要先调用工具", thread_id=TID),
+        assistant_message("", thread_id=TID, model="m"),
+        function_call(call_id="c1", name="ask", arguments="{}", thread_id=TID),
+        function_call_output(call_id="c1", output="答案", thread_id=TID),
+    ]
+
+
+def test_rebuild_merges_round_and_attaches_reasoning() -> None:
+    """同轮合并:assistant 文本 + fc 归并为一条消息,reasoning 附在其上。
+
+    thinking 模型校验每条带 tool_calls 的 assistant 消息必须带
+    reasoning_content,合并是唯一干净解(拆多条形态被 deepseek 真实 400)。
+    """
+    msgs = history_to_api_messages(_tool_call_history())
+    assert [m.role for m in msgs] == ["user", "assistant", "tool"]
+    assert msgs[1].reasoning == "我需要先调用工具"
+    assert [tc["id"] for tc in (msgs[1].tool_calls or [])] == ["c1"]
+
+
+def test_rebuild_merges_parallel_fc_interleaved() -> None:
+    """同轮并行双 fc(落史配对交错 fc,fco,fc,fco):全部归并到该轮 assistant。"""
+    items = [
+        user_message("规划行程", thread_id=TID),
+        reasoning("要并行问两个问题", thread_id=TID),
+        assistant_message("", thread_id=TID, model="m"),
+        function_call(call_id="c0", name="ask", arguments="{}", thread_id=TID),
+        function_call_output(call_id="c0", output="杭州", thread_id=TID),
+        function_call(call_id="c1", name="ask", arguments="{}", thread_id=TID),
+        function_call_output(call_id="c1", output="3000元", thread_id=TID),
+    ]
+    msgs = history_to_api_messages(items)
+    assert [m.role for m in msgs] == ["user", "assistant", "tool", "tool"]
+    assert msgs[1].reasoning == "要并行问两个问题"
+    assert [tc["id"] for tc in (msgs[1].tool_calls or [])] == ["c0", "c1"]
+    assert [m.tool_call_id for m in msgs[2:]] == ["c0", "c1"]
+
+
+def test_rebuild_knob_off_drops_reasoning() -> None:
+    """旋钮关闭:reasoning 丢弃,消息序与合并形态一致但无 reasoning 字段。"""
+    msgs = history_to_api_messages(_tool_call_history(), include_reasoning=False)
+    assert [m.role for m in msgs] == ["user", "assistant", "tool"]
+    assert all(m.reasoning is None for m in msgs)
+
+
+def test_rebuild_orphan_reasoning_skipped() -> None:
+    """孤儿 reasoning(其后首条产出消息非 assistant):确定性跳过,不附到 user/tool。"""
+    items = [
+        user_message("a", thread_id=TID),
+        reasoning("被压缩剪成孤儿的思考", thread_id=TID),
+        user_message("b", thread_id=TID),
+        assistant_message("回复", thread_id=TID, model="m"),
+    ]
+    msgs = history_to_api_messages(items)
+    assert all(m.reasoning is None for m in msgs)
+
+
+def test_rebuild_old_history_compat() -> None:
+    """旧 JSONL(无 reasoning item):重建行为与旧版完全一致。"""
+    items = [
+        user_message("a", thread_id=TID),
+        assistant_message("b", thread_id=TID, model="m"),
+    ]
+    msgs = history_to_api_messages(items)
+    assert [m.role for m in msgs] == ["user", "assistant"]
+    assert all(m.reasoning is None for m in msgs)
+
+
+# === 3. provider 组装 ========================================================
+
+
+def _req(messages: list[ApiMessage]) -> ApiRequest:
+    return ApiRequest(model="m", messages=messages)
+
+
+def test_openai_compat_payload_reasoning_content() -> None:
+    """openai_compat:reasoning 非 None 写 reasoning_content;None 不写键。"""
+    from taifeng.llm.providers.openai_compat import OpenAICompatSession
+    from taifeng.loop.cancellation import CancellationToken
+
+    sess = OpenAICompatSession(
+        base_url="https://api.example.com/v1", api_key="k",
+        model="m", cancel=CancellationToken(),
+    )
+    payload = sess._build_payload(_req([
+        ApiMessage(role="assistant", content="x", reasoning="思考过程"),
+        ApiMessage(role="assistant", content="y"),
+    ]))
+    m0, m1 = payload["messages"]
+    assert m0["reasoning_content"] == "思考过程"
+    assert "reasoning_content" not in m1
+
+
+def test_litellm_messages_reasoning_content() -> None:
+    """litellm:与 openai_compat 行为一致。"""
+    from taifeng.llm.providers.litellm_provider import _to_litellm_messages
+
+    msgs = _to_litellm_messages(_req([
+        ApiMessage(role="assistant", content="x", reasoning="思考过程"),
+        ApiMessage(role="assistant", content="y"),
+    ]))
+    assert msgs[0]["reasoning_content"] == "思考过程"
+    assert "reasoning_content" not in msgs[1]

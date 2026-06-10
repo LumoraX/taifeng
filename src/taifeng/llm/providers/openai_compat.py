@@ -101,6 +101,9 @@ class OpenAICompatSession:
                 msg["tool_call_id"] = m.tool_call_id
             if m.tool_calls:
                 msg["tool_calls"] = m.tool_calls
+            # reasoning-content-passback:thinking 模型续传契约,None 时不写键
+            if m.reasoning is not None:
+                msg["reasoning_content"] = m.reasoning
             messages.append(msg)
 
         payload: dict[str, Any] = {

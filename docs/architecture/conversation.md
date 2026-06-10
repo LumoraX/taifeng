@@ -47,6 +47,8 @@
 ```
 
 **主存**：每行单 ResponseItem 的 JSON 序列化 + 单次 `write()`（POSIX 4KB 原子）。
+
+> **reasoning 落史**（reasoning-content-passback）：thinking 模型采样产生 `reasoning_delta` 且该轮有产出（assistant 文本或 tool_calls）时，累积全文落一条 `kind="reasoning"` item，**紧邻其配对 assistant_message 之前**（与 provider 产出顺序一致）。该 item 供 prompt 重建时回传 `reasoning_content`（thinking 模型续传契约，见 `llm-client.md` reasoning 回传节）；非 thinking 模型不产生该 kind，零变化。
 **索引**：`thread` 表存 ThreadMetadata 行；`schema_meta` 表存版本号；WAL + `synchronous=NORMAL`。
 
 ## MessageWriter 协议

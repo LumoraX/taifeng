@@ -283,7 +283,7 @@ class ToolCallRuntime:
 阶段 3（顺序、按发起序）：以 (function_call, function_call_output) 配对追加 history + store
 ```
 
-**硬不变量**：执行可并发，但历史**必须按发起序、以配对形式追加**——因 `prompt.py::history_to_api_messages` 是 1:1 保序转换，配对追加才能维持 provider 要求的 tool_use↔tool_result 结构；并发度=1 时与历史 transcript **字节级一致**。
+**硬不变量**：执行可并发，但历史**必须按发起序、以配对形式追加**——`prompt.py::history_to_api_messages` 是保序的**同轮合并**转换（一次采样的 assistant_message + 全部 function_call 归并回一条 assistant 消息，fco 照序输出 tool 消息；thinking 模型 reasoning 附在合并消息上，见 llm-client 篇 reasoning 回传节），配对追加才能维持 provider 要求的 tool_use↔tool_result 结构；并发度=1 时与历史 transcript **字节级一致**。
 
 **R 线落实**：R2（不触发压缩，子 turn 历史隔离，按序回填 → cache 稳定）/ R3（`ToolBatchDispatched` + 逐 call `ToolCallStarted/Completed`）/ R4（每分支 `cancel.child`，父取消级联）/ R5（按发起序回填 → JSONL 回放确定）。
 

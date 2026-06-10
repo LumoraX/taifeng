@@ -79,6 +79,12 @@ class ApiMessage(BaseModel):
     content: list[dict[str, Any]] | str
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    reasoning: str | None = None
+    """thinking 模型的 reasoning 文本回传载体(provider-neutral 命名)。
+
+    openai_compat / litellm 组装请求体时翻译为 wire 字段 ``reasoning_content``,
+    None 时不写键(非 thinking provider 零影响)。见 reasoning-content-passback。
+    """
 
 
 class CacheBreakpoint(BaseModel):

@@ -198,11 +198,11 @@ async def scenario_multi_pending(client, tmp: Path) -> str:
     await rec.close()
     await pool.close()
     if failures and "reasoning_content" in str(failures[0].data.get("error", "")):
-        # thinking 模型续跑缺陷:reasoning 既不落史也不回传 → provider 400。
-        # 见 openspec change reasoning-content-passback(本脚本首次抓到该缺陷)。
-        return ("[KNOWN-DEFECT] thinking 模型续跑被 provider 拒:reasoning_content "
-                "未回传(change reasoning-content-passback 待修);错峰核销链本身正确"
-                "(partial → 全量达成 → 续跑被派发)")
+        # 回归探测:该缺陷已由 change reasoning-content-passback 修复(reasoning
+        # 落史 + 同轮合并重建回传;本脚本首次抓到)。此分支再触发即为回归。
+        return ("[REGRESSION] thinking 模型续跑再次被 provider 拒:reasoning_content "
+                "回传失效(reasoning-content-passback 已修,此为回归);错峰核销链"
+                "本身正确(partial → 全量达成 → 续跑被派发)")
     assert _root_truly_completed(rec.events, n0), \
         f"续跑应真正完成,实得 {[m.data for m in failures]}"
     cites = ("杭州" in final) + ("3000" in final)
@@ -242,8 +242,8 @@ async def scenario_reject_while_suspended(client, tmp: Path) -> str:
             await engine.submit(taifeng.loop.Shutdown())
             await rec.close()
             await pool.close()
-            return ("[KNOWN-DEFECT] 结清后续跑被 reasoning_content 缺陷拦截"
-                    "(change reasoning-content-passback);拒收守卫本身已验证")
+            return ("[REGRESSION] 结清后续跑被 reasoning_content 拦截"
+                    "(reasoning-content-passback 已修,此为回归);拒收守卫本身已验证")
         raise AssertionError(f"续跑失败: {failures}")
     await engine.submit(taifeng.loop.Shutdown())
     await rec.close()

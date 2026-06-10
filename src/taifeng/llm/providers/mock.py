@@ -17,6 +17,7 @@ from taifeng.llm.events import (
     completed,
     created,
     prompt_cache,
+    reasoning_delta,
     server_model,
     structured_output,
     text_delta,
@@ -31,6 +32,9 @@ class MockTurn:
     """单个 turn 的脚本。"""
 
     text: str = ""
+    reasoning: str = ""
+    """thinking 模型 reasoning 回放(reasoning-content-passback):非空时在 text
+    之前 emit ``reasoning_delta``(与真实 provider 产出顺序一致);默认空=零变化。"""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     """每项形如 ``{"id": ..., "name": ..., "arguments": "..."}``"""
     usage: TokenUsage = field(default_factory=lambda: TokenUsage(input_tokens=100, output_tokens=50))
@@ -64,6 +68,11 @@ class MockSession:
         if self._turn.delay_seconds:
             await asyncio.sleep(self._turn.delay_seconds)
         self._cancel.raise_if_cancelled()
+        # reasoning 先于 text(与真实 thinking provider 产出顺序一致),按 8-char 切分
+        r_text = self._turn.reasoning
+        for i in range(0, len(r_text), 8):
+            self._cancel.raise_if_cancelled()
+            yield reasoning_delta(r_text[i:i + 8])
         # 文本：按 4-char 切分模拟流式
         text = self._turn.text
         for i in range(0, len(text), 8):

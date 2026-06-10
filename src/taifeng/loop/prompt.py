@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.types import ApiMessage, ApiRequest, CacheBreakpoint
 
@@ -104,57 +104,116 @@ def render_system_prompt(
     return body
 
 
-def history_to_api_messages(items: Iterable[ResponseItem]) -> list[ApiMessage]:
-    """把 ResponseItem 序列转 ApiMessage 序列。"""
+def _item_to_api_message(it: ResponseItem) -> ApiMessage | None:
+    """非采样产出的单条 ResponseItem → ApiMessage;记账类 kind 返回 None。
+
+    assistant_message / function_call / function_call_output 在
+    ``history_to_api_messages`` 主循环内特殊处理(同轮合并),不走本函数。
+    """
+    if it.kind == "user_message":
+        return ApiMessage(role="user", content=str(it.payload.get("text", "")))
+    if it.kind == "system_injection":
+        # suspend_resolved 是 resume 的幂等记账 marker（engine._find_active_suspension
+        # 据它跳过已消费的挂起），非 LLM-facing；若渲染成对话中段的 role="system"，
+        # openai_compat 会原样透传 → 严格 OpenAI-compat 代理拒绝中段 system → 400
+        # （anthropic/gemini provider 各自特判丢弃/转 user，openai_compat 不处理）。故跳过。
+        # 业务/记忆类 system_injection（business / memory_pre_evict / rollback 等）保留。
+        if it.payload.get("source") == "suspend_resolved":
+            return None
+        return ApiMessage(role="system", content=str(it.payload.get("text", "")))
+    if it.kind == "compacted":
+        # 把摘要作为 system 消息插回 —— LLM 视角看到"曾被压缩的历史"
+        return ApiMessage(
+            role="system",
+            content=f"[Compacted history summary]\n{it.payload.get('summary', '')}",
+        )
+    # 其余 kind（suspension 等记账 item）不进 LLM 视图
+    return None
+
+
+def _fc_to_tool_call(it: ResponseItem) -> dict[str, Any]:
+    """function_call item → OpenAI 形态的 tool_call dict。"""
+    return {
+        "id": it.payload.get("call_id", ""),
+        "type": "function",
+        "function": {
+            "name": it.payload.get("name", ""),
+            "arguments": it.payload.get("arguments", "{}"),
+        },
+    }
+
+
+def history_to_api_messages(
+    items: Iterable[ResponseItem],
+    *,
+    include_reasoning: bool = True,
+) -> list[ApiMessage]:
+    """把 ResponseItem 序列转 ApiMessage 序列(同轮合并重建)。
+
+    **同轮合并**:一次采样的产出(assistant 文本 + 全部 function_call)落史时是
+    多条 item(assistant_message → fc/fco 配对交错),重建时归并回**一条**
+    assistant ApiMessage(content + tool_calls 同条)——忠实还原 provider 原始
+    响应的 wire 形态。thinking 模型(deepseek-v4 等)校验**每条**带 tool_calls
+    的 assistant 消息必须回传 reasoning_content,拆多条形态无法满足(真实 key
+    验证 400),合并是唯一干净解。
+
+    include_reasoning(reasoning-content-passback 旋钮):开(默认)时把
+    ``kind="reasoning"`` 的文本附到其后首条 assistant 消息(即该采样轮的合并
+    消息)上;关时与历史行为一致(reasoning 丢弃)。规则是确定性契约:同一
+    history 必然重建出同一消息序(R2 前缀稳定);压缩剪枝产生的孤儿 reasoning
+    (其后首条产出消息非 assistant)确定性跳过。
+    """
     out: list[ApiMessage] = []
+    # 暂存待附着的 reasoning 文本;开窗(assistant 消息产出)时附上并清空
+    pending_reasoning: str | None = None
+    # 当前采样轮的 assistant 消息在 out 中的下标(合并窗口);
+    # user/system/compacted 产出即关窗,fco 不关窗(同轮并行 fc 的配对序
+    # 是 fc,fco,fc,fco 交错),记账类 item(suspension 等)跨过保窗
+    window_idx: int | None = None
     for it in items:
-        if it.kind == "user_message":
-            out.append(ApiMessage(role="user", content=str(it.payload.get("text", ""))))
-        elif it.kind == "assistant_message":
-            out.append(ApiMessage(role="assistant", content=str(it.payload.get("text", ""))))
-        elif it.kind == "function_call":
-            out.append(
-                ApiMessage(
-                    role="assistant",
-                    content="",
-                    tool_calls=[
-                        {
-                            "id": it.payload.get("call_id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": it.payload.get("name", ""),
-                                "arguments": it.payload.get("arguments", "{}"),
-                            },
-                        }
-                    ],
-                )
-            )
-        elif it.kind == "function_call_output":
-            out.append(
-                ApiMessage(
-                    role="tool",
-                    content=str(it.payload.get("output", "")),
-                    tool_call_id=str(it.payload.get("call_id", "")),
-                )
-            )
-        elif it.kind == "system_injection":
-            # suspend_resolved 是 resume 的幂等记账 marker（engine._find_active_suspension
-            # 据它跳过已消费的挂起），非 LLM-facing；若渲染成对话中段的 role="system"，
-            # openai_compat 会原样透传 → 严格 OpenAI-compat 代理拒绝中段 system → 400
-            # （anthropic/gemini provider 各自特判丢弃/转 user，openai_compat 不处理）。故跳过。
-            # 业务/记忆类 system_injection（business / memory_pre_evict / rollback 等）保留。
-            if it.payload.get("source") == "suspend_resolved":
-                continue
-            out.append(ApiMessage(role="system", content=str(it.payload.get("text", ""))))
-        elif it.kind == "compacted":
-            # 把摘要作为 system 消息插回 —— LLM 视角看到"曾被压缩的历史"
-            out.append(
-                ApiMessage(
-                    role="system",
-                    content=f"[Compacted history summary]\n{it.payload.get('summary', '')}",
-                )
-            )
-        # reasoning 不进 LLM 视图（消耗 token 但不还原）
+        if it.kind == "reasoning":
+            if include_reasoning:
+                pending_reasoning = str(it.payload.get("text", "")) or None
+            continue
+        if it.kind == "assistant_message":
+            out.append(ApiMessage(
+                role="assistant",
+                content=str(it.payload.get("text", "")),
+                reasoning=pending_reasoning,
+            ))
+            window_idx = len(out) - 1
+            pending_reasoning = None
+            continue
+        if it.kind == "function_call":
+            tc = _fc_to_tool_call(it)
+            if window_idx is not None:
+                tgt = out[window_idx]
+                tgt.tool_calls = [*(tgt.tool_calls or []), tc]
+            else:
+                # 无前导 assistant 的孤立 fc(剪枝后的旧数据):独立成消息,
+                # 自身即本轮的合并窗口(后续同轮 fc 仍归并到它)
+                out.append(ApiMessage(
+                    role="assistant", content="", tool_calls=[tc],
+                    reasoning=pending_reasoning,
+                ))
+                window_idx = len(out) - 1
+                pending_reasoning = None
+            continue
+        if it.kind == "function_call_output":
+            out.append(ApiMessage(
+                role="tool",
+                content=str(it.payload.get("output", "")),
+                tool_call_id=str(it.payload.get("call_id", "")),
+            ))
+            continue
+        msg = _item_to_api_message(it)
+        if msg is None:
+            # 记账类 item 对 LLM 视图不存在,跨过它们保窗保 pending(确定性)
+            continue
+        # user/system/compacted 产出 = 新对话段:关窗 + 孤儿 reasoning 结算丢弃
+        window_idx = None
+        pending_reasoning = None
+        out.append(msg)
     return out
 
 
@@ -169,11 +228,12 @@ def build_api_request(
     instructions: list[ResolvedInstruction] | None = None,
     capabilities: RuntimeCapabilities | None = None,
     prefetched_memory: str | None = None,
+    reasoning_passback: bool = True,
 ) -> ApiRequest:
     system_prompt = render_system_prompt(
         entry, snapshot, instructions=instructions, capabilities=capabilities
     )
-    messages = history_to_api_messages(history)
+    messages = history_to_api_messages(history, include_reasoning=reasoning_passback)
 
     # K3 prefetch（page-in）：把取回的长期记忆作为**尾部** system 消息注入，
     # 不动 system_prompt 头部（R2 cache-aware：变动的 prefetch 不破坏 cached 前缀）。
