@@ -140,7 +140,7 @@ Resume(thread_id, resolutions)
 - 注入链：`EnginePool.create(failure_policy=...)` → `AgentEngine` → 全部 TurnRunner 构造点（含 resume / rewind 重建）；子 runner（call_skill / spawn）继承父实例。
 - spawn 链零新增：被 spawn 的子 turn 裁决挂起 → 既有 `_finalize_spawn` suspended 分支（句柄 suspended + `SpawnSuspended(thread_id)`，join-barrier 视为未结算不触发）→ 既有 `Resume(thread_id)` + `match_suspended_spawn` 路由续跑；abort → `SpawnFailed` 终态，barrier 推进。
 - ContextOverflow 的一次自愈（强制压缩 + 重采样）发生在 policy 判定**之前**，不受 policy 影响。
-- 已知边界：声明式编排路径（`run_orchestrated_turn`）不经 `_sample_once` 主循环，policy 对其不生效（由 change `orchestration-suspension-propagation` 处理）。
+- 编排路径：编排 turn 自身不采样 LLM（无 llm_error 判定点），但其子 skill 的采样继承 policy；子被裁决挂起后经编排挂起传递上浮（见 [skill-orchestration.md](skill-orchestration.md) §子挂起传递与重入重放），不再是挂起盲区。
 
 ### Requirement: 挂起存活期与到期自动裁决（suspension-ttl）
 

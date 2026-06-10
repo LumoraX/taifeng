@@ -61,3 +61,23 @@ composite skill 可在 SKILL.md 声明子步骤的并行/顺序/条件编排；�
 #### Scenario: 计划解析事件
 - **WHEN** 一个声明了 `orchestration` 的 entry skill 开始执行
 - **THEN** SHALL emit 一次 `orchestration_plan_resolved`，data 含 skill_id 与解析出的步骤分组结构
+
+### Requirement: 子挂起传递与重入重放（orchestration-suspension-propagation）
+
+编排批内子 skill 挂起 SHALL 正确上浮：`_execute_leaf` 按 `DispatchOutcome.suspend` 二分——完成子照常 (fc, fco) 配对回填；挂起子 SHALL 只追加悬空 fc（占位文本 `"<suspended>"` SHALL NOT 入史）；批内任一挂起 → 抛 `_BatchSuspend` 由 run() 既有路径落盘挂起，编排 turn 以 suspended 终结（与 LLM 路径混合批语义同形）。
+
+resume 重入 SHALL 以确定性 call_id（`orch_{entry}_{step_idx}_{sid}_{idx}`）为坐标重放：history 中已配对（含 gap 回填）的子直接复用 output 不重派发，已完成段零派发跳过；when 段判定与 upstream 注入由重放输出重建；`tool_batch_dispatched.count` SHALL 仅计实际派发数（重放命中率可观测）。上层链路（detached spawn 的编排 entry / call_skill 子链）SHALL 复用既有挂起路由，零新增机制。
+
+已知退化：压缩吃掉已完成段的配对 → 重放找不到坐标 → 该子重派发（幂等性由子 skill 自身语义决定）；编排 turn 不采样 LLM、history 短，实际触发概率低。
+
+#### Scenario: 子挂起编排挂起
+- **WHEN** serial 段子 skill 触发 request_user_input 挂起
+- **THEN** 编排 turn 落 SuspensionRecord（根 pending 为 CHILD_SKILL），该 call_id 仅有悬空 fc，后续段未执行
+
+#### Scenario: 重入零派发重放
+- **WHEN** 两段编排在第二段挂起，Resume(leaf) 后重入
+- **THEN** 第一段 call_id 命中重放、`tool_batch_dispatched.count == 0`，第二段续跑至编排完成
+
+#### Scenario: when 判定重放一致
+- **WHEN** when 段 then 分支挂起后 Resume 重入
+- **THEN** 条件 flag 由重放的前序输出重建，then/else 选择与挂起前一致，else 段不执行
