@@ -313,6 +313,54 @@ class TurnRunner:
         except Exception:
             logger.exception("emit failed")
 
+    def _maybe_suspend_on_guard_trip(
+        self, end_reason: str, guard_snapshot: dict[str, Any] | None = None
+    ) -> None:
+        """护栏触顶时问失败处置 policy:SUSPEND → 抛 RESOURCE_LIMIT 挂起;TERMINAL → 返回。
+
+        三个护栏(max_iterations / resource_limit_exceeded / denial_circuit_open)
+        的 break 点都在迭代边界——当轮 fc/output 已配对(K5),此处抛 SuspendSignal
+        不产生孤儿;信号被 run() 的 ``except SuspendSignal`` 捕获后落盘挂起。
+        resume retry = 重建 runner 续跑采样循环(预算 / 断路器随重建按原 cap 重置);
+        abort = 在挂起点落失败终态。默认 policy(保守)对 guard_trip 恒 TERMINAL,
+        本方法直接返回 → 调用方走既有 break,零行为变化。
+
+        Args:
+            end_reason: 触顶的护栏 end_reason(进 FailureContext 与挂起 detail)。
+            guard_snapshot: 护栏快照(如断路器 consecutive/recent,R3 可观测);
+                None 时 detail 只携带 end_reason。
+
+        Raises:
+            SuspendSignal: policy 裁决 SUSPEND 时,携带 RESOURCE_LIMIT pending。
+        """
+        from taifeng.suspend.reason import PendingRequest, SuspendReason
+
+        policy = self.failure_policy or DEFAULT_FAILURE_POLICY
+        disposition = policy.decide(FailureContext(
+            origin="guard_trip",
+            failure_class=None,
+            end_reason=end_reason,
+            error_kind=None,
+            retryable=False,
+            is_root=self._is_root,
+            iteration=self._current_iteration,
+        ))
+        if disposition is not FailureDisposition.SUSPEND:
+            return
+        detail: dict[str, Any] = {"end_reason": end_reason}
+        if guard_snapshot:
+            detail["guard_snapshot"] = guard_snapshot
+        raise SuspendSignal(PendingRequest(
+            request_id=self._suspend_id_factory(),
+            reason=SuspendReason.RESOURCE_LIMIT,
+            payload_schema={
+                "type": "object",
+                "properties": {"action": {"enum": ["retry", "abort"]}},
+            },
+            related_call_id=None,
+            detail=detail,
+        ))
+
     async def _prefetch_memory(self) -> None:
         """K3 page-in：按最近用户消息 prefetch 长期记忆 → ``_prefetched_memory``。
 
@@ -487,6 +535,8 @@ class TurnRunner:
                 while True:
                     self.cancel.raise_if_cancelled()
                     if not iter_budget.consume():
+                        # failure-suspension-policy:裁决 SUSPEND 时此处抛挂起信号
+                        self._maybe_suspend_on_guard_trip("max_iterations")
                         end_reason = "max_iterations"
                         break
                     rounds += 1
@@ -517,6 +567,11 @@ class TurnRunner:
                             "limit": self.max_session_tokens or 0,
                             "scope": "turn_aborted",
                         }))
+                        # failure-suspension-policy:裁决 SUSPEND 时此处抛挂起信号
+                        self._maybe_suspend_on_guard_trip(
+                            "resource_limit_exceeded",
+                            {"used": used, "limit": self.max_session_tokens or 0},
+                        )
                         end_reason = "resource_limit_exceeded"
                         break
 
@@ -534,6 +589,11 @@ class TurnRunner:
                     # turn-resource-guards：断路器闩锁已置（本圈 deny 记账触发）→
                     # 迭代边界提前终止——当轮 fc/output 已配对落史，无孤儿（K5 一致）。
                     if self._denial_breaker is not None and self._denial_breaker.opened:
+                        # failure-suspension-policy:裁决 SUSPEND 时此处抛挂起信号
+                        # (当轮 fc/output 已配对落史,K5 一致,无孤儿)
+                        self._maybe_suspend_on_guard_trip(
+                            "denial_circuit_open", self._denial_breaker.snapshot()
+                        )
                         end_reason = "denial_circuit_open"
                         break
 
