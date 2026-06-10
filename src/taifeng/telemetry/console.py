@@ -64,6 +64,19 @@ _KIND_TAG = {
     "turn_suspended": ("turn", _Colors.YELLOW, "⏸"),
     # turn-rewind 回访节点录制（R3 审计补：此前落 `?` 兜底渲染）
     "rewind_checkpoint_recorded": ("rwnd", _Colors.GRAY, "⊙"),
+    "rewind_rejected": ("rwnd", _Colors.RED, "⊘"),
+    # detached-spawn 生命周期 + join-barrier（R3 审计补：真实回归发现全族缺渲染）
+    "spawn_started": ("spwn", _Colors.MAGENTA, "⇣"),
+    "spawn_suspended": ("spwn", _Colors.YELLOW, "⏸"),
+    "spawn_completed": ("spwn", _Colors.GREEN, "✓"),
+    "spawn_failed": ("spwn", _Colors.RED, "✗"),
+    "spawn_cancelled": ("spwn", _Colors.GRAY, "⊘"),
+    "join_barrier_registered": ("join", _Colors.MAGENTA, "⧉"),
+    "join_barrier_fired": ("join", _Colors.GREEN, "⚡"),
+    # 挂起核销与资源强制（同上）
+    "suspension_resolved": ("turn", _Colors.GREEN, "▶"),
+    "suspension_resolve_rejected": ("turn", _Colors.RED, "⊘"),
+    "resource_limit_exceeded": ("knob", _Colors.RED, "⛔"),
     "engine_log": ("eng ", _Colors.GRAY, "·"),
     "shutdown": ("eng ", _Colors.GRAY, "⏹"),
 }

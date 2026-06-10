@@ -84,21 +84,25 @@ class LedgerWriter:
         model: str,
         records: list[ScenarioRecord],
         r3: R3Audit,
+        full_run: bool = True,
     ) -> tuple[Path, Path]:
         """合并本次结果并落盘；返回 (json_path, md_path)。
 
         合并规则：本次跑过的场景覆盖旧条目；未跑的保留旧条目原样
         （其 commit / 时间不变，渲染时与本次 run commit 不同即标 stale）。
+        ``full_run=False``（--only 部分跑）时 **不覆盖** r3_audit——部分场景的
+        事件面远小于全量，覆盖会把全量审计结论冲掉。
         """
         run_commit = git_short_commit()
         run_ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         old_scenarios: dict[str, dict] = {}
+        old_audit: dict | None = None
         if self._json_path.is_file():
             try:
-                old_scenarios = json.loads(self._json_path.read_text(encoding="utf-8")).get(
-                    "scenarios", {}
-                )
+                old_data = json.loads(self._json_path.read_text(encoding="utf-8"))
+                old_scenarios = old_data.get("scenarios", {})
+                old_audit = old_data.get("r3_audit")
             except (json.JSONDecodeError, OSError):
                 # 旧台账损坏：如实丢弃重建（台账可由重跑再生，不做修补猜测）
                 old_scenarios = {}
@@ -116,7 +120,8 @@ class LedgerWriter:
                 "scenarios_run": [r.scenario_id for r in records],
             },
             "scenarios": dict(sorted(merged.items())),
-            "r3_audit": asdict(r3),
+            # 部分跑（--only）保留上次全量审计；无旧审计时仍记本次（聊胜于无）
+            "r3_audit": asdict(r3) if full_run or old_audit is None else old_audit,
         }
 
         self._json_path.parent.mkdir(parents=True, exist_ok=True)

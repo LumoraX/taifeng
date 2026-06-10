@@ -84,6 +84,7 @@ class Scenario:
     sliding: bool = False         # 挂 SlidingWindow 压缩器
     ctx_window: int | None = None  # 覆盖 context_window（小窗逼出压缩）
     driver: str | None = None      # 多步编排剧本（_drivers.DRIVERS 键；None=单 prompt）
+    forbid: set[str] = field(default_factory=set)  # 出现即 FAIL 的事件（防假 PASS）
     tools: tuple[str, ...] = ()    # 需注册的 extra_tools 工厂名
     pool_kwargs: dict[str, Any] = field(default_factory=dict)  # EnginePool.create 追加参数
 
@@ -133,7 +134,7 @@ SCENARIOS: list[Scenario] = [
              capability="上下文压缩（sliding，小窗触发）",
              expect={"turn_completed"}, sliding=True, ctx_window=1024),
     Scenario("selective_approval", "selective_approval", "analysis-orchestrator",
-             "请同时做 PRD 评估 + SWOT 战略分析：目标是一个 LLM agent 微内核的开发者工具。",
+             "请对这份方案同时安排两项评审：产品需求评估与战略定位分析。方案：面向开发者的智能体引擎工具包，提供事件流观测与上下文管理。",  # 原措辞触发网关 content filter（连续两次复现），中性化改写
              capability="差异化授权 + 多路派发",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("travel_planner", "travel_planner", "trip-planner",
@@ -150,6 +151,7 @@ SCENARIOS: list[Scenario] = [
              "",
              capability="turn 回访重跑（Rewind re_reason）",
              expect={"rewind_checkpoint_recorded", "turn_completed"},
+             forbid={"rewind_rejected"},
              driver="turn_rewind"),
     Scenario("spawn_join", "multi_expert_consult", "orchestrator",
              "",
@@ -288,8 +290,11 @@ def _verdict(res: Result) -> tuple[str, str]:
     """判定单场景：成功条件 = turn_completed 且未 failed 且期望关键事件齐。"""
     seen = set(res.kinds)
     missing = res.scenario.expect - seen
+    forbidden = res.scenario.forbid & seen
     if res.failed:
         return "❌FAIL", f"turn_failed: {res.error}"
+    if forbidden:
+        return "❌FAIL", f"出现禁止事件: {sorted(forbidden)}"
     if not res.completed:
         return "❌FAIL", res.error or "未 turn_completed"
     if missing:
@@ -387,6 +392,7 @@ async def main() -> None:
             records=ledger_records,
             r3=R3Audit(emitted_kinds=sorted(all_kinds), unmapped=unmapped,
                        canonical_missing=sorted(r3_missing)),
+            full_run=args.only is None,
         )
         print(f"\n  台账已更新: {jp.name} + {mp.name}（docs/）")
 

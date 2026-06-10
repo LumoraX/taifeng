@@ -2,7 +2,10 @@
 name: flights-finder
 description: 航班候选查询 —— 由 trip-planner call_skill 触发
 version: 1.0.0
-type: atomic
+type: composite
+child_skills: []
+tool_names: [run_script]
+max_call_depth: 2
 scripts:
   - name: mock_flights
     path: scripts/mock_flights.sh

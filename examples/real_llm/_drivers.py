@@ -30,6 +30,12 @@ async def _wait_for(res: Any, predicate: Callable[[Any], bool], *,
         await asyncio.sleep(0.05)
 
 
+def _root_completions(res: Any) -> int:
+    """已观测到的 root turn 完成数（is_root 判根——子 turn 的 turn_completed 不算）。"""
+    return sum(1 for m in res.events
+               if m.kind == "turn_completed" and m.data.get("is_root"))
+
+
 async def drive_suspend_resume(engine: Any, res: Any) -> None:
     """HITL 挂起 → Resume 续跑：真实 LLM 调 request_user_input → 回填答案。"""
     await engine.submit(taifeng.UserMessage(
@@ -40,24 +46,33 @@ async def drive_suspend_resume(engine: Any, res: Any) -> None:
         thread_id=engine.thread_id,
         resolutions={req_id: {"answer": "今年 42 岁，无慢性病史，最近容易疲劳。"}},
     ))
-    await _wait_for(res, lambda m: m.kind == "turn_completed", what="续跑 turn_completed")
+    await _wait_for(res, lambda m: _root_completions(res) >= 1, what="续跑 root turn_completed")
 
 
 async def drive_turn_rewind(engine: Any, res: Any) -> None:
-    """跑完一轮 → Rewind(re_reason) 回退重推 → 第二次完成。"""
+    """跑完一轮 → Rewind(re_reason) 回退重推 → 第二次 root 完成。
+
+    陷阱教训（首轮真实回归的假 PASS）：call_skill 子 turn 也 emit turn_completed，
+    不按 is_root 判根会在活跃 turn 期间提交 Rewind——节点表 turn 结束才回写，
+    必吃 unknown_node 拒绝。这里 ①等 root 完成 ②用 engine.rewind_nodes() 权威表
+    取节点 ③提交后盯 rewind_rejected 快速失败。
+    """
     await engine.submit(taifeng.UserMessage(
         text="请分析「远程办公对团队协作的影响」并给出结论。"))
-    await _wait_for(res, lambda m: m.kind == "turn_completed", what="首轮 turn_completed")
-    # 取首个回访节点（turn_root / iteration 均可 re_reason）
-    cp = await _wait_for(res, lambda m: m.kind == "rewind_checkpoint_recorded",
-                         what="rewind_checkpoint_recorded")
-    await engine.submit(Rewind(node_id=cp.data["node_id"], mode="re_reason"))
+    await _wait_for(res, lambda m: _root_completions(res) >= 1, what="首轮 root turn_completed")
+    nodes = engine.rewind_nodes()
+    if not nodes:
+        raise TimeoutError("root turn 完成后 rewind_nodes() 为空")
+    await engine.submit(Rewind(node_id=nodes[0].node_id, mode="re_reason"))
     await _wait_for(
         res,
-        lambda m: m.kind == "turn_completed"
-        and res.kinds.get("turn_completed", 0) >= 2,
-        what="重推后第二次 turn_completed", wait_seconds=240.0,
+        lambda m: _root_completions(res) >= 2
+        or m.kind == "rewind_rejected",
+        what="重推后第二次 root turn_completed", wait_seconds=240.0,
     )
+    if any(m.kind == "rewind_rejected" for m in res.events):
+        rej = next(m for m in res.events if m.kind == "rewind_rejected")
+        raise TimeoutError(f"Rewind 被拒: {rej.data}")
 
 
 async def drive_spawn_join(engine: Any, res: Any) -> None:
@@ -100,8 +115,8 @@ async def drive_peer_messaging(engine: Any, res: Any) -> None:
                     wait_seconds=240.0)
     await _wait_for(res, lambda m: m.kind == "spawn_completed", what="spawn_completed",
                     wait_seconds=300.0)
-    await _wait_for(res, lambda m: m.kind == "turn_completed", what="turn_completed",
-                    wait_seconds=300.0)
+    await _wait_for(res, lambda m: _root_completions(res) >= 1,
+                    what="root turn_completed", wait_seconds=300.0)
 
 
 DRIVERS: dict[str, Any] = {
