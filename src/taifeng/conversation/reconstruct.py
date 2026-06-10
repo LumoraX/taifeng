@@ -7,7 +7,7 @@ append-only 主存(R5)在两种情况下与热内存 history 结构性发散:
 本函数顺序重放 transcript,复现热内存 history:折叠压缩区间、挪 salvage note、
 按 cut_index 截断。对未压缩/未 rewind 的干净 thread 是恒等映射。纯 CPU、无 IO。
 
-设计:docs/superpowers/specs/2026-06-07-cold-rewind-rebuild-design.md §4
+设计:ADR 0016(冷场景重建,决策一)
 """
 
 from __future__ import annotations

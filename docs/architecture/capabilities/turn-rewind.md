@@ -4,7 +4,7 @@
 
 把一次 root turn 的执行轨迹拆成一张**可寻址的回访节点表**，业务侧可对**任意节点直接 retry**：既能重跑某一次 LLM loop 采样（iteration 节点），也能重跑某一次工具 / `call_skill` 派发（dispatch 节点）。重试发生在**同一次 turn 内**；子 skill 全程 `entry: false`，**绕开 entry/call_skill 互斥**（不依赖把子 skill 变 entry，也不放松 [`skill-dispatch`](skill-dispatch.md) 的 `cannot_call_entry_skill` 约束）。
 
-设计：`docs/superpowers/specs/2026-06-05-addressable-dispatch-rewind-design.md`（热场景 v1）、`docs/superpowers/specs/2026-06-07-cold-rewind-rebuild-design.md`（冷场景重建）
+决策记录：[ADR 0014](../../decisions/0014-turn-rewind.md)（热场景 v1）、[ADR 0016](../../decisions/0016-cold-rewind-rebuild.md)（冷场景重建）
 实现：`src/taifeng/loop/rewind.py`（节点结构 + `derive_rewind_log`）、`src/taifeng/conversation/reconstruct.py`（`reconstruct_logical_history`）、`loop/turn.py`（记录 + retry_tool 补跑）、`loop/engine.py`（`_handle_rewind` + `rewind_nodes()` + 冷加载接线）。
 ADR：[0014](../../../docs/decisions/0014-turn-rewind.md)（热场景）、[0016](../../../docs/decisions/0016-cold-rewind-rebuild.md)（冷场景重建，`Supersedes #0014` 的 node_id 段）。
 

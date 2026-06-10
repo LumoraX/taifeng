@@ -6,7 +6,7 @@
 
 可选地登记一个 **join-barrier**：当 `handle_ids` 里全部句柄到达终态（done / error / cancelled），内核自动在父 engine 内发起一次聚合 skill turn，不需要 parked 父 turn 阻塞等待。
 
-设计 spec：`docs/superpowers/specs/2026-06-06-detached-skill-spawn-design.md`
+决策记录：[ADR 0015](../../decisions/0015-detached-skill-spawn.md)
 
 实现：
 - `src/taifeng/loop/spawn_driver.py`（`SpawnDriver`：spawn 状态 + 核心逻辑）

@@ -1,7 +1,7 @@
 """分离式 spawn 的句柄登记 + join-barrier(纯数据/机制,无 IO)。
 
 句柄只记 child thread 引用 + 终态/结果;可由 parent thread 的 spawn 项重建(冷恢复)。
-设计:docs/superpowers/specs/2026-06-06-detached-skill-spawn-design.md
+设计:ADR 0015(detached-skill-spawn);契约 docs/architecture/capabilities/detached-spawn.md
 """
 from __future__ import annotations
 

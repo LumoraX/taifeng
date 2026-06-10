@@ -1,6 +1,8 @@
 .history/
 .codex/
 .claude/
+.codegraph/
+docs/superpowers/
 .taifeng-*
 .ruff_cache/
 

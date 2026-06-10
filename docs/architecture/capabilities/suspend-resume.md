@@ -7,7 +7,7 @@
 - **人类输入类**：权限审批（`permission`）、表单填写（`form`）、外部数据（`data`）。
 - **系统态类**：LLM 限流 / 配额 / 余额 / key 鉴权失败 / 可恢复网络错（`system_retry`），自动 retry 耗尽后转挂起。
 
-设计源文档：`docs/superpowers/specs/2026-06-02-suspend-resume-design.md`；决策记录：ADR 0012。
+决策记录：[ADR 0012](../../decisions/0012-suspend-resume-primitive.md)。
 
 参照 **openclaw 重入模型**（挂起=turn 早返回结局 + 决定存外部 + 重入续跑）+ **codex 协议形状**（typed EventMsg + 关联 id + pending-map 按 id 索引）。差异（参照 X，差异 Y）：codex / hermes / claw-code 都是内存阻塞、不支持进程可退后 resume；taifeng 复用 `function_call` 无 `function_call_output` 的 **history-gap** 表示挂起点，resume 填 output，**不重跑 tool**；codex 每种 ask 一个 Op，taifeng 收敛成**单个通用 `Resume` Op** + typed `reason` 区分；codex **不持久化** turn 中途 pending，taifeng **额外落 `SuspensionRecord`** 标记中途断点，使 mid-turn resume 跨进程可行。
 

@@ -1,7 +1,7 @@
 """通用挂起 / resume 原语(业务无关)。
 
 参照:openclaw 重入模型 + codex 协议形状(见
-docs/superpowers/specs/2026-06-02-suspend-resume-design.md §2)。
+ADR 0012 / docs/architecture/capabilities/suspend-resume.md)。
 差异:taifeng 用 function_call 无 output 的 history-gap 表示挂起点,
 不重跑 tool;额外落 SuspensionRecord 标记 turn 中途断点。
 """

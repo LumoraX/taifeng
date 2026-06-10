@@ -10,7 +10,7 @@
   不可切在并行 tool_call 中间);``inner_history_len`` = function_call 之后 /
   function_call_output 之前(retry_tool 切点,只重跑该工具)。
 
-设计:docs/superpowers/specs/2026-06-05-addressable-dispatch-rewind-design.md
+设计:ADR 0014(turn-rewind)+ ADR 0016(冷场景重建);契约 docs/architecture/capabilities/turn-rewind.md
 约束:checkpoint 只记 history **下标**,不物理删 store —— append-only 不破(R5)。
 """
 
