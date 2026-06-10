@@ -223,3 +223,50 @@ def test_litellm_messages_reasoning_content() -> None:
     ]))
     assert msgs[0]["reasoning_content"] == "思考过程"
     assert "reasoning_content" not in msgs[1]
+
+
+# === 4. verify 修复:rewind 冷推导与压缩边界对 reasoning 的处理 ==============
+
+
+def test_derive_rewind_iteration_history_len_excludes_reasoning() -> None:
+    """冷推导 iteration 节点的 history_len 必须与热路径一致(采样前长度,不含本轮 reasoning)。
+
+    热路径在采样前记录 history_len(此时本轮 reasoning 尚未落史);冷 derive 若
+    直接用 assistant_message 下标,reasoning 占位会使坐标偏大 1 → 热冷不一致,
+    rewind 截断点错位。
+    """
+    from taifeng.loop.rewind import derive_rewind_log
+
+    hist = [
+        user_message("问题", thread_id=TID),                                    # idx 0
+        reasoning("思考", thread_id=TID),                                       # idx 1
+        assistant_message("", thread_id=TID, model="m"),                        # idx 2
+        function_call(call_id="c1", name="ask", arguments="{}", thread_id=TID),  # idx 3
+        function_call_output(call_id="c1", output="答", thread_id=TID),          # idx 4
+    ]
+    cps = derive_rewind_log(hist)
+    iters = [c for c in cps if c.kind == "iteration"]
+    # 采样前 buffer 只有 user_message 一项 → history_len 必须是 1(而非 am 下标 2)
+    assert iters and iters[0].history_len == 1, \
+        f"热冷坐标不一致: 期待 1(采样前长度), 实得 {iters[0].history_len if iters else None}"
+
+
+def test_walk_back_boundary_keeps_reasoning_with_assistant() -> None:
+    """压缩切分点指向 assistant_message 且其前一项是配对 reasoning 时必须一并保留。
+
+    否则 tail 中带 tool_calls 的 assistant 轮丢失 reasoning_content,thinking
+    模型对压缩后历史的续传可能再次被 provider 拒。
+    """
+    from taifeng.context.strategies.handoff import _walk_back_to_safe_boundary
+
+    hist = [
+        user_message("问题", thread_id=TID),                                    # idx 0
+        reasoning("思考", thread_id=TID),                                       # idx 1
+        assistant_message("", thread_id=TID, model="m"),                        # idx 2
+        function_call(call_id="c1", name="ask", arguments="{}", thread_id=TID),  # idx 3
+        function_call_output(call_id="c1", output="答", thread_id=TID),          # idx 4
+    ]
+    # cut 指向 am(idx 2):前一项是它的 reasoning → 应回退到 1 把 reasoning 留进 tail
+    assert _walk_back_to_safe_boundary(hist, 2) == 1
+    # cut 指向 reasoning 自身(idx 1):reasoning 已在 tail,无需再退
+    assert _walk_back_to_safe_boundary(hist, 1) == 1

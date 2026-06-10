@@ -184,12 +184,19 @@ def derive_rewind_log(history: list[ResponseItem]) -> list[RewindCheckpoint]:
         elif item.kind == "assistant_message":
             # 每次 LLM 采样输出:进入下一圈,记 iteration 节点
             iteration += 1
-            # iteration 节点的 history_len = 本项下标(采样前 buffer 长度)
-            cur_iter_history_len = idx
+            # iteration 节点的 history_len = 采样前 buffer 长度。本轮 reasoning
+            # (thinking 模型,紧邻本项之前落史)是本次采样的产物,坐标须扣除,
+            # 否则与热路径(采样前记录,彼时 reasoning 尚未落史)偏 1 → 热冷不一致
+            sample_start = (
+                idx - 1
+                if idx > 0 and history[idx - 1].kind == "reasoning"
+                else idx
+            )
+            cur_iter_history_len = sample_start
             log.record_iteration(
                 turn_index=k,
                 iteration_index=iteration,
-                history_len=idx,
+                history_len=sample_start,
                 cache_anchor=-1,  # 冷推导无 cache anchor 信息,用 -1 占位
             )
 
