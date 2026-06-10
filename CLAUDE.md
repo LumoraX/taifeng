@@ -29,7 +29,7 @@ PYTHONPATH=src uv run pytest tests/test_engine_e2e.py -v
 # 跑单个测试
 PYTHONPATH=src uv run pytest tests/test_dispatch.py::test_circular_reference_detection -v
 
-# 端到端示例（examples/basic/ 与各 pattern demo 均走 MockClient，无需 API key）
+# 端到端示例（examples/basic/ 与各 pattern demo 均走 SimClient，无需 API key）
 PYTHONPATH=src uv run python examples/basic/minimal_chat.py
 PYTHONPATH=src uv run python examples/basic/composite_skill.py
 PYTHONPATH=src uv run python examples/basic/instructions_basic.py   # 指令分层注入 + 热更
@@ -95,7 +95,9 @@ uv run mypy src/
 ## 测试约束
 
 - 新模块必须有对应 `tests/test_<module>.py`
-- LLM 调用走 `MockClient` —— **CI 内禁止调用真实 API**（`tests/` 全部用 mock；真实 LLM 验证只在 `examples/real_llm_*.py`）
+- LLM 调用走 `SimClient`（conformance 模拟器）—— **CI 内禁止调用真实 API**（`tests/` 全部用 sim；真实 LLM 验证只在 `examples/real_llm/`，结果落 `docs/real-llm-ledger.md` 台账）
+- **真实回归红线**：凡变更基础层（`src/taifeng/{llm,loop,context,conversation}/`），合入前必须全量跑 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 并提交更新后的 `docs/real-llm-ledger.{json,md}`；台账 commit 落后于基础层变更 → 不得标 task 完成 / openspec archive。烧 key 前可先 `examples/real_llm/selfcheck.py`（sim 干跑，零消耗）
+- **能力登记红线**：新增 / 修改 LLM 策略类能力必须同步登记 `docs/capability-matrix.md`（含「真实 LLM 验证」列），与「architecture 未同步 → PR 不合并」同级
 - 文件 IO 走 `tmp_path` fixture，不写仓库内固定路径
 - **边界必测**：cancel / 空输入 / 超长 body / 环检测 / 深度上限 / 并发
 
