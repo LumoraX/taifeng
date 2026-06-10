@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from taifeng.llm.providers.sim.script import SimTurn
+    from taifeng.llm.providers.sim.server import RecordedRequest
     from taifeng.llm.types import ApiRequest
 
 
@@ -98,6 +99,37 @@ class RequestContractValidator:
                 "unsettled_at_sampling",
                 f"采样时刻仍有未核销 call_id={sorted(pending)}（工具结果未回传 / 重建漂移）",
             )
+
+    def validate_expect(self, turn: SimTurn, record: RecordedRequest) -> None:
+        """逐 turn 声明式断言（``SimTurn.expect``）：给关键测试加请求侧密度。
+
+        规则标识以 ``expect_`` 前缀区分于通用合同规则，便于测试精确断言。
+        """
+        expect = turn.expect
+        if expect is None:
+            return
+        blob = record.blob()
+        for needle in expect.must_contain:
+            if needle not in blob:
+                raise SimContractViolation(
+                    "expect_must_contain", f"请求全文未包含期望子串 {needle!r}"
+                )
+        for call_id in expect.must_include_output_for:
+            if record.function_call_output_text(call_id) is None:
+                raise SimContractViolation(
+                    "expect_missing_output", f"请求中缺少 call_id={call_id!r} 的工具结果"
+                )
+        n = len(record.request.messages)
+        if expect.min_messages is not None and n < expect.min_messages:
+            raise SimContractViolation(
+                "expect_message_count", f"messages 数 {n} < 下界 {expect.min_messages}"
+            )
+        if expect.max_messages is not None and n > expect.max_messages:
+            raise SimContractViolation(
+                "expect_message_count", f"messages 数 {n} > 上界 {expect.max_messages}"
+            )
+        if expect.predicate is not None and not expect.predicate(record.request):
+            raise SimContractViolation("expect_predicate", "自定义谓词返回 False")
 
     def validate_response_side(self, turn: SimTurn, request: ApiRequest) -> None:
         """响应侧反查：脚本将吐的 tool_call，其 name 必须已注册进本请求 tools。

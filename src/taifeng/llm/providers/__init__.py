@@ -22,6 +22,17 @@ from taifeng.llm.providers.openai_compat import (
     OpenAICompatClient,
     OpenAICompatSession,
 )
+from taifeng.llm.providers.sim import (
+    RequestLedger,
+    RoutingSimClient,
+    SimClient,
+    SimContractViolation,
+    SimCoordinator,
+    SimExpect,
+    SimFault,
+    SimScriptExhausted,
+    SimTurn,
+)
 
 __all__ = [
     "AnthropicClient",
@@ -36,4 +47,13 @@ __all__ = [
     "MockTurn",
     "OpenAICompatClient",
     "OpenAICompatSession",
+    "RequestLedger",
+    "RoutingSimClient",
+    "SimClient",
+    "SimContractViolation",
+    "SimCoordinator",
+    "SimExpect",
+    "SimFault",
+    "SimScriptExhausted",
+    "SimTurn",
 ]

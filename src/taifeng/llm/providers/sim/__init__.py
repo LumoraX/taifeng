@@ -13,6 +13,11 @@
 
 from __future__ import annotations
 
+from taifeng.llm.providers.sim.client import (
+    RoutingSimClient,
+    SimClient,
+    SimCoordinator,
+)
 from taifeng.llm.providers.sim.contract import (
     RequestContractValidator,
     SimContractViolation,
@@ -34,7 +39,10 @@ __all__ = [
     "RecordedRequest",
     "RequestContractValidator",
     "RequestLedger",
+    "RoutingSimClient",
+    "SimClient",
     "SimContractViolation",
+    "SimCoordinator",
     "SimServerState",
     "SimExpect",
     "SimFault",
