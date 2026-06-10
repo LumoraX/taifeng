@@ -100,6 +100,14 @@ class ApiRequest(BaseModel):
 
 `cache_breakpoints` 是关键 —— 告诉 provider「这些位置之前的内容应该被缓存」。Anthropic 支持显式 `cache_control`，OpenAI 暂不支持但保留字段以备未来。`response_format` 非 None 时 provider 强制 LLM 返回符合 schema 的 JSON（详见 `capabilities/llm-structured-output.md`）。
 
+### reasoning 回传（thinking 模型续传契约）
+
+`ApiMessage` 带可选字段 `reasoning: str | None`（provider-neutral 命名）。thinking 模型（deepseek-v4/r 系等）要求带 tool_calls 的 assistant 消息在续传时回传 `reasoning_content`，否则 400 拒：
+
+- **来源**：采样期 `reasoning_delta` 累积落史为 `kind="reasoning"` ResponseItem（紧邻配对 assistant message 之前）；prompt 重建（`loop/prompt.py::history_to_api_messages`）做**同轮合并**——一次采样的 assistant 文本 + 全部 tool_calls 归并回一条 assistant ApiMessage，reasoning 附在其上（thinking 模型校验**每条**带 tool_calls 的 assistant 消息，拆多条形态无法满足）。
+- **组装**：openai_compat / litellm 仅在 `reasoning` 非 None 时写 wire 字段 `reasoning_content`。回传天然自限：history 无 reasoning item 即不回传，非 thinking 模型零变化。
+- **旋钮**：`reasoning_passback: bool = True`（Engine / Pool 构造参数），仅控回传；落史无条件（R5）。
+
 ## Provider 适配
 
 **双层架构：native 四件套（直连 HTTP，零 SDK）+ LiteLLM 兜底**。

@@ -108,6 +108,9 @@ class SimTurn:
     """
 
     text: str = ""
+    reasoning: str = ""
+    """thinking 模型 reasoning 回放（reasoning-content-passback）：非空时在 text
+    之前 emit ``reasoning_delta``（与真实 provider 产出顺序一致）；默认空=零变化。"""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     """每项形如 ``{"id": ..., "name": ..., "arguments": "..."}``（与 MockTurn 同构）。"""
     usage: TokenUsage = field(

@@ -126,6 +126,7 @@ class AgentEngine:
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
+        reasoning_passback: bool = True,
         event_queue_size: int = 1024,
         submission_queue_size: int = 256,
         instruction_layers: list[InstructionLayer] | None = None,
@@ -178,6 +179,9 @@ class AgentEngine:
         )
         # 单 turn 内一批 tool call 的最大并发；默认 1=串行。透传到每个 TurnRunner。
         self._max_parallel_tool_calls = max_parallel_tool_calls
+        # reasoning-content-passback：thinking 模型 reasoning 回传开关。透传到每个
+        # TurnRunner；默认开（history 无 reasoning item 即不回传，非 thinking 零变化）。
+        self._reasoning_passback = reasoning_passback
         # turn-resource-guards：denial 断路器配置（DenialBreakerConfig | None；
         # None=不启用零变化）。实例由各 TurnRunner 每 turn 新建（turn 级生命周期）。
         self._denial_breaker_config = denial_breaker_config
@@ -1258,6 +1262,7 @@ class AgentEngine:
             failure_suspend_on_expire=self._failure_suspend_on_expire,
             auto_retry_count=auto_retry_count,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
+            reasoning_passback=self._reasoning_passback,
             history_buffer=list(self._history),
             # B1 midturn-input-steering：与活跃 _PendingTurn 共享注入队列（同一 list
             # 引用：engine 主循环 append、runner 迭代边界 drain）
@@ -1405,6 +1410,7 @@ class AgentEngine:
             failure_suspend_on_expire=self._failure_suspend_on_expire,
             auto_retry_count=auto_retry_count,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
+            reasoning_passback=self._reasoning_passback,
             capabilities=self._capabilities,
             spawn_registry=self._spawn_registry,
             session_tokens_used=self._session_tokens,
@@ -2136,6 +2142,7 @@ class AgentEngine:
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
+            reasoning_passback=self._reasoning_passback,
             history_buffer=list(items),
             permission_policy=self._permission_policy,
             request_metadata=self._request_metadata,
@@ -2487,6 +2494,7 @@ class AgentEngine:
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
+            reasoning_passback=self._reasoning_passback,
             history_buffer=list(self._history),
             cache_anchor_index=self._cache_anchor_index,
             pinned_states=self._pinned_states,

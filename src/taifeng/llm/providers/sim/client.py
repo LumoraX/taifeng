@@ -28,6 +28,7 @@ from taifeng.llm.events import (
     completed,
     created,
     prompt_cache,
+    reasoning_delta,
     server_model,
     structured_output,
     text_delta,
@@ -169,6 +170,9 @@ class _SimSession:
         """按服务端事件骨架顺序生成本 turn 的完整事件序列（同步生成器）。"""
         yield created()
         yield server_model(self._model)
+        # reasoning 先于 text（与真实 thinking provider 产出顺序一致），8 字符切片
+        for i in range(0, len(turn.reasoning), _TEXT_CHUNK):
+            yield reasoning_delta(turn.reasoning[i : i + _TEXT_CHUNK])
         # text：8 字符切片模拟流式
         text = turn.text
         for i in range(0, len(text), _TEXT_CHUNK):

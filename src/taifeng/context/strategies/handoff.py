@@ -76,13 +76,25 @@ HANDOFF_SYSTEM_PROMPT_ZH = """你正在接手一段被压缩的对话历史。�
 
 
 def _walk_back_to_safe_boundary(history: list[ResponseItem], cut: int) -> int:
-    """回退切分点直到不切断 function_call / function_call_output 配对。
+    """回退切分点直到不切断 function_call / function_call_output 配对,
+    以及 reasoning / assistant_message 配对。
 
-    参照：claw-code crates/runtime/src/compact.rs
+    参照：claw-code crates/runtime/src/compact.rs(fc/fco 部分;reasoning
+    配对保护是 reasoning-content-passback 的 taifeng 扩展)
     """
     while cut > 0 and cut < len(history):
         item = history[cut]
         if item.kind != "function_call_output":
+            # reasoning↔assistant 配对保护:切分点指向 assistant_message 且其
+            # 前一项是配对 reasoning 时一并保留——thinking 模型要求带 tool_calls
+            # 的 assistant 消息续传时回传 reasoning_content,剪掉 reasoning 会使
+            # 压缩后历史的续传可能被 provider 拒(reasoning-content-passback)
+            if (
+                item.kind == "assistant_message"
+                and history[cut - 1].kind == "reasoning"
+            ):
+                cut -= 1
+                continue
             return cut
         # 检查它的 function_call 是否在保留段中
         call_id = item.payload.get("call_id")

@@ -33,6 +33,7 @@ from taifeng.conversation.models import (
     assistant_message,
     function_call,
     function_call_output,
+    reasoning,
 )
 from taifeng.conversation.store import MessageStore
 from taifeng.llm.client import ModelClient
@@ -235,6 +236,11 @@ class TurnRunner:
     auto_retry_count: int = 0
     # 单 turn 内一批 tool call 的最大并发数；默认 1 = 严格串行（等同历史行为，零回归）
     max_parallel_tool_calls: int = 1
+    # reasoning-content-passback:thinking 模型 reasoning 回传开关(prompt 重建时把
+    # 落史的 reasoning item 附回相邻 assistant 消息)。默认开——回传天然自限:
+    # history 无 reasoning item 即不回传,非 thinking 模型零变化。落史本身无旋钮
+    # (R5 数据完整性;只在 provider 实际吐过 reasoning_delta 时才有内容)。
+    reasoning_passback: bool = True
     # turn-级累积 usage
     total_usage: TokenUsage = field(default_factory=TokenUsage)
     history_buffer: list[ResponseItem] = field(default_factory=list)
@@ -856,6 +862,8 @@ class TurnRunner:
             capabilities=self.capabilities,
             # K3: page-in 的长期记忆（注入 prompt 尾部，cache-aware）
             prefetched_memory=self._prefetched_memory or None,
+            # reasoning-content-passback:thinking 模型 reasoning 回传开关
+            reasoning_passback=self.reasoning_passback,
         )
 
         # G2b：发送前预检 —— 即便经过压缩，估算 token 仍超 hard limit 时 emit
@@ -895,6 +903,8 @@ class TurnRunner:
 
         sess = self.model_client.session(cancel=self.cancel)
         assistant_text = ""
+        # 累积本轮 reasoning 全文(thinking 模型;非 thinking 恒为空)
+        reasoning_text = ""
         # 累积 tool calls
         tool_calls: list[dict[str, Any]] = []
         # retry 已由 provider 内 retry_async 兜底(≤3 次);走到这里的 LLMError 即重试耗尽。
@@ -909,9 +919,11 @@ class TurnRunner:
                         assistant_text += delta
                         await self._emit(AssistantText(data={"delta": delta}))
                     elif ev.kind == "reasoning_delta":
-                        await self._emit(
-                            AssistantReasoning(data={"delta": ev.data.get("delta", "")})
-                        )
+                        r_delta = ev.data.get("delta", "")
+                        # 累积落史(reasoning-content-passback):thinking 模型要求
+                        # 带 tool_calls 的 assistant 消息续传时回传 reasoning_content
+                        reasoning_text += r_delta
+                        await self._emit(AssistantReasoning(data={"delta": r_delta}))
                     elif ev.kind == "tool_call_done":
                         tool_calls.append(
                             {
@@ -1003,6 +1015,14 @@ class TurnRunner:
                 # 该 SuspendSignal 穿透回 run_turn 的 except SuspendSignal(Task 7 已加),落盘挂起。
                 raise SuspendSignal(self._system_retry_pending(e)) from e
             raise  # 确定性失败:照旧上抛硬失败(走 run_turn 宽 except → TurnFailed)
+
+        # reasoning-content-passback:本轮有 reasoning 且有产出时,先落 reasoning item
+        # (紧邻配对 assistant message 之前,与 provider 产出顺序一致;无产出轮不落——
+        # 没有可关联的 assistant 消息,回传无意义)
+        if reasoning_text and (assistant_text or tool_calls):
+            r_item = reasoning(reasoning_text, thread_id=self.thread_id)
+            self.history_buffer.append(r_item)
+            await self.store.append(r_item)
 
         # 落 assistant message（即使为空也记下，因为 tool calls 也在这条消息上）
         if assistant_text or tool_calls:
@@ -1606,6 +1626,8 @@ class TurnRunner:
             failure_suspend_on_expire=self.failure_suspend_on_expire,
             auto_retry_count=self.auto_retry_count,
             max_parallel_tool_calls=self.max_parallel_tool_calls,
+            # reasoning-content-passback: 子 turn 继承回传开关
+            reasoning_passback=self.reasoning_passback,
             # G4a: 子 turn 继承同一运行时能力快照
             capabilities=self.capabilities,
             # K1: 子 turn 共享同一 spawn registry（配额贯穿整棵 turn 树）

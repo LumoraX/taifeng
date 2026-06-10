@@ -144,6 +144,7 @@ class EnginePool:
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
+        reasoning_passback: bool = True,
         instruction_layers: list[Any] | None = None,
         hook_runner: HookRunner | None = None,
         script_executors: dict[str, Any] | None = None,
@@ -197,6 +198,8 @@ class EnginePool:
         self._now_factory = now_factory
         # 单 turn 内一批 tool call 的最大并发；默认 1=串行。透传到 AgentEngine。
         self._max_parallel_tool_calls = max_parallel_tool_calls
+        # reasoning-content-passback：thinking 模型 reasoning 回传开关，透传到 AgentEngine。
+        self._reasoning_passback = reasoning_passback
         # Phase 0: instruction_layers 仅占位存储 + 透传到 AgentEngine
         self._instruction_layers: list[Any] = list(instruction_layers or [])
         # store-protocol-decoupling: hook_runner 由 EnginePool.create 注入；用户没传 index_hook 时为 None
@@ -254,6 +257,7 @@ class EnginePool:
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
+        reasoning_passback: bool = True,
         auto_watch_skills: bool = False,
         watch_poll_interval_seconds: float = 1.0,
         instruction_layers: list[Any] | None = None,
@@ -351,6 +355,7 @@ class EnginePool:
             failure_suspend_on_expire=failure_suspend_on_expire,
             now_factory=now_factory,
             max_parallel_tool_calls=max_parallel_tool_calls,
+            reasoning_passback=reasoning_passback,
             instruction_layers=instruction_layers,
             hook_runner=hook_runner,
             script_executors=script_executors,
@@ -486,6 +491,7 @@ class EnginePool:
                 failure_suspend_on_expire=self._failure_suspend_on_expire,
                 now_factory=self._now_factory,
                 max_parallel_tool_calls=self._max_parallel_tool_calls,
+                reasoning_passback=self._reasoning_passback,
                 instruction_layers=self._instruction_layers,
                 script_executors=self._script_executors,
                 event_queue_size=self._event_queue_size,
