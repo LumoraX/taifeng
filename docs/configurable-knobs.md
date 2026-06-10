@@ -17,6 +17,7 @@
 | `hooks` | `None` | `HookRunner`（PreToolUse/PostToolUse/PreCompact） | claw-code hooks |
 | `max_iterations` | `32` | 单 turn 内 LLM ↔ tool 最大循环 | claw-code `max_iterations` |
 | **`denial_breaker_config`** | `None` | turn 内连续拒绝断路器（`DenialBreakerConfig{max_consecutive_denials, max_recent_denials, window_size}`）。None=不启用零变化；越阈值 emit `denial_circuit_open` + turn 以同名 end_reason 提前终止。详见 [capabilities/turn-resource-guards.md](architecture/capabilities/turn-resource-guards.md) | codex `guardian` 断路器 |
+| **`failure_policy`** | `None` | `FailureDispositionPolicy`；失败处置裁决（挂起 vs 终态）。`None` = 内置 `ConservativeFailurePolicy`（可恢复 LLM 错误挂起、其余终态——历史行为零变化）；注入 `SuspendByDefaultPolicy` 后一切失败（含确定性 LLM 失败与三类护栏触顶）转挂起等 Resume 裁决（护栏触顶以 `RESOURCE_LIMIT` reason 落挂起，retry=重建续跑/abort=终态）。**仅适合有人值守或有自动决策器的部署**。详见 [capabilities/suspend-resume.md](architecture/capabilities/suspend-resume.md) | — |
 | **`max_parallel_tool_calls`** | `1` | 单 turn 内**一批** tool call 的最大并发数（一条 assistant 消息里的多个 tool call / call_skill）。默认 `1` = 严格串行（等同历史行为，零回归）；设 `>1` 开启并发 fan-out。安全由 `ToolCallRuntime` 的 RwLock 兜底（parallel_safe 读类重叠、写类独占；call_skill 跳锁真并行）。结果按发起序配对回填历史，cache / resume 不受影响。声明式编排（SKILL.md `orchestration`）的 parallel 段同样受此旋钮限流，serial 段无论该值多大都强制串行。详见 `docs/architecture/agent-loop.md` 并发派发段 + 编排 turn 段 | codex `tools/parallel.rs` |
 | `auto_watch_skills` | `False` | 启用 SKILL.md 文件监听热更 | — |
 | `watch_poll_interval_seconds` | `1.0` | 文件监听轮询间隔 | — |
