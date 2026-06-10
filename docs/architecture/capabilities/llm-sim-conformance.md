@@ -10,7 +10,7 @@
 
 | 结构 | 模块 | 要点 |
 | --- | --- | --- |
-| `SimTurn` | `sim/script.py` | 单 turn 剧本；字段名兼容旧 MockTurn（text / tool_calls / usage / delay_seconds / structured / cache_read / cache_creation / request_id）+ 新增 `finish` / `expect` / `fault` / `await_signal` / `emit_signal` |
+| `SimTurn` | `sim/script.py` | 单 turn 剧本；字段名兼容旧 MockTurn（text / reasoning / tool_calls / usage / delay_seconds / structured / cache_read / cache_creation / request_id；reasoning 非空时在 text 前回放 `reasoning_delta`）+ 新增 `finish` / `expect` / `fault` / `await_signal` / `emit_signal` |
 | `SimFault` | `sim/script.py` | 故障注入四变体（工厂构造）：`rate_limit(retry_after)` / `server_error()` / `malformed_arguments()` / `truncate_stream(after_events)` |
 | `SimExpect` | `sim/script.py` | 逐 turn 请求断言：`must_contain` / `must_include_output_for` / 消息数上下界 / 自定义谓词 |
 | `SimScriptExhausted` | `sim/script.py` | 脚本耗尽异常（普通 Exception；**不入 LLMError**） |
