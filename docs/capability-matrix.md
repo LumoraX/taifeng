@@ -2,7 +2,7 @@
 
 > **这份文档回答一个问题：taifeng 到底实现了什么、怎么接、去哪看。**
 >
-> 面向**使用 taifeng 的业务方**（如 qiuben）：扫一眼就能确定「这个功能 tf 有没有 / 落地了没 / 入口是哪个 API / 有没有现成示例」，不必翻源码或猜测。
+> 面向**使用 taifeng 的业务方**：扫一眼就能确定「这个功能 tf 有没有 / 落地了没 / 入口是哪个 API / 有没有现成示例」，不必翻源码或猜测。
 >
 > 三层文档分工：
 > - **本文档**＝能力清单（能做什么 + 落地状态 + 入口 + 示例）——先看这里。
@@ -148,7 +148,7 @@ async for ev in engine.subscribe_all():
 
 **完整事件清单：** 7 类 spawn/join 生命周期事件 `spawn_started / spawn_suspended / spawn_completed / spawn_failed / spawn_cancelled / join_barrier_registered / join_barrier_fired`（字段见 [`src/taifeng/loop/event.py`](../src/taifeng/loop/event.py)）。端到端时间线 demo：[multi_expert_consult/](../examples/multi_expert_consult/)；浏览器多轨实时渲染参考实现：[web_ui/](../examples/web_ui/)（含 `multi_expert_consult` 交互 demo）。契约：[detached-spawn.md](architecture/capabilities/detached-spawn.md)。
 
-> 业务侧（如 qiuben）在 SSE 层把 `submission_id` 改名为 `track_id` 做多轨投影即可——内核不感知业务轨道语义（R1）。
+> 业务侧在 SSE 层把 `submission_id` 改名为 `track_id` 做多轨投影即可——内核不感知业务轨道语义（R1）。
 
 ---
 
