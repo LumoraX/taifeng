@@ -1488,3 +1488,39 @@ max_call_depth: 2
     assert events[-1] == "turn_suspended", (
         f"subscribe 必须以 turn_suspended 自然终结(不依赖手动 break)，实得 {events}"
     )
+
+
+# ============================================================
+# failure-suspension-policy task 1.2：RESOURCE_LIMIT 的 resolver 分支
+# ============================================================
+
+
+def test_resolver_resource_limit_retry_no_resample():
+    """RESOURCE_LIMIT retry:不置 resample(重建 runner 续跑,非重跑同次 sample)。"""
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
+    plan = SuspensionResolver().plan(rec, {"r1": {"action": "retry"}})
+    assert plan.resample is False
+    assert plan.abort is False
+
+
+def test_resolver_resource_limit_abort():
+    """RESOURCE_LIMIT abort:与 SYSTEM_RETRY abort 同语义,置 abort 位。"""
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
+    plan = SuspensionResolver().plan(rec, {"r1": {"action": "abort"}})
+    assert plan.abort is True
+    assert plan.resample is False
+
+
+def test_resolver_resource_limit_invalid_action_rejected():
+    """RESOURCE_LIMIT 非法 action:显式 ResolveError,禁静默兜底。"""
+    import pytest
+
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
+    with pytest.raises(ResolveError, match="invalid_resource_limit_action"):
+        SuspensionResolver().plan(rec, {"r1": {"action": "whatever"}})

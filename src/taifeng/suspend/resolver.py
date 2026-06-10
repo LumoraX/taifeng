@@ -28,7 +28,7 @@ class ResolvePlan:
     direct_outputs: dict[str, Any] = field(default_factory=dict)  # call_id → output(form/data)
     deny_outputs: dict[str, str] = field(default_factory=dict)  # call_id → deny reason(permission)
     resample: bool = False  # system_retry → 重跑 sample
-    abort: bool = False  # system_retry action=abort
+    abort: bool = False  # system_retry / resource_limit 的 action=abort
 
 
 class SuspensionResolver:
@@ -77,6 +77,18 @@ class SuspensionResolver:
                     plan.abort = True
                 else:
                     plan.resample = True
+            elif p.reason is SuspendReason.RESOURCE_LIMIT:
+                # 护栏触顶挂起:retry = 重建 runner 在迭代边界继续采样循环,
+                # **不置 resample**(挂起点无悬空 fc,无"同次 sample"可重跑);
+                # abort 与 SYSTEM_RETRY 同语义(在挂起点落失败终态)。
+                action = payload.get("action")
+                if action == "abort":
+                    plan.abort = True
+                elif action != "retry":
+                    # 非法 action:禁静默兜底,显式拒绝
+                    raise ResolveError(
+                        f"invalid_resource_limit_action: {action!r} (want retry|abort)"
+                    )
             else:
                 # 未知 reason:禁静默丢弃(CLAUDE.md 禁 silent fallback)
                 raise ResolveError(f"unhandled_suspend_reason: {p.reason}")
