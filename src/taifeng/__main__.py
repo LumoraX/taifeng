@@ -4,7 +4,7 @@
     skill list <dir>            列出所有 skill（id, type, entry, child_count）
     skill show <dir> <id>       展示单个 skill 详情
     skill validate <dir>        加载 + 静态环检测，失败时 exit 1
-    engine demo <dir> <entry>   交互式 demo（MockClient，回显模式）
+    engine demo <dir> <entry>   交互式 demo（SimClient，回显模式）
 
 设计：argparse 不引第三方依赖。
 """
@@ -130,10 +130,10 @@ def _cmd_skill_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_engine_demo(args: argparse.Namespace) -> int:
-    """交互式 demo：MockClient 回声 + ConsoleSink。"""
+    """交互式 demo：SimClient 回声 + ConsoleSink。"""
     import tempfile
 
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.llm.types import TokenUsage
     from taifeng.loop.pool import EnginePool
     from taifeng.loop.submission import UserMessage
@@ -142,8 +142,8 @@ def _cmd_engine_demo(args: argparse.Namespace) -> int:
     async def run() -> int:
         with tempfile.TemporaryDirectory() as td:
             threads = Path(td) / "threads"
-            client = MockClient(turns=[
-                MockTurn(
+            client = SimClient(turns=[
+                SimTurn(
                     text=f"[mock 回声] 收到消息，entry skill = {args.entry}",
                     usage=TokenUsage(input_tokens=50, output_tokens=20, total_tokens=70),
                 )
@@ -309,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
     engine = sub.add_parser("engine", help="Engine demo")
     engine_sub = engine.add_subparsers(dest="engine_cmd", required=True)
 
-    p_demo = engine_sub.add_parser("demo", help="MockClient 交互演示")
+    p_demo = engine_sub.add_parser("demo", help="SimClient 交互演示")
     p_demo.add_argument("skills_dir", type=Path)
     p_demo.add_argument("entry", help="entry skill id")
     p_demo.add_argument("--message", "-m", help="发给 engine 的消息", default=None)

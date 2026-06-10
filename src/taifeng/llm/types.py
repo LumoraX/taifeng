@@ -102,7 +102,7 @@ class ResponseFormatSpec(BaseModel):
         - OpenAI / openai-compat: ``response_format = {"type": "json_schema",
           "json_schema": {"name": ..., "schema": ..., "strict": ...}}``
         - LiteLLM: 同上（内部自动桥接到 Anthropic / Gemini native 格式）
-        - Mock: 与 ``MockTurn.structured`` 字段配对回放
+        - Sim: 与 ``SimTurn.structured`` 字段配对回放
     """
 
     name: str
