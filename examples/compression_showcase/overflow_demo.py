@@ -1,4 +1,4 @@
-"""overflow 有界自愈 demo —— provider 判超长时不丢 turn（MockClient 无需 key）。
+"""overflow 有界自愈 demo —— provider 判超长时不丢 turn（SimClient 无需 key）。
 
 演示「A1 reactive-compaction-recovery」兜底路径：当本地 token 估算偏低、但 provider
 已判「上下文超长」抛 `ContextOverflowError` 时，taifeng 不直接硬失败丢整个 turn，而是
@@ -6,7 +6,7 @@
 turn 正常继续；仍失败才硬失败。
 
 时间轴关键事件：`provider_retry` + phase=overflow 的 `compaction_started/completed`。
-本 demo 用 MockClient 在第 3 个 turn 的首次采样抛 overflow，自愈后重采样成功。
+本 demo 用 SimClient 在第 3 个 turn 的首次采样抛 overflow，自愈后重采样成功。
 
 参照 openclaw pi-embedded-subscribe.ts 的 pendingCompactionRetry。
 契约：docs/architecture/capabilities/reactive-compaction-recovery.md。
@@ -33,7 +33,7 @@ from taifeng.llm.events import (
     server_model,
     text_delta,
 )
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import ApiRequest, TokenUsage
 from taifeng.telemetry import attach_console_sink
 
@@ -96,13 +96,13 @@ class _OverflowOnNthClient(ModelClient):
 
 
 def _summary_strategies() -> list[HandoffCompactionStrategy]:
-    """handoff 压缩策略：摘要由独立 MockClient 提供（force_compress 时调用）。
+    """handoff 压缩策略：摘要由独立 SimClient 提供（force_compress 时调用）。
 
     返回策略列表（EnginePool.create 的 ``compressors=`` 内部自行包 Orchestrator）。
     """
-    summary_client = MockClient(
+    summary_client = SimClient(
         turns=[
-            MockTurn(
+            SimTurn(
                 text="## 进度摘要\n前序对话已归纳为要点，继续推进。",
                 usage=TokenUsage(input_tokens=400, output_tokens=20),
             )

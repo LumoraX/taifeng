@@ -1,7 +1,7 @@
 """内核资源旋钮演示（K1–K4 + K6）—— 业务怎么把 OS 微内核的"资源准入/强制/流控/内存/自省"接出来用。
 
 把 taifeng 当 LLM agent 的 OS 微内核时，这五类旋钮（照 `docs/configurable-knobs.md §1.0`）
-全部经 `EnginePool.create(...)` 注入、`engine.introspect()` 观测。本 demo 用 MockClient
+全部经 `EnginePool.create(...)` 注入、`engine.introspect()` 观测。本 demo 用 SimClient
 跑通两条路径，无需 API key：
 
     ① 正常路径：K1 spawn 配额 + K3 memory 换页钩子 + K4 流控 全接出，跑一轮 tool-calling
@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 # 两个 skill：atomic 风格规则 + composite 审查入口（带子 skill，可触发 spawn）
@@ -78,14 +78,14 @@ async def scenario_normal(root: Path) -> None:
     """① 正常路径：K1/K3/K4 旋钮全接 + 真跑 turn + introspect 自省。"""
     (root / "threads").mkdir(parents=True, exist_ok=True)
     mem = SpyMemoryStore()
-    client = MockClient(turns=[
-        MockTurn(
+    client = SimClient(turns=[
+        SimTurn(
             text="加载规则…",
             tool_calls=[{"id": "tc1", "name": "read_skill",
                          "arguments": '{"skill_id": "style-checker"}'}],
             usage=TokenUsage(input_tokens=200, output_tokens=30, total_tokens=230),
         ),
-        MockTurn(
+        SimTurn(
             text="函数 120>80，建议拆分。",
             usage=TokenUsage(input_tokens=380, output_tokens=55, total_tokens=435,
                              cache_read_input_tokens=190),
@@ -120,9 +120,9 @@ async def scenario_normal(root: Path) -> None:
 async def scenario_oom(root: Path) -> None:
     """② K2 OOM 路径：max_session_tokens 极小，证明触顶后内核真拒新 turn。"""
     (root / "threads").mkdir(parents=True, exist_ok=True)
-    client = MockClient(turns=[
-        MockTurn(text="第一轮", usage=TokenUsage(input_tokens=5000, total_tokens=5000)),
-        MockTurn(text="第二轮", usage=TokenUsage(input_tokens=5000, total_tokens=5000)),
+    client = SimClient(turns=[
+        SimTurn(text="第一轮", usage=TokenUsage(input_tokens=5000, total_tokens=5000)),
+        SimTurn(text="第二轮", usage=TokenUsage(input_tokens=5000, total_tokens=5000)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=_write_skills(root), threads_dir=root / "threads",

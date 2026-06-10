@@ -1,4 +1,4 @@
-"""turn-rewind 体验 demo —— 自治链「一键跑完」+ 回退到任意节点重跑(纯 MockClient)。
+"""turn-rewind 体验 demo —— 自治链「一键跑完」+ 回退到任意节点重跑(纯 SimClient)。
 
 演示内核的 **turn-rewind** 能力:把一次 root turn 拆成可寻址的**回访节点表**,
 业务侧可对任意节点直接 retry —— 子 skill 全程 ``entry: false``,绕开 entry/call_skill 互斥。
@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.submission import Rewind
 
 # ── skills 目录：磁盘单一真相，orchestrator(entry composite)+ analyzer(子 skill,entry:false)──
@@ -74,15 +74,15 @@ async def scenario_retry_tool() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         # skills 来自磁盘固定目录，临时目录仅用于 threads_dir（会话存储）
-        client = MockClient(turns=[
+        client = SimClient(turns=[
             # 一键跑完:orchestrator → call_skill(analyzer) → 综合
-            MockTurn(text="先派发专科分析…", tool_calls=[
+            SimTurn(text="先派发专科分析…", tool_calls=[
                 {"id": "a0", "name": "call_skill", "arguments": CALL_ANALYZER}]),
-            MockTurn(text="【分析】风险偏高(初版)"),
-            MockTurn(text="【综合】建议:加强监测(基于初版)"),
+            SimTurn(text="【分析】风险偏高(初版)"),
+            SimTurn(text="【综合】建议:加强监测(基于初版)"),
             # —— retry_tool 后:analyzer 重跑 + orchestrator 续推 ——
-            MockTurn(text="【分析】风险中等(修订版)"),
-            MockTurn(text="【综合】建议:常规随访(基于修订版)"),
+            SimTurn(text="【分析】风险中等(修订版)"),
+            SimTurn(text="【综合】建议:常规随访(基于修订版)"),
         ])
         pool = await taifeng.EnginePool.create(
             skills_dir=SKILLS_DIR, threads_dir=root / "threads",
@@ -114,13 +114,13 @@ async def scenario_re_reason() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         # skills 来自磁盘固定目录，临时目录仅用于 threads_dir（会话存储）
-        client = MockClient(turns=[
-            MockTurn(text="先派发专科分析…", tool_calls=[
+        client = SimClient(turns=[
+            SimTurn(text="先派发专科分析…", tool_calls=[
                 {"id": "a0", "name": "call_skill", "arguments": CALL_ANALYZER}]),
-            MockTurn(text="【分析】风险偏高"),
-            MockTurn(text="【综合】建议:加强监测"),
+            SimTurn(text="【分析】风险偏高"),
+            SimTurn(text="【综合】建议:加强监测"),
             # —— re_reason 到 it1 后:LLM 重决,这次直接不派发、给保守结论 ——
-            MockTurn(text="【综合】重新判断:信息不足,先补检查再说"),
+            SimTurn(text="【综合】重新判断:信息不足,先补检查再说"),
         ])
         pool = await taifeng.EnginePool.create(
             skills_dir=SKILLS_DIR, threads_dir=root / "threads",

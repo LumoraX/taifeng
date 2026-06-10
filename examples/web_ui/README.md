@@ -287,7 +287,7 @@ PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py
 # 预期末行：🎉 smoke_detached 全绿
 ```
 
-**实现要点**：smoke 用 MockClient + `httpx.AsyncClient(transport=ASGITransport(app))`，不启动真实服务器；SSE 事件订阅通过进程内 `server._event_subs` 队列直接注入，绕开 `ASGITransport` 对长连 SSE 的缓冲限制。无需 API key。`await_skills`-via-LLM 路径（LLM 自主调用 `await_skills` 工具）依赖真实 LLM 决策，仅浏览器人工验证覆盖。
+**实现要点**：smoke 用 SimClient + `httpx.AsyncClient(transport=ASGITransport(app))`，不启动真实服务器；SSE 事件订阅通过进程内 `server._event_subs` 队列直接注入，绕开 `ASGITransport` 对长连 SSE 的缓冲限制。无需 API key。`await_skills`-via-LLM 路径（LLM 自主调用 `await_skills` 工具）依赖真实 LLM 决策，仅浏览器人工验证覆盖。
 
 ## 文件
 
@@ -297,7 +297,7 @@ examples/web_ui/
 ├── server.py          FastAPI app（18 个 DEMOS 注册 + per-demo pool + SSE 桥接
 │                       + HITL + /api/threads resume 端点 + MCP client 生命周期
 │                       + /api/rewind_nodes + /api/rewind）
-├── smoke_detached.py  detached demo 无 key 自动化 smoke（MockClient + in-process queue）
+├── smoke_detached.py  detached demo 无 key 自动化 smoke（SimClient + in-process queue）
 ├── static/
 │   └── index.html     单文件 UI（demo 下拉 + 历史下拉 + chat + 可观测面板
 │                       + 时间轴 + HITL modal + detached 专家卡 + 回访节点表）

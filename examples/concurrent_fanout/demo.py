@@ -20,7 +20,7 @@
     [SKILL RET]   3 路结果回流（完成序可能交错）
     [LLM FINAL]   research-fanout 综合结论
 
-运行（MockClient，**无需 API key**）：
+运行（SimClient，**无需 API key**）：
 
     cd taifeng
     PYTHONPATH=src uv run python examples/concurrent_fanout/demo.py
@@ -33,21 +33,21 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.telemetry import attach_console_sink
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 
-def _routing_client() -> RoutingMockClient:
-    """RoutingMockClient：entry 首轮吐 3 个 call_skill（fan-out）、次轮综合；
+def _routing_client() -> RoutingSimClient:
+    """RoutingSimClient：entry 首轮吐 3 个 call_skill（fan-out）、次轮综合；
     三个源各 sleep 0.3s 以体现并发（串行需 ≥0.9s，并发约 0.3s）。
 
     按各 skill body 内的唯一标记路由，回放与子 turn 完成顺序无关。
     """
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "FANOUT_ENTRY_MARK": [
-            MockTurn(text="三个源相互独立，并发检索。", tool_calls=[
+            SimTurn(text="三个源相互独立，并发检索。", tool_calls=[
                 {"id": "f0", "name": "call_skill",
                  "arguments": '{"skill_id": "source-web", "reason": "网络资料"}'},
                 {"id": "f1", "name": "call_skill",
@@ -55,11 +55,11 @@ def _routing_client() -> RoutingMockClient:
                 {"id": "f2", "name": "call_skill",
                  "arguments": '{"skill_id": "source-news", "reason": "新闻时讯"}'},
             ]),
-            MockTurn(text="综合三路：主流观点一致，学术与新闻互为补充，结论可信。"),
+            SimTurn(text="综合三路：主流观点一致，学术与新闻互为补充，结论可信。"),
         ],
-        "SOURCE_WEB_MARK": [MockTurn(text="网络：要点 A/B/C。", delay_seconds=0.3)],
-        "SOURCE_ACADEMIC_MARK": [MockTurn(text="学术：文献 X/Y 支持。", delay_seconds=0.3)],
-        "SOURCE_NEWS_MARK": [MockTurn(text="新闻：近期进展 Z。", delay_seconds=0.3)],
+        "SOURCE_WEB_MARK": [SimTurn(text="网络：要点 A/B/C。", delay_seconds=0.3)],
+        "SOURCE_ACADEMIC_MARK": [SimTurn(text="学术：文献 X/Y 支持。", delay_seconds=0.3)],
+        "SOURCE_NEWS_MARK": [SimTurn(text="新闻：近期进展 Z。", delay_seconds=0.3)],
     })
 
 
@@ -89,7 +89,7 @@ async def main() -> None:
             if done and ev.msg.data.get("is_root"):
                 break
 
-        # MockClient 瞬时完成，给异步 console_sink 时间把事件打印完整再收尾
+        # SimClient 瞬时完成，给异步 console_sink 时间把事件打印完整再收尾
         await asyncio.sleep(0.5)
         await pool.close()
         await asyncio.sleep(0.2)

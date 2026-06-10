@@ -1,4 +1,4 @@
-"""instructions-injection 端到端示例 —— MockClient + 两层指令 + 热更 + snapshot。
+"""instructions-injection 端到端示例 —— SimClient + 两层指令 + 热更 + snapshot。
 
 运行：
     cd taifeng
@@ -20,7 +20,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.mock import MockClient, MockSession, MockTurn
+from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.llm.types import ApiRequest, TokenUsage
 
 # --- 与 minimal_chat.py 同样的最小 skill 定义 -----------------------------
@@ -68,36 +68,16 @@ class _TenantPersonaSource:
         return self._text
 
 
-# --- 一个能记录请求的 Mock client（便于打印 system prompt） -----------------
+# --- 请求侦察：SimClient 的 ledger 原生记录每次 ApiRequest ------------------
 
 
-class _CapturingClient(MockClient):
-    """记录每次 LLM 调用收到的 ApiRequest。"""
+class _CapturingClient(SimClient):
+    """captured = ledger 记录的原始 ApiRequest（便于打印 system prompt）。"""
 
-    def __init__(self, *, turns) -> None:
-        super().__init__(turns=turns)
-        self.captured: list[ApiRequest] = []
-
-    def session(self, *, cancel, model=None):  # type: ignore[override]
-        return _CapturingSession(super().session(cancel=cancel, model=model), self)
-
-
-class _CapturingSession:
-    def __init__(self, inner: MockSession, owner: _CapturingClient) -> None:
-        self._inner = inner
-        self._owner = owner
-
-    async def __aenter__(self):
-        await self._inner.__aenter__()
-        return self
-
-    async def __aexit__(self, *exc):
-        return await self._inner.__aexit__(*exc)
-
-    async def stream(self, request: ApiRequest):
-        self._owner.captured.append(request)
-        async for ev in self._inner.stream(request):
-            yield ev
+    @property
+    def captured(self) -> list[ApiRequest]:
+        """全部已采样请求（保序）。"""
+        return [rec.request for rec in self.ledger.requests()]
 
 
 # --- 主流程 ----------------------------------------------------------------
@@ -125,12 +105,12 @@ async def main() -> None:
             COMPOSITE, encoding="utf-8",
         )
 
-        # MockClient 脚本：每个 turn 一条无工具调用的简单回复
+        # SimClient 脚本：每个 turn 一条无工具调用的简单回复
         client = _CapturingClient(turns=[
-            MockTurn(text="turn1 ok", usage=TokenUsage(
+            SimTurn(text="turn1 ok", usage=TokenUsage(
                 input_tokens=100, output_tokens=10, total_tokens=110,
             )),
-            MockTurn(text="turn2 ok", usage=TokenUsage(
+            SimTurn(text="turn2 ok", usage=TokenUsage(
                 input_tokens=100, output_tokens=10, total_tokens=110,
             )),
         ])

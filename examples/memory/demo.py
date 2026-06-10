@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 import taifeng
 from taifeng.context import ContextBudget
 from taifeng.context.strategies.sliding import SlidingWindowStrategy
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 if TYPE_CHECKING:
@@ -139,7 +139,7 @@ class InMemoryMemoryStore:
         print(f"  [mem] on_session_end thread={thread_id} → 全库沉淀 {total} 条，flush 完成")
 
 
-# === skill 定义（极简 entry，不调工具，1 user 消息 = 1 MockTurn）============
+# === skill 定义（极简 entry，不调工具，1 user 消息 = 1 SimTurn）============
 
 # composite entry 必须声明至少一个 child_skill —— 这里放一个占位 atomic 子 skill，
 # 演示中助手直接作答、并不真正派发它，仅为满足启动期校验。
@@ -190,16 +190,16 @@ async def main() -> None:
 
         # Mock LLM 脚本：3 条用户消息对应 3 个回合。故意把每条回复写长，
         # 配合下方极小 context_window 触发压缩 → on_pre_evict。
-        client = MockClient(turns=[
-            MockTurn(
+        client = SimClient(turns=[
+            SimTurn(
                 text="好的，我记住了：你喜欢用 SQLite 做本地索引，项目代号是 Taifeng。" * 3,
                 usage=TokenUsage(input_tokens=60, output_tokens=40, total_tokens=100),
             ),
-            MockTurn(
+            SimTurn(
                 text="今天天气晴朗，适合写代码喝咖啡，我们继续聊技术吧。" * 3,
                 usage=TokenUsage(input_tokens=80, output_tokens=40, total_tokens=120),
             ),
-            MockTurn(
+            SimTurn(
                 text="根据你之前告诉我的信息，你喜欢用 SQLite 做本地索引。",
                 usage=TokenUsage(input_tokens=90, output_tokens=30, total_tokens=120),
             ),

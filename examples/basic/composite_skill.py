@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.telemetry import attach_console_sink
 
@@ -64,8 +64,8 @@ async def main() -> None:
         #  programmer turn 1 → 派 call_skill(code-review)
         #  code-review turn 1 → 给出审查建议（无 tool call）
         #  programmer turn 2 → 用子 skill 输出给最终答复
-        client = MockClient(turns=[
-            MockTurn(
+        client = SimClient(turns=[
+            SimTurn(
                 text="开始派发代码审查专家...",
                 tool_calls=[{
                     "id": "tc_review",
@@ -75,12 +75,12 @@ async def main() -> None:
                 usage=TokenUsage(input_tokens=120, output_tokens=20, total_tokens=140),
             ),
             # 这条是 code-review 子 skill 的 turn 1
-            MockTurn(
+            SimTurn(
                 text="审查结论：函数简洁，建议添加类型注解与 docstring。",
                 usage=TokenUsage(input_tokens=80, output_tokens=20, total_tokens=100),
             ),
             # programmer turn 2 —— 工具结果回流
-            MockTurn(
+            SimTurn(
                 text="综合建议：保留函数逻辑，补充 type hints 与文档字符串。",
                 usage=TokenUsage(input_tokens=180, output_tokens=30, total_tokens=210,
                                  cache_read_input_tokens=100),

@@ -1,4 +1,4 @@
-"""挂起 / Resume 头条故事 —— 表单采集型 HITL 跨实例续跑（纯 MockClient，无需 API key）。
+"""挂起 / Resume 头条故事 —— 表单采集型 HITL 跨实例续跑（纯 SimClient，无需 API key）。
 
 讲一个端到端的故事（每步打印清晰旁白）：
 
@@ -32,7 +32,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.suspend.record import SuspensionRecord
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
@@ -49,7 +49,7 @@ type: atomic
 """
 
 # entry composite skill：声明 tool_names 含 request_user_input，否则会被
-# turn.py 的工具白名单过滤掉。body 不决定何时调工具 —— 那由 MockClient 脚本决定。
+# turn.py 的工具白名单过滤掉。body 不决定何时调工具 —— 那由 SimClient 脚本决定。
 ENTRY_SKILL = """---
 name: intake-assistant
 description: 问诊信息采集助手
@@ -67,7 +67,7 @@ max_call_depth: 2
 向用户发问；拿到回答后给出最终结论。
 """
 
-# 这条 call_id 在两个 MockClient 脚本里都要用到（request_user_input 把它同时
+# 这条 call_id 在两个 SimClient 脚本里都要用到（request_user_input 把它同时
 # 当作 PendingRequest.request_id 与 related_call_id —— resume 回填的锚点）。
 FORM_CALL_ID = "call_intake_1"
 
@@ -84,13 +84,13 @@ def _build_skill(skills_dir: Path) -> None:
     )
 
 
-def _suspending_client() -> MockClient:
+def _suspending_client() -> SimClient:
     """实例#1 的脚本：第一轮产出一个 request_user_input 调用（命中表单挂起）。
 
     挂起后 turn 不再采样，所以这里只需要一轮。
     """
-    return MockClient(turns=[
-        MockTurn(
+    return SimClient(turns=[
+        SimTurn(
             text="为完成评估，我需要先采集您的年龄。",
             tool_calls=[{
                 "id": FORM_CALL_ID,
@@ -107,10 +107,10 @@ def _suspending_client() -> MockClient:
     ])
 
 
-def _resuming_client() -> MockClient:
+def _resuming_client() -> SimClient:
     """实例#2 的脚本：resume 续跑只需一轮成功完成（纯文本，无新工具调用）。"""
-    return MockClient(turns=[
-        MockTurn(
+    return SimClient(turns=[
+        SimTurn(
             text="收到，您今年 35 岁。结论：各项指标在该年龄段属正常范围。",
             usage=TokenUsage(input_tokens=90, output_tokens=24),
         ),

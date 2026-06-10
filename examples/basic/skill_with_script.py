@@ -2,7 +2,7 @@
 
 演示：
     entry skill `data-prep` 声明 1 个 shell 脚本 + 1 个 python 脚本。
-    MockClient 第一轮让 LLM 调 `run_script(skill_id="data-prep", script_name="prep")`，
+    SimClient 第一轮让 LLM 调 `run_script(skill_id="data-prep", script_name="prep")`，
     第二轮调 python validate 脚本，第三轮汇总输出。
 
 运行：
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.skill.scripts.python import PythonScriptExecutor
 from taifeng.skill.scripts.shell import ShellScriptExecutor
@@ -101,9 +101,9 @@ def _setup_workspace() -> Path:
     return workspace
 
 
-def _mock_turns() -> list[MockTurn]:
+def _mock_turns() -> list[SimTurn]:
     return [
-        MockTurn(
+        SimTurn(
             text="开始预处理。",
             tool_calls=[{
                 "id": "c1",
@@ -115,7 +115,7 @@ def _mock_turns() -> list[MockTurn]:
             }],
             usage=TokenUsage(input_tokens=120, output_tokens=15),
         ),
-        MockTurn(
+        SimTurn(
             text="预处理完成，开始校验。",
             tool_calls=[{
                 "id": "c2",
@@ -127,7 +127,7 @@ def _mock_turns() -> list[MockTurn]:
             }],
             usage=TokenUsage(input_tokens=160, output_tokens=20),
         ),
-        MockTurn(
+        SimTurn(
             text="校验通过：100 行 / 0 错误。",
             usage=TokenUsage(input_tokens=200, output_tokens=15),
         ),
@@ -139,7 +139,7 @@ async def main() -> None:
     print(f"workspace: {workspace}")
     print(f"skills:    {workspace / 'skills'}")
 
-    client = MockClient(turns=_mock_turns())
+    client = SimClient(turns=_mock_turns())
     pool = await taifeng.EnginePool.create(
         skills_dir=workspace / "skills",
         threads_dir=workspace / "threads",

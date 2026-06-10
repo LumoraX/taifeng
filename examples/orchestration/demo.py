@@ -19,7 +19,7 @@
     [SKILL DISP/RET]  每个子 skill 的派发 / 返回
     [TURN DONE]       根 turn 完成
 
-运行（MockClient，**无需 API key**）：
+运行（SimClient，**无需 API key**）：
 
     cd taifeng
     PYTHONPATH=src uv run python examples/orchestration/demo.py
@@ -31,26 +31,26 @@ import asyncio
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.telemetry import attach_console_sink
 
 # 本 demo 的 skill 包目录（与 web_ui demo 复用同一份 skills）
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 
-def _routing_client() -> RoutingMockClient:
+def _routing_client() -> RoutingSimClient:
     """按子 skill 的 body 标记路由回放（编排 entry 不采样 LLM，故无需 entry 路由）。
 
     weather-probe 返回 `{"needs_weather": true}` → 触发 when 的 then 分支（weather-detail）。
     各子 skill 一轮即返回文本（atomic，无 tool call）。
     """
-    return RoutingMockClient(routes={
-        "ROUTE_NORTH_MARK": [MockTurn(text="北线：D1 出发→山区古镇，D2 湖区，D3 返程。")],
-        "ROUTE_SOUTH_MARK": [MockTurn(text="南线：D1 出发→海滨，D2 老城美食，D3 返程。")],
+    return RoutingSimClient(routes={
+        "ROUTE_NORTH_MARK": [SimTurn(text="北线：D1 出发→山区古镇，D2 湖区，D3 返程。")],
+        "ROUTE_SOUTH_MARK": [SimTurn(text="南线：D1 出发→海滨，D2 老城美食，D3 返程。")],
         # 探测步骤：严格输出布尔 flag（when 据此判定）
-        "WEATHER_PROBE_MARK": [MockTurn(text='{"needs_weather": true}')],
-        "WEATHER_DETAIL_MARK": [MockTurn(text="沿途多晴，山区昼夜温差大，备外套；湖区午后阵雨。")],
-        "ITINERARY_SUM_MARK": [MockTurn(
+        "WEATHER_PROBE_MARK": [SimTurn(text='{"needs_weather": true}')],
+        "WEATHER_DETAIL_MARK": [SimTurn(text="沿途多晴，山区昼夜温差大，备外套；湖区午后阵雨。")],
+        "ITINERARY_SUM_MARK": [SimTurn(
             text="推荐南线（美食+海滨更契合）；山区段备保暖，湖区避开午后阵雨。"
         )],
     })
@@ -86,7 +86,7 @@ async def main() -> None:
             if done and ev.msg.data.get("is_root"):
                 break
 
-        # MockClient 瞬时跑完，console_sink 是异步独立订阅——给它一点时间把
+        # SimClient 瞬时跑完，console_sink 是异步独立订阅——给它一点时间把
         # 缓冲的事件全部打印出来再收尾（真实 LLM 因网络延迟通常无需等待）。
         await asyncio.sleep(0.5)
         await pool.close()

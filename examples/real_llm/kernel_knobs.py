@@ -1,6 +1,6 @@
 """真实 LLM 内核旋钮验证 —— K1–K4 + K6 经公开 API 接出，用真实 token 计量驱动。
 
-MockClient 版（examples/kernel_knobs/demo.py）证明"机制接得通"；本文用**真实 LLM**
+SimClient 版（examples/kernel_knobs/demo.py）证明"机制接得通"；本文用**真实 LLM**
 证明它们在真实 token 流下也成立——尤其 K2 OOM-killer：会话累计是 provider 回报的
 **真实 usage**，不是脚本捏的数。
 

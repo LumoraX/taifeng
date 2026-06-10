@@ -23,7 +23,7 @@ turn / thread。换来的是**每一步都可调试式重试，且输入语义�
 ```
 skills/{intake,risk,plan}/SKILL.md   # 3 个步骤 skill（均 entry:true 的 tool-only composite）
 pipeline.py                          # 编排器：run_from / retry / resume_step（不绑定 web）
-demo.py                              # 离线自测（MockClient）：跑流水线 + 表单 + 级联重试断言
+demo.py                              # 离线自测（SimClient）：跑流水线 + 表单 + 级联重试断言
 server.py + static/index.html        # 最小 web：步卡 UI + 🔄 重试按钮 + 就地表单
 ```
 

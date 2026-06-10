@@ -1,4 +1,4 @@
-"""聚焦自测：验证 entry:true 双重身份 + retry 中间步级联（纯 MockClient，无 API key）。
+"""聚焦自测：验证 entry:true 双重身份 + retry 中间步级联（纯 SimClient，无 API key）。
 
 与同目录 demo.py 不同，本脚本专打两个容易出问题的点：
 
@@ -24,8 +24,7 @@ from typing import TYPE_CHECKING
 from pipeline import Pipeline  # noqa: E402  —— 同目录模块（脚本直跑）
 
 import taifeng
-from taifeng.llm.client import ModelClient
-from taifeng.llm.providers.mock import MockSession, MockTurn
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.skill.loader import load_skills_from_dir
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
@@ -69,45 +68,22 @@ def _write_skills(root: Path) -> None:
             _STEP.format(sid=sid, title=title), encoding="utf-8")
 
 
-# ── 2. MockClient：按 <entry_skill id="X"> 路由脚本，每 skill 一个游标 ───────
-ROUTES: dict[str, list[MockTurn]] = {
-    "s1": [MockTurn(text="### 采集结论：55岁/右肺结节8mm S1_OUT")],
+# ── 2. SimClient：RoutingSimClient 按 <entry_skill id="X"> 标记路由脚本，每标记一个游标 ───────
+ROUTES: dict[str, list[SimTurn]] = {
+    "s1": [SimTurn(text="### 采集结论：55岁/右肺结节8mm S1_OUT")],
     "s2": [
-        MockTurn(text="### 风险评估 v1：基于[采集] → 中风险 S2_V1"),
-        MockTurn(text="### 风险评估 v2（重试）：复核后 → 低风险 S2_V2"),
+        SimTurn(text="### 风险评估 v1：基于[采集] → 中风险 S2_V1"),
+        SimTurn(text="### 风险评估 v2（重试）：复核后 → 低风险 S2_V2"),
     ],
     "s3": [
-        MockTurn(text="### 干预计划 v1 S3_V1"),
-        MockTurn(text="### 干预计划 v2（级联重跑） S3_V2"),
+        SimTurn(text="### 干预计划 v1 S3_V1"),
+        SimTurn(text="### 干预计划 v2（级联重跑） S3_V2"),
     ],
 }
 
 
-class _IdSession(MockSession):
-    """按 system_prompt 的 <entry_skill id="X"> 路由脚本游标。"""
-
-    def __init__(self, client: _IdClient, cancel, model) -> None:
-        super().__init__(turn=MockTurn(text=""), cancel=cancel, model=model)
-        self._client = client
-
-    async def stream(self, request: ApiRequest) -> AsyncIterator:
-        sp = request.system_prompt[0] if request.system_prompt else ""
-        m = re.search(r'<entry_skill id="([^"]+)"', sp)
-        sid = m.group(1) if m else "?"
-        cur = self._client.cur.get(sid, 0)
-        turns = ROUTES.get(sid, [MockTurn(text=f"NOROUTE_{sid}")])
-        self._turn = turns[cur] if cur < len(turns) else MockTurn(text="")
-        self._client.cur[sid] = cur + 1
-        async for ev in super().stream(request):
-            yield ev
-
-
-class _IdClient(ModelClient):
-    def __init__(self) -> None:
-        self.cur: dict[str, int] = {}
-
-    def session(self, *, cancel, model=None) -> _IdSession:
-        return _IdSession(self, cancel, model or "mock")
+# RoutingSimClient 按请求规范化全文的标记子串路由——skill body 进
+# system_prompt,<entry_skill id="..."> 标记天然可作路由键,无需自定义 session
 
 
 def _bar(t: str) -> None:
@@ -150,7 +126,7 @@ async def main() -> None:
         # ── 验证点 2：retry 中间步级联 ─────────────────────────────────
         pool = await taifeng.EnginePool.create(
             skills_dir=root, threads_dir=Path(td) / "t",
-            model_client=_IdClient(), compressors=[],
+            model_client=RoutingSimClient(routes=ROUTES), compressors=[],
             extra_tools=[make_request_user_input_tool()], max_iterations=20)
         # 用 s1/s2/s3 作为业务编排的三步（每步 entry 单独跑）
         pipe = Pipeline(

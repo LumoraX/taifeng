@@ -1,4 +1,4 @@
-"""离线演示 + 自测：业务编排多步流水线 + 步级级联重试（纯 MockClient，无需 API key）。
+"""离线演示 + 自测：业务编排多步流水线 + 步级级联重试（纯 SimClient，无需 API key）。
 
 讲一个故事：
   1. 跑 intake→risk→plan 三步；intake 第 1 步调 request_user_input 弹表单 → 挂起。
@@ -20,8 +20,7 @@ from typing import TYPE_CHECKING
 from pipeline import Pipeline  # noqa: E402  —— 同目录模块（脚本直跑）
 
 import taifeng
-from taifeng.llm.client import ModelClient
-from taifeng.llm.providers.mock import MockSession, MockTurn
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
 if TYPE_CHECKING:
@@ -42,51 +41,28 @@ _FORM = {
 }
 
 # 按 entry skill id 路由的脚本（每 skill 一个游标）
-ROUTES: dict[str, list[MockTurn]] = {
-    "intake": [
-        MockTurn(text="信息不全，先采集", tool_calls=[{
+ROUTES: dict[str, list[SimTurn]] = {
+    '<entry_skill id="intake"': [
+        SimTurn(text="信息不全，先采集", tool_calls=[{
             "id": "rui_intake", "name": "request_user_input",
             "arguments": '{"prompt":"请补充基础信息","response_schema":'
                          + __import__("json").dumps(_FORM, ensure_ascii=False) + "}"}]),
-        MockTurn(text="### 采集结果 v1：55岁/目前吸烟/右肺结节8mm INTAKE_V1"),
-        MockTurn(text="### 采集结果 v2（重试）：55岁/已戒烟/右肺结节8mm INTAKE_V2"),
+        SimTurn(text="### 采集结果 v1：55岁/目前吸烟/右肺结节8mm INTAKE_V1"),
+        SimTurn(text="### 采集结果 v2（重试）：55岁/已戒烟/右肺结节8mm INTAKE_V2"),
     ],
-    "risk": [
-        MockTurn(text="### 风险评估 v1：基于[采集v1] → 中风险 RISK_V1"),
-        MockTurn(text="### 风险评估 v2：基于[采集v2] → 低风险 RISK_V2"),
+    '<entry_skill id="risk"': [
+        SimTurn(text="### 风险评估 v1：基于[采集v1] → 中风险 RISK_V1"),
+        SimTurn(text="### 风险评估 v2：基于[采集v2] → 低风险 RISK_V2"),
     ],
-    "plan": [
-        MockTurn(text="### 干预计划 v1 PLAN_V1"),
-        MockTurn(text="### 干预计划 v2 PLAN_V2"),
+    '<entry_skill id="plan"': [
+        SimTurn(text="### 干预计划 v1 PLAN_V1"),
+        SimTurn(text="### 干预计划 v2 PLAN_V2"),
     ],
 }
 
 
-class _IdSession(MockSession):
-    """按 system_prompt 的 <entry_skill id="X"> 路由脚本。"""
-
-    def __init__(self, client: _IdClient, cancel, model) -> None:
-        super().__init__(turn=MockTurn(text=""), cancel=cancel, model=model)
-        self._client = client
-
-    async def stream(self, request: ApiRequest) -> AsyncIterator:
-        sp = request.system_prompt[0] if request.system_prompt else ""
-        m = re.search(r'<entry_skill id="([^"]+)"', sp)
-        sid = m.group(1) if m else "?"
-        cur = self._client.cur.get(sid, 0)
-        turns = ROUTES.get(sid, [MockTurn(text=f"NOROUTE_{sid}")])
-        self._turn = turns[cur] if cur < len(turns) else MockTurn(text="")
-        self._client.cur[sid] = cur + 1
-        async for ev in super().stream(request):
-            yield ev
-
-
-class _IdClient(ModelClient):
-    def __init__(self) -> None:
-        self.cur: dict[str, int] = {}
-
-    def session(self, *, cancel, model=None) -> _IdSession:
-        return _IdSession(self, cancel, model or "mock")
+# RoutingSimClient 按请求规范化全文的标记子串路由——skill body 进
+# system_prompt,<entry_skill id="..."> 标记天然可作路由键,无需自定义 session
 
 
 def _bar(t: str) -> None:
@@ -97,7 +73,7 @@ async def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         pool = await taifeng.EnginePool.create(
             skills_dir=SKILLS, threads_dir=Path(td) / "t",
-            model_client=_IdClient(), compressors=[],
+            model_client=RoutingSimClient(routes=ROUTES), compressors=[],
             extra_tools=[make_request_user_input_tool()], max_iterations=20)
         pipe = Pipeline(
             pool,

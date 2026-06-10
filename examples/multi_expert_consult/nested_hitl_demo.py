@@ -1,4 +1,4 @@
-"""嵌套专科错峰 HITL demo —— 真实 MDT 拓扑（composite 专科 + 子 skill HITL，MockClient）。
+"""嵌套专科错峰 HITL demo —— 真实 MDT 拓扑（composite 专科 + 子 skill HITL，SimClient）。
 
 与同目录 `demo.py` 的差异：`demo.py` 的专科是 **tool-only composite**（自己直接
 `request_user_input`），挂起落在 spawn 子 thread 自身（直接 DATA 挂起）。本 demo 演示
@@ -25,8 +25,8 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockTurn
-from taifeng.llm.providers.mock import RoutingMockClient
+from taifeng.llm.providers import SimTurn
+from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.telemetry import attach_console_sink
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
@@ -76,20 +76,20 @@ max_call_depth: 2
 """
 
 
-def _client() -> RoutingMockClient:
+def _client() -> RoutingSimClient:
     """按 body 标记路由：专科两轮（call_skill→最终），子步骤两轮（补问挂起→结论）。"""
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "EXPERT_MARK": [
-            MockTurn(text="专科编排：先调用子步骤采集信息。", tool_calls=[
+            SimTurn(text="专科编排：先调用子步骤采集信息。", tool_calls=[
                 {"id": "call_step", "name": "call_skill",
                  "arguments": '{"skill_id": "nested-step", "args": {}}'}]),
-            MockTurn(text="专科最终诊断 EXPERT_DONE"),
+            SimTurn(text="专科最终诊断 EXPERT_DONE"),
         ],
         "STEP_MARK": [
-            MockTurn(text="子步骤需要补充信息。", tool_calls=[
+            SimTurn(text="子步骤需要补充信息。", tool_calls=[
                 {"id": "step_ask", "name": "request_user_input",
                  "arguments": '{"prompt": "请补充近期血糖值"}'}]),
-            MockTurn(text="子步骤结论 STEP_DONE"),
+            SimTurn(text="子步骤结论 STEP_DONE"),
         ],
     })
 

@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.submission import SendToPeer
 from taifeng.tool.builtins.send_message import make_send_message_tool
 from taifeng.tool.builtins.spawn_skill import make_spawn_skill_tool
@@ -70,16 +70,16 @@ async def main() -> None:
             (root / "skills" / name / "SKILL.md").write_text(
                 body, encoding="utf-8")
 
-        client = RoutingMockClient(routes={
+        client = RoutingSimClient(routes={
             "COORD_MARK": [
-                MockTurn(text="派出代谢专家", tool_calls=[
+                SimTurn(text="派出代谢专家", tool_calls=[
                     {"id": "s1", "name": "spawn_skill", "arguments":
                      '{"skill_id":"expert","reason":"会诊","args":{}}'}]),
-                MockTurn(text="专家已派出"),
+                SimTurn(text="专家已派出"),
             ],
             "EXPERT_MARK": [
-                MockTurn(text="初步结论:糖耐量异常,建议复查 OGTT"),
-                MockTurn(text="结合家族史修正:升级为糖尿病前期高危,建议立即干预"),
+                SimTurn(text="初步结论:糖耐量异常,建议复查 OGTT"),
+                SimTurn(text="结合家族史修正:升级为糖尿病前期高危,建议立即干预"),
             ],
         })
         pool = await taifeng.EnginePool.create(

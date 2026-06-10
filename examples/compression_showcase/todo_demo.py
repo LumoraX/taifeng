@@ -25,7 +25,7 @@ from pathlib import Path
 
 import taifeng
 from taifeng.context.strategies import HandoffCompactionStrategy
-from taifeng.llm.providers.mock import MockClient, MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimClient, SimTurn, RoutingSimClient
 from taifeng.loop.submission import CompactNow
 from taifeng.tool.builtins.todo import TodoStore, make_todo_write_tool
 
@@ -51,32 +51,32 @@ async def main() -> None:
             _SKILL, encoding="utf-8")
 
         store = TodoStore()
-        client = RoutingMockClient(routes={
+        client = RoutingSimClient(routes={
             "PLANNER_MARK": [
                 # turn1:建立清单
-                MockTurn(text="建立清单", tool_calls=[
+                SimTurn(text="建立清单", tool_calls=[
                     {"id": "t1", "name": "todo_write", "arguments":
                      '{"items":['
                      '{"content":"梳理需求边界","status":"in_progress"},'
                      '{"content":"实现核心模块","status":"pending"},'
                      '{"content":"补齐测试","status":"pending"}]}'}]),
-                MockTurn(text="清单已建立"),
+                SimTurn(text="清单已建立"),
                 # turn2:推进进度(整表替换)
-                MockTurn(text="更新进度", tool_calls=[
+                SimTurn(text="更新进度", tool_calls=[
                     {"id": "t2", "name": "todo_write", "arguments":
                      '{"items":['
                      '{"content":"梳理需求边界","status":"completed"},'
                      '{"content":"实现核心模块","status":"in_progress"},'
                      '{"content":"补齐测试","status":"pending"}]}'}]),
-                MockTurn(text="进度已更新"),
-                MockTurn(text="好的,继续。"),
+                SimTurn(text="进度已更新"),
+                SimTurn(text="好的,继续。"),
             ],
         })
         pool = await taifeng.EnginePool.create(
             skills_dir=root / "skills", threads_dir=root / "threads",
             model_client=client,
             compressors=[HandoffCompactionStrategy(
-                model_client=MockClient(turns=[MockTurn(text="## 会话摘要")]))],
+                model_client=SimClient(turns=[SimTurn(text="## 会话摘要")]))],
             extra_tools=[make_todo_write_tool(store)],  # ← 双注入:同一 store
             pinned_state_sources=[store],
         )

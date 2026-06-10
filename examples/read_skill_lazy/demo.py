@@ -17,7 +17,7 @@
     [TOOL RET]    返回该 skill 的 body（注入上下文）
     [LLM FINAL]   基于刚读入的指南作答
 
-运行（MockClient，**无需 API key**）：
+运行（SimClient，**无需 API key**）：
 
     cd taifeng
     PYTHONPATH=src uv run python examples/read_skill_lazy/demo.py
@@ -30,20 +30,20 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.telemetry import attach_console_sink
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 
-def _client() -> MockClient:
+def _client() -> SimClient:
     """两轮：turn1 调 read_skill 取 SQL 指南；turn2 基于读入的 body 作答。
 
     只有 entry（knowledge-router）采样——子 skill 是被「读」而非被「调」，不起子 turn，
-    故用最简单的顺序 MockClient 即可。
+    故用最简单的顺序 SimClient 即可。
     """
-    return MockClient(turns=[
-        MockTurn(
+    return SimClient(turns=[
+        SimTurn(
             text="这道题关于 SQL 注入，先按需读取相关指南。",
             tool_calls=[{
                 "id": "rs0",
@@ -51,7 +51,7 @@ def _client() -> MockClient:
                 "arguments": '{"skill_id": "sql-injection-guide"}',
             }],
         ),
-        MockTurn(
+        SimTurn(
             text=(
                 "根据刚读入的《SQL 注入防护指南》：核心是永不拼接用户输入——"
                 "用参数化查询 / 预编译语句，配合最小权限账号与输入校验。"

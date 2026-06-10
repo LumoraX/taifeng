@@ -1,4 +1,4 @@
-"""hooks_showcase 的钩子定义 —— 被 demo.py（MockClient）与 web_ui server.py（真实 LLM）共用。
+"""hooks_showcase 的钩子定义 —— 被 demo.py（SimClient）与 web_ui server.py（真实 LLM）共用。
 
 要点：hook 是**进程内 async 回调**，可跑任意业务逻辑（查 DB / 改写 args / 审计），
 与「声明式权限规则」（PermissionPolicy 的 Style A 配置）互补：
@@ -72,7 +72,7 @@ async def _audit_dispatch(
 def build_showcase_hook_runner() -> HookRunner:
     """构造 hooks_showcase 用的 HookRunner（注册上面两类业务钩子）。
 
-    demo.py（MockClient）与 web_ui server.py（真实 LLM）共用本工厂，确保两处行为一致。
+    demo.py（SimClient）与 web_ui server.py（真实 LLM）共用本工厂，确保两处行为一致。
     """
     registry = HookRegistry()
     registry.register("pre_skill_dispatch", _block_full_export)

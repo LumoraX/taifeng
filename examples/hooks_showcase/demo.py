@@ -23,7 +23,7 @@
     [SKILL RET ]  子 turn 结果回流
     [LLM FINAL ]  task-runner 综合回复
 
-运行（MockClient，**无需 API key**）：
+运行（SimClient，**无需 API key**）：
 
     cd taifeng
     PYTHONPATH=src uv run python examples/hooks_showcase/demo.py
@@ -38,36 +38,36 @@ from pathlib import Path
 from hooks_lib import build_showcase_hook_runner
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.telemetry import attach_console_sink
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 
-def _routing_client() -> RoutingMockClient:
-    """RoutingMockClient：
+def _routing_client() -> RoutingSimClient:
+    """RoutingSimClient：
 
     - task-runner 首轮派发 scope=all（会被钩子 deny），次轮改 scope=recent（放行），三轮综合；
     - data-export 仅在 scope=recent 时真正执行一次（scope=all 在 pre 钩子被拦，不进子 turn）。
 
     按各 skill body 内的唯一标记路由，回放与派发顺序无关。
     """
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "HOOKS_TASK_RUNNER_MARK": [
-            MockTurn(text="先尝试全量导出。", tool_calls=[
+            SimTurn(text="先尝试全量导出。", tool_calls=[
                 {"id": "h0", "name": "call_skill",
                  "arguments": '{"skill_id": "data-export", '
                               '"args": {"scope": "all"}, "reason": "全量导出"}'},
             ]),
-            MockTurn(text="全量被业务钩子拒，改用近期数据导出。", tool_calls=[
+            SimTurn(text="全量被业务钩子拒，改用近期数据导出。", tool_calls=[
                 {"id": "h1", "name": "call_skill",
                  "arguments": '{"skill_id": "data-export", '
                               '"args": {"scope": "recent"}, "reason": "近期导出"}'},
             ]),
-            MockTurn(text="全量导出被风控钩子拦截；已改用近期数据完成导出。"),
+            SimTurn(text="全量导出被风控钩子拦截；已改用近期数据完成导出。"),
         ],
         "HOOKS_DATA_EXPORT_MARK": [
-            MockTurn(text="导出完成：近期 120 条记录。"),
+            SimTurn(text="导出完成：近期 120 条记录。"),
         ],
     })
 
@@ -98,7 +98,7 @@ async def main() -> None:
             if done and ev.msg.data.get("is_root"):
                 break
 
-        # MockClient 瞬时完成，给异步 console_sink 时间把事件打印完整再收尾
+        # SimClient 瞬时完成，给异步 console_sink 时间把事件打印完整再收尾
         await asyncio.sleep(0.5)
         await pool.close()
         await asyncio.sleep(0.2)

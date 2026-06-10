@@ -1,9 +1,9 @@
-"""web_ui detached 能力 smoke —— MockClient 驱动 ASGI app，无需 API key，可复跑。
+"""web_ui detached 能力 smoke —— SimClient 驱动 ASGI app，无需 API key，可复跑。
 
 验证 multi_expert_consult / turn_rewind 两个 detached demo 在 web_ui 的端到端事件流。
 **事件订阅走进程内队列**（直接注册到 server._event_subs），绕开 httpx
 ASGITransport 对长连 SSE 的整体缓冲；/api/chat、/api/resume 等非流式 POST/GET 仍走 HTTP。
-真 LLM 的 await_skills-via-LLM 路径不在此（MockTurn 无法回放运行时 handle_id），
+真 LLM 的 await_skills-via-LLM 路径不在此（SimTurn 无法回放运行时 handle_id），
 由 README 记的真 LLM 人工跑覆盖；此处 barrier 经 engine API 登记（同 demo.py）。
 
 运行：PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py
@@ -21,25 +21,25 @@ sys.path.insert(0, str(HERE))  # 让 import server 命中 examples/web_ui/server
 
 import httpx  # noqa: E402,I001
 import server  # noqa: E402,I001  examples/web_ui/server.py
-# 复用 multi_expert_consult demo 的 MockClient 路由（按 skill body 标记路由）
+# 复用 multi_expert_consult demo 的 SimClient 路由（按 skill body 标记路由）
 sys.path.insert(0, str(server.EXAMPLES_DIR / "multi_expert_consult"))
 from demo import _routing_client  # type: ignore  # noqa: E402
 
-from taifeng.llm.providers import MockClient, MockTurn  # noqa: E402
+from taifeng.llm.providers import SimClient, SimTurn  # noqa: E402
 
 CALL_ANALYZER = '{"skill_id":"analyzer","reason":"取分析","args":{}}'
 
 
-def _rewind_mock() -> MockClient:
+def _rewind_mock() -> SimClient:
     """turn_rewind 用的固定 turns：跑完一次自治链 + 一次 retry_tool 重跑。"""
-    return MockClient(turns=[
-        MockTurn(text="派发分析…", tool_calls=[
+    return SimClient(turns=[
+        SimTurn(text="派发分析…", tool_calls=[
             {"id": "a0", "name": "call_skill", "arguments": CALL_ANALYZER}]),
-        MockTurn(text="【分析】风险偏高(初版)"),
-        MockTurn(text="【综合】建议:加强监测(初版)"),
+        SimTurn(text="【分析】风险偏高(初版)"),
+        SimTurn(text="【综合】建议:加强监测(初版)"),
         # retry_tool 重跑 analyzer 用的后续 turns：
-        MockTurn(text="【分析】风险中等(修订)"),
-        MockTurn(text="【综合】建议:常规随访(修订)"),
+        SimTurn(text="【分析】风险中等(修订)"),
+        SimTurn(text="【综合】建议:常规随访(修订)"),
     ])
 
 
@@ -181,7 +181,7 @@ async def smoke_turn_rewind() -> None:
 async def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         server.STORAGE_DIR = Path(td) / "runs"  # 隔离存储到 tmp
-        server._model_client = _routing_client()  # 注入 MockClient
+        server._model_client = _routing_client()  # 注入 SimClient
         server._llm_meta = {"provider": "mock", "model": "mock",
                             "context_window": 128_000}
         await smoke_multi_expert()

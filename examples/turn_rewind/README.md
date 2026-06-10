@@ -10,7 +10,7 @@
 
 ```bash
 cd taifeng
-PYTHONPATH=src uv run python examples/turn_rewind/demo.py   # 无需 API key（MockClient）
+PYTHONPATH=src uv run python examples/turn_rewind/demo.py   # 无需 API key（SimClient）
 ```
 
 ## 节点表(一次 turn 拆出的可寻址节点)

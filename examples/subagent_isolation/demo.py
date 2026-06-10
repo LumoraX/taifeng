@@ -25,7 +25,7 @@ import asyncio
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.permission.types import PermissionPolicy, PermissionRule
 from taifeng.skill.dispatch import DispatchPolicy
@@ -35,10 +35,10 @@ REPO_ROOT = HERE.parent.parent
 SKILLS_DIR = HERE / "skills"
 
 
-def _scripted_client() -> MockClient:
+def _scripted_client() -> SimClient:
     """父 turn → call_skill；子 turn → 给 review；父 turn → 总结。"""
-    return MockClient(turns=[
-        MockTurn(
+    return SimClient(turns=[
+        SimTurn(
             text="正在派发代码审查专家...",
             tool_calls=[{
                 "id": "tc1",
@@ -50,7 +50,7 @@ def _scripted_client() -> MockClient:
             }],
             usage=TokenUsage(input_tokens=120, output_tokens=20),
         ),
-        MockTurn(
+        SimTurn(
             text=(
                 "审查结论：\n"
                 "1. 正确性：基础加法逻辑正确\n"
@@ -60,7 +60,7 @@ def _scripted_client() -> MockClient:
             ),
             usage=TokenUsage(input_tokens=80, output_tokens=40),
         ),
-        MockTurn(
+        SimTurn(
             text="综合建议：保留逻辑，补充类型注解与 docstring。",
             usage=TokenUsage(
                 input_tokens=180, output_tokens=30,

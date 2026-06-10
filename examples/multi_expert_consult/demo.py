@@ -1,4 +1,4 @@
-"""multi_expert_consult 体验 demo —— 并发多专家 + 错峰 HITL + 联合会诊聚合（纯 MockClient）。
+"""multi_expert_consult 体验 demo —— 并发多专家 + 错峰 HITL + 联合会诊聚合（纯 SimClient）。
 
 演示内核 **detached-spawn** 能力的完整闭环：
 
@@ -22,7 +22,7 @@
     spawn_started / spawn_suspended / spawn_completed / join_barrier_registered /
     join_barrier_fired，以及聚合 turn 的最终文本。
 
-运行（MockClient，**无需 API key**）：
+运行（SimClient，**无需 API key**）：
 
     cd taifeng
     PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py
@@ -35,7 +35,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 from taifeng.tool.builtins.spawn_skill import (
@@ -48,8 +48,8 @@ from taifeng.tool.builtins.spawn_skill import (
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 
-def _routing_client() -> RoutingMockClient:
-    """按各 skill body 唯一标记路由的 MockClient。
+def _routing_client() -> RoutingSimClient:
+    """按各 skill body 唯一标记路由的 SimClient。
 
     - orchestrator（ORCH_CONSULT_MARK）：一个 turn 内连发两个 spawn_skill +
       一个 await_skills（登记 join-barrier → joint-consult），再吐收尾文本。
@@ -58,9 +58,9 @@ def _routing_client() -> RoutingMockClient:
     - metabolic-expert（METABOLIC_MARK）：同上，独立节奏。
     - joint-consult（JOINT_CONSULT_MARK）：barrier 触发后自动起，吐最终会诊报告。
     """
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "ORCH_CONSULT_MARK": [
-            MockTurn(text="主诉涉及多系统，并发分离发起两个专科专家，收齐后联合会诊。",
+            SimTurn(text="主诉涉及多系统，并发分离发起两个专科专家，收齐后联合会诊。",
                      tool_calls=[
                          {"id": "sp_cardio", "name": "spawn_skill",
                           "arguments": '{"skill_id":"cardio-expert",'
@@ -69,24 +69,24 @@ def _routing_client() -> RoutingMockClient:
                           "arguments": '{"skill_id":"metabolic-expert",'
                                        '"reason":"评估代谢风险","args":{}}'},
                      ]),
-            MockTurn(text="编排完成，专家在后台错峰推进，收齐自动联合会诊。"),
+            SimTurn(text="编排完成，专家在后台错峰推进，收齐自动联合会诊。"),
         ],
         "CARDIO_MARK": [
-            MockTurn(text="心血管专家向用户补问。", tool_calls=[
+            SimTurn(text="心血管专家向用户补问。", tool_calls=[
                 {"id": "cardio_ask", "name": "request_user_input",
                  "arguments": '{"prompt": "近期是否有胸闷 / 血压波动？"}'},
             ]),
-            MockTurn(text="心血管结论：血压偏高但无急性风险，建议低盐 + 监测。"),
+            SimTurn(text="心血管结论：血压偏高但无急性风险，建议低盐 + 监测。"),
         ],
         "METABOLIC_MARK": [
-            MockTurn(text="代谢专家向用户补问。", tool_calls=[
+            SimTurn(text="代谢专家向用户补问。", tool_calls=[
                 {"id": "metab_ask", "name": "request_user_input",
                  "arguments": '{"prompt": "近期体重 / 血糖 / 饮食有何变化？"}'},
             ]),
-            MockTurn(text="代谢结论：空腹血糖临界，建议控糖 + 复查糖化。"),
+            SimTurn(text="代谢结论：空腹血糖临界，建议控糖 + 复查糖化。"),
         ],
         "JOINT_CONSULT_MARK": [
-            MockTurn(text="【联合会诊报告】心血管与代谢双高危：优先控糖控压，"
+            SimTurn(text="【联合会诊报告】心血管与代谢双高危：优先控糖控压，"
                           "4 周后心内 + 内分泌联合复诊。"),
         ],
     })
@@ -220,7 +220,7 @@ async def main() -> None:
         print("\n=== ⑤ 最终联合会诊报告 ===")
         _print(report)
 
-        # MockClient 瞬时完成，给后台聚合 turn 落盘时间后收尾
+        # SimClient 瞬时完成，给后台聚合 turn 落盘时间后收尾
         await asyncio.sleep(0.3)
         await pool.close()
         watch_task.cancel()

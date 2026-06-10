@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.telemetry import attach_console_sink
 
@@ -70,8 +70,8 @@ async def main() -> None:
         # Mock LLM 脚本：
         #   turn 1: 决定调用 read_skill
         #   turn 2: 工具返回后给最终答复
-        client = MockClient(turns=[
-            MockTurn(
+        client = SimClient(turns=[
+            SimTurn(
                 text="正在加载风格规则...",
                 tool_calls=[{
                     "id": "tc_1",
@@ -80,7 +80,7 @@ async def main() -> None:
                 }],
                 usage=TokenUsage(input_tokens=200, output_tokens=30, total_tokens=230),
             ),
-            MockTurn(
+            SimTurn(
                 text="函数行数 120 > 80 上限，建议拆分；命名 getCwd 不符合 snake_case。",
                 usage=TokenUsage(input_tokens=380, output_tokens=55, total_tokens=435,
                                  cache_read_input_tokens=190),

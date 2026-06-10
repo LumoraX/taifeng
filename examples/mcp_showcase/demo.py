@@ -18,7 +18,7 @@
     [TOOL RET] 子进程经 MCP 返回的文本结果
     [LLM FINAL] market-assistant 综合回复
 
-运行（MockClient 驱动工具调用，**无需 API key**；MCP server 是本地子进程）：
+运行（SimClient 驱动工具调用，**无需 API key**；MCP server 是本地子进程）：
 
     cd taifeng
     PYTHONPATH=src uv run python examples/mcp_showcase/demo.py
@@ -33,29 +33,29 @@ from pathlib import Path
 from mcp_lib import connect_showcase_mcp
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.telemetry import attach_console_sink
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 
-def _routing_client() -> RoutingMockClient:
-    """RoutingMockClient：market-assistant 依次调两个 MCP 工具再综合。
+def _routing_client() -> RoutingSimClient:
+    """RoutingSimClient：market-assistant 依次调两个 MCP 工具再综合。
 
     工具名 = 注册进来的 MCP 工具名（无前缀）；runtime 派发到 MCP-backed handler，
     转成 tools/call 打到子进程。
     """
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "MCP_MARKET_MARK": [
-            MockTurn(text="先查 AAPL 股价。", tool_calls=[
+            SimTurn(text="先查 AAPL 股价。", tool_calls=[
                 {"id": "m0", "name": "lookup_stock_price",
                  "arguments": '{"symbol": "AAPL"}'},
             ]),
-            MockTurn(text="再把 192.5 美元换成人民币。", tool_calls=[
+            SimTurn(text="再把 192.5 美元换成人民币。", tool_calls=[
                 {"id": "m1", "name": "convert_currency",
                  "arguments": '{"amount": 192.5, "from_": "USD", "to": "CNY"}'},
             ]),
-            MockTurn(text="AAPL 现价约 $192.5，约合 1390 元人民币（数据来自 MCP server）。"),
+            SimTurn(text="AAPL 现价约 $192.5，约合 1390 元人民币（数据来自 MCP server）。"),
         ],
     })
 
@@ -89,7 +89,7 @@ async def main() -> None:
                 if done and ev.msg.data.get("is_root"):
                     break
 
-            # MockClient 瞬时完成，给异步 console_sink 时间打印完整再收尾
+            # SimClient 瞬时完成，给异步 console_sink 时间打印完整再收尾
             await asyncio.sleep(0.5)
             await pool.close()
             await asyncio.sleep(0.2)

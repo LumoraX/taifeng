@@ -18,7 +18,7 @@ from pathlib import Path
 
 import taifeng
 from taifeng.conversation import ResponseItem, ThreadMetadata
-from taifeng.llm.providers.mock import MockClient, MockTurn
+from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 
@@ -129,10 +129,10 @@ async def main() -> None:
 
         _prepare_skills(skills_dir)
 
-        # MockClient：3 个 turn 各返回固定文本（避免依赖真实 LLM）
-        client = MockClient(
+        # SimClient：3 个 turn 各返回固定文本（避免依赖真实 LLM）
+        client = SimClient(
             turns=[
-                MockTurn(text=f"answer {i}", usage=TokenUsage(input_tokens=10, output_tokens=3))
+                SimTurn(text=f"answer {i}", usage=TokenUsage(input_tokens=10, output_tokens=3))
                 for i in range(3)
             ]
         )

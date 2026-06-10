@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 import taifeng
 from taifeng.context.memory import CompositeMemoryStore, NullMemoryStore
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -119,9 +119,9 @@ async def main() -> None:
 
         kb = KeywordKnowledgeBase()
         session = SessionMemory()
-        client = MockClient(turns=[
-            MockTurn(text="好的,已了解你在做压缩相关的工作。"),
-            MockTurn(text="(结合知识库)三档策略中 surgical 最便宜。"),
+        client = SimClient(turns=[
+            SimTurn(text="好的,已了解你在做压缩相关的工作。"),
+            SimTurn(text="(结合知识库)三档策略中 surgical 最便宜。"),
         ])
         pool = await taifeng.EnginePool.create(
             skills_dir=root / "skills", threads_dir=root / "threads",

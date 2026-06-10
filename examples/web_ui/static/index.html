@@ -698,7 +698,7 @@ function accumulateObs(kind, data) {
 
 // 渲染指标网格。每个 tile = 标签 + 主值（可带次级 sub 注记）；告警/提醒着色。
 function renderObsPanel() {
-  // cache 命中率：会话累计 cache_read / 累计 input；MockClient 无缓存恒为 0（符合预期）。
+  // cache 命中率：会话累计 cache_read / 累计 input；SimClient 前缀账本会产生真实命中率。
   const cacheRate = obs.inTok ? (obs.cacheReadTok / obs.inTok) * 100 : 0;
   // ── ctx 窗口 + 占用两块 ──────────────────────────────────────
   // 窗口大小来自 LLM model 的 context window（/api/demos 的 llm.context_window）；
@@ -1159,7 +1159,7 @@ function renderFormInto(box, schema) {
   box.innerHTML = "";
   // 纯提示型 HITL（request_user_input 只给 prompt、response_schema 为空 {}）：
   // schema 无 properties，退化为单个自由文本框，key=answer
-  // （提交 payload 形如 {answer: "..."}，与 demo / MockClient 约定一致），
+  // （提交 payload 形如 {answer: "..."}，与 demo / SimClient 约定一致），
   // 否则只剩"提交"按钮没有输入框，用户无处填写。
   if (Object.keys(props).length === 0) {
     const fld = document.createElement("div");

@@ -14,7 +14,7 @@
   → 两句柄全终态 → join-barrier 自动触发 → joint-consult 聚合 turn → 最终会诊报告
 ```
 
-## 运行（MockClient，无需 API key）
+## 运行（SimClient，无需 API key）
 
 ```bash
 cd taifeng
@@ -31,7 +31,7 @@ PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py
 | `skills/cardio-expert/SKILL.md` | composite **非 entry**：tool_names=[request_user_input]，先 HITL 问诊再下结论 |
 | `skills/metabolic-expert/SKILL.md` | 同上，独立节奏 |
 | `skills/joint-consult/SKILL.md` | atomic 聚合器：种子参数带**全部专家句柄终态**（含取消 / 失败，不静默丢），综合成最终报告 |
-| `demo.py` | 用 `RoutingMockClient` 按 body 标记路由，串行 staggered resume 两个专家，订阅 `subscribe_all` 打印时间线 |
+| `demo.py` | 用 `RoutingSimClient` 按 body 标记路由，串行 staggered resume 两个专家，订阅 `subscribe_all` 打印时间线 |
 
 > 本 demo 专家 / 聚合器用**非 entry**（一种设计选择，非硬性要求）。注意 spawn 与 call_skill 不同：**spawn 目标可为 entry skill**（spawn 把目标作为独立根分离发起，`DispatchPolicy.check(allow_entry_target=True)` 跳过「不可调 entry」门，与 `set_join_barrier` 的 then_skill 同理）。两者仍要求 target 在 caller 白名单内。
 

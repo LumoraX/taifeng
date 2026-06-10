@@ -1,4 +1,4 @@
-"""上下文压缩 demo —— 本地 budget 到达上限即主动压缩（sliding 兜底，MockClient 无需 key）。
+"""上下文压缩 demo —— 本地 budget 到达上限即主动压缩（sliding 兜底，SimClient 无需 key）。
 
 演示「机制1：本地 budget 主动压缩」——配极小 `context_window`（1024，正常 LLM 是
 128k–1M），连续多轮把 history 撑过 soft/hard 上限，taifeng **不依赖 provider 报错**、
@@ -20,7 +20,7 @@ from pathlib import Path
 import taifeng
 from taifeng.context.budget import ContextBudget
 from taifeng.context.strategies.sliding import SlidingWindowStrategy
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.telemetry import attach_console_sink
 
@@ -37,11 +37,11 @@ _LONG_REPLY = (
 ) * 6  # 放大到 ~1700 字符/轮，几轮即越过 hard 上限（char/4 估算 > 973 token）
 
 
-def _chatty_client(rounds: int) -> MockClient:
+def _chatty_client(rounds: int) -> SimClient:
     """每轮回放一段长文本（无 tool call，一轮一次采样）。"""
-    return MockClient(
+    return SimClient(
         turns=[
-            MockTurn(text=_LONG_REPLY, usage=TokenUsage(input_tokens=200, output_tokens=180))
+            SimTurn(text=_LONG_REPLY, usage=TokenUsage(input_tokens=200, output_tokens=180))
             for _ in range(rounds)
         ]
     )

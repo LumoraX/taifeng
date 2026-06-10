@@ -10,7 +10,7 @@
 
 ## 单文件示例（按主题分组）
 
-### `basic/` —— 入门必读，纯 MockClient 无需 API key
+### `basic/` —— 入门必读，纯 SimClient 无需 API key
 
 | 文件 | 演示内容 |
 | --- | --- |
@@ -21,7 +21,7 @@
 
 运行：`PYTHONPATH=src uv run python examples/basic/<file>.py`
 
-### `kernel_knobs/` —— 内核资源旋钮（能力体验，纯 MockClient 无需 API key）
+### `kernel_knobs/` —— 内核资源旋钮（能力体验，纯 SimClient 无需 API key）
 
 | 文件 | 演示内容 |
 | --- | --- |
@@ -31,7 +31,7 @@
 
 运行：`PYTHONPATH=src uv run python examples/kernel_knobs/demo.py`
 
-### `turn_rewind/` —— 自治链一键跑完 + 回退到任意节点重跑（纯 MockClient 无需 API key）
+### `turn_rewind/` —— 自治链一键跑完 + 回退到任意节点重跑（纯 SimClient 无需 API key）
 
 | 文件 | 演示内容 |
 | --- | --- |
@@ -41,7 +41,7 @@
 
 运行：`PYTHONPATH=src uv run python examples/turn_rewind/demo.py`
 
-### `multi_expert_consult/` —— 并发多专家 + 错峰 HITL + 联合会诊聚合（纯 MockClient 无需 API key）
+### `multi_expert_consult/` —— 并发多专家 + 错峰 HITL + 联合会诊聚合（纯 SimClient 无需 API key）
 
 | 文件 | 演示内容 |
 | --- | --- |

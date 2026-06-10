@@ -25,7 +25,7 @@ from pathlib import Path
 
 import taifeng
 from taifeng.context.strategies import HandoffCompactionStrategy
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import CompactNow
 
@@ -81,14 +81,14 @@ async def main() -> None:
         todo.add("补齐测试")
         todo.complete("梳理需求边界")
 
-        summary_client = MockClient(turns=[
-            MockTurn(text="## 会话摘要\n前几轮讨论了需求边界与模块拆分。",
+        summary_client = SimClient(turns=[
+            SimTurn(text="## 会话摘要\n前几轮讨论了需求边界与模块拆分。",
                      usage=TokenUsage(input_tokens=200, output_tokens=30)),
         ])
         pool = await taifeng.EnginePool.create(
             skills_dir=root / "skills", threads_dir=root / "threads",
-            model_client=MockClient(
-                turns=[MockTurn(text=f"好的,推进第 {i + 1} 步。") for i in range(6)]
+            model_client=SimClient(
+                turns=[SimTurn(text=f"好的,推进第 {i + 1} 步。") for i in range(6)]
             ),
             compressors=[HandoffCompactionStrategy(model_client=summary_client)],
             pinned_state_sources=[todo],  # ← 构造期注入
