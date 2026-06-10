@@ -289,7 +289,7 @@ class SpawnDriver:
         """按子 turn 的 end_reason 回写句柄状态并 emit 对应终态事件。
 
         - completed → done + SpawnCompleted(result=final_text)
-        - suspended → suspended + SpawnSuspended（resume 路由留待后续 task）
+        - suspended → suspended + SpawnSuspended（Resume 经 match_suspended_spawn 路由续跑）
         - cancelled → cancelled + SpawnCancelled
         - 其余（error / 未知）→ error + SpawnFailed
 
@@ -318,7 +318,8 @@ class SpawnDriver:
             ))
         elif end == "suspended":
             # 子 thread 内已落 SuspensionRecord 并 emit turn_suspended；句柄标 suspended。
-            # Resume 路由（据 child_thread_id 续跑）留待后续 task。
+            # Resume(thread_id=child_thread_id) 经 match_suspended_spawn 命中后由
+            # resume_spawn / resume_spawn_nested 续跑（支持多轮错峰 HITL）。
             self._spawn_handles.set_result(
                 handle_id, status="suspended", result=None
             )
