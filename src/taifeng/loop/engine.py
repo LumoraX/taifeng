@@ -182,6 +182,13 @@ class AgentEngine:
         # （FailureDispositionPolicy | None;None → turn 层保守默认,零行为变化）
         self._failure_policy = failure_policy
         # suspension-ttl:内核自产挂起的存活期声明(透传 TurnRunner)
+        # 构造期校验(报错点贴近配置点;否则首次护栏挂起时才在 PendingRequest
+        # __post_init__ 炸出、被宽 except 吞为 turn_failed,远离根因)
+        if (failure_suspend_ttl_seconds is not None
+                and failure_suspend_ttl_seconds <= 0):
+            raise ValueError(
+                f"failure_suspend_ttl_seconds must be positive or None, "
+                f"got {failure_suspend_ttl_seconds}")
         self._failure_suspend_ttl_seconds = failure_suspend_ttl_seconds
         self._failure_suspend_on_expire = failure_suspend_on_expire
         # suspension-ttl：壁钟工厂(注入可固定,测试用;默认与 TurnRunner 兜底一致)
@@ -195,6 +202,9 @@ class AgentEngine:
         # Resume/到期)对同一父 record 的「判定剩余 → 落 marker → 续跑」必须串行,
         # 否则可能双双判 partial(无人续跑)或双双 settle(双重续跑)
         self._settle_locks: dict[str, asyncio.Lock] = {}
+        # suspension-ttl-hardening:在飞 Resume 守卫——record 命中后立即占位,
+        # 闭合「人工 Resume 处理中(marker 未落)时定时器 fire」的双裁决窗口
+        self._resolving_records: set[str] = set()
         # config-consistency-fixes C2: 把 event_queue_size kwarg 真正生效
         # 之前此 kwarg 收下后未存到 self，subscribe / subscribe_all 内仍硬编码 1024
         self._event_queue_size = event_queue_size
@@ -593,6 +603,33 @@ class AgentEngine:
             record = self._find_active_suspension_in(items)
             if record is None or record.record_id != record_id:
                 return
+            # 在飞守卫:人工 Resume 正在处理(marker 未落)→ 到期让位(先核销者胜)
+            if record_id in self._resolving_records:
+                return
+            # 路由解析(fire 时):spawn 嵌套 leaf 的 thread_id 不可直接路由
+            # (match_suspended_spawn 只认 spawn 子 tid)→ 解析可路由入口。
+            # 挂起上浮(leaf → 上层 CHILD_SKILL / spawn 句柄置 suspended)有毫秒级
+            # 窗口,fire 紧贴挂起时(短 ttl / 冷装载即过期)可能撞上 → 有界重试消化
+            route_tid: str | None = None
+            for _ in range(20):
+                route_tid = await self._resolve_expiry_route(thread_id, record_id)
+                if route_tid is not None:
+                    break
+                await asyncio.sleep(0.05)
+            if route_tid is None:
+                logger.warning(
+                    "suspension ttl expiry unroutable: record=%s thread=%s "
+                    "(冷装载时重试)", record_id, thread_id)
+                return
+            # 重试等待期间可能已被人工 Resume 核销/占位 → 让位(先核销者胜)
+            items = (
+                list(self._history) if thread_id == self._thread_id
+                else await self._load_thread_items(thread_id)
+            )
+            record = self._find_active_suspension_in(items)
+            if (record is None or record.record_id != record_id
+                    or record_id in self._resolving_records):
+                return
             await self._emit(EventMsg(
                 submission_id=record_id,
                 msg=SuspensionExpired(data={
@@ -609,7 +646,7 @@ class AgentEngine:
             if not pending_left:
                 return
             await self.submit(Resume(
-                thread_id=thread_id,
+                thread_id=route_tid,
                 resolutions={
                     p.request_id: {EXPIRE_SENTINEL: True} for p in pending_left
                 },
@@ -621,6 +658,59 @@ class AgentEngine:
             logger.exception("suspension ttl expiry crashed: %s", record_id)
         finally:
             self._ttl_timers.pop(record_id, None)
+
+    async def _resolve_expiry_route(
+        self, thread_id: str, record_id: str,
+    ) -> str | None:
+        """到期裁决的路由解析(fire 时):返回可路由的 Resume.thread_id。
+
+        武装时只记原 thread_id;leaf 挂起事件先于上层 CHILD_SKILL/spawn 挂起,
+        提前解析有时序窗口,故推迟到 fire 时全量判定:
+        1. 根 thread → 直接可路由;
+        2. call_skill 链(挂根):根链可下探到该 thread → 原 thread_id 可路由
+           (_handle_child_resume 自根寻址);
+        3. spawn 拓扑:该 thread 是 spawn 子自身,或埋在某挂起态 spawn 句柄的
+           子链中 → 以 **spawn 子 tid** 提交(与人工 Resume 约定一致,
+           resume_spawn_nested 自动下探);
+        4. 均未命中 → None(调用方 log + no-op,冷装载重武装再试)。
+        """
+        if thread_id == self._thread_id:
+            return thread_id
+        if await self._build_resume_chain(thread_id) is not None:
+            return thread_id
+        for h in self._spawn.suspended_handles():
+            if h.status != "suspended":
+                continue
+            if h.child_thread_id == thread_id:
+                return thread_id  # spawn 直接挂起(既有可路由形态)
+            if await self._chain_contains_thread(
+                    h.child_thread_id, thread_id,
+                    self._max_total_spawns_guard()):
+                return h.child_thread_id
+        return None
+
+    async def _chain_contains_thread(
+        self, root_tid: str, target_tid: str, depth: int,
+    ) -> bool:
+        """自 root_tid 沿活跃挂起的 CHILD_SKILL pending DFS,判定子链是否含 target。"""
+        from taifeng.suspend.reason import SuspendReason
+
+        if root_tid == target_tid:
+            return True
+        if depth <= 0:
+            return False
+        items = await self._load_thread_items(root_tid)
+        record = self._find_active_suspension_in(items)
+        if record is None:
+            return False
+        for pend in record.pending:
+            if pend.reason is not SuspendReason.CHILD_SKILL:
+                continue
+            child_tid = pend.detail.get("sub_thread_id")
+            if isinstance(child_tid, str) and await self._chain_contains_thread(
+                    child_tid, target_tid, depth - 1):
+                return True
+        return False
 
     async def _rearm_ttl_timers_cold(self) -> None:
         """冷启动重武装(R5):扫根 history + 挂起态 spawn 子 thread 的活跃挂起。
@@ -827,6 +917,9 @@ class AgentEngine:
                     continue
         finally:
             self._running = False
+            # R4:任何退出路径(Shutdown / root-cancel break / 异常)统一取消全部
+            # TTL 定时器——孤儿定时器到期后会向无人消费的队列 submit(可能永久阻塞)
+            self._cancel_ttl_timers()
             # 通知所有 subscriber 退出
             for q in list(self._all_subs):
                 try:
@@ -1264,7 +1357,25 @@ class AgentEngine:
                 data={"reason": "no_active_suspension", "record_id": None, "detail": {}})))
             return
 
-        # 2. 配对 + 计划（不允许部分 resume；ResolveError 显式拒绝，不静默兜底）
+        # 1.5 在飞守卫:同 record 已有 Resume 在处理(marker 未落)→ 显式拒绝,
+        # 防双裁决(同 call_id 双 fco、双 marker、双续跑)
+        if record.record_id in self._resolving_records:
+            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
+                data={"reason": "resolve_in_flight",
+                      "record_id": record.record_id, "detail": {}})))
+            return
+        self._resolving_records.add(record.record_id)
+        try:
+            await self._handle_resume_resolved(sub, op, record, root_cancel)
+        finally:
+            self._resolving_records.discard(record.record_id)
+
+    async def _handle_resume_resolved(
+        self, sub: Submission, op: Resume,
+        record: SuspensionRecord, root_cancel: CancellationToken,
+    ) -> None:
+        """_handle_resume 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
+        # 2. 配对 + 计划（ResolveError 显式拒绝，不静默兜底）
         from taifeng.suspend.resolver import ResolveError, SuspensionResolver
         try:
             plan = SuspensionResolver().plan(record, op.resolutions)
@@ -1283,10 +1394,11 @@ class AgentEngine:
                     thread_id=self._thread_id, is_error=False)
                 self._history.append(out)
                 await self._store.append(out)
-            # 3b. permission deny → error output（让模型知道被拒并据此改写后续）
+            # 3b. deny / 到期 → error output(前缀按 pending reason 渲染)
             for call_id, reason in plan.deny_outputs.items():
                 out = function_call_output(
-                    call_id=call_id, output=f"permission_denied: {reason}",
+                    call_id=call_id,
+                    output=self._deny_output_text(record, call_id, reason),
                     thread_id=self._thread_id, is_error=True)
                 self._history.append(out)
                 await self._store.append(out)
@@ -1472,14 +1584,34 @@ class AgentEngine:
         Returns:
             子 turn 续跑后的 final_text（成功）/ 错误串（失败）；核销被拒或子又挂起 → None。
         """
-        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
-
         items = await self._load_thread_items(leaf_tid)
         record = self._find_active_suspension_in(items)
         if record is None:
             await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
                 data={"reason": "no_active_suspension", "record_id": None, "detail": {}})))
             return None
+        # 在飞守卫(与根路径同理):同 leaf record 并发 Resume 拒后到者
+        if record.record_id in self._resolving_records:
+            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
+                data={"reason": "resolve_in_flight",
+                      "record_id": record.record_id, "detail": {}})))
+            return None
+        self._resolving_records.add(record.record_id)
+        try:
+            return await self._resume_leaf_settled(
+                sub, leaf_tid, leaf_skill_id, resolutions, record, root_cancel,
+                submission_id=submission_id)
+        finally:
+            self._resolving_records.discard(record.record_id)
+
+    async def _resume_leaf_settled(
+        self, sub: Submission, leaf_tid: str, leaf_skill_id: str,
+        resolutions: dict[str, Any], record: SuspensionRecord,
+        root_cancel: CancellationToken, *, submission_id: str | None = None,
+    ) -> str | None:
+        """_resume_leaf_thread 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
+        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+
         try:
             plan = SuspensionResolver().plan(record, resolutions)
         except ResolveError as e:
@@ -1729,7 +1861,8 @@ class AgentEngine:
             await self._store.append(out)
         for call_id, reason in plan.deny_outputs.items():
             out = function_call_output(
-                call_id=call_id, output=f"permission_denied: {reason}",
+                call_id=call_id,
+                output=self._deny_output_text(record, call_id, reason),
                 thread_id=thread_id, is_error=True)
             await self._store.append(out)
         for call_id in plan.execute_tool_call_ids:
@@ -1935,6 +2068,24 @@ class AgentEngine:
         if record.record_id in resolved_ids:
             return None
         return record
+
+    @staticmethod
+    def _deny_output_text(
+        record: SuspensionRecord, call_id: str, reason_text: str,
+    ) -> str:
+        """按 pending reason 渲染 deny 回填文案(suspension-ttl-hardening)。
+
+        PERMISSION → ``permission_denied: ...``(用户拒绝语义不变);
+        其余(DATA/FORM/CHILD_SKILL 的到期 abort)→ ``suspension_expired: ...``——
+        数据问询超时不再被模型/业务误读为权限拒绝。
+        """
+        from taifeng.suspend.reason import SuspendReason
+
+        pend = next(
+            (p for p in record.pending if p.related_call_id == call_id), None)
+        if pend is not None and pend.reason is not SuspendReason.PERMISSION:
+            return f"suspension_expired: {reason_text}"
+        return f"permission_denied: {reason_text}"
 
     def _settle_lock(self, record_id: str) -> asyncio.Lock:
         """取 record 级结算锁(惰性创建;record 终结后残留的空锁可忽略不计)。"""

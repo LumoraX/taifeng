@@ -23,7 +23,7 @@
 | `form` | 等用户填表 | payload 直接成该 call 的 `function_call_output` |
 | `data` | 等外部数据 | 同 `form`，payload 直接成 `function_call_output` |
 | `system_retry` | 限流 / 配额 / 余额 / 鉴权 / 可恢复网络错 | `action=retry`（默认）→ 重跑同次 sample；`action=abort` → turn 终止不续跑 |
-| `resource_limit` | 资源护栏触顶（`max_iterations` / `resource_limit_exceeded` / `denial_circuit_open`）被失败处置 policy 裁决为挂起 | `action=retry` → 重建 runner 自迭代边界**继续采样循环**（无悬空 fc、**不 resample**；IterationBudget / DenialBreaker 随重建按原 cap 重置）；`action=abort` → 与 system_retry abort 同语义。非法 action 显式 `ResolveError`。`detail` 携带 `{end_reason, guard_snapshot?}` |
+| `resource_limit` | 资源护栏触顶（`max_iterations` / `resource_limit_exceeded` / `denial_circuit_open`）被失败处置 policy 裁决为挂起 | `action=retry` → 重建 runner 自迭代边界**继续采样循环**（无悬空 fc；IterationBudget / DenialBreaker 随重建按原 cap 重置）；`action=abort` → 与 system_retry abort 同语义。非法 action 显式 `ResolveError`。`detail` 携带 `{end_reason, guard_snapshot?}` |
 | `child_skill` | `call_skill` 派发的子 skill 内部挂起 → 父的 `call_skill` 随之挂起 | **非用户可直接 resolve**：由 engine 续跑链内部核销——先续跑子 thread 拿结果，再回填本 `call_skill` 的 `function_call_output`（见下「子 thread resume 续跑链」） |
 
 `StrEnum` 保证 JSON 序列化为字符串（`reason.value`），跨进程 `from_item` 还原稳定。`child_skill` pending 的 `related_call_id` = 父 `call_skill` 的 call_id，`detail` 携带 `{sub_thread_id, skill_id}`（子 thread + 子 entry skill）。
@@ -82,8 +82,9 @@ payload 形状由对应 `PendingRequest.reason` 决定：
 - `execute_tool_call_ids: list[str]` —— permission allow → resume 时执行 tool
 - `direct_outputs: dict[str, Any]` —— call_id → output（form / data）
 - `deny_outputs: dict[str, str]` —— call_id → deny reason（permission deny）
-- `resample: bool` —— system_retry → 重跑 sample（resource_limit **不置此位**：重建续跑即继续循环）
 - `abort: bool` —— system_retry / resource_limit `action=abort`
+
+> 无 `resample` 位:SYSTEM_RETRY retry 的「重跑同次 sample」由挂起点 history 形态天然保证（挂起时无失败轮 assistant 消息,重建续跑即重新采样）,不需要标志位。
 
 `ResolveError`（普通 `Exception`，**不进 LLMError 体系**）在：resolutions 为空 / 含未知 request_id、人类输入类 pending 缺 `related_call_id`、未知 reason 时抛出（禁 silent fallback）。`plan` 只裁决 resolutions 覆盖到的 pending（request 级核销）。
 
@@ -128,7 +129,7 @@ Resume(thread_id, resolutions)
 - **permission deny**（`granted=false`）：回填 `is_error=True` 的 `function_call_output`（`permission_denied: <reason>`），让模型据此改写后续。
 - **form / data**：`resolutions[request_id]` 直接 JSON 序列化成该 `related_call_id` 的 `function_call_output`（`is_error=False`），**不重跑 tool**。
 - **system_retry**：`action=retry`（默认）→ 不动 history，重跑那次 `_sample_once`（获全新 retry 预算）；`action=abort` → turn 终止不续跑。retry 自动机制：`_sample_once` 命中可恢复错误先走 `RetryConfig`（默认 `max_attempts=3`）自动退避重试；**3 次耗尽**或确定性"等外部介入"类（`provider_auth` / `provider_quota` / `provider_balance`）才转 `SYSTEM_RETRY` 挂起。`ContentFilter` / `ContextOverflow` / `InvalidRequest` 这类确定性失败在**默认（保守）policy** 下不挂起、照旧硬失败；注入 `SuspendByDefaultPolicy` 后同样转 `SYSTEM_RETRY` 挂起（裁决权见下「失败处置裁决 policy」）。
-- **resource_limit**：`action=retry` → 重建 runner 以挂起点 history 继续采样循环（挂起发生在迭代边界、fc/output 已配对，无 resample 语义；IterationBudget / DenialBreaker 随 runner 重建按原 cap 重新起算——每轮 retry 都需显式 Resume，人在环、无无界自动循环）；`action=abort` → 与 system_retry abort 同形。
+- **resource_limit**：`action=retry` → 重建 runner 以挂起点 history 继续采样循环（挂起发生在迭代边界、fc/output 已配对；IterationBudget / DenialBreaker 随 runner 重建按原 cap 重新起算。注意：配合 `failure_suspend_on_expire="retry"` 时 retry 由 TTL 自动签发,**存在自动循环**——熔断上限旋钮见 change resource-limit-retry-semantics）；`action=abort` → 与 system_retry abort 同形。
 
 ### Requirement: 失败处置裁决 policy（FailureDispositionPolicy）
 
@@ -149,7 +150,11 @@ Resume(thread_id, resolutions)
 - **record 级生效**：`SuspensionRecord.expires_at` 为派生属性 = `created_at + min(各 pending ttl)`（全 None → None）；到期对整个 record 一次性裁决（与全量 resume 语义对齐）。真相在 pending 序列化字段，冷热一致（R5），旧 JSONL 无字段 → 永不过期（前向兼容）。
 - **武装**：engine 借唯一事件总线簿记——`turn_suspended`（data 含 `expires_at`）武装 asyncio 定时器，`suspension_resolved` 撤销（**先核销者胜**：触发时重读活跃挂起验证 record_id，已核销 no-op）；shutdown 取消全部（R4）。所有层级 turn（根 / call_skill 子链 / spawn 子 thread）的挂起事件都流经 engine emit，热路径单点全覆盖。
 - **冷重武装**：engine.run 启动时扫根 history + 挂起态 spawn 句柄的子 thread：已过期立即裁决、未过期按剩余壁钟时长重武装。v1 边界：深层 call_skill leaf 的 ttl 仅热路径覆盖（冷恢复后该 leaf 再次挂起时重新武装）。
-- **裁决 = 内核签发等价 Resume**：到期 emit `suspension_expired`（data `{record_id, thread_id, on_expire, reasons}`，R3）后以 `EXPIRE_SENTINEL`（`{"__expired__": true}`）payload 提交公共 `Resume` Op——root / 嵌套 / spawn 三条续跑链零改动复用。resolver 对哨兵按 pending 裁决：系统位按 `on_expire`（SYSTEM_RETRY retry → resample；RESOURCE_LIMIT retry → 重建续跑；abort → 终止）；人类输入类 / CHILD_SKILL → 悬空 fc 回填 `suspension_expired` error output（保配对，R5）+ 整体 abort。哨兵是内核内部形态，业务伪造等价于自行 deny/abort，无能力增益。
+- **裁决 = 内核签发等价 Resume**：到期 emit `suspension_expired`（data `{record_id, thread_id, on_expire, reasons}`，R3）后以 `EXPIRE_SENTINEL`（`{"__expired__": true}`）payload 提交公共 `Resume` Op——root / 嵌套 / spawn 三条续跑链零改动复用。resolver 对哨兵按 pending 裁决：系统位按 `on_expire`（retry → 重建续跑；abort → 终止）；人类输入类 / CHILD_SKILL → 悬空 fc 回填 error output（保配对，R5；文案按 reason 渲染——PERMISSION → `permission_denied: ...`,其余 → `suspension_expired: ...`,数据问询超时不被误读为权限拒绝）+ 整体 abort。request 级核销下哨兵只对**剩余未核销** pending 签发。哨兵是内核内部形态，业务伪造等价于自行 deny/abort，无能力增益。
+- **到期路由 fire 时解析（suspension-ttl-hardening）**：定时器只记 record_id + 原 thread_id；fire 时在「根 → call_skill 链（根链可下探）→ 挂起态 spawn 句柄子链（含嵌套 leaf,以 **spawn 子 tid** 提交,与人工 Resume 约定一致）」中解析可路由入口,带有界重试消化挂起上浮的毫秒级窗口；解析失败 log + no-op（冷装载重武装再试）。
+- **在飞守卫**：Resume 命中 record 后立即占位（finally 释放）；定时器 fire 验证「未核销 且 不在飞」；同 record 并发第二个 Resume → `SuspensionResolveRejected(resolve_in_flight)`。任何交错下同一 record 至多被裁决一次。
+- **定时器生命周期（R4）**：Shutdown / root-cancel / 异常退出任一路径均在 `run()` finally 统一取消全部定时器,无孤儿定时器向已死队列提交。
+- **边界校验**：resolver 对结构化 payload 的 reason（PERMISSION / SYSTEM_RETRY / RESOURCE_LIMIT）收到非 dict payload → `ResolveError`（FORM/DATA 的 payload 本就是任意 JSON,不受限）；`failure_suspend_ttl_seconds ≤ 0` 在 engine / pool 构造期 `ValueError`；`failure_class == "cancelled"` 的 LLM 异常不进 failure policy（取消非失败,直接走取消链）。
 - **时钟**：`now_factory` 构造期注入（默认 `time.time`，测试可固定）；壁钟回拨仅影响触发时刻不影响裁决正确性。
 
 #### Scenario: 到期 retry 自动续跑

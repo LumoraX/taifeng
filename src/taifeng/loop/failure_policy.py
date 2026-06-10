@@ -52,6 +52,9 @@ class FailureContext:
         error_kind: 异常类名(可观测 / 审计);guard_trip 时为 None。
         retryable: origin=llm_error 时取 LLMError.retryable;guard_trip 恒 False。
         is_root: 是否 root turn(子 turn 失败的裁决可能与根不同,留给业务判断)。
+            注意:detached spawn 子 thread 是独立根 turn(call_stack 为空),
+            其失败 is_root 恒为 True —— 该字段只能区分 call_skill 子链,
+            无法识别 spawn 子线程。
         iteration: 失败发生时的迭代序号(1-based)。
     """
 
@@ -99,11 +102,17 @@ class ConservativeFailurePolicy:
 
 
 class SuspendByDefaultPolicy:
-    """失败一律挂起:「失败默认非终态,人裁决终态」哲学的官方形态。
+    """失败默认挂起:「失败默认非终态,人裁决终态」哲学的官方形态。
 
-    任意失败(含确定性 LLM 失败与护栏触顶)→ SUSPEND,由 Resume 的提交者决定
-    retry / abort。确定性失败原样 retry 必然再失败——业务 UI 应据挂起 detail 中的
-    failure_class(配合 G3 recovery 配方)引导用户走 abort 或改参后重试。
+    **作用域**:policy 只辖两个判定点——采样 LLMError 重试耗尽、护栏触顶
+    (max_iterations / denial 断路器 / 会话 token)。以下失败不在裁决范围:
+    cancelled(取消非失败,直接走取消链)、RequestTooLargeError 预检、引擎级
+    K2 拒新 turn、非 LLM 异常(store / hook / 工具内部崩溃)——这些仍走既有
+    终态路径(扩面见 change resource-limit-retry-semantics)。
+
+    判定点内任意失败 → SUSPEND,由 Resume 的提交者决定 retry / abort。确定性
+    失败原样 retry 必然再失败——业务 UI 应据挂起 detail 中的 failure_class
+    (配合 G3 recovery 配方)引导用户走 abort 或改参后重试。
     """
 
     def decide(self, ctx: FailureContext) -> FailureDisposition:

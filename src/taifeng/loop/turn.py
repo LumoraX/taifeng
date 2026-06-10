@@ -917,6 +917,11 @@ class TurnRunner:
                 )
                 # 单次重采样：递归深度恒为 1（标志已置 True，二次必走硬失败）
                 return await self._sample_once(iteration)
+            # 取消不是失败:按 ModelClient 协议字面实现的 provider 会抛
+            # llm.errors.CancelledError(LLMError 子类)——直接上抛走取消链,
+            # 不咨询 policy(否则 SuspendByDefault 会把用户取消转成挂起)。
+            if getattr(e, "failure_class", None) == "cancelled":
+                raise
             # failure-suspension-policy:裁决权交注入的 policy(None → 保守默认,
             # 零行为变化)。policy 只回答挂还是不挂;真正的裁决人是 Resume 提交者。
             policy = self.failure_policy or DEFAULT_FAILURE_POLICY

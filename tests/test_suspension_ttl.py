@@ -106,20 +106,19 @@ def _expire_all(rec: SuspensionRecord) -> dict:
 
 
 def test_expire_system_retry_with_retry():
-    """SYSTEM_RETRY 到期 on_expire=retry → resample,不 abort(自动续跑)。"""
+    """SYSTEM_RETRY 到期 on_expire=retry → 不 abort(自动续跑,重建即重采样)。"""
     rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.SYSTEM_RETRY,
                               ttl_seconds=60, on_expire="retry"))
     plan = SuspensionResolver().plan(rec, _expire_all(rec))
-    assert plan.resample is True
+    assert plan.abort is False  # retry:不 abort 即续跑(无 resample 位,重建续跑天然重采样)
     assert plan.abort is False
 
 
-def test_expire_resource_limit_with_retry_no_resample():
-    """RESOURCE_LIMIT 到期 retry → 不置 resample(重建续跑即继续循环)、不 abort。"""
+def test_expire_resource_limit_with_retry_not_abort():
+    """RESOURCE_LIMIT 到期 retry → 不 abort(重建续跑即继续循环)。"""
     rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT,
                               ttl_seconds=60, on_expire="retry"))
     plan = SuspensionResolver().plan(rec, _expire_all(rec))
-    assert plan.resample is False
     assert plan.abort is False
 
 
@@ -132,8 +131,8 @@ def test_expire_data_form_permission_abort_with_gap_fill():
                        related_call_id="cb", ttl_seconds=60),
     )
     plan = SuspensionResolver().plan(rec, _expire_all(rec))
-    assert plan.deny_outputs["ca"] == "suspension_expired"
-    assert plan.deny_outputs["cb"] == "suspension_expired"
+    assert plan.deny_outputs["ca"] == "ttl_reached"
+    assert plan.deny_outputs["cb"] == "ttl_reached"  # 渲染前缀由 engine 按 reason 决定
     assert plan.abort is True
     assert plan.execute_tool_call_ids == []
 
@@ -151,12 +150,11 @@ def test_expire_mixed_record_abort_wins():
 
 
 def test_expire_system_abort_default():
-    """SYSTEM_RETRY 到期默认 on_expire=abort → abort 不 resample。"""
+    """SYSTEM_RETRY 到期默认 on_expire=abort → abort。"""
     rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.SYSTEM_RETRY,
                               ttl_seconds=60))
     plan = SuspensionResolver().plan(rec, _expire_all(rec))
     assert plan.abort is True
-    assert plan.resample is False
 
 
 # ============================================================
@@ -466,3 +464,211 @@ async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_d
     await engine.submit(taifeng.loop.Shutdown())
     await asyncio.wait_for(task, timeout=5.0)
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# suspension-ttl-hardening:路由死角 / 生命周期 / 在飞竞态 / 边界收紧
+# ---------------------------------------------------------------------------
+
+_NEST_HOST = """---
+name: nest-host
+description: 宿主
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [nest-mid]
+max_call_depth: 4
+---
+# 宿主 NEST_HOST_MARK
+派发中层。
+"""
+
+_NEST_MID = """---
+name: nest-mid
+description: 中层专科
+version: 1.0.0
+type: composite
+model: mock-model
+child_skills: [nest-ask]
+max_call_depth: 3
+---
+# 中层 NEST_MID_MARK
+先派问询。
+"""
+
+_NEST_ASK = """---
+name: nest-ask
+description: 问询
+version: 1.0.0
+type: composite
+model: mock-model
+tool_names: [request_user_input]
+max_call_depth: 2
+---
+# 问询 NEST_ASK_MARK
+先问人。
+"""
+
+
+async def test_spawn_nested_leaf_expire_routes_and_unblocks(tmp_path, threads_dir):
+    """spawn 子的【嵌套】leaf 带 ttl 挂起到期(P0-4 路由死角修复):fire 时路由
+    解析以 spawn 子 tid 提交 → 嵌套链 expire-abort leaf → 中层续跑 → 句柄落终态
+    (barrier 解除)。修复前 Resume(leaf_tid) 不可路由 → no_active_suspension
+    拒绝,句柄永滞 suspended、TTL 在该拓扑完全失效。"""
+    skills = tmp_path / "nest_skills"
+    for sub, body in (("nest-host", _NEST_HOST), ("nest-mid", _NEST_MID),
+                      ("nest-ask", _NEST_ASK)):
+        d = skills / sub
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(body, encoding="utf-8")
+    client = RoutingMockClient(routes={
+        "NEST_HOST_MARK": [MockTurn(text="host idle")],
+        "NEST_MID_MARK": [
+            MockTurn(text="派", tool_calls=[
+                {"id": "m1", "name": "call_skill",
+                 "arguments": '{"skill_id": "nest-ask", "reason": "go"}'}]),
+            MockTurn(text="MID_DONE"),
+        ],
+        "NEST_ASK_MARK": [
+            MockTurn(text="问", tool_calls=[
+                {"id": "a1", "name": "request_user_input",
+                 "arguments": '{"prompt": "补充?"}'}]),
+            MockTurn(text="不应被采样"),
+        ],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills, threads_dir=threads_dir, model_client=client,
+        compressors=[],
+        extra_tools=[make_request_user_input_tool(ttl_seconds=60)],
+        now_factory=_future_now,
+    )
+    engine = await pool.get_or_create(session_id="ttl-nest", entry_skill_id="nest-host")
+    events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev.msg)
+            if ev.msg.kind == "shutdown":
+                break
+
+    task = asyncio.create_task(watch())
+    await asyncio.sleep(0)
+
+    h = await engine.spawn_skill(skill_id="nest-mid", args={}, reason="t")
+    hid = h["handle_id"]
+    # leaf 到期 → 路由经 spawn 子 tid → expire-abort → 中层续跑 MID_DONE → done
+    assert await _wait_status(engine, hid, "done"), \
+        f"到期裁决应使句柄落终态,实为 {engine.spawn_status([hid])[hid]}"
+    kinds = [m.kind for m in events]
+    assert "suspension_expired" in kinds
+    rejected = [m for m in events if m.kind == "suspension_resolve_rejected"]
+    assert not rejected, f"到期裁决不得因路由死角被拒: {[m.data for m in rejected]}"
+
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
+
+
+async def test_root_cancel_clears_ttl_timers(ask_skills, threads_dir):
+    """R4:root-cancel 退出路径同样清空全部 TTL 定时器(不只 Shutdown 分支)——
+    孤儿定时器到期后会向无人消费的队列 submit。"""
+    client = RoutingMockClient(routes={"ASK_MARK": _ask_turns()})
+    pool = await taifeng.EnginePool.create(
+        skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[],
+        # 正常时钟 + 长 ttl:定时器武装后保持挂着(测清理而非触发)
+        extra_tools=[make_request_user_input_tool(ttl_seconds=3600)],
+    )
+    engine = await pool.get_or_create(session_id="ttl-rc", entry_skill_id="ask-skill")
+    await engine.submit(taifeng.UserMessage(text="开始"))
+    await _collect_until(
+        engine, lambda s: any(m.kind == "turn_suspended" for m in s))
+    assert engine._ttl_timers, "挂起后应有武装中的定时器"  # noqa: SLF001
+    # root-cancel(非 Shutdown Op)退出
+    engine._root_cancel.cancel()  # noqa: SLF001
+    for _ in range(100):
+        if not engine._ttl_timers:  # noqa: SLF001
+            break
+        await asyncio.sleep(0.02)
+    assert not engine._ttl_timers, "root-cancel 退出必须清空定时器(R4)"  # noqa: SLF001
+    await pool.close()
+
+
+async def test_inflight_guard_timer_noop_and_second_resume_rejected(
+    ask_skills, threads_dir,
+):
+    """在飞守卫:① record 在飞时定时器 fire 为 no-op(不发 suspension_expired、
+    不二次裁决);② 同 record 第二个 Resume 被 resolve_in_flight 拒绝;
+    ③ 释放后人工 Resume 正常核销。"""
+    client = RoutingMockClient(routes={"ASK_MARK": _ask_turns()})
+    pool = await taifeng.EnginePool.create(
+        skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[],
+        extra_tools=[make_request_user_input_tool(ttl_seconds=3600)],
+    )
+    engine = await pool.get_or_create(session_id="ttl-if", entry_skill_id="ask-skill")
+    await engine.submit(taifeng.UserMessage(text="开始"))
+    seen = await _collect_until(
+        engine, lambda s: any(m.kind == "turn_suspended" for m in s))
+    susp = next(m for m in seen if m.kind == "turn_suspended")
+    rid = susp.data["record_id"]
+    req_id = susp.data["pending"][0]["request_id"]
+
+    # ① 人为占位在飞 → 直接驱动到期任务体 → 必须 no-op
+    engine._resolving_records.add(rid)  # noqa: SLF001
+    events2: list = []
+    task = asyncio.create_task(_watch_kinds(engine, events2))
+    await asyncio.sleep(0)
+    await engine._ttl_expire_after(0, engine.thread_id, rid)  # noqa: SLF001
+    await asyncio.sleep(0.1)
+    assert "suspension_expired" not in [m.kind for m in events2], \
+        "在飞窗口 fire 必须 no-op(先核销者胜)"
+
+    # ② 在飞期间的第二个 Resume 被显式拒绝
+    from taifeng.loop.submission import Resume
+    await engine.submit(Resume(
+        thread_id=engine.thread_id, resolutions={req_id: {"answer": "x"}}))
+    for _ in range(100):
+        if any(m.kind == "suspension_resolve_rejected" for m in events2):
+            break
+        await asyncio.sleep(0.02)
+    rejects = [m for m in events2 if m.kind == "suspension_resolve_rejected"]
+    assert rejects and rejects[0].data["reason"] == "resolve_in_flight"
+
+    # ③ 释放占位 → 人工 Resume 正常核销
+    engine._resolving_records.discard(rid)  # noqa: SLF001
+    await engine.submit(Resume(
+        thread_id=engine.thread_id, resolutions={req_id: {"answer": "好"}}))
+    for _ in range(150):
+        if any(m.kind == "suspension_resolved" for m in events2):
+            break
+        await asyncio.sleep(0.02)
+    assert any(m.kind == "suspension_resolved" for m in events2)
+
+    await engine.submit(taifeng.loop.Shutdown())
+    await asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
+
+
+async def _watch_kinds(engine, sink: list) -> None:
+    """后台收集事件直到 shutdown(in-flight 测试用)。"""
+    async for ev in engine.subscribe_all():
+        sink.append(ev.msg)
+        if ev.msg.kind == "shutdown":
+            return
+
+
+async def test_engine_pool_ctor_rejects_nonpositive_failure_ttl(
+    ask_skills, threads_dir,
+):
+    """构造期校验:failure_suspend_ttl_seconds ≤ 0 在 pool 构造点即 ValueError,
+    不再延迟到首次护栏挂起被宽 except 吞为 turn_failed(报错点贴近配置点)。"""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="failure_suspend_ttl_seconds"):
+        await taifeng.EnginePool.create(
+            skills_dir=ask_skills, threads_dir=threads_dir,
+            model_client=RoutingMockClient(routes={}), compressors=[],
+            failure_suspend_ttl_seconds=-1,
+        )

@@ -304,3 +304,72 @@ async def test_call_skill_chain_inherits_policy_and_nested_resume(
     await engine.submit(taifeng.loop.Shutdown())
     await asyncio.wait_for(watch_task, timeout=5.0)
     await pool.close()
+
+
+class _CancelRaisingClient(RoutingMockClient):
+    """首次采样抛 llm.errors.CancelledError —— 模拟按 ModelClient 协议字面实现的
+    provider 在检测到取消时上抛(suspension-ttl-hardening 边界)。"""
+
+    def __init__(self, *, routes: dict[str, list[MockTurn]]) -> None:
+        super().__init__(routes=routes)
+        self._raised = False
+
+    def session(self, *, cancel: Any, model: str | None = None):  # noqa: ANN201
+        outer = self
+        inner = super().session(cancel=cancel, model=model)
+
+        class _S:
+            async def __aenter__(self):  # noqa: ANN204
+                return self
+
+            async def __aexit__(self, *exc):  # noqa: ANN002, ANN204
+                pass
+
+            async def stream(self, request):  # noqa: ANN001, ANN201
+                if not outer._raised:
+                    outer._raised = True
+                    from taifeng.llm.errors import CancelledError
+                    raise CancelledError("user cancelled")
+                async with inner as s:
+                    async for ev in s.stream(request):
+                        yield ev
+
+        return _S()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_bypasses_policy(chain_skills, threads_dir) -> None:
+    """取消非失败:llm CancelledError 不进 failure policy —— 即便注入
+    SuspendByDefaultPolicy,用户取消也不得被转成 SYSTEM_RETRY 挂起。"""
+    import taifeng
+
+    client = _CancelRaisingClient(routes={
+        "HOST_MARK": [MockTurn(text="host done")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=chain_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], failure_policy=taifeng.SuspendByDefaultPolicy(),
+    )
+    engine = await pool.get_or_create(session_id="cxl", entry_skill_id="host")
+    events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev.msg)
+            if ev.msg.kind in ("turn_failed", "turn_suspended", "shutdown"):
+                if ev.msg.kind != "shutdown":
+                    return
+                return
+
+    task = asyncio.create_task(watch())
+    await asyncio.sleep(0)
+    await engine.submit(taifeng.UserMessage(text="go"))
+    await asyncio.wait_for(task, timeout=8.0)
+
+    kinds = [m.kind for m in events]
+    assert "turn_suspended" not in kinds, \
+        f"用户取消被误转挂起(policy 不应裁决 cancelled): {kinds}"
+    assert "turn_failed" in kinds
+
+    await engine.submit(taifeng.loop.Shutdown())
+    await pool.close()

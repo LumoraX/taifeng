@@ -683,7 +683,7 @@ def test_resolver_classifies_outputs():
     })
     assert plan.execute_tool_call_ids == ["ca"]
     assert plan.direct_outputs["cb"] == {"answer": "hello"}
-    assert plan.resample is True
+    assert plan.abort is False  # retry:不 abort 即续跑(无 resample 位,重建续跑天然重采样)
 
 
 def test_resolver_permission_deny_path():
@@ -703,7 +703,6 @@ def test_resolver_system_retry_abort():
     rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.SYSTEM_RETRY))
     plan = SuspensionResolver().plan(rec, {"r1": {"action": "abort"}})
     assert plan.abort is True
-    assert plan.resample is False
 
 
 def test_resolver_permission_granted_missing_call_id_raises():
@@ -1513,13 +1512,12 @@ max_call_depth: 2
 # ============================================================
 
 
-def test_resolver_resource_limit_retry_no_resample():
-    """RESOURCE_LIMIT retry:不置 resample(重建 runner 续跑,非重跑同次 sample)。"""
+def test_resolver_resource_limit_retry_not_abort():
+    """RESOURCE_LIMIT retry:不 abort(重建 runner 在迭代边界继续采样循环)。"""
     from taifeng.suspend.reason import PendingRequest, SuspendReason
     from taifeng.suspend.resolver import SuspensionResolver
     rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
     plan = SuspensionResolver().plan(rec, {"r1": {"action": "retry"}})
-    assert plan.resample is False
     assert plan.abort is False
 
 
@@ -1530,7 +1528,6 @@ def test_resolver_resource_limit_abort():
     rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
     plan = SuspensionResolver().plan(rec, {"r1": {"action": "abort"}})
     assert plan.abort is True
-    assert plan.resample is False
 
 
 def test_resolver_resource_limit_invalid_action_rejected():
@@ -1542,3 +1539,27 @@ def test_resolver_resource_limit_invalid_action_rejected():
     rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
     with pytest.raises(ResolveError, match="invalid_resource_limit_action"):
         SuspensionResolver().plan(rec, {"r1": {"action": "whatever"}})
+
+
+def test_resolver_rejects_non_dict_payload():
+    """结构化 payload 的 reason(PERMISSION/SYSTEM_RETRY/RESOURCE_LIMIT)收到非
+    dict payload → ResolveError 显式拒绝,不再 AttributeError 逃逸致 resume 任务
+    静默崩溃(suspension-ttl-hardening)。"""
+    import pytest
+
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+    for reason in (SuspendReason.PERMISSION, SuspendReason.SYSTEM_RETRY,
+                   SuspendReason.RESOURCE_LIMIT):
+        rec = _rec(PendingRequest(
+            request_id="r1", reason=reason,
+            related_call_id="c1" if reason is SuspendReason.PERMISSION else None,
+            detail={"end_reason": "x"} if reason is SuspendReason.RESOURCE_LIMIT else {},
+        ))
+        with pytest.raises(ResolveError, match="invalid_payload_shape"):
+            SuspensionResolver().plan(rec, {"r1": "retry"})  # 字符串而非 dict
+    # FORM/DATA 的 payload 本就是任意 JSON,非 dict 合法
+    rec = _rec(PendingRequest(
+        request_id="r1", reason=SuspendReason.DATA, related_call_id="c1"))
+    plan = SuspensionResolver().plan(rec, {"r1": "自由文本回答"})
+    assert plan.direct_outputs["c1"] == "自由文本回答"

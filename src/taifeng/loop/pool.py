@@ -173,6 +173,12 @@ class EnginePool:
         self._denial_breaker_config = denial_breaker_config
         # failure-suspension-policy：失败处置裁决 policy,透传到每个 AgentEngine。
         self._failure_policy = failure_policy
+        # 构造期校验(与 engine 同口径,报错点贴近配置点)
+        if (failure_suspend_ttl_seconds is not None
+                and failure_suspend_ttl_seconds <= 0):
+            raise ValueError(
+                f"failure_suspend_ttl_seconds must be positive or None, "
+                f"got {failure_suspend_ttl_seconds}")
         self._failure_suspend_ttl_seconds = failure_suspend_ttl_seconds
         self._failure_suspend_on_expire = failure_suspend_on_expire
         # suspension-ttl：壁钟工厂(测试可注入固定时钟),透传到每个 AgentEngine。
