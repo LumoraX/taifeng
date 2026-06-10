@@ -19,15 +19,18 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 import tempfile
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 # examples/ 进 sys.path，import 共享 bootstrap
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from _ledger import LedgerWriter, R3Audit, ScenarioRecord  # noqa: E402
 from _provider_bootstrap import (  # noqa: E402
     ProviderBootstrapError,
     build_model_client,
@@ -138,11 +141,13 @@ class Result:
     error: str = ""
     kinds: Counter = field(default_factory=Counter)
     grants: int = 0
+    duration_s: float = 0.0
 
 
 async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
     """跑单个能力场景，返回采集到的事件统计。"""
     res = Result(scenario=sc)
+    started = time.monotonic()
     root = logs_dir / sc.demo_id
     storage = root / "store"
     storage.mkdir(parents=True, exist_ok=True)
@@ -189,6 +194,7 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
         res.error = "timeout(240s)"
     finally:
         res.grants = prompter.grants
+        res.duration_s = time.monotonic() - started
         await pool.close()
         await asyncio.sleep(0.05)
     return res
@@ -208,20 +214,30 @@ def _verdict(res: Result) -> tuple[str, str]:
 
 
 async def main() -> None:
+    parser = argparse.ArgumentParser(description="真实 LLM 能力矩阵跑测")
+    parser.add_argument("--only", help="只跑指定 scenario_id（台账增量合并，其余标 stale）")
+    args = parser.parse_args()
+    scenarios = SCENARIOS
+    if args.only:
+        scenarios = [sc for sc in SCENARIOS if sc.demo_id == args.only]
+        if not scenarios:
+            print(f"❌ 未知场景 {args.only!r}，可选: {[s.demo_id for s in SCENARIOS]}",
+                  file=sys.stderr)
+            sys.exit(2)
     try:
         client, meta = build_model_client(timeout_seconds=180.0)
     except ProviderBootstrapError as exc:
         print(f"❌ {exc}", file=sys.stderr)
         sys.exit(1)
     print(f"[setup] provider={meta['provider']} model={meta['model']}")
-    print(f"[setup] 共 {len(SCENARIOS)} 个能力场景，真实 LLM 逐个跑\n")
+    print(f"[setup] 共 {len(scenarios)} 个能力场景，真实 LLM 逐个跑\n")
 
     with tempfile.TemporaryDirectory() as td:
         logs_dir = Path(td) / "logs"
         logs_dir.mkdir(parents=True)
         results: list[Result] = []
-        for i, sc in enumerate(SCENARIOS, 1):
-            print(f"\n{'━' * 70}\n[{i}/{len(SCENARIOS)}] {sc.demo_id} —— {sc.capability}\n{'━' * 70}")
+        for i, sc in enumerate(scenarios, 1):
+            print(f"\n{'━' * 70}\n[{i}/{len(scenarios)}] {sc.demo_id} —— {sc.capability}\n{'━' * 70}")
             try:
                 results.append(await run_scenario(client, sc, logs_dir))
             except Exception as exc:  # noqa: BLE001  —— 单场景异常不拖垮整矩阵
@@ -262,6 +278,33 @@ async def main() -> None:
         else:
             print(f"  ✅ R3 经典事件全部在真实运行中被观测到: {sorted(R3_CANONICAL)}")
         print(f"\n  JSONL 机读日志已落: {logs_dir}/<demo>.jsonl（每行一个事件）")
+
+        # ── 台账落盘（D1 双格式 + 增量合并）──
+        from _ledger import git_short_commit
+        run_commit = git_short_commit()
+        from datetime import UTC, datetime
+        now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        ledger_records = []
+        for r in results:
+            tag, note = _verdict(r)
+            verdict = {"✅PASS": "PASS", "⚠️PART": "PART", "❌FAIL": "FAIL"}[tag]
+            ledger_records.append(ScenarioRecord(
+                scenario_id=r.scenario.demo_id,
+                capability=r.scenario.capability,
+                verdict=verdict, note=note,
+                expect=sorted(r.scenario.expect),
+                missing=sorted(r.scenario.expect - set(r.kinds)),
+                kinds=dict(r.kinds), grants=r.grants,
+                duration_s=r.duration_s,
+                commit=run_commit, timestamp_utc=now_utc,
+            ))
+        jp, mp = LedgerWriter().merge_and_write(
+            provider=meta["provider"], model=meta["model"],
+            records=ledger_records,
+            r3=R3Audit(emitted_kinds=sorted(all_kinds), unmapped=unmapped,
+                       canonical_missing=sorted(r3_missing)),
+        )
+        print(f"\n  台账已更新: {jp.name} + {mp.name}（docs/）")
 
         ok = npass == len(results) and not unmapped
         print(f"\n{'=' * 70}\n{'✅ 全能力场景真实 LLM 通过 + 日志完整' if ok else '⚠️ 见上方未通过/不完整项'}\n{'=' * 70}")
