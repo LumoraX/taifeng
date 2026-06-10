@@ -163,14 +163,31 @@ def history_to_api_messages(
     history 必然重建出同一消息序(R2 前缀稳定);压缩剪枝产生的孤儿 reasoning
     (其后首条产出消息非 assistant)确定性跳过。
     """
+    return _convert_history(items, include_reasoning=include_reasoning)[0]
+
+
+def _convert_history(
+    items: Iterable[ResponseItem],
+    *,
+    include_reasoning: bool,
+) -> tuple[list[ApiMessage], list[int]]:
+    """转换循环的单一来源:返回 ``(messages, source_indexes)``。
+
+    ``source_indexes[i]`` = 产出 ``messages[i]`` 的 history 下标;合并消息取
+    开窗 assistant_message(孤立 fc 时取该 fc 自身)的下标。cache anchor 据此
+    把 history 坐标换算到 messages 坐标(cache-anchor-message-index)——独立
+    的映射函数会与本循环的跳过/合并规则双实现漂移,故收敛在同一循环内。
+    """
     out: list[ApiMessage] = []
+    # 与 out 等长:每条产出消息的来源 history 下标
+    src: list[int] = []
     # 暂存待附着的 reasoning 文本;开窗(assistant 消息产出)时附上并清空
     pending_reasoning: str | None = None
     # 当前采样轮的 assistant 消息在 out 中的下标(合并窗口);
     # user/system/compacted 产出即关窗,fco 不关窗(同轮并行 fc 的配对序
     # 是 fc,fco,fc,fco 交错),记账类 item(suspension 等)跨过保窗
     window_idx: int | None = None
-    for it in items:
+    for idx, it in enumerate(items):
         if it.kind == "reasoning":
             if include_reasoning:
                 pending_reasoning = str(it.payload.get("text", "")) or None
@@ -181,12 +198,14 @@ def history_to_api_messages(
                 content=str(it.payload.get("text", "")),
                 reasoning=pending_reasoning,
             ))
+            src.append(idx)
             window_idx = len(out) - 1
             pending_reasoning = None
             continue
         if it.kind == "function_call":
             tc = _fc_to_tool_call(it)
             if window_idx is not None:
+                # 并入合并窗口:不新增消息,来源下标保持窗口起点(am)
                 tgt = out[window_idx]
                 tgt.tool_calls = [*(tgt.tool_calls or []), tc]
             else:
@@ -196,6 +215,7 @@ def history_to_api_messages(
                     role="assistant", content="", tool_calls=[tc],
                     reasoning=pending_reasoning,
                 ))
+                src.append(idx)
                 window_idx = len(out) - 1
                 pending_reasoning = None
             continue
@@ -205,6 +225,7 @@ def history_to_api_messages(
                 content=str(it.payload.get("output", "")),
                 tool_call_id=str(it.payload.get("call_id", "")),
             ))
+            src.append(idx)
             continue
         msg = _item_to_api_message(it)
         if msg is None:
@@ -214,7 +235,8 @@ def history_to_api_messages(
         window_idx = None
         pending_reasoning = None
         out.append(msg)
-    return out
+        src.append(idx)
+    return out, src
 
 
 def build_api_request(
@@ -233,7 +255,20 @@ def build_api_request(
     system_prompt = render_system_prompt(
         entry, snapshot, instructions=instructions, capabilities=capabilities
     )
-    messages = history_to_api_messages(history, include_reasoning=reasoning_passback)
+    messages, source_indexes = _convert_history(
+        history, include_reasoning=reasoning_passback
+    )
+
+    # cache anchor 坐标换算(cache-anchor-message-index):anchor 是 history
+    # 下标(压缩 anchor_preserved_until,[0, N) 为稳定前缀),CacheBreakpoint.index
+    # 是 messages 下标(anthropic 据此打 cache_control)。打点位置 = 稳定前缀
+    # 产出的最后一条消息;前缀无产出消息(N<=0 / 全是记账 item)则不打点。
+    breakpoints: list[CacheBreakpoint] = []
+    if cache_anchor_index > 0:
+        for i in range(len(source_indexes) - 1, -1, -1):
+            if source_indexes[i] < cache_anchor_index:
+                breakpoints.append(CacheBreakpoint(index=i))
+                break
 
     # K3 prefetch（page-in）：把取回的长期记忆作为**尾部** system 消息注入，
     # 不动 system_prompt 头部（R2 cache-aware：变动的 prefetch 不破坏 cached 前缀）。
@@ -242,10 +277,6 @@ def build_api_request(
             role="system",
             content=f"<retrieved_memory>\n{prefetched_memory}\n</retrieved_memory>",
         ))
-
-    breakpoints: list[CacheBreakpoint] = []
-    if cache_anchor_index >= 0:
-        breakpoints.append(CacheBreakpoint(index=cache_anchor_index))
 
     return ApiRequest(
         model=model,
