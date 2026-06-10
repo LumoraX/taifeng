@@ -257,6 +257,10 @@ class TurnRunner:
     max_session_tokens: int | None = None
     # K3：长期记忆 swap 接口（engine 注入）；None=无内存层级（默认，行为不变）。
     memory_store: Any = None  # MemoryStore | None
+    # memory-integration-ergonomics：prefetch 检索 query 的业务侧构造器
+    # （同步 (history: list[ResponseItem]) -> str）。None=默认构造（最后一条
+    # 用户消息文本）。builder 崩溃 → 记日志回退默认（best-effort 域）。
+    memory_query_builder: Any = None
     # postcompact-state-reinjection：pinned 状态注册表（engine 注入共享实例）。
     # 压缩成功后按注册序把各 source 渲染结果以 system_injection 钉回 history 尾。
     # None=未启用（默认，零行为变化）。与 K3 正交：memory 是换出抢救，这里是钉回保活。
@@ -422,6 +426,15 @@ class TurnRunner:
             if it.kind == "user_message":
                 query = str(it.payload.get("text", ""))
                 break
+        # 业务侧 query 构造器：拿 history 拷贝自由组装检索语境（如近 N 轮拼接）。
+        # 崩溃回退默认构造——prefetch 全链 best-effort，builder 故障不应使
+        # 长期记忆整体失效（有日志，非静默）。
+        if self.memory_query_builder is not None:
+            try:
+                query = str(self.memory_query_builder(list(self.history_buffer)))
+            except Exception:
+                logger.exception(
+                    "memory_query_builder failed (fallback to default query)")
         try:
             text = await self.memory_store.prefetch(query, thread_id=self.thread_id)
         except Exception:

@@ -398,6 +398,14 @@ class MemoryStore(Protocol):
 - **全 best-effort**：钩子异常不打断 turn。后端（向量 / KV / RAG）全在业务侧，内核只定协议（R1）。
 - 详见 `kernel-gap-analysis.md` [K3]，commit `1bd57b1`。
 
+### 接入工效（memory-integration-ergonomics）
+
+- **最简只读知识库**：继承 `NullMemoryStore` 仅覆写 `prefetch`（其余钩子 no-op）即合法实现——接向量 DB / 本地文件三行完成。
+- **多源组合**：`CompositeMemoryStore([知识库, 会话记忆])`——prefetch 按注册序拼接非空结果，写钩子广播，单子异常记日志不传染（fan-out 不做策略，R1）。
+- **检索语境定制**：`EnginePool.create(memory_query_builder=...)`（同步 `(history 拷贝) -> str`）——默认 query 只取最后一条用户消息，多轮指代场景用 builder 拼近 N 轮语境；builder 异常记日志回退默认。
+- **writeback 语义注意**：钩子收到的是「本 turn 运行期间新增」items（assistant 输出等）；用户消息在 turn 构造前已入 history、不在新增集合内。
+- demo：`examples/memory/knowledge_demo.py`（三件套一起演示）。
+
 ## `replaced_range` 与冷加载消费
 
 `CompressionResult` 的 `replaced_range: tuple[int, int] | None` 字段（以及压缩 salvage note `system_injection(source=memory_pre_evict)`）会被 **`reconstruct_logical_history`**（`conversation/reconstruct.py`）在冷加载 / resume 时消费，把 append-only transcript 折叠回与热内存等价的逻辑 history。

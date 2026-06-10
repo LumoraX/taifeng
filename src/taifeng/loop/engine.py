@@ -139,6 +139,7 @@ class AgentEngine:
         max_total_spawns: int = 1000,
         max_session_tokens: int | None = None,
         memory_store: Any = None,
+        memory_query_builder: Any = None,
         pinned_state_sources: list[Any] | None = None,
         pinned_total_max_chars: int = 8000,
     ) -> None:
@@ -243,6 +244,8 @@ class AgentEngine:
         self._max_session_tokens = max_session_tokens
         # K3：长期记忆 swap 接口（None=无内存层级，默认行为不变）
         self._memory_store = memory_store
+        # prefetch 检索 query 构造器（None=默认：最后一条用户消息）
+        self._memory_query_builder = memory_query_builder
         # postcompact-state-reinjection：pinned 注册表（engine 级共享实例，贯穿
         # 所有 TurnRunner）。构造期注入 list + 运行时 register/unregister 增删；
         # 空注册表在 turn 层短路（零行为变化）。同名注册 ValueError 由 registry 保证。
@@ -1280,6 +1283,7 @@ class AgentEngine:
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
+            memory_query_builder=self._memory_query_builder,
             pinned_states=self._pinned_states,
             # detached-spawn：注入自身作 spawn 协调器 → spawn_skill/await_skills/
             # join_skill/kill_skill 四工具经 ctx.extras['spawn_coordinator'] 转发
@@ -1406,6 +1410,7 @@ class AgentEngine:
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
+            memory_query_builder=self._memory_query_builder,
             pinned_states=self._pinned_states,
             history_buffer=buffer,
             # detached-spawn：spawned 子 runner 也注入协调器 → 子 skill 可继续 spawn
@@ -2138,6 +2143,7 @@ class AgentEngine:
             capabilities=self._capabilities,
             spawn_registry=self._spawn_registry,
             memory_store=self._memory_store,
+            memory_query_builder=self._memory_query_builder,
             pinned_states=self._pinned_states,
             call_stack=sub_stack,
         )

@@ -18,14 +18,28 @@
 
 所有钩子由内核 best-effort 调用：实现抛异常**不得**打断主 turn（内核吞掉 + 记日志）。
 返回文本的钩子（prefetch / on_pre_evict）异常时按返回空串处理。
+
+**只读知识库最简接入**：继承 ``NullMemoryStore`` 仅覆写 ``prefetch`` 即构成合法
+实现（其余三钩子 no-op）——接外部知识库/向量 DB 只需三行::
+
+    class KnowledgeBase(NullMemoryStore):
+        async def prefetch(self, query: str, *, thread_id: str) -> str:
+            hits = await self._backend.search(query, top_k=3)
+            return "\\n".join(h.text for h in hits) if hits else ""
+
+多源(知识库 + 会话记忆)用 ``CompositeMemoryStore`` 组合；检索 query 的构造可经
+``EnginePool.create(memory_query_builder=...)`` 定制（默认 = 最后一条用户消息）。
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from taifeng.conversation.models import ResponseItem
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -81,3 +95,75 @@ class NullMemoryStore:
         self, *, thread_id: str, items: Sequence[ResponseItem]
     ) -> None:
         return None
+
+class CompositeMemoryStore:
+    """多源组合器 —— 把多个 MemoryStore 以 fan-out 方式合成一个(R1:只组合不决策)。
+
+    典型装配:「只读知识库 + 会话长期记忆」双源::
+
+        memory = CompositeMemoryStore([KnowledgeBase(vec), SessionMemory(db)])
+        pool = await EnginePool.create(..., memory_store=memory)
+
+    聚合语义:
+      - ``prefetch``:按注册序逐个调用,非空结果以空行拼接(全空返回空串);
+      - ``writeback`` / ``on_session_end``:广播全部子 store;
+      - ``on_pre_evict``:逐个调用,非空 digest 以换行拼接。
+    单个子 store 抛异常 → 记日志后继续其余子(不传染,与内核对单 store 的
+    best-effort 语义一致)。不去重、不限长:结果体积由各子 store 自律,
+    prompt 层既有截断兜底——组合器只做 fan-out,不引入第二套护栏。
+    """
+
+    def __init__(self, stores: Sequence[MemoryStore]) -> None:
+        """Args:
+            stores: 子 store 序列(按序决定 prefetch 拼接顺序);空序列是
+                无意义装配,显式 ``ValueError`` 拒绝。
+        """
+        if not stores:
+            raise ValueError("CompositeMemoryStore: stores 不能为空")
+        self._stores: list[MemoryStore] = list(stores)
+
+    async def prefetch(self, query: str, *, thread_id: str) -> str:
+        """按注册序拼接各子的非空 prefetch 结果(空行分隔)。"""
+        parts: list[str] = []
+        for s in self._stores:
+            try:
+                text = await s.prefetch(query, thread_id=thread_id)
+            except Exception:  # 单子崩溃不传染(best-effort,有日志非静默)
+                logger.exception("composite memory prefetch failed (skipped)")
+                continue
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
+
+    async def writeback(
+        self, *, thread_id: str, items: Sequence[ResponseItem]
+    ) -> None:
+        """广播写回到全部子 store;单子异常记日志后继续。"""
+        for s in self._stores:
+            try:
+                await s.writeback(thread_id=thread_id, items=items)
+            except Exception:
+                logger.exception("composite memory writeback failed (skipped)")
+
+    async def on_pre_evict(self, items: Sequence[ResponseItem]) -> str:
+        """逐个调用,拼接各子非空 digest(换行分隔)。"""
+        parts: list[str] = []
+        for s in self._stores:
+            try:
+                digest = await s.on_pre_evict(items)
+            except Exception:
+                logger.exception("composite memory on_pre_evict failed (skipped)")
+                continue
+            if digest:
+                parts.append(digest)
+        return "\n".join(parts)
+
+    async def on_session_end(
+        self, *, thread_id: str, items: Sequence[ResponseItem]
+    ) -> None:
+        """广播 teardown 到全部子 store;单子异常记日志后继续。"""
+        for s in self._stores:
+            try:
+                await s.on_session_end(thread_id=thread_id, items=items)
+            except Exception:
+                logger.exception("composite memory on_session_end failed (skipped)")

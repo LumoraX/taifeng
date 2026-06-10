@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from taifeng.telemetry.otel_sink import OtelSinkConfig, OtelTelemetrySink
 
 from taifeng.context import (
+    CompositeMemoryStore,
     CompressionContext,
     CompressionOrchestrator,
     CompressionResult,
@@ -184,6 +185,7 @@ __all__ = [
     "FilesystemSkillRegistry",
     "HandoffCompactionStrategy",
     "IndexHook",
+    "CompositeMemoryStore",
     "MemoryStore",
     "NullMemoryStore",
     "InitialContextInjection",

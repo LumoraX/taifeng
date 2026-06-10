@@ -155,6 +155,7 @@ class EnginePool:
         max_total_spawns: int = 1000,
         max_session_tokens: int | None = None,
         memory_store: Any = None,
+        memory_query_builder: Any = None,
         pinned_state_sources: list[Any] | None = None,
         pinned_total_max_chars: int = 8000,
     ) -> None:
@@ -216,6 +217,8 @@ class EnginePool:
         self._max_session_tokens = max_session_tokens
         # K3：长期记忆 swap 接口（None=无内存层级）
         self._memory_store = memory_store
+        # prefetch query 构造器，透传到 AgentEngine
+        self._memory_query_builder = memory_query_builder
         # postcompact-state-reinjection：pinned 源列表 + 总预算，透传到 AgentEngine
         self._pinned_state_sources: list[Any] = list(pinned_state_sources or [])
         self._pinned_total_max_chars = pinned_total_max_chars
@@ -271,6 +274,7 @@ class EnginePool:
         max_total_spawns: int = 1000,
         max_session_tokens: int | None = None,
         memory_store: Any = None,
+        memory_query_builder: Any = None,
         pinned_state_sources: list[Any] | None = None,
         pinned_total_max_chars: int = 8000,
     ) -> EnginePool:
@@ -358,6 +362,7 @@ class EnginePool:
             max_total_spawns=max_total_spawns,
             max_session_tokens=max_session_tokens,
             memory_store=memory_store,
+            memory_query_builder=memory_query_builder,
             pinned_state_sources=pinned_state_sources,
             pinned_total_max_chars=pinned_total_max_chars,
         )
@@ -492,6 +497,7 @@ class EnginePool:
                 max_total_spawns=self._max_total_spawns,
                 max_session_tokens=self._max_session_tokens,
                 memory_store=self._memory_store,
+                memory_query_builder=self._memory_query_builder,
                 pinned_state_sources=self._pinned_state_sources,
                 pinned_total_max_chars=self._pinned_total_max_chars,
             )

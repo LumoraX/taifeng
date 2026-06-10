@@ -20,7 +20,11 @@ from taifeng.context.compressor import (
     CompressionTrigger,
 )
 from taifeng.context.injection import InitialContextInjection
-from taifeng.context.memory import MemoryStore, NullMemoryStore
+from taifeng.context.memory import (
+    CompositeMemoryStore,
+    MemoryStore,
+    NullMemoryStore,
+)
 from taifeng.context.pinned_state import (
     PinnedStateRegistry,
     PinnedStateSource,
@@ -34,6 +38,7 @@ from taifeng.context.strategies import (
 __all__ = [
     "CacheBreakEvent",
     "CacheBreakReason",
+    "CompositeMemoryStore",
     "MemoryStore",
     "NullMemoryStore",
     "CompressionContext",
