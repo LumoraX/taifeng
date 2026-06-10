@@ -11,8 +11,8 @@ import time
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockTurn
-from taifeng.llm.providers.mock import RoutingMockClient
+from taifeng.llm.providers import SimTurn
+from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.suspend.reason import PendingRequest, SuspendReason
 from taifeng.suspend.record import SuspensionRecord
@@ -199,12 +199,12 @@ def ask_skills(tmp_path):
     return skills
 
 
-def _ask_turns() -> list[MockTurn]:
+def _ask_turns() -> list[SimTurn]:
     return [
-        MockTurn(text="提问", tool_calls=[
+        SimTurn(text="提问", tool_calls=[
             {"id": "ask1", "name": "request_user_input",
              "arguments": '{"prompt": "请补充"}'}]),
-        MockTurn(text="ASK_DONE"),
+        SimTurn(text="ASK_DONE"),
     ]
 
 
@@ -230,7 +230,7 @@ async def _collect_until(engine, pred, max_wait: float = 5.0):
 async def test_expire_data_suspend_auto_aborts(ask_skills, threads_dir):
     """DATA 挂起到期(ttl=60,注入未来时钟 → 立即触发)→ suspension_expired →
     自动核销(gap 回填 suspension_expired)且不续跑新 turn。"""
-    client = RoutingMockClient(routes={"ASK_MARK": _ask_turns()})
+    client = RoutingSimClient(routes={"ASK_MARK": _ask_turns()})
     pool = await taifeng.EnginePool.create(
         skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
         compressors=[],
@@ -259,7 +259,7 @@ async def test_expire_data_suspend_auto_aborts(ask_skills, threads_dir):
 async def test_manual_resume_wins_over_timer(ask_skills, threads_dir):
     """ttl 未到期(真实时钟,ttl=3600)→ 人工 Resume 先核销 → 定时器被撤销,
     无 suspension_expired,turn 正常完成。"""
-    client = RoutingMockClient(routes={"ASK_MARK": _ask_turns()})
+    client = RoutingSimClient(routes={"ASK_MARK": _ask_turns()})
     pool = await taifeng.EnginePool.create(
         skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
         compressors=[],
@@ -287,7 +287,7 @@ async def test_kernel_system_retry_expire_auto_retries(ask_skills, threads_dir):
     → 到期自动 resample 续跑至完成(无人值守自愈)。"""
     from taifeng.llm.errors import RateLimitError
 
-    class _FlakyOnce(RoutingMockClient):
+    class _FlakyOnce(RoutingSimClient):
         def __init__(self, **kw):
             super().__init__(**kw)
             self._raised = False
@@ -313,7 +313,7 @@ async def test_kernel_system_retry_expire_auto_retries(ask_skills, threads_dir):
 
             return _S()
 
-    client = _FlakyOnce(routes={"ASK_MARK": [MockTurn(text="RECOVERED")]})
+    client = _FlakyOnce(routes={"ASK_MARK": [SimTurn(text="RECOVERED")]})
     pool = await taifeng.EnginePool.create(
         skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
         compressors=[],
@@ -338,7 +338,7 @@ async def test_kernel_system_retry_expire_auto_retries(ask_skills, threads_dir):
 async def test_cold_rearm_fires_expired_on_load(ask_skills, threads_dir):
     """进程死亡期间过期:pool#1 挂起(ttl=60)后关闭;pool#2 注入未来时钟装载同
     thread → run 启动冷重武装立即裁决(suspension_expired + 核销)。"""
-    client = RoutingMockClient(routes={"ASK_MARK": _ask_turns()})
+    client = RoutingSimClient(routes={"ASK_MARK": _ask_turns()})
     pool1 = await taifeng.EnginePool.create(
         skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
         compressors=[],
@@ -353,7 +353,7 @@ async def test_cold_rearm_fires_expired_on_load(ask_skills, threads_dir):
     await pool1.close()
 
     # pool#2:同 threads_dir 冷恢复;未来时钟 → 装载即过期
-    client2 = RoutingMockClient(routes={"ASK_MARK": _ask_turns()})
+    client2 = RoutingSimClient(routes={"ASK_MARK": _ask_turns()})
     pool2 = await taifeng.EnginePool.create(
         skills_dir=ask_skills, threads_dir=threads_dir, model_client=client2,
         compressors=[],
@@ -447,15 +447,15 @@ async def _wait_status(engine, hid: str, want: str, tries: int = 200) -> bool:
 async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_dir):
     """挂起的 spawn 子任务到期(DATA,on_expire=abort)→ 句柄 error + SpawnFailed,
     且解除 barrier 占用(单句柄 barrier 在 abort 终态后触发,无人值守不死锁)。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "TTL_EXPERT_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "q1", "name": "request_user_input",
                  "arguments": '{"prompt": "补充?"}'}]),
-            MockTurn(text="不应被采样"),
+            SimTurn(text="不应被采样"),
         ],
-        "TTL_CONSULT_MARK": [MockTurn(text="汇总综合 CONSULT_DONE")],
-        "TTL_HOST_MARK": [MockTurn(text="host idle")],
+        "TTL_CONSULT_MARK": [SimTurn(text="汇总综合 CONSULT_DONE")],
+        "TTL_HOST_MARK": [SimTurn(text="host idle")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=ttl_spawn_skills, threads_dir=threads_dir, model_client=client,
@@ -506,15 +506,15 @@ async def test_spawn_abort_recheck_fires_join_barrier(ttl_spawn_skills, threads_
     barrier 永不触发、聚合挂死。"""
     import json
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "TTL_EXPERT_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "q1", "name": "request_user_input",
                  "arguments": '{"prompt": "补充?"}'}]),
         ],
-        "TTL_FAST_MARK": [MockTurn(text="速诊结论 FAST_DONE")],
-        "TTL_CONSULT_MARK": [MockTurn(text="汇总综合 CONSULT_DONE")],
-        "TTL_HOST_MARK": [MockTurn(text="host idle")],
+        "TTL_FAST_MARK": [SimTurn(text="速诊结论 FAST_DONE")],
+        "TTL_CONSULT_MARK": [SimTurn(text="汇总综合 CONSULT_DONE")],
+        "TTL_HOST_MARK": [SimTurn(text="host idle")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=ttl_spawn_skills, threads_dir=threads_dir, model_client=client,
@@ -619,19 +619,19 @@ async def test_spawn_nested_leaf_expire_routes_and_unblocks(tmp_path, threads_di
         d = skills / sub
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(body, encoding="utf-8")
-    client = RoutingMockClient(routes={
-        "NEST_HOST_MARK": [MockTurn(text="host idle")],
+    client = RoutingSimClient(routes={
+        "NEST_HOST_MARK": [SimTurn(text="host idle")],
         "NEST_MID_MARK": [
-            MockTurn(text="派", tool_calls=[
+            SimTurn(text="派", tool_calls=[
                 {"id": "m1", "name": "call_skill",
                  "arguments": '{"skill_id": "nest-ask", "reason": "go"}'}]),
-            MockTurn(text="MID_DONE"),
+            SimTurn(text="MID_DONE"),
         ],
         "NEST_ASK_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "a1", "name": "request_user_input",
                  "arguments": '{"prompt": "补充?"}'}]),
-            MockTurn(text="不应被采样"),
+            SimTurn(text="不应被采样"),
         ],
     })
     pool = await taifeng.EnginePool.create(
@@ -670,7 +670,7 @@ async def test_spawn_nested_leaf_expire_routes_and_unblocks(tmp_path, threads_di
 async def test_root_cancel_clears_ttl_timers(ask_skills, threads_dir):
     """R4:root-cancel 退出路径同样清空全部 TTL 定时器(不只 Shutdown 分支)——
     孤儿定时器到期后会向无人消费的队列 submit。"""
-    client = RoutingMockClient(routes={"ASK_MARK": _ask_turns()})
+    client = RoutingSimClient(routes={"ASK_MARK": _ask_turns()})
     pool = await taifeng.EnginePool.create(
         skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
         compressors=[],
@@ -698,7 +698,7 @@ async def test_inflight_guard_timer_noop_and_second_resume_rejected(
     """在飞守卫:① record 在飞时定时器 fire 为 no-op(不发 suspension_expired、
     不二次裁决);② 同 record 第二个 Resume 被 resolve_in_flight 拒绝;
     ③ 释放后人工 Resume 正常核销。"""
-    client = RoutingMockClient(routes={"ASK_MARK": _ask_turns()})
+    client = RoutingSimClient(routes={"ASK_MARK": _ask_turns()})
     pool = await taifeng.EnginePool.create(
         skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
         compressors=[],
@@ -766,12 +766,12 @@ async def test_engine_pool_ctor_rejects_nonpositive_failure_ttl(
     with _pytest.raises(ValueError, match="failure_suspend_ttl_seconds"):
         await taifeng.EnginePool.create(
             skills_dir=ask_skills, threads_dir=threads_dir,
-            model_client=RoutingMockClient(routes={}), compressors=[],
+            model_client=RoutingSimClient(routes={}), compressors=[],
             failure_suspend_ttl_seconds=-1,
         )
 
 
-class _AlwaysFilteredClient(RoutingMockClient):
+class _AlwaysFilteredClient(RoutingSimClient):
     """每次采样都抛确定性 ContentFilterError —— 测自动 retry 谱系熔断用。"""
 
     def __init__(self) -> None:

@@ -12,7 +12,7 @@
   对话中段出现 system 消息（anthropic/gemini provider 都特判丢弃/转 user，唯独
   openai_compat 没处理）→ 严格代理回 400。该 marker 是幂等记账，LLM 不该看见。
 
-MockClient 不校验 tool_call_id 配对，故既有 e2e 测不到——这里用渲染后断言补齐。
+SimClient 不校验 tool_call_id 配对，故既有 e2e 测不到——这里用渲染后断言补齐。
 """
 from __future__ import annotations
 
@@ -145,21 +145,21 @@ max_call_depth: 2
 
 
 def _routing_client():
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
 
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "PARENT_MARK": [
-            MockTurn(text="先做初诊", tool_calls=[
+            SimTurn(text="先做初诊", tool_calls=[
                 {"id": "c_call", "name": "call_skill",
                  "arguments": '{"skill_id":"intake-analyzer","reason":"x"}'}]),
-            MockTurn(text="父流程完成"),
+            SimTurn(text="父流程完成"),
         ],
         "CHILD_MARK": [
-            MockTurn(text="向用户采集", tool_calls=[
+            SimTurn(text="向用户采集", tool_calls=[
                 {"id": "call_rui1", "name": "request_user_input",
                  "arguments": '{"prompt":"补充体检"}'}]),
-            MockTurn(text="子完成 CHILD_DONE"),
+            SimTurn(text="子完成 CHILD_DONE"),
         ],
     })
 
@@ -288,27 +288,27 @@ max_call_depth: 2
 
 
 def _nested_client():
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
 
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "ROOT2_MARK": [
-            MockTurn(text="派 mid", tool_calls=[
+            SimTurn(text="派 mid", tool_calls=[
                 {"id": "r_call", "name": "call_skill",
                  "arguments": '{"skill_id":"n-mid","reason":"x"}'}]),
-            MockTurn(text="root done"),
+            SimTurn(text="root done"),
         ],
         "MID2_MARK": [
-            MockTurn(text="派 leaf", tool_calls=[
+            SimTurn(text="派 leaf", tool_calls=[
                 {"id": "m_call", "name": "call_skill",
                  "arguments": '{"skill_id":"n-leaf","reason":"x"}'}]),
-            MockTurn(text="mid done"),
+            SimTurn(text="mid done"),
         ],
         "LEAF2_MARK": [
-            MockTurn(text="采集", tool_calls=[
+            SimTurn(text="采集", tool_calls=[
                 {"id": "leaf_rui", "name": "request_user_input",
                  "arguments": '{"prompt":"补充"}'}]),
-            MockTurn(text="leaf done LEAF_DONE"),
+            SimTurn(text="leaf done LEAF_DONE"),
         ],
     })
 

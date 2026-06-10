@@ -213,7 +213,7 @@ async def test_runtime_invoke_propagates_suspend_signal():
 # ====================================================================
 #
 # 走 EnginePool → AgentEngine → 一次 turn 的真实链路(参照 tests/loop/test_engine_e2e.py
-# 与 tests/loop/test_permission_policy_wiring.py 的 MockClient + EnginePool 搭建套路):
+# 与 tests/loop/test_permission_policy_wiring.py 的 SimClient + EnginePool 搭建套路):
 #   - 注册一个工具,其 handler 主动经注入的 PermissionPolicy.check 走审批门控;
 #   - PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter()) → check 抛
 #     SuspendSignal(reason=PERMISSION);
@@ -261,7 +261,7 @@ async def test_suspend_turn_ends_suspended_and_persists_record(skills_dir, threa
     """run_turn 命中挂起点时:end_reason=="suspended"、落 SuspensionRecord、
     function_call 有但无配对 function_call_output(history-gap)。"""
     import taifeng
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.llm.types import TokenUsage
     from taifeng.permission.types import PermissionPolicy
 
@@ -284,9 +284,9 @@ max_call_depth: 2
     (skills_dir / "suspend-skill").mkdir()
     (skills_dir / "suspend-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
-    # MockClient:第一轮产出一个 danger tool call(命中审批挂起);无第二轮(turn 挂起不再采样)
-    client = MockClient(turns=[
-        MockTurn(
+    # SimClient:第一轮产出一个 danger tool call(命中审批挂起);无第二轮(turn 挂起不再采样)
+    client = SimClient(turns=[
+        SimTurn(
             text="calling danger",
             tool_calls=[{"id": "call_d1", "name": "danger", "arguments": "{}"}],
             usage=TokenUsage(input_tokens=10, output_tokens=5),
@@ -395,29 +395,13 @@ async def test_system_retry_suspends_turn(skills_dir, threads_dir):
     detail["failure_class"] 已填。
     """
     import taifeng
-    from taifeng.llm.client import ModelClient
-    from taifeng.llm.errors import RateLimitError
+    from taifeng.llm.providers import SimClient, SimFault, SimTurn
 
-    class _RaisingSession:
-        """stream 直接抛 RateLimitError(模拟 provider retry 已耗尽)。"""
-
-        def __init__(self, cancel):  # noqa: ANN001, ANN204
-            self._cancel = cancel
-
-        async def __aenter__(self):  # noqa: ANN204
-            return self
-
-        async def __aexit__(self, *exc):  # noqa: ANN002, ANN204
-            pass
-
-        async def stream(self, request):  # noqa: ANN001, ANN201
-            # 必须先 yield 才是 async generator;yield 前抛即在首次迭代抛出
-            raise RateLimitError("rate limited", retry_after_seconds=3.0)
-            yield  # pragma: no cover —— 使函数成为 async generator
-
-    class _RaisingClient(ModelClient):
-        def session(self, *, cancel, model=None):  # noqa: ANN001, ANN201
-            return _RaisingSession(cancel)
+    # 每段剧本都抛 RateLimitError(模拟 provider retry 已耗尽且持续限流)
+    raising_client = SimClient(turns=[
+        SimTurn(fault=SimFault.rate_limit(retry_after_seconds=3.0)),
+        SimTurn(fault=SimFault.rate_limit(retry_after_seconds=3.0)),
+    ])
 
     skill_md = """---
 name: retry-skill
@@ -437,7 +421,7 @@ max_call_depth: 2
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
         threads_dir=threads_dir,
-        model_client=_RaisingClient(),
+        model_client=raising_client,
         compressors=[],
     )
     engine = await pool.get_or_create(
@@ -805,13 +789,13 @@ async def test_resume_after_permission_suspension(skills_dir, threads_dir):
     """permission ask 挂起 → Resume(granted=True) → 执行被批准 tool + 续采样完成。
 
     链路：
-      1. MockClient 第一轮产出 danger tool call → 经 ask 门控挂起为 PERMISSION。
+      1. SimClient 第一轮产出 danger tool call → 经 ask 门控挂起为 PERMISSION。
       2. 提交 Resume(resolutions={req_id: {"granted": True}})。
       3. 断言：suspension_resolved 事件触发；被挂起的 call 现在有了
          function_call_output（gap 补齐）；续采样的第二轮以 turn_completed 结束。
     """
     import taifeng
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.llm.types import TokenUsage
     from taifeng.loop.submission import Resume
     from taifeng.permission.types import (
@@ -825,13 +809,13 @@ async def test_resume_after_permission_suspension(skills_dir, threads_dir):
     _build_suspend_skill(skills_dir)
 
     # 第一轮：danger tool call（命中审批挂起）；第二轮（resume 后续跑）：纯文本完成
-    client = MockClient(turns=[
-        MockTurn(
+    client = SimClient(turns=[
+        SimTurn(
             text="calling danger",
             tool_calls=[{"id": "call_d1", "name": "danger", "arguments": "{}"}],
             usage=TokenUsage(input_tokens=10, output_tokens=5),
         ),
-        MockTurn(
+        SimTurn(
             text="approved and done",
             usage=TokenUsage(input_tokens=8, output_tokens=4),
         ),
@@ -900,50 +884,19 @@ async def test_resume_system_retry(skills_dir, threads_dir):
     resume 时 {req_id: {"action": "retry"}} → 续采样走第二个（成功）turn → 完成。
     """
     import taifeng
-    from taifeng.llm.client import ModelClient
-    from taifeng.llm.errors import RateLimitError
-    from taifeng.llm.providers import MockSession, MockTurn
+    from taifeng.llm.providers import SimClient, SimFault, SimTurn
     from taifeng.llm.types import TokenUsage
     from taifeng.loop.submission import Resume
 
-    class _RetryThenOkClient(ModelClient):
-        """首次 session 的 stream 抛 RateLimitError；之后成功回放空文本完成。
-
-        模拟「retry 耗尽 → 挂起 → resume 续跑时 provider 已恢复」。
-        """
-
-        def __init__(self):  # noqa: ANN204
-            self._calls = 0
-
-        def session(self, *, cancel, model=None):  # noqa: ANN001, ANN201
-            self._calls += 1
-            if self._calls == 1:
-                return _RaisingOnceSession(cancel)
-            # resume 续跑：正常成功 turn（纯文本，无 tool call → 完成）
-            return MockSession(
-                turn=MockTurn(
-                    text="recovered and done",
-                    usage=TokenUsage(input_tokens=6, output_tokens=3),
-                ),
-                cancel=cancel,
-                model=model or "mock-model",
-            )
-
-    class _RaisingOnceSession:
-        """stream 直接抛 RateLimitError（模拟首轮 provider retry 已耗尽）。"""
-
-        def __init__(self, cancel):  # noqa: ANN001, ANN204
-            self._cancel = cancel
-
-        async def __aenter__(self):  # noqa: ANN204
-            return self
-
-        async def __aexit__(self, *exc):  # noqa: ANN002, ANN204
-            pass
-
-        async def stream(self, request):  # noqa: ANN001, ANN201
-            raise RateLimitError("rate limited", retry_after_seconds=3.0)
-            yield  # pragma: no cover —— 使函数成为 async generator
+    # sim 故障注入原生覆盖「retry 耗尽 → 挂起 → resume 续跑时 provider 已恢复」:
+    # 第 1 段剧本直接抛 RateLimitError(被拒采样不消耗游标错位),第 2 段成功完成
+    client = SimClient(turns=[
+        SimTurn(fault=SimFault.rate_limit(retry_after_seconds=3.0)),
+        SimTurn(
+            text="recovered and done",
+            usage=TokenUsage(input_tokens=6, output_tokens=3),
+        ),
+    ])
 
     skill_md = """---
 name: retry-resume-skill
@@ -963,7 +916,7 @@ max_call_depth: 2
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
         threads_dir=threads_dir,
-        model_client=_RetryThenOkClient(),
+        model_client=client,
         compressors=[],
     )
     engine = await pool.get_or_create(
@@ -1079,17 +1032,17 @@ async def _suspend_pool_and_engine(
 
 
 def _suspend_client():
-    """构造一个第一轮产出 danger tool call、第二轮纯文本完成的 MockClient。"""
-    from taifeng.llm.providers import MockClient, MockTurn
+    """构造一个第一轮产出 danger tool call、第二轮纯文本完成的 SimClient。"""
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.llm.types import TokenUsage
 
-    return MockClient(turns=[
-        MockTurn(
+    return SimClient(turns=[
+        SimTurn(
             text="calling danger",
             tool_calls=[{"id": "call_d1", "name": "danger", "arguments": "{}"}],
             usage=TokenUsage(input_tokens=10, output_tokens=5),
         ),
-        MockTurn(
+        SimTurn(
             text="approved and done",
             usage=TokenUsage(input_tokens=8, output_tokens=4),
         ),
@@ -1120,7 +1073,7 @@ async def test_resume_partial_resolution_rejected(skills_dir, threads_dir):
     本用例覆盖「resolutions 与 record.pending 不匹配」这条边界：提交一个
     包含真实 req_id 之外的多余 key 的 Resume，SuspensionResolver.plan 抛
     ResolveError → engine emit suspension_resolve_rejected，turn 不续跑。
-    （两 pending 同批挂起经 MockClient 难构造；resolver 层「缺项 / 多余项」
+    （两 pending 同批挂起经 SimClient 难构造；resolver 层「缺项 / 多余项」
     已由 test_resolver_rejects_incomplete / _rejects_unknown 单测覆盖，此处
     在 engine 层验证拒绝路径真实触发。）
     """
@@ -1232,7 +1185,7 @@ async def test_resume_unknown_thread_or_no_suspension(skills_dir, threads_dir):
     _find_active_suspension 返回 None → suspension_resolve_rejected。
     """
     import taifeng
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.llm.types import TokenUsage
 
     # 一个纯文本（不挂起）的 entry skill：直接完成,无挂起
@@ -1251,8 +1204,8 @@ max_call_depth: 2
     (skills_dir / "plain-skill").mkdir()
     (skills_dir / "plain-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
-    client = MockClient(turns=[
-        MockTurn(text="done", usage=TokenUsage(input_tokens=4, output_tokens=2)),
+    client = SimClient(turns=[
+        SimTurn(text="done", usage=TokenUsage(input_tokens=4, output_tokens=2)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -1366,7 +1319,7 @@ async def test_tier2_rebuild_resume(skills_dir, threads_dir):
        补齐 gap、续采样完成 → 证明跨进程 resume。
     """
     import taifeng
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.llm.types import TokenUsage
     from taifeng.permission.types import PermissionPolicy, SuspendingPrompter
 
@@ -1388,8 +1341,8 @@ async def test_tier2_rebuild_resume(skills_dir, threads_dir):
     gated_tool_2 = await _gated_tool_with_call_id_factory()
     policy_2 = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
     # resume 续跑只需要「成功完成」的一轮（无需再产出 tool call）
-    client2 = MockClient(turns=[
-        MockTurn(text="recovered and done", usage=TokenUsage(input_tokens=6, output_tokens=3)),
+    client2 = SimClient(turns=[
+        SimTurn(text="recovered and done", usage=TokenUsage(input_tokens=6, output_tokens=3)),
     ])
     # 注意：suspend-skill 已在实例#1 setup 时写入磁盘，重建实例直接复用，无需再写。
     pool2 = await taifeng.EnginePool.create(
@@ -1446,7 +1399,7 @@ async def test_subscribe_terminates_on_suspension(skills_dir, threads_dir):
     import anyio
 
     import taifeng
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.llm.types import TokenUsage
     from taifeng.permission.types import PermissionPolicy
 
@@ -1469,9 +1422,9 @@ max_call_depth: 2
     (skills_dir / "suspend-skill").mkdir()
     (skills_dir / "suspend-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
-    # MockClient：第一轮产出一个 danger tool call(命中审批挂起)；无第二轮(挂起不再采样)
-    client = MockClient(turns=[
-        MockTurn(
+    # SimClient：第一轮产出一个 danger tool call(命中审批挂起)；无第二轮(挂起不再采样)
+    client = SimClient(turns=[
+        SimTurn(
             text="calling danger",
             tool_calls=[{"id": "call_d1", "name": "danger", "arguments": "{}"}],
             usage=TokenUsage(input_tokens=10, output_tokens=5),

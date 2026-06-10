@@ -182,8 +182,8 @@ async def _leaf_with_user_pending(pool, thread_ids: list[str]):
 async def test_nested_grandchild_suspension_propagates_to_root(tmp_path: Path, threads_dir):
     """三层派发：叶内 danger 挂起 → Resume(叶 thread) → 续跑链跨两级父回传 → 根 completed。"""
     import taifeng
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
     from taifeng.loop.submission import Resume
 
     skills = _write_skills(tmp_path, "nested_skills", {
@@ -192,26 +192,26 @@ async def test_nested_grandchild_suspension_propagates_to_root(tmp_path: Path, t
         "leaf-worker": _composite("leaf-worker", "LEAF_MARK", ["noop"], ["danger"]),
         "noop": _atomic("noop"),
     })
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         # 祖：派 mid → （回传后）文本完成
         "GP_MARK": [
-            MockTurn(text="派发 mid", tool_calls=[
+            SimTurn(text="派发 mid", tool_calls=[
                 {"id": "gp_call", "name": "call_skill",
                  "arguments": '{"skill_id": "mid-orch", "reason": "go"}'}]),
-            MockTurn(text="祖完成。"),
+            SimTurn(text="祖完成。"),
         ],
         # 父：派 leaf → （回传后）文本完成
         "MID_MARK": [
-            MockTurn(text="派发 leaf", tool_calls=[
+            SimTurn(text="派发 leaf", tool_calls=[
                 {"id": "mid_call", "name": "call_skill",
                  "arguments": '{"skill_id": "leaf-worker", "reason": "go"}'}]),
-            MockTurn(text="中完成。"),
+            SimTurn(text="中完成。"),
         ],
         # 叶：danger 挂起 → （resume 后）文本完成
         "LEAF_MARK": [
-            MockTurn(text="叶调 danger", tool_calls=[
+            SimTurn(text="叶调 danger", tool_calls=[
                 {"id": "leaf_d", "name": "danger", "arguments": "{}"}]),
-            MockTurn(text="叶工作完成 LEAF_DONE_MARK"),
+            SimTurn(text="叶工作完成 LEAF_DONE_MARK"),
         ],
     })
 
@@ -269,8 +269,8 @@ async def test_child_multi_pending_partial_then_complete(tmp_path: Path, threads
     """子内 danger×2 同批挂起(request 级核销):先 resolve 1 个 → 部分核销(record
     仍活跃、子不续跑);补齐另 1 个 → 全量达成、两 tool 都执行回填、根完成。"""
     import taifeng
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
     from taifeng.loop.submission import Resume
 
     skills = _write_skills(tmp_path, "multi_skills", {
@@ -278,19 +278,19 @@ async def test_child_multi_pending_partial_then_complete(tmp_path: Path, threads
         "worker2": _composite("worker2", "W2_MARK", ["noop2"], ["danger"]),
         "noop2": _atomic("noop2"),
     })
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "P2_MARK": [
-            MockTurn(text="派发 worker", tool_calls=[
+            SimTurn(text="派发 worker", tool_calls=[
                 {"id": "p2_call", "name": "call_skill",
                  "arguments": '{"skill_id": "worker2", "reason": "go"}'}]),
-            MockTurn(text="父完成。"),
+            SimTurn(text="父完成。"),
         ],
         # 同一 turn 抛两个 danger call → 一批两 pending
         "W2_MARK": [
-            MockTurn(text="子调两个 danger", tool_calls=[
+            SimTurn(text="子调两个 danger", tool_calls=[
                 {"id": "call_a", "name": "danger", "arguments": "{}"},
                 {"id": "call_b", "name": "danger", "arguments": "{}"}]),
-            MockTurn(text="子工作完成 W2_DONE_MARK"),
+            SimTurn(text="子工作完成 W2_DONE_MARK"),
         ],
     })
 
@@ -351,8 +351,8 @@ async def test_child_multi_pending_partial_then_complete(tmp_path: Path, threads
 async def test_child_resume_rejects_bad_request_id_and_double_resume(tmp_path: Path, threads_dir):
     """错误 req_id → 拒绝且 record 不消费 → 正确 resume 仍成功；完成后再 resume → 拒绝。"""
     import taifeng
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
     from taifeng.loop.submission import Resume
 
     skills = _write_skills(tmp_path, "reject_skills", {
@@ -360,17 +360,17 @@ async def test_child_resume_rejects_bad_request_id_and_double_resume(tmp_path: P
         "worker3": _composite("worker3", "W3_MARK", ["noop3"], ["danger"]),
         "noop3": _atomic("noop3"),
     })
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "P3_MARK": [
-            MockTurn(text="派发", tool_calls=[
+            SimTurn(text="派发", tool_calls=[
                 {"id": "p3_call", "name": "call_skill",
                  "arguments": '{"skill_id": "worker3", "reason": "go"}'}]),
-            MockTurn(text="父完成。"),
+            SimTurn(text="父完成。"),
         ],
         "W3_MARK": [
-            MockTurn(text="子调 danger", tool_calls=[
+            SimTurn(text="子调 danger", tool_calls=[
                 {"id": "w3_d", "name": "danger", "arguments": "{}"}]),
-            MockTurn(text="子完成 W3_DONE_MARK"),
+            SimTurn(text="子完成 W3_DONE_MARK"),
         ],
     })
 

@@ -116,7 +116,7 @@ async def _gated_danger_tool():
 
 
 def _routing_client():
-    """RoutingMockClient：父首轮 call_skill 派子；子首轮 danger（挂起）；子续跑纯文本完成。
+    """RoutingSimClient：父首轮 call_skill 派子；子首轮 danger（挂起）；子续跑纯文本完成。
 
     路由标记取各 skill body 唯一标记（ENTRY_MARK / CHILD_MARK），父子互不串扰。
       - ENTRY_MARK 第 1 次命中：吐 call_skill(child-worker)；
@@ -124,22 +124,22 @@ def _routing_client():
       - CHILD_MARK 第 1 次命中：吐 danger tool call（触发审批挂起）；
         第 2 次命中（resume 后子续采样）：纯文本 → 子 turn 完成。
     """
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
 
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "ENTRY_MARK": [
-            MockTurn(text="派发子 skill", tool_calls=[
+            SimTurn(text="派发子 skill", tool_calls=[
                 {"id": "c_call", "name": "call_skill",
                  "arguments": '{"skill_id": "child-worker", "reason": "do work"}'},
             ]),
-            MockTurn(text="父编排完成。"),
+            SimTurn(text="父编排完成。"),
         ],
         "CHILD_MARK": [
-            MockTurn(text="子调用 danger", tool_calls=[
+            SimTurn(text="子调用 danger", tool_calls=[
                 {"id": "call_d1", "name": "danger", "arguments": "{}"},
             ]),
-            MockTurn(text="子工作完成 CHILD_DONE_MARK"),
+            SimTurn(text="子工作完成 CHILD_DONE_MARK"),
         ],
     })
 

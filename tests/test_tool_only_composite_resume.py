@@ -62,23 +62,23 @@ def _build_skills(tmp_path: Path) -> Path:
 
 def _routing_client():
     """父首轮 call_skill 派子；子首轮 request_user_input（挂起）；各自第 2 轮纯文本完成。"""
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
 
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "PARENT_MARK": [
-            MockTurn(text="派发子 skill", tool_calls=[
+            SimTurn(text="派发子 skill", tool_calls=[
                 {"id": "c_call", "name": "call_skill",
                  "arguments": '{"skill_id": "intake-analyzer", "reason": "analyze"}'},
             ]),
-            MockTurn(text="父流程完成。"),
+            SimTurn(text="父流程完成。"),
         ],
         "CHILD_MARK": [
-            MockTurn(text="子向用户采集", tool_calls=[
+            SimTurn(text="子向用户采集", tool_calls=[
                 {"id": "call_rui1", "name": "request_user_input",
                  "arguments": '{"prompt": "请补充近三月体检报告"}'},
             ]),
-            MockTurn(text="子分析完成 CHILD_DONE_MARK"),
+            SimTurn(text="子分析完成 CHILD_DONE_MARK"),
         ],
     })
 
