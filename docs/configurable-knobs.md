@@ -34,6 +34,8 @@
 | **`max_total_spawns`** | `1000` | K1 广度准入 | 单 engine 生命周期内累计 spawn 上限（单调递增，不回收；兜底 runaway 循环），与并发上限独立 | codex 同上 |
 | **`max_session_tokens`** | `None` | K2 资源强制 | 会话累计 token 硬天花板（OOM-killer）。`None`=不强制（只告警）。设值后：跨 turn 累计触顶 → pre-turn 拒新 turn（`turn_refused`）；turn 内触顶且有后续 tool call → `ResourceLimitExceeded(turn_aborted)` 事件 + 停采样 | codex `UsageLimitReached` |
 | **`memory_store`** | `None` | K3 内存层级 | `MemoryStore` 协议实现（长期记忆 swap/缺页接口）：`prefetch` 换入注入 prompt 尾部 / `writeback` 脏页写回 / `on_pre_evict` 换出前抢救 digest / `on_session_end` teardown。`None`=无内存层级（=`NullMemoryStore`）。全 best-effort（钩子异常不打断 turn）。后端（向量库/KV/RAG）是 **userspace**，业务自接。协议见 `src/taifeng/context/memory.py` | hermes `memory_provider.py`（剔业务字段） |
+| **`pinned_state_sources`** | `None` | E1 压缩后状态保活 | `list[PinnedStateSource]`（name / max_chars / `format_for_injection()`，同步协议）：压缩成功后按注册序渲染并以 `system_injection(source="pinned:<name>")` 钉回 history 尾（R5 持久化）。`None`/空=零行为变化。运行时增删走 `engine.register_pinned_state` / `unregister_pinned_state`。详见 [capabilities/postcompact-state-reinjection.md](architecture/capabilities/postcompact-state-reinjection.md) | hermes 压缩后重注入 `todo_snapshot`（协议化） |
+| **`pinned_total_max_chars`** | `8000` | pinned 注入总预算 | 单轮注入字符总预算（按注册序累计，装不下的 source 整体丢弃并记入事件 `dropped`）；per-source 上限由各 source 的 `max_chars` 控制（truncate_middle 截断） | 防 pinned 反噬压缩收益 |
 | **`submission_queue_size`** | `256` | K4 入站流控 | 入站 submission 队列 maxsize（bounded backpressure）。满则 `submit()` 在 `put` 处 await（业务侧自然阻塞），不丢提交。与 `event_queue_size`（出站）成对 | codex bounded 入站队列 |
 
 ### `get_or_create` 运行时参数

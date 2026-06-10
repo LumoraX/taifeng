@@ -150,6 +150,8 @@ class EnginePool:
         max_total_spawns: int = 1000,
         max_session_tokens: int | None = None,
         memory_store: Any = None,
+        pinned_state_sources: list[Any] | None = None,
+        pinned_total_max_chars: int = 8000,
     ) -> None:
         self._registry = skill_registry
         self._model_client = model_client
@@ -187,6 +189,9 @@ class EnginePool:
         self._max_session_tokens = max_session_tokens
         # K3：长期记忆 swap 接口（None=无内存层级）
         self._memory_store = memory_store
+        # postcompact-state-reinjection：pinned 源列表 + 总预算，透传到 AgentEngine
+        self._pinned_state_sources: list[Any] = list(pinned_state_sources or [])
+        self._pinned_total_max_chars = pinned_total_max_chars
 
         self._engines: dict[str, AgentEngine] = {}
         self._engine_tasks: dict[str, asyncio.Task[None]] = {}
@@ -234,6 +239,8 @@ class EnginePool:
         max_total_spawns: int = 1000,
         max_session_tokens: int | None = None,
         memory_store: Any = None,
+        pinned_state_sources: list[Any] | None = None,
+        pinned_total_max_chars: int = 8000,
     ) -> EnginePool:
         """便捷构造。
 
@@ -314,6 +321,8 @@ class EnginePool:
             max_total_spawns=max_total_spawns,
             max_session_tokens=max_session_tokens,
             memory_store=memory_store,
+            pinned_state_sources=pinned_state_sources,
+            pinned_total_max_chars=pinned_total_max_chars,
         )
 
         if auto_watch_skills:
@@ -441,6 +450,8 @@ class EnginePool:
                 max_total_spawns=self._max_total_spawns,
                 max_session_tokens=self._max_session_tokens,
                 memory_store=self._memory_store,
+                pinned_state_sources=self._pinned_state_sources,
+                pinned_total_max_chars=self._pinned_total_max_chars,
             )
             # 让 engine 能在收到 RefreshSnapshot 时拉最新快照
             engine._registry_ref = self._registry  # type: ignore[attr-defined]

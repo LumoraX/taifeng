@@ -130,6 +130,8 @@ class AgentEngine:
         max_total_spawns: int = 1000,
         max_session_tokens: int | None = None,
         memory_store: Any = None,
+        pinned_state_sources: list[Any] | None = None,
+        pinned_total_max_chars: int = 8000,
     ) -> None:
         """
         Args:
@@ -192,6 +194,16 @@ class AgentEngine:
         self._max_session_tokens = max_session_tokens
         # K3：长期记忆 swap 接口（None=无内存层级，默认行为不变）
         self._memory_store = memory_store
+        # postcompact-state-reinjection：pinned 注册表（engine 级共享实例，贯穿
+        # 所有 TurnRunner）。构造期注入 list + 运行时 register/unregister 增删；
+        # 空注册表在 turn 层短路（零行为变化）。同名注册 ValueError 由 registry 保证。
+        from taifeng.context.pinned_state import PinnedStateRegistry
+
+        self._pinned_states = PinnedStateRegistry(
+            total_max_chars=pinned_total_max_chars
+        )
+        for _src in pinned_state_sources or []:
+            self._pinned_states.register(_src)
         self._session_tokens: int = 0
         # detached-spawn：协调器（句柄表 / 分离驱动 / 错峰 resume / join-barrier / 冷恢复）
         # 抽到 SpawnDriver（见 spawn_driver.py），engine 仅留薄转发器（公共 API + 调用点）。
@@ -262,6 +274,18 @@ class AgentEngine:
     @property
     def thread_id(self) -> str:
         return self._thread_id
+
+    def register_pinned_state(self, source: Any) -> None:
+        """运行时注册 pinned 状态源（生效于下一次成功压缩）。
+
+        宿主装配动作（业务持 engine 引用直调，不走 Op）。同名已注册 →
+        ``ValueError``（registry 保证，禁静默覆盖）。
+        """
+        self._pinned_states.register(source)
+
+    def unregister_pinned_state(self, name: str) -> None:
+        """运行时注销 pinned 状态源；不存在 → ``KeyError``（显式失败）。"""
+        self._pinned_states.unregister(name)
 
     @property
     def entry_skill(self) -> SkillDefinition:
@@ -823,6 +847,7 @@ class AgentEngine:
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
+            pinned_states=self._pinned_states,
             # detached-spawn：注入自身作 spawn 协调器 → spawn_skill/await_skills/
             # join_skill/kill_skill 四工具经 ctx.extras['spawn_coordinator'] 转发
             spawn_coordinator=self,
@@ -940,6 +965,7 @@ class AgentEngine:
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
+            pinned_states=self._pinned_states,
             history_buffer=buffer,
             # detached-spawn：spawned 子 runner 也注入协调器 → 子 skill 可继续 spawn
             spawn_coordinator=self,
@@ -1438,6 +1464,7 @@ class AgentEngine:
             capabilities=self._capabilities,
             spawn_registry=self._spawn_registry,
             memory_store=self._memory_store,
+            pinned_states=self._pinned_states,
             call_stack=sub_stack,
         )
         return await runner.run()
@@ -1690,6 +1717,7 @@ class AgentEngine:
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(self._history),
             cache_anchor_index=self._cache_anchor_index,
+            pinned_states=self._pinned_states,
         )
         await runner._maybe_compress(phase="manual", force=op.force)  # noqa: SLF001
         async with self._lock:

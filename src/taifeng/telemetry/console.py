@@ -46,6 +46,7 @@ _KIND_TAG = {
     "thread_resumed": ("eng ", _Colors.GRAY, "↻"),
     "compaction_started": ("comp", _Colors.GRAY, "→"),
     "compaction_completed": ("comp", _Colors.GRAY, "←"),
+    "pinned_state_reinjected": ("comp", _Colors.GRAY, "📌"),
     "cache_break_detected": ("cach", _Colors.RED, "!"),
     # Permission gate 事件（红色 —— 表示拦截）
     "permission_prompt_timeout": ("perm", _Colors.RED, "⏱"),
@@ -117,6 +118,13 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         parts.append(
             f"{status} removed={data.get('removed_count')} cache_invalid={data.get('cache_invalidated')}"
             + (f" reason={data.get('reason')}" if data.get("reason") else "")
+        )
+    elif ev.msg.kind == "pinned_state_reinjected":
+        names = ",".join(s.get("name", "?") for s in data.get("sources", []))
+        parts.append(
+            f"phase={data.get('phase')} sources=[{names}] "
+            f"total={data.get('total_chars')}ch"
+            + (f" dropped={data.get('dropped')}" if data.get("dropped") else "")
         )
     elif ev.msg.kind == "cache_break_detected":
         u = "unexpected" if data.get("unexpected") else "expected"

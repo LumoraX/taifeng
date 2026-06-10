@@ -12,7 +12,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from taifeng.context.budget import (
     ContextBudget,
@@ -25,6 +25,9 @@ from taifeng.context.compressor import (
     CompressionOrchestrator,
 )
 from taifeng.context.injection import InitialContextInjection
+
+if TYPE_CHECKING:
+    from taifeng.context.pinned_state import PinnedStateRegistry
 from taifeng.conversation.models import (
     ResponseItem,
     assistant_message,
@@ -52,7 +55,9 @@ from taifeng.loop.event import (
     CompactionIntegrityRolledBack,
     CompactionStarted,
     ContextBudgetExceeded,
+    EngineLog,
     EventMsg,
+    PinnedStateReinjected,
     PreCompactHookSkipped,
     ProviderRetry,
     ResourceLimitExceeded,
@@ -233,6 +238,10 @@ class TurnRunner:
     max_session_tokens: int | None = None
     # K3：长期记忆 swap 接口（engine 注入）；None=无内存层级（默认，行为不变）。
     memory_store: Any = None  # MemoryStore | None
+    # postcompact-state-reinjection：pinned 状态注册表（engine 注入共享实例）。
+    # 压缩成功后按注册序把各 source 渲染结果以 system_injection 钉回 history 尾。
+    # None=未启用（默认，零行为变化）。与 K3 正交：memory 是换出抢救，这里是钉回保活。
+    pinned_states: PinnedStateRegistry | None = None
     # detached-spawn：spawn 协调器（engine 注入 self）；让 spawn_skill / await_skills /
     # join_skill / kill_skill 四工具经 ctx.extras['spawn_coordinator'] 拿到 engine 的
     # spawn API。None=无 engine 上下文（裸 TurnRunner 单测），工具返回 spawn_unavailable。
@@ -362,6 +371,49 @@ class TurnRunner:
                     break
         new_history.insert(insert_at, note)
         await self.store.append(note)
+        return new_history
+
+    async def _reinject_pinned_state(
+        self, history: list[ResponseItem], phase: str
+    ) -> list[ResponseItem]:
+        """postcompact re-injection：压缩成功后把 pinned 状态钉回 history 尾。
+
+        紧随 K3 salvage 之后调用（两个「压缩瞬间钩子」相邻）。按注册序渲染
+        全部 source（双层护栏在 registry 内完成），每条以 ``system_injection``
+        （source="pinned:<name>"）追加尾部并经 store 持久化（R5）。
+
+        渲染异常 → EngineLog 告警后跳过该 source（壳层隔离业务渲染崩溃，
+        有事件、非 silent fallback）。无注入且无丢弃 → 不 emit（零噪声）。
+        """
+        if self.pinned_states is None or len(self.pinned_states) == 0:
+            return history
+        rendered = self.pinned_states.render_all()
+        for name, err in rendered.errors:
+            await self._emit(EngineLog(data={
+                "level": "warning",
+                "message": f"pinned state source {name!r} 渲染失败，已跳过: {err}",
+                "extra": {"source": name},
+            }))
+        if not rendered.entries and not rendered.dropped:
+            return history
+        from taifeng.conversation.models import system_injection
+
+        new_history = list(history)
+        for entry in rendered.entries:
+            note = system_injection(
+                entry.text, thread_id=self.thread_id,
+                source=f"pinned:{entry.name}",
+            )
+            new_history.append(note)
+            await self.store.append(note)
+        await self._emit(PinnedStateReinjected(data={
+            "sources": [
+                {"name": e.name, "chars": len(e.text)} for e in rendered.entries
+            ],
+            "total_chars": rendered.total_chars,
+            "dropped": rendered.dropped,
+            "phase": phase,
+        }))
         return new_history
 
     async def run(self) -> TurnOutcome:
@@ -1222,6 +1274,9 @@ class TurnRunner:
             new_history = await self._apply_pre_evict_salvage(
                 ctx.history, result.new_history, result.summary_item_id
             )
+            # postcompact re-injection：pinned 状态钉回 tail（K3 salvage 之后、
+            # 写回 buffer 之前——任何成功压缩路径含 overflow 自愈均覆盖）。
+            new_history = await self._reinject_pinned_state(new_history, phase)
             self.history_buffer[:] = new_history
             self.cache_anchor_index = result.anchor_preserved_until
             # 持久化新的 compacted item

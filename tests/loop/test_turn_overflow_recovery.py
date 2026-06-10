@@ -279,3 +279,44 @@ async def test_compaction_completed_carries_strategy_detail(skills_dir: Path) ->
     assert done, "未发出 compaction_completed"
     detail = done[0].data.get("detail")
     assert detail == {"deduped": 1, "soft_trimmed": 0, "hard_cleared": 1}
+
+
+@pytest.mark.asyncio
+async def test_overflow_recovery_reinjects_pinned_state(skills_dir: Path) -> None:
+    """2.4 接线:overflow 自愈(force_compress)成功后同样重注入 pinned 状态。
+
+    overflow 路径与 pre_turn/mid_turn 共用 _maybe_compress 成功分支,
+    pinned 项必须在重采样前钉回 tail(phase=overflow 透传进事件)。
+    """
+    from taifeng.context.pinned_state import PinnedStateRegistry
+
+    class _PlanSrc:
+        name = "plan"
+        max_chars = 500
+
+        def format_for_injection(self) -> str:
+            return "当前规划:步骤 A 已完成,继续步骤 B"
+
+    reg = PinnedStateRegistry()
+    reg.register(_PlanSrc())
+    events: list = []
+    history = [user_message(f"m{i} {'x' * 120}", thread_id="t") for i in range(8)]
+    client = _OverflowThenOkClient(fail_times=1)
+    runner = await _make_runner(
+        skills_dir,
+        model_client=client,
+        compressors=_summary_compressor(),
+        history=history,
+        events=events,
+        pinned_states=reg,
+    )
+    outcome = await runner.run()
+
+    assert outcome.success
+    pinned_items = [it for it in runner.history_buffer
+                    if it.kind == "system_injection"
+                    and it.payload.get("source") == "pinned:plan"]
+    assert pinned_items, "overflow 自愈后未重注入 pinned 项"
+    assert "步骤 B" in pinned_items[0].payload["text"]
+    ev = next(m for m in events if m.kind == "pinned_state_reinjected")
+    assert ev.data["phase"] == "overflow"

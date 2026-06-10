@@ -226,6 +226,23 @@ class SurgicalTrimStrategy:
 > `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim 三档谱系**。
 > 单条工具结果的超长截断仍走 `context/truncate.py::truncate_middle`（G6b，被 surgical soft-trim 复用），不是独立 CompressionStrategy。
 
+## 压缩后状态保活（postcompact re-injection，E1）
+
+压缩成功的应用瞬间有**两个相邻钩子**（`turn.py:_maybe_compress` 成功分支）：
+
+```
+result.new_history
+  → _apply_pre_evict_salvage   # K3 swap-out：换出项交 MemoryStore，digest 插 summary 之后
+  → _reinject_pinned_state     # E1 pin-back：PinnedStateRegistry 渲染各 source，钉回最尾
+  → history_buffer 写回
+```
+
+业务实现 `PinnedStateSource`（`name` / `max_chars` / 同步 `format_for_injection() -> str | None`），经 `EnginePool.create(pinned_state_sources=[...])` 构造期注入或 `engine.register_pinned_state(...)` 运行时增删。任何成功压缩路径（pre_turn / mid_turn / manual / **overflow 自愈**）都会按注册序把渲染结果以 `system_injection(source="pinned:<name>")` 追加到压缩后历史尾部并持久化（R5）——解决「摘要吸收了任务清单、LLM 压缩后忘了自己在做什么」（hermes todo_snapshot 范式，协议化）。
+
+护栏：per-source `max_chars`（truncate_middle 截断）+ registry `total_max_chars` 总预算（默认 8000，装不下的 source 整体丢弃并记入事件 `dropped`）；渲染异常 → `EngineLog` 告警 + 跳过该 source（压缩不被业务渲染炸掉）。事件 `pinned_state_reinjected`（不带正文）。上一轮的 pinned 项是下一轮的普通历史（被压缩自然回收），不做主动清除。
+
+契约：[capabilities/postcompact-state-reinjection.md](capabilities/postcompact-state-reinjection.md)。demo：`examples/compression_showcase/pinned_demo.py`（mock 可跑）。
+
 ## tool_use / tool_result 边界保护
 
 参照 claw-code `compact.rs` 的关键发现：

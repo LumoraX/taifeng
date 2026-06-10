@@ -21,6 +21,10 @@ from taifeng.context.compressor import (
 )
 from taifeng.context.injection import InitialContextInjection
 from taifeng.context.memory import MemoryStore, NullMemoryStore
+from taifeng.context.pinned_state import (
+    PinnedStateRegistry,
+    PinnedStateSource,
+)
 from taifeng.context.strategies import (
     HandoffCompactionStrategy,
     SlidingWindowStrategy,
@@ -41,6 +45,8 @@ __all__ = [
     "ContextBudget",
     "HandoffCompactionStrategy",
     "InitialContextInjection",
+    "PinnedStateRegistry",
+    "PinnedStateSource",
     "PromptCacheStats",
     "SlidingWindowStrategy",
     "SurgicalTrimStrategy",

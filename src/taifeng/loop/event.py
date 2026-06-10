@@ -27,6 +27,7 @@ MsgKind = Literal[
     "skill_returned",
     "compaction_started",
     "compaction_completed",
+    "pinned_state_reinjected",
     "cache_break_detected",
     "provider_retry",
     "user_input_injected",
@@ -180,6 +181,18 @@ class CompactionStarted(_Msg):
 class CompactionCompleted(_Msg):
     kind: Literal["compaction_completed"] = "compaction_completed"
     """data = {"success": bool, "cache_invalidated": bool, "removed_count": int, "reason": str|None}"""
+
+
+class PinnedStateReinjected(_Msg):
+    """压缩成功后 agent-owned 状态钉回 history tail(postcompact re-injection)。
+
+    data = {"sources": [{"name": str, "chars": int}], "total_chars": int,
+            "dropped": [str], "phase": str}
+    不带渲染正文(PII 约束);dropped = 总预算装不下被整体跳过的 source 名。
+    无 source 注册或全部渲染 None 时不 emit(零噪声)。
+    """
+
+    kind: Literal["pinned_state_reinjected"] = "pinned_state_reinjected"
 
 
 class CacheBreakDetected(_Msg):
@@ -606,6 +619,7 @@ Msg = Union[
     CompactionCompleted,
     CompactionDegradationWarning,
     CompactionIntegrityRolledBack,
+    PinnedStateReinjected,
     ContextBudgetExceeded,
     CacheBreakDetected,
     ProviderRetry,
