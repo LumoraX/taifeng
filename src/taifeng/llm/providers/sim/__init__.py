@@ -13,6 +13,10 @@
 
 from __future__ import annotations
 
+from taifeng.llm.providers.sim.contract import (
+    RequestContractValidator,
+    SimContractViolation,
+)
 from taifeng.llm.providers.sim.script import (
     SimExpect,
     SimFault,
@@ -22,6 +26,8 @@ from taifeng.llm.providers.sim.script import (
 )
 
 __all__ = [
+    "RequestContractValidator",
+    "SimContractViolation",
     "SimExpect",
     "SimFault",
     "SimFinish",
