@@ -357,41 +357,17 @@ async def test_resolver_text_too_large_raises() -> None:
 from pathlib import Path  # noqa: E402
 
 import taifeng  # noqa: E402
-from taifeng.llm.providers.mock import MockClient, MockSession, MockTurn  # noqa: E402
+from taifeng.llm.providers.sim import SimClient, SimTurn  # noqa: E402
 from taifeng.llm.types import ApiRequest, TokenUsage  # noqa: E402
 
 
-class _CapturingMockClient(MockClient):
-    """记录每次 LLM 调用收到的 ApiRequest（用于断言 system prompt 内容）。"""
+class _CapturingSimClient(SimClient):
+    """captured = ledger 记录的原始 ApiRequest（sim 原生请求侦察，无需代理 session）。"""
 
-    def __init__(self, *, turns: list[MockTurn], model: str = "mock-model") -> None:
-        super().__init__(turns=turns, model=model)
-        self.captured: list[ApiRequest] = []
-
-    def session(self, *, cancel, model=None):  # type: ignore[override]
-        sess = super().session(cancel=cancel, model=model)
-        sess = _CapturingSession(sess, self)
-        return sess
-
-
-class _CapturingSession:
-    """代理 MockSession，把每次 stream 收到的 request 记录下来。"""
-
-    def __init__(self, inner: MockSession, owner: _CapturingMockClient) -> None:
-        self._inner = inner
-        self._owner = owner
-
-    async def __aenter__(self):
-        await self._inner.__aenter__()
-        return self
-
-    async def __aexit__(self, *exc):
-        return await self._inner.__aexit__(*exc)
-
-    async def stream(self, request: ApiRequest):
-        self._owner.captured.append(request)
-        async for ev in self._inner.stream(request):
-            yield ev
+    @property
+    def captured(self) -> list[ApiRequest]:
+        """全部已采样请求（保序），等价旧 _CapturingSession 的逐次记录。"""
+        return [rec.request for rec in self.ledger.requests()]
 
 
 async def _drive_one_turn(engine: taifeng.AgentEngine, text: str) -> str:
@@ -411,8 +387,8 @@ async def test_engine_uses_instruction_layers(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """T4 Acceptance: engine 跑一个 turn，system prompt 含 <system_instructions> 块。"""
-    client = _CapturingMockClient(turns=[
-        MockTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+    client = _CapturingSimClient(turns=[
+        SimTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -453,9 +429,9 @@ async def test_update_instructions_op_hot_swap(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """T4 Acceptance: UpdateInstructions 后下个 turn 的 prompt 含新文本。"""
-    client = _CapturingMockClient(turns=[
-        MockTurn(text="ok1", usage=TokenUsage(input_tokens=10, output_tokens=5)),
-        MockTurn(text="ok2", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+    client = _CapturingSimClient(turns=[
+        SimTurn(text="ok1", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+        SimTurn(text="ok2", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -494,7 +470,7 @@ async def test_update_instructions_unknown_layer_rejected(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """T4 spec: 未知 name 时 SHALL 发 instruction_update_rejected 事件。"""
-    client = _CapturingMockClient(turns=[])
+    client = _CapturingSimClient(turns=[])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
         threads_dir=threads_dir,
@@ -529,8 +505,8 @@ async def test_snapshot_returns_resolved_after_turn(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """T4 Acceptance: snapshot 含 fetched_at / source_kind / cache_volatile。"""
-    client = _CapturingMockClient(turns=[
-        MockTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+    client = _CapturingSimClient(turns=[
+        SimTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -575,9 +551,9 @@ async def test_engine_scope_only_resolved_once(
             return "ENGINE_TEXT"
 
     src = _OnceSource()
-    client = _CapturingMockClient(turns=[
-        MockTurn(text="t1", usage=TokenUsage(input_tokens=10, output_tokens=5)),
-        MockTurn(text="t2", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+    client = _CapturingSimClient(turns=[
+        SimTurn(text="t1", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+        SimTurn(text="t2", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -612,8 +588,8 @@ async def test_engine_fetch_failure_fails_turn(
         async def fetch(self, ctx):
             raise RuntimeError("db_down")
 
-    client = _CapturingMockClient(turns=[
-        MockTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+    client = _CapturingSimClient(turns=[
+        SimTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -643,8 +619,8 @@ async def test_empty_layers_no_block(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """T5 #1: 无 layers 时 prompt 与基线完全一致（不含 <system_instructions>）。"""
-    client = _CapturingMockClient(turns=[
-        MockTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+    client = _CapturingSimClient(turns=[
+        SimTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -666,8 +642,8 @@ async def test_layer_ordering_by_priority_in_engine(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """T5 #2: 三层 priority 10/50/100 顺序拼接进 prompt。"""
-    client = _CapturingMockClient(turns=[
-        MockTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+    client = _CapturingSimClient(turns=[
+        SimTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -699,8 +675,8 @@ async def test_fetch_failed_event_has_cause_repr(
         async def fetch(self, ctx):
             raise RuntimeError("io_err")
 
-    client = _CapturingMockClient(turns=[
-        MockTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+    client = _CapturingSimClient(turns=[
+        SimTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,

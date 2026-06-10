@@ -1,4 +1,4 @@
-"""Composite skill 多层 E2E 测试 —— 通过 EnginePool + MockClient 跑通三层派发。
+"""Composite skill 多层 E2E 测试 —— 通过 EnginePool + SimClient 跑通三层派发。
 
 覆盖 spec `skill-dispatch` 在真实 Engine 路径上的端到端行为：
     - 三层 entry → middle → leaf 完整派发 + 返回；SkillDispatched 事件嵌套关系
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 if TYPE_CHECKING:
@@ -169,9 +169,9 @@ async def test_three_level_dispatch_emits_correct_stack(
     threads = tmp_path / "threads"
     threads.mkdir()
 
-    client = MockClient(turns=[
+    client = SimClient(turns=[
         # entry turn 1 → call middle
-        MockTurn(
+        SimTurn(
             text="派发到 middle",
             tool_calls=[{
                 "id": "tc_mid",
@@ -181,7 +181,7 @@ async def test_three_level_dispatch_emits_correct_stack(
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
         # middle turn 1 → call leaf
-        MockTurn(
+        SimTurn(
             text="派发到 leaf",
             tool_calls=[{
                 "id": "tc_leaf",
@@ -191,17 +191,17 @@ async def test_three_level_dispatch_emits_correct_stack(
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
         # leaf turn 1 → 终结
-        MockTurn(
+        SimTurn(
             text="leaf 输出：完成",
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
         # middle turn 2 → 终结
-        MockTurn(
+        SimTurn(
             text="middle 综合：done",
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
         # entry turn 2 → 终结
-        MockTurn(
+        SimTurn(
             text="entry 总结：所有子任务完成",
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
@@ -285,8 +285,8 @@ async def test_max_depth_blocks_grandchild_dispatch(
     threads = tmp_path / "threads"
     threads.mkdir()
 
-    client = MockClient(turns=[
-        MockTurn(
+    client = SimClient(turns=[
+        SimTurn(
             text="派发 middle",
             tool_calls=[{
                 "id": "tc_mid",
@@ -295,7 +295,7 @@ async def test_max_depth_blocks_grandchild_dispatch(
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
-        MockTurn(
+        SimTurn(
             text="尝试派发 leaf",
             tool_calls=[{
                 "id": "tc_leaf_blocked",
@@ -304,11 +304,11 @@ async def test_max_depth_blocks_grandchild_dispatch(
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
-        MockTurn(
+        SimTurn(
             text="收到深度限制错误，中止下钻",
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
-        MockTurn(
+        SimTurn(
             text="entry 终结",
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
@@ -370,8 +370,8 @@ async def test_runtime_cycle_detected_when_child_calls_entry(
     threads = tmp_path / "threads"
     threads.mkdir()
 
-    client = MockClient(turns=[
-        MockTurn(
+    client = SimClient(turns=[
+        SimTurn(
             text="派发 middle",
             tool_calls=[{
                 "id": "tc_mid",
@@ -380,7 +380,7 @@ async def test_runtime_cycle_detected_when_child_calls_entry(
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
-        MockTurn(
+        SimTurn(
             text="尝试回调 entry（应被环检测拒绝）",
             tool_calls=[{
                 "id": "tc_cycle",
@@ -389,11 +389,11 @@ async def test_runtime_cycle_detected_when_child_calls_entry(
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
-        MockTurn(
+        SimTurn(
             text="middle 退出：环已被拒",
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
-        MockTurn(
+        SimTurn(
             text="entry 收尾",
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),

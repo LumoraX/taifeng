@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from taifeng.llm.providers import MockClient
-from taifeng.llm.providers.mock import MockTurn
+from taifeng.llm.providers import SimClient
+from taifeng.llm.providers.sim import SimTurn
 from taifeng.llm.providers.openai_compat import OpenAICompatClient, OpenAICompatSession
 from taifeng.llm.types import (
     ApiMessage,
@@ -273,9 +273,9 @@ async def test_litellm_passes_response_format_kwarg(
 # ====================================================================
 
 async def test_mock_session_emits_structured_output_when_configured() -> None:
-    """MockTurn.structured 配置 + ApiRequest 带 response_format → emit。"""
-    client = MockClient(turns=[
-        MockTurn(text="", structured={"x": 1}, usage=TokenUsage(input_tokens=10)),
+    """SimTurn.structured 配置 + ApiRequest 带 response_format → emit。"""
+    client = SimClient(turns=[
+        SimTurn(text="", structured={"x": 1}, usage=TokenUsage(input_tokens=10)),
     ])
     spec = ResponseFormatSpec(name="X", json_schema={"type": "object"})
     sess = client.session(cancel=CancellationToken())
@@ -299,8 +299,8 @@ async def test_mock_session_emits_structured_output_when_configured() -> None:
 
 
 async def test_mock_session_no_emit_when_structured_unset() -> None:
-    """MockTurn 未设 structured（默认 None）+ response_format → 不 emit。"""
-    client = MockClient(turns=[MockTurn(text="hi")])
+    """SimTurn 未设 structured（默认 None）+ response_format → 不 emit。"""
+    client = SimClient(turns=[SimTurn(text="hi")])
     spec = ResponseFormatSpec(name="X", json_schema={"type": "object"})
     sess = client.session(cancel=CancellationToken())
     events = []
@@ -318,9 +318,9 @@ async def test_mock_session_no_emit_when_structured_unset() -> None:
 
 
 async def test_mock_session_no_emit_when_response_format_none() -> None:
-    """MockTurn 设了 structured 但请求 response_format=None → 不 emit（保险）。"""
-    client = MockClient(turns=[
-        MockTurn(text="", structured={"x": 1}),
+    """SimTurn 设了 structured 但请求 response_format=None → 不 emit（保险）。"""
+    client = SimClient(turns=[
+        SimTurn(text="", structured={"x": 1}),
     ])
     sess = client.session(cancel=CancellationToken())
     events = []

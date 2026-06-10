@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import taifeng
 from taifeng.context.pinned_state import PinnedStateSource
 from taifeng.context.strategies import HandoffCompactionStrategy
-from taifeng.llm.providers.mock import MockClient, MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimClient, SimTurn, RoutingSimClient
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import CompactNow
 from taifeng.tool.builtins.todo import TodoStore, make_todo_write_tool
@@ -131,16 +131,16 @@ async def test_todo_survives_compaction_e2e(tmp_path: Path, threads_dir: Path):
     (skills / "planner" / "SKILL.md").write_text(_SKILL, encoding="utf-8")
 
     store = TodoStore()
-    # handoff 摘要采样的 prompt 不含技能标记 → 摘要走独立 MockClient
-    summary_client = MockClient(turns=[MockTurn(text="## 摘要")])
-    client = RoutingMockClient(routes={
+    # handoff 摘要采样的 prompt 不含技能标记 → 摘要走独立 SimClient
+    summary_client = SimClient(turns=[SimTurn(text="## 摘要")])
+    client = RoutingSimClient(routes={
         "PLANNER_MARK": [
-            MockTurn(text="记录清单", tool_calls=[
+            SimTurn(text="记录清单", tool_calls=[
                 {"id": "t1", "name": "todo_write", "arguments":
                  '{"items":[{"content":"训练玄武岩模型","status":"pending"}]}'}]),
-            MockTurn(text="已记录"),
-            MockTurn(text="继续聊别的 a"),
-            MockTurn(text="继续聊别的 b"),
+            SimTurn(text="已记录"),
+            SimTurn(text="继续聊别的 a"),
+            SimTurn(text="继续聊别的 b"),
         ],
     })
     pool = await taifeng.EnginePool.create(

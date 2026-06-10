@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.mcp.server import (
     MCP_PROTOCOL_VERSION,
@@ -29,9 +29,9 @@ from taifeng.mcp.server import (
 
 async def _build_pool(
     skills_dir: Path, threads_dir: Path,
-    *, mock_turns: list[MockTurn] | None = None,
+    *, mock_turns: list[SimTurn] | None = None,
 ) -> taifeng.EnginePool:
-    client = MockClient(turns=mock_turns or [])
+    client = SimClient(turns=mock_turns or [])
     return await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client, compressors=[],
@@ -106,7 +106,7 @@ async def test_tools_call_run_skill_turn_returns_final_text(
 ) -> None:
     pool = await _build_pool(
         skills_dir, threads_dir,
-        mock_turns=[MockTurn(
+        mock_turns=[SimTurn(
             text="hello-from-skill",
             usage=TokenUsage(input_tokens=10, output_tokens=5),
         )],

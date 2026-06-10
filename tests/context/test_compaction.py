@@ -15,7 +15,7 @@ from taifeng.conversation.models import (
     function_call_output,
     user_message,
 )
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 
@@ -57,8 +57,8 @@ def test_sliding_window_when_handoff_skipped() -> None:
 @pytest.mark.asyncio
 async def test_handoff_compaction_with_mock_client() -> None:
     """走通 handoff 流程：mock LLM 返回固定摘要，结果应替换中段。"""
-    client = MockClient(
-        turns=[MockTurn(text="## 进度\n- 已完成\n## 决策\n- 用 A 方案", usage=TokenUsage(input_tokens=400, output_tokens=20))]
+    client = SimClient(
+        turns=[SimTurn(text="## 进度\n- 已完成\n## 决策\n- 用 A 方案", usage=TokenUsage(input_tokens=400, output_tokens=20))]
     )
     strategy = HandoffCompactionStrategy(model_client=client, model="mock-model")
     budget = ContextBudget(context_window=1000, soft_limit_ratio=0.85, preserve_tail_messages=2)
@@ -83,8 +83,8 @@ async def test_handoff_compaction_with_mock_client() -> None:
 @pytest.mark.asyncio
 async def test_handoff_do_not_inject_preserves_anchor() -> None:
     """mid_turn 模式不应破坏 cache anchor 之前的内容。"""
-    client = MockClient(
-        turns=[MockTurn(text="## summary", usage=TokenUsage(input_tokens=100, output_tokens=10))]
+    client = SimClient(
+        turns=[SimTurn(text="## summary", usage=TokenUsage(input_tokens=100, output_tokens=10))]
     )
     strategy = HandoffCompactionStrategy(model_client=client, model="mock-model")
     budget = ContextBudget(context_window=1000, soft_limit_ratio=0.85, preserve_tail_messages=2)
@@ -171,9 +171,9 @@ def _ctx_for(items: list) -> CompressionContext:
 async def test_handoff_regenerates_when_identifier_dropped() -> None:
     """首轮摘要丢了 UUID → 自动重生成；第二轮补回 → 成功。"""
     _usage = TokenUsage(input_tokens=400, output_tokens=20)
-    client = MockClient(turns=[
-        MockTurn(text="## 进度\n- 处理中（这版丢了 ID）", usage=_usage),
-        MockTurn(text=f"## 进度\n- 处理中\n## 引用\n- {_UUID}", usage=_usage),
+    client = SimClient(turns=[
+        SimTurn(text="## 进度\n- 处理中（这版丢了 ID）", usage=_usage),
+        SimTurn(text=f"## 进度\n- 处理中\n## 引用\n- {_UUID}", usage=_usage),
     ])
     strategy = HandoffCompactionStrategy(model_client=client, model="mock-model")
     items = _items_with_identifier()
@@ -190,9 +190,9 @@ async def test_handoff_regenerates_when_identifier_dropped() -> None:
 async def test_handoff_fails_preserve_when_identifier_still_missing() -> None:
     """重生成后仍丢标识符 → 不压缩（保留历史），返回质量失败原因。"""
     _usage = TokenUsage(input_tokens=400, output_tokens=20)
-    client = MockClient(turns=[
-        MockTurn(text="## 进度\n- 丢了 ID 第 1 版", usage=_usage),
-        MockTurn(text="## 进度\n- 丢了 ID 第 2 版", usage=_usage),
+    client = SimClient(turns=[
+        SimTurn(text="## 进度\n- 丢了 ID 第 1 版", usage=_usage),
+        SimTurn(text="## 进度\n- 丢了 ID 第 2 版", usage=_usage),
     ])
     strategy = HandoffCompactionStrategy(model_client=client, model="mock-model")
     items = _items_with_identifier()
@@ -207,7 +207,7 @@ async def test_handoff_fails_preserve_when_identifier_still_missing() -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_picks_highest_priority() -> None:
     """多策略协调：优先级高的先触发。"""
-    client = MockClient(turns=[MockTurn(text="## ok", usage=TokenUsage(input_tokens=50, output_tokens=5))])
+    client = SimClient(turns=[SimTurn(text="## ok", usage=TokenUsage(input_tokens=50, output_tokens=5))])
     budget = ContextBudget(context_window=1000, soft_limit_ratio=0.85, preserve_tail_messages=2)
     items = [user_message(f"msg-{i} {'x'*100}", thread_id="t") for i in range(6)]
     ctx = CompressionContext(
@@ -233,9 +233,9 @@ async def test_force_compress_bypasses_should_trigger() -> None:
     这是 A1 reactive-compaction-recovery 的底座：overflow 成因是「本地估算偏低、
     provider 已判超长」，此时 should_trigger 必返回 None，必须有一条绕过阈值的强制路径。
     """
-    client = MockClient(
+    client = SimClient(
         turns=[
-            MockTurn(
+            SimTurn(
                 text="## 进度\n- x\n## 决策\n- y",
                 usage=TokenUsage(input_tokens=400, output_tokens=20),
             )
@@ -295,7 +295,7 @@ async def test_sliding_do_not_inject_with_no_anchor_shrinks() -> None:
 async def test_handoff_do_not_inject_with_no_anchor_shrinks() -> None:
     """回归：handoff 同病——anchor=-1 + DO_NOT_INJECT 区间起点必须钳到 0。"""
     budget = ContextBudget(context_window=1000, preserve_tail_messages=2)
-    client = MockClient(turns=[MockTurn(text="摘要：用户连续发了多条消息。")])
+    client = SimClient(turns=[SimTurn(text="摘要：用户连续发了多条消息。")])
     handoff = HandoffCompactionStrategy(model_client=client)
     items = [user_message(f"msg-{i} " * 30, thread_id="t") for i in range(6)]
     ctx = CompressionContext(

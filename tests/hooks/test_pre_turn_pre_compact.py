@@ -16,7 +16,7 @@ import pytest
 
 import taifeng
 from taifeng.hooks import HookDecision, HookRegistry, HookRunner
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import CompactNow
 
@@ -95,7 +95,7 @@ async def test_pre_turn_hook_allow_passes_through(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """注册 always-allow 的 pre_turn hook → turn 正常完成。"""
-    client = MockClient(turns=[MockTurn(
+    client = SimClient(turns=[SimTurn(
         text="ok",
         usage=TokenUsage(input_tokens=10, output_tokens=2),
     )])
@@ -145,7 +145,7 @@ async def test_pre_turn_hook_deny_blocks_turn(
         - user_message 仍持久化（resume 友好）
         - _turn_index 仍 +1
     """
-    client = MockClient(turns=[])  # turn 不会真正跑，不需要 LLM 响应
+    client = SimClient(turns=[])  # turn 不会真正跑，不需要 LLM 响应
     reg = HookRegistry()
 
     async def deny_handler(hook, ctx) -> HookDecision:
@@ -199,7 +199,7 @@ async def test_pre_compact_hook_allow_runs_compaction(
 
     用 force=True 绕过阈值，强制 hook 被调用。
     """
-    client = MockClient(turns=[])
+    client = SimClient(turns=[])
     reg = HookRegistry()
     pre_compact_seen: list[str] = []
 
@@ -251,7 +251,7 @@ async def test_pre_compact_hook_deny_skips_compaction(
         - 不 emit compaction_started / compaction_completed
         - history_buffer 长度不变
     """
-    client = MockClient(turns=[])
+    client = SimClient(turns=[])
     reg = HookRegistry()
 
     async def deny_handler(hook, ctx) -> HookDecision:

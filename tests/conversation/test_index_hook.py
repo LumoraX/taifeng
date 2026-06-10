@@ -184,12 +184,12 @@ async def test_engine_pool_integrates_index_hook(skills_dir: Path, threads_dir: 
 
     复用 conftest 全局 skills_dir / threads_dir fixture（含 code-reviewer 等已配 entry skill）。
     """
-    from taifeng.llm.providers.mock import MockClient, MockTurn
+    from taifeng.llm.providers.sim import SimClient, SimTurn
     from taifeng.llm.types import TokenUsage
 
     hook = _SpyHook()
     sink = _RecordingSink()
-    client = MockClient(turns=[MockTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=2))])
+    client = SimClient(turns=[SimTurn(text="ok", usage=TokenUsage(input_tokens=10, output_tokens=2))])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
         threads_dir=threads_dir,  # 旧名仍支持；新 storage_dir 等价
