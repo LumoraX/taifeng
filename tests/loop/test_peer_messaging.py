@@ -466,7 +466,7 @@ async def test_llm_sibling_messaging_e2e(peer_skills, threads_dir) -> None:
             # 第一 turn:迭代1 spawn,迭代2 收尾
             MockTurn(text="先派专家", tool_calls=[
                 {"id": "s1", "name": "spawn_skill", "arguments":
-                 '{"skill_id":"expert","reason":"会诊","args":{}}'}]),
+                 '{"skill_id":"expert","reason":"collab","args":{}}'}]),
             MockTurn(text="已派出"),
             # 第二 turn:迭代1 send_message(占位符在提交前替换),迭代2 收尾
             MockTurn(text="专家已完成,推送发现并唤醒", tool_calls=[
@@ -489,7 +489,7 @@ async def test_llm_sibling_messaging_e2e(peer_skills, threads_dir) -> None:
     await asyncio.sleep(0)
 
     # 第一 turn:spawn 专家
-    sub_id = await engine.submit(taifeng.UserMessage(text="开始会诊"))
+    sub_id = await engine.submit(taifeng.UserMessage(text="开始协作"))
     async for ev in engine.subscribe(sub_id):
         if ev.msg.kind in ("turn_completed", "turn_failed"):
             assert ev.msg.kind == "turn_completed"

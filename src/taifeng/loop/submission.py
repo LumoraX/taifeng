@@ -133,7 +133,8 @@ class Resume(BaseModel):
 
     Attributes:
         thread_id: 要续跑的 thread。
-        resolutions: {request_id: payload}；必须一次补齐该挂起 record 的全部 pending
+    resolutions 可为该 record request_ids 的非空子集(request 级核销):子集只
+    裁决子集,整体 marker 与续跑在全部 pending 核销后才发生;空集/未知 id 显式拒绝。
             （不允许部分 resume）。payload 形状由对应 PendingRequest.reason 决定：
             - permission: {"granted": bool, "reason"?: str, "remember_until"?: str}
             - form / data: 任意 JSON（直接成 function_call_output）

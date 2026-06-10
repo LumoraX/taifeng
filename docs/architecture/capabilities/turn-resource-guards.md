@@ -54,6 +54,8 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
 - **limit 类失败全面进 policy**：K2 引擎级拒新 turn（policy SUSPEND → engine 级 RESOURCE_LIMIT 挂起,user_message 已入史,retry+增额后该 turn 正常执行）与 RequestTooLargeError 预检（SUSPEND → SYSTEM_RETRY 挂起,业务 CompactNow / 改参后 retry 可过）均咨询 policy;Conservative 对两者恒 TERMINAL,零行为变化。
 - **自动 retry 有界**：pending detail 携带 `auto_retry_count` 谱系计数（TTL 到期自动 retry 续跑 +1;人工 Resume 恒 0）;达 `failure_suspend_max_auto_retries`（None=不限）后到期裁决强制 abort,`suspension_expired.data` 标注 `auto_retry_exhausted: true`——熔断无人值守无界循环。
 - **观测如实（R3）**：护栏触顶经 policy 裁决 SUSPEND 时 `ResourceLimitExceeded.scope` 为 `"turn_suspended"`（turn 并未 abort）;TERMINAL 时维持 `"turn_aborted"` / `"turn_refused"`。
+- **Resume 续跑过 K2 闸门对 Conservative 亦生效（suspend-review-fixes 声明）**：会话已触顶时,挂起的 HITL 答复被消费（gap 回填）但续跑被闸（`turn_refused` + TurnFailed）——不再静默烧 token;此为对旧版的有意行为变化。leaf/父层续跑 runner 注入会话预算（增额后有执法）;**续跑用量不回写 engine 会话计量为既有缺口**（K2 计量整体是进程态,增额不落盘,重启后按构造值重新执法）。
+- **谱系熔断全拓扑生效**：root / call_skill 链 / spawn 重跑均透传 `auto_retry_count`;`max_session_tokens ≤ 0` 与 `failure_suspend_max_auto_retries ≤ 0` 在 engine/pool 构造期 ValueError。
 
 ## R1–R5 影响
 

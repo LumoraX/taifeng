@@ -181,7 +181,16 @@ class EnginePool:
                 f"failure_suspend_ttl_seconds must be positive or None, "
                 f"got {failure_suspend_ttl_seconds}")
         self._failure_suspend_ttl_seconds = failure_suspend_ttl_seconds
+        if (failure_suspend_max_auto_retries is not None
+                and failure_suspend_max_auto_retries <= 0):
+            raise ValueError(
+                f"failure_suspend_max_auto_retries must be positive or None, "
+                f"got {failure_suspend_max_auto_retries}")
         self._failure_suspend_max_auto_retries = failure_suspend_max_auto_retries
+        if max_session_tokens is not None and max_session_tokens <= 0:
+            raise ValueError(
+                f"max_session_tokens must be positive or None, "
+                f"got {max_session_tokens}")
         self._failure_suspend_on_expire = failure_suspend_on_expire
         # suspension-ttl：壁钟工厂(测试可注入固定时钟),透传到每个 AgentEngine。
         self._now_factory = now_factory

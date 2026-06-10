@@ -50,7 +50,7 @@ class SuspensionRecord:
     def expires_at(self) -> int | None:
         """record 级到期时刻 = created_at + 各 pending ttl 的最小值。
 
-        record 级一次性裁决(与 SuspensionResolver 全量 resume 对齐,杜绝
+        record 级 deadline(到期只裁决剩余未核销 pending,杜绝
         「半个 record 已过期」的部分 resume 违例),故取 min。全部 pending
         未声明 ttl → None(永不过期,与历史行为一致)。派生属性而非存储字段:
         真相来源是 pending 的 ttl_seconds(已随 to_item 落盘),冷热一致(R5)。

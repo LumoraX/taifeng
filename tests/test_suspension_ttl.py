@@ -414,11 +414,11 @@ type: atomic
 
 _SPAWN_CONSULT = """---
 name: ttl-consult
-description: 聚合会诊
+description: 聚合汇总
 version: 1.0.0
 type: atomic
 ---
-# 会诊 TTL_CONSULT_MARK
+# 汇总 TTL_CONSULT_MARK
 综合各专家终态出报告。
 """
 
@@ -445,7 +445,7 @@ async def _wait_status(engine, hid: str, want: str, tries: int = 200) -> bool:
 
 
 async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_dir):
-    """挂起的 spawn 子专科到期(DATA,on_expire=abort)→ 句柄 error + SpawnFailed,
+    """挂起的 spawn 子任务到期(DATA,on_expire=abort)→ 句柄 error + SpawnFailed,
     且解除 barrier 占用(单句柄 barrier 在 abort 终态后触发,无人值守不死锁)。"""
     client = RoutingMockClient(routes={
         "TTL_EXPERT_MARK": [
@@ -454,7 +454,7 @@ async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_d
                  "arguments": '{"prompt": "补充?"}'}]),
             MockTurn(text="不应被采样"),
         ],
-        "TTL_CONSULT_MARK": [MockTurn(text="会诊综合 CONSULT_DONE")],
+        "TTL_CONSULT_MARK": [MockTurn(text="汇总综合 CONSULT_DONE")],
         "TTL_HOST_MARK": [MockTurn(text="host idle")],
     })
     pool = await taifeng.EnginePool.create(
@@ -500,10 +500,10 @@ async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_d
 
 
 async def test_spawn_abort_recheck_fires_join_barrier(ttl_spawn_skills, threads_dir):
-    """业务命中路径忠实重放(spawn-terminal-single-convergence):双专科会诊,
-    挂起专科 TTL 到期 abort(spawn_failed)后 join-barrier 必须重查并触发聚合
-    (会诊)turn —— 修复前 resume_spawn 的 plan.abort 分支漏调 _check_barriers,
-    barrier 永不触发、会诊挂死。"""
+    """业务命中路径忠实重放(spawn-terminal-single-convergence):双子任务聚合,
+    挂起子任务 TTL 到期 abort(spawn_failed)后 join-barrier 必须重查并触发聚合
+    turn —— 修复前 resume_spawn 的 plan.abort 分支漏调 _check_barriers,
+    barrier 永不触发、聚合挂死。"""
     import json
 
     client = RoutingMockClient(routes={
@@ -513,7 +513,7 @@ async def test_spawn_abort_recheck_fires_join_barrier(ttl_spawn_skills, threads_
                  "arguments": '{"prompt": "补充?"}'}]),
         ],
         "TTL_FAST_MARK": [MockTurn(text="速诊结论 FAST_DONE")],
-        "TTL_CONSULT_MARK": [MockTurn(text="会诊综合 CONSULT_DONE")],
+        "TTL_CONSULT_MARK": [MockTurn(text="汇总综合 CONSULT_DONE")],
         "TTL_HOST_MARK": [MockTurn(text="host idle")],
     })
     pool = await taifeng.EnginePool.create(
@@ -551,7 +551,7 @@ async def test_spawn_abort_recheck_fires_join_barrier(ttl_spawn_skills, threads_
             break
         await asyncio.sleep(0.02)
     assert fired["v"] is not None, \
-        "abort 终态后 join-barrier 应重查触发聚合 turn,实际未触发(会诊挂死)"
+        "abort 终态后 join-barrier 应重查触发聚合 turn,实际未触发(聚合挂死)"
     # 聚合种子含两专家终态:a done / b error(失败专家不被静默丢弃)
     items = [it async for it in await pool.store.load_thread(
         fired["v"]["then_thread_id"])]
@@ -583,7 +583,7 @@ max_call_depth: 4
 
 _NEST_MID = """---
 name: nest-mid
-description: 中层专科
+description: 中层
 version: 1.0.0
 type: composite
 model: mock-model

@@ -501,7 +501,7 @@ child task 运行（独立 TurnRunner @ child thread）：
 
 Resume(thread_id=<child_thread_id>, resolutions=...)
   → engine 先查 SpawnHandleRegistry：命中挂起态 → SpawnDriver.resume_spawn（专用路径）
-  → SuspensionResolver 全量 resume（禁部分 resume）
+  → SuspensionResolver request 级核销（子集合法,全量达成才结算续跑）
   → _build_child_runner（call_stack 为空 → 独立根 turn）→ 续跑
   → 终态 → _finalize_spawn → _check_barriers
   → abort 裁决（TTL 到期 / 人工）→ _settle_failed → emit spawn_failed → _check_barriers
@@ -620,7 +620,7 @@ steering 解决「用户 → 运行中 turn」；peer-mailbox 把同一 seam 推
 Resume(thread_id, resolutions)
   → _find_active_suspension：扫 history 取最后一条未被 resolved-marker 消费的 suspension
        （找不到 → emit suspension_resolve_rejected(reason="no_active_suspension")）
-  → SuspensionResolver.plan（禁部分 resume；ResolveError → suspension_resolve_rejected）
+  → SuspensionResolver.plan（非空子集；空集/未知 id → ResolveError → suspension_resolve_rejected）
   → 应用 plan：补齐 history-gap（form/data 直接回填 output；permission deny 回填 error；
        permission allow → _execute_resumed_tool 真正执行 tool，preapprove 一次性放行）
   → 落 resolved-marker（system_injection source='suspend_resolved'，幂等：重复 Resume 被拒）

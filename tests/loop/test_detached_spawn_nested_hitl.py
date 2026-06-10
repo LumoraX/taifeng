@@ -1,8 +1,8 @@
-"""detached spawn + 嵌套（composite 专科的子 skill）错峰 HITL resume 测试。
+"""detached spawn + 嵌套（composite 专家的子 skill）错峰 HITL resume 测试。
 
-复现并守护一个真实场景缺口：被 spawn 的专科是 **composite**（如医学专科 agent，
+复现并守护一个真实场景缺口：被 spawn 的子任务是 **composite**（如领域专家 agent，
 top turn 通过 call_skill 编排多个子 skill），其**子 skill** 在执行中 request_user_input
-挂起 → 专科 top turn 随之以 ``CHILD_SKILL`` 挂起（嵌套），spawn 句柄标 suspended。
+挂起 → 专家 top turn 随之以 ``CHILD_SKILL`` 挂起（嵌套），spawn 句柄标 suspended。
 
 修复前缺口：``_resume_spawn`` 只在【spawn 直接子 thread】上找活跃挂起并交
 ``SuspensionResolver`` 配对——而嵌套场景里该层挂起 reason==CHILD_SKILL（内核内部态、
@@ -35,17 +35,17 @@ async def _wait(cond, tries: int = 300) -> bool:
     return False
 
 
-# 专科 agent：composite + entry=false，top turn 通过 call_skill 编排一个子 skill。
+# 专家 agent：composite + entry=false，top turn 通过 call_skill 编排一个子 skill。
 _NESTED_EXPERT = """---
 name: nested-expert
-description: 嵌套专科（top 编排子 skill）
+description: 嵌套专家（top 编排子 skill）
 version: 1.0.0
 type: composite
 model: mock-model
 child_skills: [nested-step]
 max_call_depth: 3
 ---
-# 嵌套专科 NESTED_EXPERT_MARK
+# 嵌套专家 NESTED_EXPERT_MARK
 先 call_skill 调用 nested-step，拿到其结论后给最终结论。
 """
 
@@ -63,7 +63,7 @@ max_call_depth: 2
 先 request_user_input 补问，再据答复给结论。
 """
 
-# 编排器（entry）：把嵌套专科列进白名单（spawn 要求 target 在 caller 白名单内）。
+# 编排器（entry）：把嵌套专家列进白名单（spawn 要求 target 在 caller 白名单内）。
 _ORCH = """---
 name: nested-orch
 description: 编排器
@@ -75,7 +75,7 @@ child_skills: [nested-expert]
 max_call_depth: 4
 ---
 # 编排器 NESTED_ORCH_MARK
-spawn 嵌套专科。
+spawn 嵌套专家。
 """
 
 
@@ -96,16 +96,16 @@ def nested_skills(tmp_path):
 
 @pytest.mark.asyncio
 async def test_spawn_nested_child_skill_hitl_resume(nested_skills, threads_dir):
-    """spawn composite 专科 → 其子 skill HITL 挂起（嵌套 CHILD_SKILL）→ Resume(spawn 子
-    thread, leaf 的 request_id) → 子 skill 续跑 → 专科 top 续跑 → spawn_completed。"""
+    """spawn composite 专家 → 其子 skill HITL 挂起（嵌套 CHILD_SKILL）→ Resume(spawn 子
+    thread, leaf 的 request_id) → 子 skill 续跑 → 专家 top 续跑 → spawn_completed。"""
     client = RoutingMockClient(routes={
-        # 专科 top：turn1 call_skill(nested-step)；子 skill 回流后 turn2 出最终结论。
+        # 专家 top：turn1 call_skill(nested-step)；子 skill 回流后 turn2 出最终结论。
         "NESTED_EXPERT_MARK": [
-            MockTurn(text="专科编排：调用子步骤。", tool_calls=[
+            MockTurn(text="专家编排：调用子步骤。", tool_calls=[
                 {"id": "call_step", "name": "call_skill",
                  "arguments": '{"skill_id": "nested-step", "args": {}}'},
             ]),
-            MockTurn(text="专科最终结论 EXPERT_DONE"),
+            MockTurn(text="专家最终结论 EXPERT_DONE"),
         ],
         # 子 skill（leaf）：turn1 request_user_input（挂起）；Resume 后 turn2 出结论。
         "NESTED_STEP_MARK": [
@@ -138,15 +138,15 @@ async def test_spawn_nested_child_skill_hitl_resume(nested_skills, threads_dir):
     watch_task = asyncio.create_task(watch())
     await asyncio.sleep(0)  # 让 subscribe_all 注册队列
 
-    # 1. spawn 嵌套专科（直接发起，绕开 orchestrator LLM turn，聚焦续跑链）
+    # 1. spawn 嵌套专家（直接发起，绕开 orchestrator LLM turn，聚焦续跑链）
     sp = await engine.spawn_skill(
-        skill_id="nested-expert", args={}, reason="嵌套专科")
+        skill_id="nested-expert", args={}, reason="嵌套专家")
     hid, child_tid = sp["handle_id"], sp["child_thread_id"]
 
-    # 2. 等专科句柄挂起（其 top turn 因子 skill CHILD_SKILL 而挂起）
+    # 2. 等专家句柄挂起（其 top turn 因子 skill CHILD_SKILL 而挂起）
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "suspended"), \
-        "嵌套专科未挂起"
+        "嵌套专家未挂起"
 
     # 3. 真实用户可答的 DATA 挂起来自 leaf 子 skill turn —— 取其 turn_suspended 事件
     #    （reason=data，携带真实 request_id；submission_id == spawn 子 thread）。
@@ -171,29 +171,29 @@ async def test_spawn_nested_child_skill_hitl_resume(nested_skills, threads_dir):
     await engine.submit(Resume(
         thread_id=child_tid, resolutions={req_id: {"answer": "已补充：血糖 6.3"}}))
 
-    # 5. 续跑链应让专科跑到终态完成（子 skill 续跑 → 专科 top 续跑 → spawn_completed）
+    # 5. 续跑链应让专家跑到终态完成（子 skill 续跑 → 专家 top 续跑 → spawn_completed）
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "done"), \
-        "嵌套专科续跑后未完成（嵌套 CHILD_SKILL 续跑链缺口）"
-    assert engine.spawn_status([hid])[hid]["result"] == "专科最终结论 EXPERT_DONE"
+        "嵌套专家续跑后未完成（嵌套 CHILD_SKILL 续跑链缺口）"
+    assert engine.spawn_status([hid])[hid]["result"] == "专家最终结论 EXPERT_DONE"
 
     watch_task.cancel()
     await pool.close()
 
 
-# 多轮嵌套错峰：composite 专科编排 2 个子 skill，**两个子 skill 各自挂起一次**（镜像真实
-# 医学专科多步流水线里多步先后 request_user_input）—— 验证嵌套续跑链支持多轮、且每轮都能
-# 重新挂起 / 重新 resume，专科最终跑完所有步骤。
+# 多轮嵌套错峰：composite 专家编排 2 个子 skill，**两个子 skill 各自挂起一次**（镜像真实
+# 医学专家多步流水线里多步先后 request_user_input）—— 验证嵌套续跑链支持多轮、且每轮都能
+# 重新挂起 / 重新 resume，专家最终跑完所有步骤。
 _EXPERT2 = """---
 name: expert2
-description: 两步嵌套专科
+description: 两步嵌套专家
 version: 1.0.0
 type: composite
 model: mock-model
 child_skills: [step-a, step-b]
 max_call_depth: 3
 ---
-# 两步专科 EXPERT2_MARK
+# 两步专家 EXPERT2_MARK
 依次 call_skill 调用 step-a、step-b，各拿结论后给最终结论。
 """
 
@@ -234,7 +234,7 @@ child_skills: [expert2]
 max_call_depth: 4
 ---
 # 编排器 ORCH2_MARK
-spawn 两步嵌套专科。
+spawn 两步嵌套专家。
 """
 
 
@@ -256,7 +256,7 @@ def nested2_skills(tmp_path):
 
 @pytest.mark.asyncio
 async def test_spawn_nested_multi_round_hitl_resume(nested2_skills, threads_dir):
-    """spawn 两步专科 → step-a 挂起 → Resume → step-b 又挂起（多轮）→ Resume → 全跑完。"""
+    """spawn 两步专家 → step-a 挂起 → Resume → step-b 又挂起（多轮）→ Resume → 全跑完。"""
     client = RoutingMockClient(routes={
         "EXPERT2_MARK": [
             MockTurn(text="调用 step-a。", tool_calls=[
@@ -298,7 +298,7 @@ async def test_spawn_nested_multi_round_hitl_resume(nested2_skills, threads_dir)
     watch_task = asyncio.create_task(watch())
     await asyncio.sleep(0)
 
-    sp = await engine.spawn_skill(skill_id="expert2", args={}, reason="两步专科")
+    sp = await engine.spawn_skill(skill_id="expert2", args={}, reason="两步专家")
     hid, child_tid = sp["handle_id"], sp["child_thread_id"]
 
     def _suspend_count() -> int:
@@ -336,7 +336,7 @@ async def test_spawn_nested_multi_round_hitl_resume(nested2_skills, threads_dir)
     # 全跑完
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "done"), \
-        "两步专科多轮续跑后未完成"
+        "两步专家多轮续跑后未完成"
     assert engine.spawn_status([hid])[hid]["result"] == "两步完成 EXPERT2_DONE"
 
     # 链路真实跑过两个子步（A_OK / B_OK 都进了 child thread 历史）

@@ -505,7 +505,7 @@ async def test_has_live_spawns_keepalive(expert_skills, threads_dir):
 
 
 # ---------------------------------------------------------------------------
-# Task 8: join-barrier —— {句柄集}全终态 → 自动起聚合(联合会诊)turn。
+# Task 8: join-barrier —— {句柄集}全终态 → 自动起聚合(联合汇总)turn。
 #         失败/取消的专家不被静默丢弃,聚合输入含其终态。
 # ---------------------------------------------------------------------------
 
@@ -515,7 +515,7 @@ async def test_join_barrier_fires_when_all_done(skills_dir, threads_dir):
     """两个 spawn 全 done → barrier 自动起聚合 turn,emit join_barrier_fired。"""
     client = RoutingMockClient(routes={
         "style-checker": [MockTurn(text="结论A"), MockTurn(text="结论B")],
-        "code-reviewer": [MockTurn(text="会诊:综合A+B")],  # 聚合 skill 用 code-reviewer 占位
+        "code-reviewer": [MockTurn(text="汇总:综合A+B")],  # 聚合 skill 用 code-reviewer 占位
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
@@ -545,7 +545,7 @@ async def test_join_barrier_with_failed_expert(expert_skills, threads_dir):
     确定性制造非 done 终态:expert-a 首 turn 调 request_user_input → 挂起(永不
     resume,故不会 done),再 kill 它 → cancelled(终态);expert-b 直接跑完 → done。
     两 handle 全终态 → barrier 触发。断言默认聚合参数里**含被取消 handle 的
-    cancelled 状态**(失败/取消专家不被静默丢弃,会诊需看到全部专家结局)。
+    cancelled 状态**(失败/取消专家不被静默丢弃,聚合需看到全部子任务结局)。
     """
     import json
 
@@ -562,7 +562,7 @@ async def test_join_barrier_with_failed_expert(expert_skills, threads_dir):
         # expert-b:直接给结论 → done
         "EXPERT_B_MARK": [MockTurn(text="B 结论 B_DONE")],
         # orchestrator 作聚合 skill 占位(独立根 turn,无 entry 门控也允许 entry)
-        "ORCH_MARK": [MockTurn(text="会诊综合")],
+        "ORCH_MARK": [MockTurn(text="汇总综合")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=expert_skills, threads_dir=threads_dir, model_client=client,
@@ -851,7 +851,7 @@ async def test_cold_recovery_rebuilds_handles_and_barrier(skills_dir, threads_di
     """
     client = RoutingMockClient(routes={
         "style-checker": [MockTurn(text="A"), MockTurn(text="B")],
-        "code-reviewer": [MockTurn(text="会诊")],
+        "code-reviewer": [MockTurn(text="汇总")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -885,7 +885,7 @@ async def test_cold_recovery_barrier_idempotent(skills_dir, threads_dir):
     """冷恢复幂等:已触发的 barrier 重载后不二次触发(从 fired 标记重建守卫集)。"""
     client = RoutingMockClient(routes={
         "style-checker": [MockTurn(text="A"), MockTurn(text="B")],
-        "code-reviewer": [MockTurn(text="会诊1"), MockTurn(text="会诊2")],
+        "code-reviewer": [MockTurn(text="汇总1"), MockTurn(text="汇总2")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,

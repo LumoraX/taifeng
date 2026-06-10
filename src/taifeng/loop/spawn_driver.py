@@ -155,7 +155,7 @@ class SpawnDriver:
             call_id=f"spawn_entry_{secrets.token_hex(4)}",
         )
         # detached spawn 把目标作为独立 child thread 分离发起（非嵌套子调用），调 entry
-        # skill 是其正当用法（专科 skill 多为 entry）→ allow_entry_target=True 跳过 entry 门。
+        # skill 是其正当用法（业务子任务 skill 多为 entry）→ allow_entry_target=True 跳过 entry 门。
         verdict = eng._dispatch_policy.check(  # noqa: SLF001
             stack, eng._entry_skill, target,  # noqa: SLF001
             allow_entry_target=True,
@@ -367,7 +367,7 @@ class SpawnDriver:
         (spawn-terminal-single-convergence)任何使句柄进入 error 终态的路径
         ——abort 裁决 / 驱动·续跑·唤醒的宽 except 兜底——必须走本方法,禁止
         各自手写三件套。历史事故:abort 分支漏调 ``_check_barriers``,被等待的
-        句柄虽落终态但 barrier 永不重查 → 聚合(会诊)turn 永不触发、下游挂死。
+        句柄虽落终态但 barrier 永不重查 → 聚合 turn 永不触发、下游挂死。
 
         终态幂等(对齐 ``_finalize_spawn`` 守卫):已终态句柄 no-op——不覆盖
         状态、不重复 emit、不重复 barrier 重查;终态事件对外恰好一次。
@@ -435,14 +435,14 @@ class SpawnDriver:
         turn。因此**直接挂起**（DATA/FORM/permission 落在 spawn 子 thread 自身）只做三步：
           1. 在【子 thread 的 load_thread 历史】上找活跃挂起，核销 resolutions、补 gap
              （复用 SuspensionResolver + _apply_plan_on_thread，与 leaf resume 同语义；
-             SuspensionResolver 已强制全量 resume，杜绝部分 resume 违例）。
+             request 级核销:子集合法,全量达成才落 marker / 重跑）。
           2. 以补齐后的子 thread 历史重建 detached 子 TurnRunner（_build_child_runner，
              call_stack 仍空 → 仍是独立根 turn），续跑至终态。
           3. _finalize_spawn 回写句柄 + emit SpawnCompleted/SpawnSuspended/SpawnFailed
              —— 与 _drive_spawn 收尾完全一致：再次挂起则 handle 重新标 suspended（可再
              resume），从而支持多轮错峰 HITL。
 
-        **嵌套挂起**（被 spawn 的 composite 专科其子 skill 在执行中 request_user_input
+        **嵌套挂起**（被 spawn 的 composite 子任务其子 skill 在执行中 request_user_input
         挂起 → spawn 子 thread 自身的活跃挂起 reason==CHILD_SKILL，内核内部态、非用户可直
         接 resolve）：转 ``resume_spawn_nested`` 走「以 spawn 子 thread 为根的续跑链」——
         下探 leaf 核销用户挂起、逐层回填父 call_skill output，再重跑 spawn 子 thread +
@@ -456,8 +456,6 @@ class SpawnDriver:
             sub: 本次 Resume submission（事件归因 / Rejected emit）。
             handle: 命中的挂起 spawn 句柄（match_suspended_spawn 已校验 status）。
         """
-        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
-
         eng = self._engine
         assert isinstance(sub.op, Resume)
         op = sub.op
@@ -474,88 +472,22 @@ class SpawnDriver:
                         "record_id": None, "detail": {}}),
                 ))
                 return
-            # 嵌套错峰 HITL：spawn 子 thread 的活跃挂起是 CHILD_SKILL（其子 skill 在执行中
-            # request_user_input 挂起 → 本层随之内核态挂起）。用户可答的 DATA/FORM 挂起埋在
-            # 更深的 leaf 子 thread，本层 record 不能直接交 SuspensionResolver（reason=
-            # child_skill 非用户可 resolve）→ 转嵌套续跑链。
-            if eng._next_child_link(record) is not None:  # noqa: SLF001
-                await self.resume_spawn_nested(sub, handle)
-                return
-            try:
-                # SuspensionResolver.plan 强制全量配齐该 record 的全部 pending，
-                # 任何部分 resume / 未知 request_id → ResolveError（禁静默兜底）。
-                plan = SuspensionResolver().plan(record, op.resolutions)
-            except ResolveError as e:
+            # 在飞守卫(suspend-review-fixes,与根/leaf 路径同形):并发双 Resume
+            # 拒后到者,TTL fire 对在飞 record 让位——异步 store(协议支持的业务
+            # DB 实现)下的双结算窗口(双 fco / 双 marker / 双重跑)在此闭合。
+            if record.record_id in eng._resolving_records:  # noqa: SLF001
                 await eng._emit(EventMsg(  # noqa: SLF001
                     submission_id=sub.id,
                     msg=SuspensionResolveRejected(data={
-                        "reason": str(e),
+                        "reason": "resolve_in_flight",
                         "record_id": record.record_id, "detail": {}}),
                 ))
                 return
-            # 会话级副作用(K2 增额 / 谱系计数;spawn 重跑链路 v1 不透传计数)
-            eng._apply_plan_session_effects(plan, record)  # noqa: SLF001
-            # 补 gap（复用与 leaf resume 同一机制；marker 由全量达成判定后签发）
-            await eng._apply_plan_on_thread(  # noqa: SLF001
-                child_tid, handle.skill_id, record, plan)
-            # request 级核销:仍有未核销 pending → 部分核销,句柄保持 suspended
-            items_after = await eng._load_thread_items(child_tid)  # noqa: SLF001
-            remaining = [
-                pend for pend in eng._unsettled_pendings(  # noqa: SLF001
-                    record, items_after)
-                if pend.request_id not in op.resolutions]
-            if remaining:
-                await eng._emit(EventMsg(  # noqa: SLF001
-                    submission_id=sub.id,
-                    msg=SuspensionPartiallyResolved(data={
-                        "record_id": record.record_id, "thread_id": child_tid,
-                        "resolved_request_ids": sorted(op.resolutions.keys()),
-                        "remaining_request_ids": sorted(
-                            pend.request_id for pend in remaining)}),
-                ))
-                return
-            await eng._append_resolved_marker(  # noqa: SLF001
-                child_tid, record.record_id)
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=sub.id,
-                msg=SuspensionResolved(data={
-                    "record_id": record.record_id,
-                    "request_ids": sorted(record.request_ids())}),
-            ))
-
-            # 句柄回到 running（子 turn 又要跑了）；abort 则不续跑，直接落终态。
-            self._spawn_handles.set_result(
-                handle.handle_id, status="running", result=None)
-            if plan.abort:
-                # abort 裁决（TTL 到期 / 人工）：子 turn 在挂起点终止 → 失败终态
-                # 单点收敛（含 join-barrier 重查——否则被等待的句柄虽落终态但
-                # barrier 永不触发，聚合/会诊 turn 挂死）。
-                await self._settle_failed(
-                    handle.handle_id, f"spawn_aborted: {record.record_id}")
-                return
-
-            # 2. 以补齐后的子 thread 历史重建 detached 子 TurnRunner，续跑至终态。
-            target = eng._snapshot.get(handle.skill_id)  # noqa: SLF001
-            if target is None:
-                raise RuntimeError(
-                    f"spawn_resume_skill_missing: {handle.skill_id}")
-            assert eng._root_cancel is not None  # engine.run 已启动  # noqa: SLF001
-            cancel = eng._root_cancel.child(  # noqa: SLF001
-                f"spawn_resume:{handle.handle_id}")
-            # 续跑期间也登记取消 token：覆盖首发遗留的旧 token，使 kill_spawn 取消
-            # 的是当前正在跑的续跑子树（而非已结束的首发子树）。
-            self._spawn_cancels[handle.handle_id] = cancel
-            resumed_history = await eng._load_thread_items(child_tid)  # noqa: SLF001
-            runner = eng._build_child_runner(  # noqa: SLF001
-                target, child_tid, resumed_history[0], cancel,
-                history=resumed_history)
-            self._live_runners[child_tid] = runner  # peer-mailbox：续跑期也可被投递
+            eng._resolving_records.add(record.record_id)  # noqa: SLF001
             try:
-                outcome = await runner.run()
+                await self._resume_spawn_settled(sub, handle, record)
             finally:
-                self._live_runners.pop(child_tid, None)
-            # 3. 与 _drive_spawn 收尾一致：回写句柄 + emit 终态（再挂起 → 可再 resume）。
-            await self._finalize_spawn(handle.handle_id, child_tid, outcome)
+                eng._resolving_records.discard(record.record_id)  # noqa: SLF001
         except Exception as e:  # noqa: BLE001
             logger.exception(
                 "detached spawn resume crashed: %s", handle.handle_id)
@@ -563,16 +495,118 @@ class SpawnDriver:
             await self._settle_failed(
                 handle.handle_id, str(e), suppress_barrier_errors=True)
 
+    async def _resume_spawn_settled(
+        self, sub: Submission, handle: SpawnHandle, record: Any
+    ) -> None:
+        """resume_spawn 的主体(在飞守卫占位后):嵌套分流 / 配对 / 结算 / 重跑。
+
+        与 resume_spawn 拆分仅为守卫 try/finally 的作用域清晰;异常仍由调用方的
+        宽 except 兜底(落 handle error,不静默不卡 suspended)。
+        """
+        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+
+        eng = self._engine
+        assert isinstance(sub.op, Resume)
+        op = sub.op
+        child_tid = handle.child_thread_id
+        # 嵌套错峰 HITL：spawn 子 thread 的活跃挂起是 CHILD_SKILL（其子 skill 在执行中
+        # request_user_input 挂起 → 本层随之内核态挂起）。用户可答的 DATA/FORM 挂起埋在
+        # 更深的 leaf 子 thread，本层 record 不能直接交 SuspensionResolver（reason=
+        # child_skill 非用户可 resolve）→ 转嵌套续跑链。
+        if eng._next_child_link(record) is not None:  # noqa: SLF001
+            await self.resume_spawn_nested(sub, handle)
+            return
+        # 到期哨兵与未核销 pending 求交;空 → 让位(已被并发人工核销)
+        resolutions = eng._effective_resolutions(  # noqa: SLF001
+            record, await eng._load_thread_items(child_tid),  # noqa: SLF001
+            op.resolutions)
+        if not resolutions:
+            return
+        try:
+            plan = SuspensionResolver().plan(record, resolutions)
+        except ResolveError as e:
+            await eng._emit(EventMsg(  # noqa: SLF001
+                submission_id=sub.id,
+                msg=SuspensionResolveRejected(data={
+                    "reason": str(e),
+                    "record_id": record.record_id, "detail": {}}),
+            ))
+            return
+        # 会话级副作用(K2 增额)+ 谱系计数透传(suspend-review-fixes:spawn
+        # 重跑不再丢计数 → failure_suspend_max_auto_retries 对 spawn 拓扑生效)
+        auto_retries = eng._apply_plan_session_effects(plan, record)  # noqa: SLF001
+        # 补 gap（复用与 leaf resume 同一机制；marker 由全量达成判定后签发）
+        await eng._apply_plan_on_thread(  # noqa: SLF001
+            child_tid, handle.skill_id, record, plan)
+        # request 级核销:仍有未核销 pending → 部分核销,句柄保持 suspended
+        items_after = await eng._load_thread_items(child_tid)  # noqa: SLF001
+        remaining = [
+            pend for pend in eng._unsettled_pendings(  # noqa: SLF001
+                record, items_after)
+            if pend.request_id not in resolutions]
+        if remaining:
+            await eng._emit(EventMsg(  # noqa: SLF001
+                submission_id=sub.id,
+                msg=SuspensionPartiallyResolved(data={
+                    "record_id": record.record_id, "thread_id": child_tid,
+                    "resolved_request_ids": sorted(resolutions.keys()),
+                    "remaining_request_ids": sorted(
+                        pend.request_id for pend in remaining)}),
+            ))
+            return
+        await eng._append_resolved_marker(  # noqa: SLF001
+            child_tid, record.record_id)
+        await eng._emit(EventMsg(  # noqa: SLF001
+            submission_id=sub.id,
+            msg=SuspensionResolved(data={
+                "record_id": record.record_id,
+                "request_ids": sorted(record.request_ids())}),
+        ))
+
+        # 句柄回到 running（子 turn 又要跑了）；abort 则不续跑，直接落终态。
+        self._spawn_handles.set_result(
+            handle.handle_id, status="running", result=None)
+        if plan.abort:
+            # abort 裁决（TTL 到期 / 人工）：子 turn 在挂起点终止 → 失败终态
+            # 单点收敛（含 join-barrier 重查——否则被等待的句柄虽落终态但
+            # barrier 永不触发，聚合 turn 挂死）。
+            await self._settle_failed(
+                handle.handle_id, f"spawn_aborted: {record.record_id}")
+            return
+
+        # 2. 以补齐后的子 thread 历史重建 detached 子 TurnRunner，续跑至终态。
+        target = eng._snapshot.get(handle.skill_id)  # noqa: SLF001
+        if target is None:
+            raise RuntimeError(
+                f"spawn_resume_skill_missing: {handle.skill_id}")
+        assert eng._root_cancel is not None  # engine.run 已启动  # noqa: SLF001
+        cancel = eng._root_cancel.child(  # noqa: SLF001
+            f"spawn_resume:{handle.handle_id}")
+        # 续跑期间也登记取消 token：覆盖首发遗留的旧 token，使 kill_spawn 取消
+        # 的是当前正在跑的续跑子树（而非已结束的首发子树）。
+        self._spawn_cancels[handle.handle_id] = cancel
+        resumed_history = await eng._load_thread_items(child_tid)  # noqa: SLF001
+        runner = eng._build_child_runner(  # noqa: SLF001
+            target, child_tid, resumed_history[0], cancel,
+            history=resumed_history, auto_retry_count=auto_retries)
+        self._live_runners[child_tid] = runner  # peer-mailbox：续跑期也可被投递
+        try:
+            outcome = await runner.run()
+        finally:
+            self._live_runners.pop(child_tid, None)
+        # 3. 与 _drive_spawn 收尾一致：回写句柄 + emit 终态（再挂起 → 可再 resume）。
+        await self._finalize_spawn(handle.handle_id, child_tid, outcome)
+
     async def resume_spawn_nested(
         self, sub: Submission, handle: SpawnHandle
     ) -> None:
-        """续跑【嵌套挂起】的 detached spawn：被 spawn 的 composite 专科其子 skill 挂起，
+        """续跑【嵌套挂起】的 detached spawn：被 spawn 的 composite 子任务其子 skill 挂起，
         spawn 子 thread 以 CHILD_SKILL 内核态挂起 —— 走「以 spawn 子 thread 为根的续跑链」。
 
         机制（对账 ``_handle_child_resume``，但根换成 spawn 子 thread、且根层重跑走 spawn
         驱动而非 engine 根续跑）：
           1. ``_build_spawn_resume_chain``：自 spawn 子 thread 沿 CHILD_SKILL pending 下探到
-             持有用户 DATA/FORM 挂起的 leaf，得 ``[(spawn子tid, 专科, None), …, (leaf, …)]``。
+             持有用户 DATA/FORM 挂起的 leaf，得 ``[(spawn子tid, 子skill, None), …, (leaf, …)]``。
           2. ``_resume_leaf_thread``：用用户 resolutions 核销 leaf 真实挂起 + 续跑 leaf turn，
              拿回传父的结果串。leaf 又挂起 / 核销被拒 → 已各自 emit，句柄保持 suspended、不动。
           3. 中间各父层（若链 > 2）：``_resume_parent_level`` 逐层回填 call_skill output + 续跑。
@@ -1032,7 +1066,7 @@ class SpawnDriver:
             await asyncio.sleep(min(0.05, remaining))
 
     # -----------------------------------------------------------------
-    # join-barrier：登记「{句柄集}全终态 → 自动起聚合(联合会诊)turn」
+    # join-barrier：登记「{句柄集}全终态 → 自动起聚合 turn」
     # -----------------------------------------------------------------
 
     async def set_join_barrier(
@@ -1130,7 +1164,7 @@ class SpawnDriver:
         """触发一个 barrier:起 then_skill 独立聚合 turn,落 fired 标记 + emit。
 
         聚合输入:then_args_template(若给)否则默认 = {handle_id: {status, result}},
-        **含失败/取消句柄**(非 done 终态不丢弃,会诊需看到全部专家结局)。
+        **含失败/取消句柄**(非 done 终态不丢弃,聚合需看到全部子任务结局)。
         聚合 turn 经 ``_build_child_runner``(call_stack 空)以独立根 turn 跑,
         取消 token 自根派生(R4),其完成不回写本 engine 的 history/句柄表。
 

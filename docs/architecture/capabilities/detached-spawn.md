@@ -107,7 +107,7 @@ running → done | error | cancelled
 2. 未命中已知 spawn → 走原有父链 `_handle_resume` / `_handle_child_resume`（对称：detached spawn 的 `Resume` 走 spawn 路径，`call_skill` 嵌套挂起走父链路径）
 
 `resume_spawn` 内部：
-- 复用 `SuspensionResolver`（强制全量 resume，禁部分 resume）
+- 复用 `SuspensionResolver`（request 级核销:子集合法,全量达成才落 marker / 重跑）
 - 复用 `_build_child_runner`（call_stack 为空 → 子 turn 是**独立根 turn**，无 DispatchPolicy entry 门控）
 - 复用 `_finalize_spawn`（终态回调 + barrier 检查，与首发路径完全一致）
 

@@ -1,6 +1,6 @@
 """resume 后 history → OpenAI messages 重建的合法性回归。
 
-复现并固化两个缺陷（医生端 OpenAI-compat 代理迁移顶出的边界）：
+复现并固化两个缺陷（业务端 OpenAI-compat 代理迁移顶出的边界）：
 
 - Defect 1（call_id 错配）：call_skill 派发的子 skill 挂起后，父 call_skill 的
   ``function_call`` 用 LLM 给的 call_id 落盘，但 resume 回填的 ``function_call_output``

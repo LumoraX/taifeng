@@ -99,7 +99,7 @@ def make_spawn_skill_tool() -> ToolSpec:
         description=(
             "分离式发起一个子 skill：立即返回句柄(handle_id / child_thread_id)，"
             "子 skill 在后台独立跑完，**不阻塞**你当前的 turn。适合并发铺开多个独立"
-            "子任务（如同时让多个专科 skill 分析同一份资料）。\n\n"
+            "子任务（如同时让多个子任务 skill 分析同一份资料）。\n\n"
             "与 call_skill 的区别：call_skill 同步阻塞等子 skill 跑完拿结果；"
             "spawn_skill 立即返回句柄，之后用 join_skill 查状态 / 取结果，或用"
             "await_skills 登记「全部跑完后自动起聚合 skill」。\n\n"
@@ -178,7 +178,7 @@ def make_await_skills_tool() -> ToolSpec:
         name="await_skills",
         description=(
             "登记一个 join-barrier：等给定的一批 spawn 句柄**全部进入终态**"
-            "(done/error/cancelled)后，自动起一个聚合 skill 做联合会诊 / 汇总。"
+            "(done/error/cancelled)后，自动起一个聚合 skill 做联合汇总。"
             "失败或被取消的句柄终态也会带入聚合输入（不丢弃）。返回 barrier_id。\n\n"
             "用于「先 spawn_skill 铺开多个专家，再 await_skills 让它们全跑完后自动汇总」。"
         ),

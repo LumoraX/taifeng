@@ -20,7 +20,7 @@
 | [hooks](hooks.md) | 8 种 HookKind、各 hook 数据载荷字段、调用点映射、`PreTurnHookDenied` / `PreCompactHookSkipped` 事件 |
 | [instructions-injection](instructions-injection.md) | `InstructionSource` 协议、三档 scope 缓存、热更语义、fail-fast、5 类事件 |
 | [permission-gate](permission-gate.md) | `PermissionRequest` 字段、工厂方法、`prompter_timeout_seconds`、`args_match` 三态匹配、`PermissionRule.parse` / `from_dict`、内核无状态约束 |
-| [suspend-resume](suspend-resume.md) | `SuspendReason` 四值、`PendingRequest` / `SuspensionRecord`（↔ `suspension` ResponseItem）、`Resume` Op、`ResolvePlan` / `SuspensionResolver`、3 类 EventMsg、四 reason resume 语义、多挂起并存 + 禁部分 resume、resolved-marker 幂等、R4 丢弃、tier-1/2 + 跨进程重建 |
+| [suspend-resume](suspend-resume.md) | `SuspendReason` 四值、`PendingRequest` / `SuspensionRecord`（↔ `suspension` ResponseItem）、`Resume` Op、`ResolvePlan` / `SuspensionResolver`、3 类 EventMsg、四 reason resume 语义、多挂起并存 + request 级核销(错峰 Resume)、resolved-marker 幂等、R4 丢弃、tier-1/2 + 跨进程重建 |
 | [script-execution](script-execution.md) | `ScriptDescriptor` / `ScriptExecutor` 协议、隐式发现、subprocess 隔离、timeout / cancel、5 类事件 |
 | [tool-builtins-extended](tool-builtins-extended.md) | `apply_patch` 两阶段原子、`BackgroundTaskRegistry`、`http_request`、各工具 `parallel_safe` |
 | [mcp-server](mcp-server.md) | `McpStdioServer`、MCP 握手 / tools / resources、双向 JSON-RPC elicitation、CLI `mcp serve` |

@@ -104,11 +104,11 @@ class ConservativeFailurePolicy:
 class SuspendByDefaultPolicy:
     """失败默认挂起:「失败默认非终态,人裁决终态」哲学的官方形态。
 
-    **作用域**:policy 只辖两个判定点——采样 LLMError 重试耗尽、护栏触顶
-    (max_iterations / denial 断路器 / 会话 token)。以下失败不在裁决范围:
-    cancelled(取消非失败,直接走取消链)、RequestTooLargeError 预检、引擎级
-    K2 拒新 turn、非 LLM 异常(store / hook / 工具内部崩溃)——这些仍走既有
-    终态路径(扩面见 change resource-limit-retry-semantics)。
+    **作用域**:policy 辖四类判定点——采样 LLMError 重试耗尽、护栏触顶
+    (max_iterations / denial 断路器 / 会话 token)、RequestTooLargeError 预检、
+    引擎级 K2 拒新 turn(后两类 SUSPEND 分别落 SYSTEM_RETRY / RESOURCE_LIMIT)。
+    不在裁决范围:cancelled(取消非失败,直接走取消链)、非 LLM 异常
+    (store / hook / 工具内部崩溃)——仍走既有终态路径。
 
     判定点内任意失败 → SUSPEND,由 Resume 的提交者决定 retry / abort。确定性
     失败原样 retry 必然再失败——业务 UI 应据挂起 detail 中的 failure_class

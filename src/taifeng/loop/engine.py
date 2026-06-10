@@ -235,6 +235,11 @@ class AgentEngine:
         )
         # K2：会话级累计 token 上限（OOM-killer）。_session_tokens 跨 turn 累计；
         # None → 不强制（默认，行为不变）。
+        # K2 上限构造期校验:0/负值无意义(0 会使首条消息即触顶且增额判定歧义)
+        if max_session_tokens is not None and max_session_tokens <= 0:
+            raise ValueError(
+                f"max_session_tokens must be positive or None, "
+                f"got {max_session_tokens}")
         self._max_session_tokens = max_session_tokens
         # K3：长期记忆 swap 接口（None=无内存层级，默认行为不变）
         self._memory_store = memory_store
@@ -591,6 +596,25 @@ class AgentEngine:
             self._ttl_expire_after(delay, str(thread_id), str(record_id))
         )
 
+    async def _ttl_record_active(
+        self, thread_id: str, record_id: str,
+    ) -> SuspensionRecord | None:
+        """到期任务的活跃性验证:record 仍活跃且不在飞 → 返回 record,否则 None。
+
+        「先核销者胜」的单点判定:人工 Resume 已核销(marker 落盘)或正在处理
+        (在飞占位)时,到期裁决让位。根 thread 读内存 history,其余 load store。
+        """
+        items = (
+            list(self._history) if thread_id == self._thread_id
+            else await self._load_thread_items(thread_id)
+        )
+        record = self._find_active_suspension_in(items)
+        if record is None or record.record_id != record_id:
+            return None
+        if record_id in self._resolving_records:
+            return None
+        return record
+
     async def _ttl_expire_after(
         self, delay: float, thread_id: str, record_id: str
     ) -> None:
@@ -605,16 +629,9 @@ class AgentEngine:
         try:
             if delay > 0:
                 await asyncio.sleep(delay)
-            # 验证活跃性(先核销者胜):根 thread 看内存 history,其余 load store
-            items = (
-                list(self._history) if thread_id == self._thread_id
-                else await self._load_thread_items(thread_id)
-            )
-            record = self._find_active_suspension_in(items)
-            if record is None or record.record_id != record_id:
-                return
-            # 在飞守卫:人工 Resume 正在处理(marker 未落)→ 到期让位(先核销者胜)
-            if record_id in self._resolving_records:
+            # 验证活跃性 + 在飞让位(先核销者胜)
+            record = await self._ttl_record_active(thread_id, record_id)
+            if record is None:
                 return
             # 路由解析(fire 时):spawn 嵌套 leaf 的 thread_id 不可直接路由
             # (match_suspended_spawn 只认 spawn 子 tid)→ 解析可路由入口。
@@ -627,19 +644,28 @@ class AgentEngine:
                     break
                 await asyncio.sleep(0.05)
             if route_tid is None:
+                # 退避重武装(suspend-review-fixes D3):到期是事实,路由不可达只是
+                # 时序(挂起上浮未完成 / 批内兄弟在跑)。放弃版的「冷装载补」对长
+                # 生命进程是永不发生的承诺;2s 后重试,人工核销/Shutdown 经既有
+                # 取消路径终止,纯内存检查无 token 成本。
                 logger.warning(
-                    "suspension ttl expiry unroutable: record=%s thread=%s "
-                    "(冷装载时重试)", record_id, thread_id)
+                    "suspension ttl expiry unroutable, rearming in 2s: "
+                    "record=%s thread=%s", record_id, thread_id)
+                self._ttl_timers.pop(record_id, None)
+                self._arm_ttl_timer({
+                    "record_id": record_id,
+                    "thread_id": thread_id,
+                    "expires_at": int(self._now_factory()) + 2,
+                })
                 return
             # 重试等待期间可能已被人工 Resume 核销/占位 → 让位(先核销者胜)
+            record = await self._ttl_record_active(thread_id, record_id)
+            if record is None:
+                return
             items = (
                 list(self._history) if thread_id == self._thread_id
                 else await self._load_thread_items(thread_id)
             )
-            record = self._find_active_suspension_in(items)
-            if (record is None or record.record_id != record_id
-                    or record_id in self._resolving_records):
-                return
             # 内核签发到期裁决:只对**未核销** pending 配哨兵(request 级核销下,
             # 已部分结算的 pending 再发哨兵会产生重复 fco)
             pending_left = self._unsettled_pendings(record, items)
@@ -678,7 +704,9 @@ class AgentEngine:
         except Exception:
             logger.exception("suspension ttl expiry crashed: %s", record_id)
         finally:
-            self._ttl_timers.pop(record_id, None)
+            # 只弹自身:路由失败分支已重武装新 task,不可被旧 task 的收尾误弹
+            if self._ttl_timers.get(record_id) is asyncio.current_task():
+                self._ttl_timers.pop(record_id, None)
 
     async def _resolve_expiry_route(
         self, thread_id: str, record_id: str,
@@ -950,6 +978,26 @@ class AgentEngine:
 
     async def _run_turn_for(self, sub: Submission, root_cancel: CancellationToken) -> None:
         assert isinstance(sub.op, UserMessage)
+
+        # 挂起态守卫(suspend-review-fixes):根 thread 有活跃挂起 → 在落史**之前**
+        # 显式拒绝新 UserMessage。挂起 = turn 停在待裁决,裁决(Resume retry/abort)
+        # 是继续会话的唯一出口;放行会让新 turn 的同名编排 call_id fco 污染
+        # request 级核销凭据(假核销 → TTL 静默 no-op / 幽灵续跑重放错轮),并使
+        # engine 级 K2 record 可叠加成僵尸。拒绝不落史:被拒消息若入史会污染
+        # 编排重放锚与续跑 seed——业务凭 thread_suspended 事件引导用户先裁决,
+        # 结清后重发(消息文本在事件归因的 submission 里,未静默丢弃)。
+        active_suspension = self._find_active_suspension()
+        if active_suspension is not None:
+            await self._emit(EventMsg(submission_id=sub.id, msg=TurnFailed(data={
+                "error": "active_suspension",
+                "kind": "thread_suspended",
+                "record_id": active_suspension.record_id,
+                "iterations": 0,
+                "is_root": True,
+            })))
+            self._turn_index += 1
+            return
+
         turn_cancel = root_cancel.child(f"sub:{sub.id}")
         self._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
 
@@ -1310,8 +1358,12 @@ class AgentEngine:
         cancel: CancellationToken,
         *,
         history: list[ResponseItem] | None = None,
+        auto_retry_count: int = 0,
     ) -> TurnRunner:
         """构造 detached spawn 的子 TurnRunner（镜像 turn.py::_spawn_sub_runner 的 kwargs）。
+
+        ``auto_retry_count``:TTL 到期自动 retry 的谱系计数(suspend-review-fixes:
+        spawn 重跑透传 → failure_suspend_max_auto_retries 对 spawn 拓扑生效)。
 
         与阻塞式 call_skill 子 runner 的差异：``cancel`` 由 engine 根取消派生（而非
         父 turn 的 ctx.cancel），其余依赖（snapshot / model / runtime / store /
@@ -1347,6 +1399,7 @@ class AgentEngine:
             failure_policy=self._failure_policy,
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
+            auto_retry_count=auto_retry_count,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             capabilities=self._capabilities,
             spawn_registry=self._spawn_registry,
@@ -1485,10 +1538,15 @@ class AgentEngine:
         record: SuspensionRecord, root_cancel: CancellationToken,
     ) -> None:
         """_handle_resume 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
+        # 1.6 到期哨兵与未核销 pending 求交(陈旧快照不重复回填);空 → 让位
+        resolutions = self._effective_resolutions(
+            record, list(self._history), op.resolutions)
+        if not resolutions:
+            return
         # 2. 配对 + 计划（ResolveError 显式拒绝，不静默兜底）
         from taifeng.suspend.resolver import ResolveError, SuspensionResolver
         try:
-            plan = SuspensionResolver().plan(record, op.resolutions)
+            plan = SuspensionResolver().plan(record, resolutions)
         except ResolveError as e:
             await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
                 data={"reason": str(e), "record_id": record.record_id, "detail": {}})))
@@ -1521,16 +1579,21 @@ class AgentEngine:
         async with self._settle_lock(record.record_id):
             active = self._find_active_suspension()
             if active is None or active.record_id != record.record_id:
-                return  # 并发 Resume 已抢先全量结算
+                # 并发 Resume 已抢先全量结算:补显式事件(消除观测空洞)
+                await self._emit(EventMsg(
+                    submission_id=sub.id, msg=SuspensionResolveRejected(data={
+                        "reason": "superseded_by_concurrent_settlement",
+                        "record_id": record.record_id, "detail": {}})))
+                return
             remaining = [
                 p for p in self._unsettled_pendings(record, list(self._history))
-                if p.request_id not in op.resolutions]
+                if p.request_id not in resolutions]
             if remaining:
                 await self._emit(EventMsg(
                     submission_id=sub.id,
                     msg=SuspensionPartiallyResolved(data={
                         "record_id": record.record_id, "thread_id": self._thread_id,
-                        "resolved_request_ids": sorted(op.resolutions.keys()),
+                        "resolved_request_ids": sorted(resolutions.keys()),
                         "remaining_request_ids": sorted(
                             p.request_id for p in remaining)})))
                 return
@@ -1667,8 +1730,13 @@ class AgentEngine:
         return [(self._thread_id, self._entry_skill.id, None), *rest]
 
     def _max_total_spawns_guard(self) -> int:
-        """续跑链下探的最大层数守卫（取 spawn 总配额上界 + 余量，避免坏数据死循环）。"""
-        return 1024
+        """续跑链 DFS 下探的最大层数守卫(防坏数据成环)。
+
+        必须低于 Python 默认递归限(1000):descend 系 async 递归逐帧压栈,守卫
+        高于递归限时坏数据会先炸 RecursionError(create_task 中静默)而非由守卫
+        终止。正常链深受 max_call_depth 约束(个位数),128 余量充足。
+        """
+        return 128
 
     @staticmethod
     def _next_child_link(
@@ -1729,6 +1797,11 @@ class AgentEngine:
         """_resume_leaf_thread 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
         from taifeng.suspend.resolver import ResolveError, SuspensionResolver
 
+        # 到期哨兵与未核销 pending 求交;空 → 让位(已被并发人工核销)
+        resolutions = self._effective_resolutions(
+            record, await self._load_thread_items(leaf_tid), resolutions)
+        if not resolutions:
+            return None
         try:
             plan = SuspensionResolver().plan(record, resolutions)
         except ResolveError as e:
@@ -1807,7 +1880,12 @@ class AgentEngine:
                      else await self._load_thread_items(parent_tid))
             active = self._find_active_suspension_in(fresh)
             if active is None or active.record_id != record.record_id:
-                return None  # 并发链已抢先全量结算并续跑 → 本链到此为止
+                # 并发链已抢先全量结算并续跑 → 本链到此为止(补显式事件)
+                await self._emit(EventMsg(
+                    submission_id=sub.id, msg=SuspensionResolveRejected(data={
+                        "reason": "superseded_by_concurrent_settlement",
+                        "record_id": record.record_id, "detail": {}})))
+                return None
             remaining = self._unsettled_pendings(record, fresh)
             if remaining:
                 # request 级核销:仍有未核销 pending → 不落 marker、不续跑父 turn
@@ -2011,7 +2089,7 @@ class AgentEngine:
 
         ``submission_id``：续跑事件的归因 submission。默认 None → 用本次 Resume 的
         ``sub.id``（根 thread 续跑链语义）。**spawn 嵌套续跑链**显式传 spawn 子 thread id：
-        使被 spawn 的专科 subtree 续跑事件归因到与首发一致的 child_thread（业务侧按
+        使被 spawn 的子任务 subtree 续跑事件归因到与首发一致的 child_thread（业务侧按
         submission_id 分轨，否则 leaf 子步文本会错挂到 Resume submission，丢轨）。
         """
         from taifeng.loop.turn import TurnRunner
@@ -2048,6 +2126,10 @@ class AgentEngine:
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
             auto_retry_count=auto_retry_count,
+            # K2 执法(suspend-review-fixes):leaf/父层续跑注入会话预算——
+            # 增额后有执法;续跑用量不回写 engine 计量为既有缺口(文档声明)
+            session_tokens_used=self._session_tokens,
+            max_session_tokens=self._max_session_tokens,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(items),
             permission_policy=self._permission_policy,
@@ -2216,7 +2298,8 @@ class AgentEngine:
         - 谱系计数:plan 来自 TTL 到期自动 retry(expired_retry)→ 续跑计数 =
           record 内既有计数 + 1(人工 Resume 恒 0,不计数)。
         """
-        if getattr(plan, "extend_session_tokens", 0) and self._max_session_tokens:
+        if (getattr(plan, "extend_session_tokens", 0)
+                and self._max_session_tokens is not None):
             self._max_session_tokens += plan.extend_session_tokens
         if not getattr(plan, "expired_retry", False):
             return 0
@@ -2224,6 +2307,26 @@ class AgentEngine:
             (int(p.detail.get("auto_retry_count", 0) or 0) for p in record.pending),
             default=0)
         return prior + 1
+
+    def _effective_resolutions(
+        self, record: SuspensionRecord, items: list[ResponseItem],
+        resolutions: dict[str, Any],
+    ) -> dict[str, Any]:
+        """到期哨兵 resolutions 与未核销 pending 求交;人工 payload 原样返回。
+
+        fire 快照与哨兵 Resume 实际处理之间存在陈旧窗口:期间被人工部分核销的
+        pending 再收哨兵会对已配对 call_id 重复落 deny fco(suspend-review-fixes)。
+        仅对**纯哨兵**提交过滤(内核签发形态);空交集 → 调用方 no-op 让位。
+        """
+        from taifeng.suspend.resolver import EXPIRE_SENTINEL
+
+        if not resolutions or not all(
+            isinstance(v, dict) and v.get(EXPIRE_SENTINEL) is True
+            for v in resolutions.values()
+        ):
+            return dict(resolutions)
+        unsettled = {p.request_id for p in self._unsettled_pendings(record, items)}
+        return {rid: v for rid, v in resolutions.items() if rid in unsettled}
 
     def _settle_lock(self, record_id: str) -> asyncio.Lock:
         """取 record 级结算锁(惰性创建;record 终结后残留的空锁可忽略不计)。"""

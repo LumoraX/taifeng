@@ -1,13 +1,13 @@
 """detached spawn 嵌套 HITL 续跑 —— 边界对抗验证（补 resume_spawn_nested 未覆盖路径）。
 
-现有 test_detached_spawn_nested_hitl.py 只覆盖**深度 2**（spawn 子=专科、leaf=子步），
+现有 test_detached_spawn_nested_hitl.py 只覆盖**深度 2**（spawn 子=专家、leaf=子步），
 ``resume_spawn_nested`` 的中间父层循环 ``for level in range(len(chain)-2, 0, -1)`` 在
 chain==2 时为空循环、从未执行。本文件补三个高风险盲区：
 
 1. **深度 3 嵌套**（spawn→l1→l2→leaf）：逼出中间父层逐层回填循环（level=1 真实执行）。
 2. **entry-target spawn**：dispatch.py 新增 ``allow_entry_target`` 放开 spawn 调 entry 门，
    验证 entry 目标可 spawn、且白名单门仍拦截非白名单目标（其余门未被一并放开）。
-3. **嵌套 resume 完成后 join-barrier 触发**：MDT 核心——专科嵌套挂起→resume 完成后，
+3. **嵌套 resume 完成后 join-barrier 触发**：多子任务聚合核心——专家嵌套挂起→resume 完成后，
    登记的 join-barrier 应正常 fire（聚合 turn 起跑）。
 """
 from __future__ import annotations
@@ -217,13 +217,13 @@ def barrier_skills(tmp_path):
 
 @pytest.mark.asyncio
 async def test_join_barrier_fires_after_nested_resume(barrier_skills, threads_dir):
-    """专科嵌套挂起 → 登记 join-barrier → Resume 完成专科 → barrier 应 fire（聚合起跑）。"""
+    """专家嵌套挂起 → 登记 join-barrier → Resume 完成专家 → barrier 应 fire（聚合起跑）。"""
     client = RoutingMockClient(routes={
         "B_EXPERT_MARK": [
-            MockTurn(text="专科调子步。", tool_calls=[
+            MockTurn(text="专家调子步。", tool_calls=[
                 {"id": "c_step", "name": "call_skill",
                  "arguments": '{"skill_id": "b-step", "args": {}}'}]),
-            MockTurn(text="专科完成 B_EXPERT_DONE"),
+            MockTurn(text="专家完成 B_EXPERT_DONE"),
         ],
         "B_STEP_MARK": [
             MockTurn(text="子步补问。", tool_calls=[
@@ -231,7 +231,7 @@ async def test_join_barrier_fires_after_nested_resume(barrier_skills, threads_di
                  "arguments": '{"prompt": "补充"}'}]),
             MockTurn(text="子步结论 B_STEP_OK"),
         ],
-        "CONSULT_MARK": [MockTurn(text="会诊聚合 CONSULT_DONE")],
+        "CONSULT_MARK": [MockTurn(text="汇总聚合 CONSULT_DONE")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=barrier_skills, threads_dir=threads_dir, model_client=client,
@@ -249,13 +249,13 @@ async def test_join_barrier_fires_after_nested_resume(barrier_skills, threads_di
     watch_task = asyncio.create_task(watch())
     await asyncio.sleep(0)
 
-    sp = await engine.spawn_skill(skill_id="b-expert", args={}, reason="专科")
+    sp = await engine.spawn_skill(skill_id="b-expert", args={}, reason="expert")
     hid, child_tid = sp["handle_id"], sp["child_thread_id"]
-    # 登记 join-barrier：专科终态后起 consult 聚合
+    # 登记 join-barrier：专家终态后起 consult 聚合
     await engine.set_join_barrier([hid], then_skill_id="consult")
 
     assert await _wait(
-        lambda: engine.spawn_status([hid])[hid]["status"] == "suspended"), "专科未挂起"
+        lambda: engine.spawn_status([hid])[hid]["status"] == "suspended"), "专家未挂起"
 
     def _leaf_req():
         for ev in events:

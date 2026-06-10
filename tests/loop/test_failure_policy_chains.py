@@ -1,7 +1,7 @@
 """failure-suspension-policy 链路端到端 —— spawn 链 + call_skill 子链。
 
 覆盖 spec「spawn 链路零新增复用挂起路由」与「子 runner 继承 policy」:
-- 被 spawn 的专科触 max_iterations → 句柄 suspended + SpawnSuspended(thread_id)
+- 被 spawn 的专家触 max_iterations → 句柄 suspended + SpawnSuspended(thread_id)
   → Resume(child_tid, retry) 续跑至 done;abort → error + SpawnFailed。
 - call_skill 子链:SuspendByDefault 下子 skill 确定性 LLM 错误(content_filter)
   → 子 turn SYSTEM_RETRY 挂起 → 父 CHILD_SKILL 上浮 → 根 turn_suspended;
@@ -97,7 +97,7 @@ async def _spawn_until_suspended(pool, engine):
     hid, ctid = h["handle_id"], h["child_thread_id"]
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "suspended"
-    ), "spawn 专科应在 max_iterations 触顶后挂起"
+    ), "spawn 专家应在 max_iterations 触顶后挂起"
     items = [it async for it in await pool.store.load_thread(ctid)]
     recs = [it for it in items if it.kind == "suspension"]
     assert len(recs) == 1
@@ -109,7 +109,7 @@ async def _spawn_until_suspended(pool, engine):
 
 @pytest.mark.asyncio
 async def test_spawn_resource_limit_resume_retry_to_done(chain_skills, threads_dir):
-    """spawn 专科触顶挂起 → Resume(child_tid, retry) 续跑至 done,
+    """spawn 专家触顶挂起 → Resume(child_tid, retry) 续跑至 done,
     已走历史保留(续跑轮文本接续),句柄经既有 suspended 路由,零新增状态机。"""
     client = RoutingMockClient(routes={
         # 2 轮 echo 耗尽 cap=2 → 挂起;第 3 个脚本留给 resume 续跑(纯文本完成)
@@ -140,7 +140,7 @@ async def test_spawn_resource_limit_resume_retry_to_done(chain_skills, threads_d
 
 @pytest.mark.asyncio
 async def test_spawn_resource_limit_resume_abort_to_failed(chain_skills, threads_dir):
-    """spawn 专科触顶挂起 → Resume(child_tid, abort) → 句柄 error + SpawnFailed
+    """spawn 专家触顶挂起 → Resume(child_tid, abort) → 句柄 error + SpawnFailed
     (人显式放弃成终态,barrier 全终态条件得以推进)。"""
     client = RoutingMockClient(routes={
         "BUDGET_EXPERT_MARK": [_echo_turn(1), _echo_turn(2),
