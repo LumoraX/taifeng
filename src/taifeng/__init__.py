@@ -95,7 +95,7 @@ from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.pool import EnginePool
-from taifeng.loop.submission import Resume
+from taifeng.loop.submission import Resume, SendToPeer
 from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.mcp import McpStdioClient, McpStdioServer, McpToolError
 from taifeng.permission import (
@@ -144,7 +144,9 @@ from taifeng.tool.builtins import (
     BackgroundTaskTimeoutError,
     make_apply_patch_tool,
     make_run_in_background_tool,
+    make_send_message_tool,
     make_wait_for_task_tool,
+    make_wait_peer_tool,
 )
 
 __all__ = [
@@ -183,6 +185,8 @@ __all__ = [
     "OtelSinkConfig",
     "OtelTelemetrySink",
     "make_apply_patch_tool",
+    "make_send_message_tool",
+    "make_wait_peer_tool",
     "make_run_in_background_tool",
     "make_wait_for_task_tool",
     "MessageWriter",
@@ -196,6 +200,7 @@ __all__ = [
     "ResolveError",
     "ResolvePlan",
     "Resume",
+    "SendToPeer",
     "ResponseEvent",
     "ResponseFormatSpec",
     "ResponseItem",

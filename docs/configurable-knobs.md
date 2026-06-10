@@ -729,6 +729,17 @@ pool = await EnginePool.create(
 )
 ```
 
+### 6.5 peer 通信工具（peer-mailbox-messaging）
+
+2 个 LLM 工具，同为 **opt-in**（`extra_tools=` 注入 + entry skill `tool_names` 显式启用），均 `parallel_safe=True`、经 `ctx.extras["spawn_coordinator"]` 接入。详见 [peer-mailbox-messaging 契约](architecture/capabilities/peer-mailbox-messaging.md)。
+
+| 工具 | 说明 |
+| --- | --- |
+| `make_send_message_tool()` | 谱系内点对点发消息：target = child_thread_id / handle_id / `"parent"`；mode = `queue_only`（入队/落史）/ `trigger_turn`（空闲唤醒，运行中自动降级、root 拒绝、suspended 只落史） |
+| `make_wait_peer_tool()` | turn 内阻塞等单个 spawn 句柄终态；`timeout_seconds` **必填**（互等死锁的唯一保底）；超时返回 error 结果（turn 不失败） |
+
+业务侧程序化投递走 `engine.submit(SendToPeer(target_thread_id=…, text=…, mode=…))` 或直调 `engine.deliver_peer_message(...)`，与工具完全同一路径。
+
 | 工具名 | 对应 engine API | 输入 schema | 输出 |
 | --- | --- | --- | --- |
 | `spawn_skill` | `engine.spawn_skill(skill_id, args, reason)` | `{skill_id, args?, reason}` | `{handle_id, child_thread_id}` |

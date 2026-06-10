@@ -63,6 +63,7 @@ from taifeng.loop.submission import (
     RefreshSnapshot,
     Resume,
     Rewind,
+    SendToPeer,
     Shutdown,
     Submission,
     ThreadRollback,
@@ -580,6 +581,32 @@ class AgentEngine:
                     self._history.append(item)
                     await self._store.append(item)
                     continue
+                if isinstance(sub.op, SendToPeer):
+                    # peer-mailbox：与 send_message 工具收敛到同一投递路径。
+                    # 寻址失败 / TriggerTurn 打 root → EngineLog 告警（显式，不静默）。
+                    try:
+                        await self.deliver_peer_message(
+                            target=sub.op.target_thread_id,
+                            text=sub.op.text,
+                            mode=sub.op.mode,
+                            from_thread_id=sub.op.from_thread_id,
+                            submission_id=sub.id,
+                        )
+                    except ValueError as e:
+                        await self._emit(
+                            EventMsg(
+                                submission_id=sub.id,
+                                msg=EngineLog(data={
+                                    "level": "warning",
+                                    "message": f"send_to_peer 投递失败: {e}",
+                                    "extra": {
+                                        "target": sub.op.target_thread_id,
+                                        "mode": sub.op.mode,
+                                    },
+                                }),
+                            )
+                        )
+                    continue
                 if isinstance(sub.op, InjectUserInput):
                     # B1 midturn-input-steering：投进活跃 turn 的 pending 队列（下一
                     # 迭代边界 drain 并入）；无活跃 turn → 落历史不起新 turn。
@@ -988,6 +1015,35 @@ class AgentEngine:
     def spawn_status(self, handle_ids: list[str]) -> dict[str, dict[str, Any]]:
         """转发到 SpawnDriver.spawn_status —— 公共 API（业务侧轮询 / join 检查）。"""
         return self._spawn.spawn_status(handle_ids)
+
+    async def deliver_peer_message(
+        self,
+        *,
+        target: str,
+        text: str,
+        mode: str = "queue_only",
+        from_thread_id: str | None = None,
+        submission_id: str | None = None,
+    ) -> dict[str, Any]:
+        """转发到 SpawnDriver.deliver_peer_message —— peer-mailbox 唯一投递路径。
+
+        ``send_message`` 工具（经 spawn_coordinator 协议）与 ``SendToPeer`` Op
+        都收敛到此。详见 spawn_driver.py 同名方法。
+        """
+        return await self._spawn.deliver_peer_message(
+            target=target, text=text, mode=mode,
+            from_thread_id=from_thread_id, submission_id=submission_id)
+
+    async def wait_spawn_terminal(
+        self,
+        *,
+        handle_id: str,
+        timeout_seconds: float,
+        cancel: CancellationToken,
+    ) -> dict[str, Any]:
+        """转发到 SpawnDriver.wait_spawn_terminal —— ``wait_peer`` 工具实现体。"""
+        return await self._spawn.wait_spawn_terminal(
+            handle_id=handle_id, timeout_seconds=timeout_seconds, cancel=cancel)
 
     async def kill_spawn(self, handle_id: str) -> None:
         """转发到 SpawnDriver.kill_spawn —— 公共 API（主动终止单个 spawn 子树）。"""

@@ -519,6 +519,8 @@ join-barrier（全终态触发）：
 | `await_skills` | `engine.set_join_barrier(handle_ids, then_skill_id, then_args_template)` | 登记 join-barrier，返回 `{barrier_id}` |
 | `join_skill` | `engine.spawn_status(handle_ids)` | 非阻塞读各句柄当前 status+result |
 | `kill_skill` | `engine.kill_spawn(handle_id)` | R4：杀单个，兄弟不受影响 |
+| `send_message` | `engine.deliver_peer_message(target, text, mode)` | peer 点对点投递（thread_id / handle_id / "parent" 寻址，双模式） |
+| `wait_peer` | `engine.wait_spawn_terminal(handle_id, timeout_seconds)` | turn 内阻塞等单个句柄终态（timeout **必填**防互等死锁） |
 
 **注**：detached-spawn 能力**无新 Op**——发起 / 查询 / 取消全部通过 LLM 工具或业务直调 engine API 完成，不走 Submission 队列（与 turn 无关的 out-of-band 操作）。
 
@@ -560,6 +562,17 @@ K1（广度）/ K2（token）之外，turn 级还有两条 opt-in 护栏（默�
 - **R4**：drain 前 `cancel.is_cancelled` 守卫，已取消 turn 不并入（文本由 engine 收尾落历史，不丢，R5）。
 
 完整契约见 [`capabilities/midturn-input-steering.md`](capabilities/midturn-input-steering.md)。
+
+## peer-mailbox：活体 agent 间点对点消息（peer-mailbox-messaging 契约）
+
+steering 解决「用户 → 运行中 turn」；peer-mailbox 把同一 seam 推广到「agent → agent」（同 engine 谱系内 sibling↔sibling / child→parent）：
+
+- **Op + 工具同路径**：`SendToPeer{target_thread_id, text, mode}` 与 `send_message` 工具都收敛到 `engine.deliver_peer_message`（SpawnDriver 实现）。寻址 = child_thread_id / handle_id / `"parent"`（解析为谱系 root）；未知目标显式 error。
+- **双模式**：`queue_only`（运行中投目标 runner 的 `pending_input`——B1 同一队列；空闲即时 `store.append` 落史，R5）；`trigger_turn`（空闲 spawn child 落史后以续跑范式唤醒新 detached turn，emit `peer_agent_woken`；运行中自动降级 `mode_downgraded=true`；root 拒绝；suspended 只落史——挂起只能由 Resume 解除）。
+- **消息形态**：`user_message` + payload `source="peer", from_thread`（不新增 kind）；事件 `peer_message_sent` 不含正文。
+- **wait_peer**：turn 内轮询句柄表等单个终态，与 `await_skills`（barrier，turn 结束后聚合）分工互补。
+
+完整契约见 [`capabilities/peer-mailbox-messaging.md`](capabilities/peer-mailbox-messaging.md)。
 
 ## turn 的终止结局：含 suspended（suspend-resume）
 

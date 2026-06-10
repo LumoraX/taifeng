@@ -86,7 +86,7 @@ src/taifeng/
 │                         #   + mock + _shared.py（错误分类 / SSE / usage 统一）
 │
 ├── loop/         # §1.2 主循环部分
-│   ├── submission.py     # Submission / Op（12 种，全集见 docs/capability-matrix.md）
+│   ├── submission.py     # Submission / Op（13 种含 SendToPeer，全集见 docs/capability-matrix.md）
 │   ├── event.py          # EventMsg（输出事件总线）
 │   ├── engine.py         # AgentEngine —— 主 actor（注入 entry_skill）
 │   ├── pool.py           # EnginePool —— 多 thread engine 复用 + resume
@@ -94,6 +94,7 @@ src/taifeng/
 │   ├── tool_batch.py     # dispatch_batch —— 一批 tool call 三段式并发派发
 │   ├── orchestration_exec.py # 声明式编排执行器（检测到 orchestration 则跳过 LLM 采样）
 │   ├── spawn.py          # K1 SpawnSlotRegistry —— 广度准入（fork-bomb 防护）
+│   ├── spawn_driver.py   # detached spawn 协调 + peer-mailbox（点对点投递/唤醒/wait）
 │   ├── prompt.py         # build_prompt + history ↔ api messages 转换
 │   └── cancellation.py   # 父子 CancellationToken
 │

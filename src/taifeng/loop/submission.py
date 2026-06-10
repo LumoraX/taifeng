@@ -166,6 +166,24 @@ class Rewind(BaseModel):
     new_args: dict[str, Any] | None = None
 
 
+class SendToPeer(BaseModel):
+    """业务侧程序化向谱系内 peer 投递消息（与 ``send_message`` 工具同一路径）。
+
+    参数：
+        - ``target_thread_id``: 目标寻址 —— child_thread_id / handle_id / "parent"
+          （"parent" 解析为发送者谱系的 root thread）。
+        - ``text``: 消息正文（落 ResponseItem，事件只带长度与截断预览）。
+        - ``mode``: queue_only（入队/落史）或 trigger_turn（空闲 spawn child 唤醒）。
+        - ``from_thread_id``: 发送者 thread（None = root thread 自身）。
+    """
+
+    kind: Literal["send_to_peer"] = "send_to_peer"
+    target_thread_id: str
+    text: str
+    mode: Literal["queue_only", "trigger_turn"] = "queue_only"
+    from_thread_id: str | None = None
+
+
 class Shutdown(BaseModel):
     kind: Literal["shutdown"] = "shutdown"
 
@@ -182,6 +200,7 @@ Op = Union[
     UpdateInstructions,
     Resume,
     Rewind,
+    SendToPeer,
     Shutdown,
 ]
 

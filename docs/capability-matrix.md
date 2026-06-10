@@ -166,7 +166,7 @@ pool = await taifeng.EnginePool.create(
 )
 ```
 
-### Op 全集（运行时通过 `engine.submit(...)` 投递，共 12 种）
+### Op 全集（运行时通过 `engine.submit(...)` 投递，共 13 种）
 
 | Op | 作用 |
 | --- | --- |
@@ -177,6 +177,7 @@ pool = await taifeng.EnginePool.create(
 | `CompactNow` | 手动触发一次压缩 |
 | `Resume` | HITL 挂起后续跑 |
 | `Rewind` | 回退到可寻址节点重跑 |
+| `SendToPeer` | 谱系内 peer 点对点投递（与 `send_message` 工具同路径） |
 | `ThreadRollback` | 历史截断回滚 |
 | `UpdateBudget` | 运行时改 context 预算 |
 | `UpdateInstructions` | 热更某层 instruction |
@@ -185,7 +186,7 @@ pool = await taifeng.EnginePool.create(
 
 ### 内置工具全集（`make_*_tool()`，按需 `extra_tools=` 注册）
 
-`read_skill` · `call_skill` · `file_read` · `file_write` · `shell_exec` · `apply_patch` · `http_request` · `run_in_background` · `wait_for_task` · `run_script` · `request_user_input` · `spawn_skill` · `await_skills` · `join_skill` · `kill_skill`
+`read_skill` · `call_skill` · `file_read` · `file_write` · `shell_exec` · `apply_patch` · `http_request` · `run_in_background` · `wait_for_task` · `run_script` · `request_user_input` · `spawn_skill` · `await_skills` · `join_skill` · `kill_skill` · `send_message` · `wait_peer`
 
 ### 公共 API 符号
 

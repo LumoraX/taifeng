@@ -125,6 +125,7 @@
 | [compression_showcase/overflow_demo.py](compression_showcase/overflow_demo.py) | provider 判超长 → **overflow 有界自愈**（强制压缩一次 + 重采样一次，phase=overflow，发 `provider_retry`） | 否（Mock） |
 | [compression_showcase/surgical_demo.py](compression_showcase/surgical_demo.py) | **手术刀档就地剪枝**（dedup / soft-trim / hard-clear 三 pass 分级，LLM-free、配对不变、detail 计数） | 否（Mock） |
 | [compression_showcase/pinned_demo.py](compression_showcase/pinned_demo.py) | **压缩后状态保活**（任务清单实现 `PinnedStateSource`，穿越压缩钉回 tail；`pinned_state_reinjected` 事件 + 运行时注销） | 否（Mock） |
+| [peer_messaging/demo.py](peer_messaging/demo.py) | **活体专家间点对点消息**（SendToPeer 唤醒空闲专家产出修正结论、wait_peer 等终态、peer 项 source 标注持久化） | 否（Mock） |
 
 > 真实 LLM handoff 摘要压缩见 [real_llm/capability_matrix.py](real_llm/capability_matrix.py) 的 compression 场景。
 

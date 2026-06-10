@@ -54,6 +54,10 @@ _KIND_TAG = {
     "skill_dispatch_permission_denied": ("perm", _Colors.RED, "✗"),
     # turn-resource-guards：连续拒绝断路器触发（红色 —— turn 提前终止）
     "denial_circuit_open": ("perm", _Colors.RED, "⊘"),
+    "peer_message_sent": ("peer", _Colors.CYAN, "✉"),
+    "peer_agent_woken": ("peer", _Colors.CYAN, "⏰"),
+    "peer_wait_started": ("peer", _Colors.GRAY, "⧖"),
+    "peer_wait_resolved": ("peer", _Colors.GRAY, "⧗"),
     "turn_completed": ("turn", _Colors.GREEN, "✓"),
     "turn_failed": ("turn", _Colors.RED, "✗"),
     # turn_suspended 是独立终结态(挂起等待 Resume)——黄色 ⏸ 与完成/失败区分
@@ -118,6 +122,21 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         parts.append(
             f"{status} removed={data.get('removed_count')} cache_invalid={data.get('cache_invalidated')}"
             + (f" reason={data.get('reason')}" if data.get("reason") else "")
+        )
+    elif ev.msg.kind == "peer_message_sent":
+        down = " (downgraded)" if data.get("mode_downgraded") else ""
+        parts.append(
+            f"{data.get('from')} → {data.get('to')} mode={data.get('mode')}"
+            f" via={data.get('delivered_via')}{down} len={data.get('text_len')}"
+        )
+    elif ev.msg.kind == "peer_agent_woken":
+        parts.append(f"thread={data.get('thread_id')} handle={data.get('handle_id')}")
+    elif ev.msg.kind == "peer_wait_started":
+        parts.append(f"handle={data.get('handle_id')} timeout={data.get('timeout_seconds')}s")
+    elif ev.msg.kind == "peer_wait_resolved":
+        parts.append(
+            f"handle={data.get('handle_id')} outcome={data.get('outcome')}"
+            f" status={data.get('status')}"
         )
     elif ev.msg.kind == "pinned_state_reinjected":
         names = ",".join(s.get("name", "?") for s in data.get("sources", []))

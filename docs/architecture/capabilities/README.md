@@ -31,6 +31,7 @@
 | [compaction-surgical-trim](compaction-surgical-trim.md) | 手术刀档就地剪枝：dedup → soft-trim → hard-clear 三 pass、只改写 output payload 永不删条（配对安全）、cache-TTL 对齐触发、glob deny 优先、`CompressionResult.detail` 明细透传、幂等占位符守卫 |
 | [turn-resource-guards](turn-resource-guards.md) | turn 级资源护栏：`DenialBreaker`（连续/滑窗 deny 单次断路、`denial_circuit_open`）、`IterationBudget`（consume/refund/child 分层派生，父子独立）、`ToolSpec.refunds_iteration`、单点记账 `_note_tool_outcome` |
 | [postcompact-state-reinjection](postcompact-state-reinjection.md) | 压缩后状态保活：`PinnedStateSource` 协议 + 注册表（双层护栏：per-source truncate + 总预算显式 dropped）、`system_injection(source="pinned:<name>")` 钉回 tail、`pinned_state_reinjected` 事件、运行时 register/unregister、与 K3 salvage 正交叠加 |
+| [peer-mailbox-messaging](peer-mailbox-messaging.md) | 谱系内活体 agent 点对点消息：thread_id/handle_id/"parent" 寻址、QueueOnly（steering pending_input 复用 / 空闲落史 R5）+ TriggerTurn（空闲唤醒 / 运行中降级 / root 拒绝 / suspended 不唤醒）、`wait_peer`（timeout 必填）、`SendToPeer` Op、4 peer 事件 |
 | [midturn-input-steering](midturn-input-steering.md) | 运行中 turn 注入用户输入：`InjectUserInput` Op、`_PendingTurn.pending_input` 共享队列、`_drain_pending_input` 迭代边界排空、无活跃 turn 退化（codex inject_no_new_turn）、`UserInputInjected{delivered}` 事件、tool 配对保护 / R4 取消守卫 |
 
 ### 持久化（对应 [conversation.md](../conversation.md)）

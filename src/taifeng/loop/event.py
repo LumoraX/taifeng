@@ -73,6 +73,10 @@ MsgKind = Literal[
     "spawn_cancelled",
     "join_barrier_registered",
     "join_barrier_fired",
+    "peer_message_sent",
+    "peer_agent_woken",
+    "peer_wait_started",
+    "peer_wait_resolved",
     "denial_circuit_open",
 ]
 
@@ -193,6 +197,41 @@ class PinnedStateReinjected(_Msg):
     """
 
     kind: Literal["pinned_state_reinjected"] = "pinned_state_reinjected"
+
+
+class PeerMessageSent(_Msg):
+    """peer 点对点消息已投递(送达路径与降级如实标注;不带正文,仅长度+预览)。
+
+    data = {"from": str, "to": str, "mode": str, "delivered_via":
+            "pending_input"|"history", "mode_downgraded": bool,
+            "text_len": int, "text_preview": str}
+    """
+
+    kind: Literal["peer_message_sent"] = "peer_message_sent"
+
+
+class PeerAgentWoken(_Msg):
+    """TriggerTurn 唤醒了一个空闲 spawn child(新 detached turn 已启动)。
+
+    data = {"thread_id": str, "handle_id": str}
+    """
+
+    kind: Literal["peer_agent_woken"] = "peer_agent_woken"
+
+
+class PeerWaitStarted(_Msg):
+    """wait_peer 开始阻塞等待句柄终态。data = {"handle_id", "timeout_seconds"}"""
+
+    kind: Literal["peer_wait_started"] = "peer_wait_started"
+
+
+class PeerWaitResolved(_Msg):
+    """wait_peer 等待结束。
+
+    data = {"handle_id", "outcome": "terminal"|"timeout"|"cancelled", "status"}
+    """
+
+    kind: Literal["peer_wait_resolved"] = "peer_wait_resolved"
 
 
 class CacheBreakDetected(_Msg):
@@ -662,6 +701,10 @@ Msg = Union[
     SpawnCancelled,
     JoinBarrierRegistered,
     JoinBarrierFired,
+    PeerMessageSent,
+    PeerAgentWoken,
+    PeerWaitStarted,
+    PeerWaitResolved,
 ]
 
 
