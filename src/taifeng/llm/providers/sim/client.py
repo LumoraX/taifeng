@@ -116,10 +116,15 @@ class _SimSession:
             client.ledger.violations.append(violation)
             raise
 
-        # 2. 选脚本（耗尽抛 SimScriptExhausted；选取失败不推进游标）
+        # 2. 记账：超窗抛 ContextOverflowError（LLMError，走 engine 自愈路径）。
+        #    放在选脚本之前——被拒的采样不消耗脚本 turn（真实服务端拒绝请求时
+        #    并没有产出回答；否则 overflow 自愈的重采样会错位吃掉下一段剧本）
+        cache_read, cache_creation = client.server.admit(request)
+
+        # 3. 选脚本（耗尽抛 SimScriptExhausted；选取失败不推进游标）
         turn = client._next_turn(request)  # noqa: SLF001
 
-        # 3. 前置故障：限速 / 服务端错误在产出任何事件前直接抛（与真实服务端一致）
+        # 4. 前置故障：限速 / 服务端错误在产出任何事件前直接抛（与真实服务端一致）
         if turn.fault is not None and turn.fault.kind == "rate_limit":
             raise RateLimitError(
                 "sim: rate limited", retry_after_seconds=turn.fault.retry_after_seconds
@@ -127,7 +132,7 @@ class _SimSession:
         if turn.fault is not None and turn.fault.kind == "server_error":
             raise ServerError("sim: internal server error")
 
-        # 4. 响应侧反查 + 逐 turn expect 断言
+        # 5. 响应侧反查 + 逐 turn expect 断言
         try:
             client.validator.validate_response_side(turn, request)
             client.validator.validate_expect(turn, record)
@@ -135,8 +140,6 @@ class _SimSession:
             client.ledger.violations.append(violation)
             raise
 
-        # 5. 记账：超窗抛 ContextOverflowError（LLMError，走 engine 自愈路径）
-        cache_read, cache_creation = client.server.admit(request)
         if turn.cache_read is not None:
             # 旧脚本手填值覆写自动账本（MockTurn 兼容语义）
             cache_read, cache_creation = turn.cache_read, turn.cache_creation

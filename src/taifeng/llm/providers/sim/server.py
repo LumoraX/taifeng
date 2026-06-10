@@ -168,6 +168,10 @@ class SimServerState:
     """
 
     context_window: int | None = None
+    last_cache_read: int = 0
+    """最近一次 admit 折算的 cache_read（测试可观测：engine 消费事件后仍可断言）。"""
+    last_cache_creation: int = 0
+    """最近一次 admit 折算的 cache_creation。"""
     _seen_texts: list[str] = field(default_factory=list)
 
     @staticmethod
@@ -194,6 +198,7 @@ class SimServerState:
         )
         cache_read = prefix_chars // _CHARS_PER_TOKEN
         cache_creation = max(total - cache_read, 0)
+        self.last_cache_read, self.last_cache_creation = cache_read, cache_creation
         self._seen_texts.append(text)
         if len(self._seen_texts) > _PREFIX_CACHE_CAPACITY:
             self._seen_texts.pop(0)
