@@ -9,6 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Taifeng (泰逢)** —— 通用 LLM Agent **微内核 / OS 调度器**（不是织造工具，不是业务框架）。Python 3.12+，对标 codex (Rust) / Claude Code (TS) / claw-code (Rust) 的 CLI agent 范式，为 Python 服务端提供可嵌入的 agent 引擎。
 
 **关键定位**：
+- **LLM OS 的内核：用来开发开箱即用的产品，自身不是产品**。立项裁决四规则见 ADR 0017——①内核机制缺口→做；②模型认知回路原语（自我 review / 任务清单工作记忆 / 状态穿越压缩）→做；③外部成熟服务能承担的（DB / 向量记忆 / 知识库）→内核只定协议、实现走外部；④仅"别家有"的产品功能→不做。
 - 是独立 infra 包，**与业务完全解耦**。`src/` 内**禁止出现任何业务概念**（无 tenant / 无领域名词 / 无 LLM provider lock-in）。
 - 不与 LangGraph / AutoGen / Letta 竞争（不同范式：codex 风格 vs 图/Actor/记忆）。
 - 范式核心：**skill 是 markdown**（不是 function tool）、**LLM 是调度器**（不是被调度对象）、**压缩 cache-aware**、**Actor 风格 Submission/EventMsg 双总线**。

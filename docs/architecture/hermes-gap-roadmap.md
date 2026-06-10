@@ -141,7 +141,7 @@ hermes `agent/memory_provider.py` 已证明它**可以 R1-clean**：一个纯协
 | `postcompact-state-reinjection` | E1 压缩后 pinned 状态重注入钩子（hermes todo 穿越压缩） | P1 | ✅ 已落地（todo builtin 范例亦已落地：`TodoStore` + `todo_write`） |
 
 **核实关闭**：C3（子 agent 触发 HITL 阻塞主 actor，hermes `delegate_tool.py` 的 ThreadPoolExecutor 死锁）→ **taifeng 不存在**：单 event-loop async + suspend/resume 释放实例 + `subagent_approval_mode=auto_deny`，无线程模型死锁。
-**未纳入（P2 backlog）**：A4 多模态重载荷驱逐、A5 压缩相对增量基线、E2 ContextEngine 可插拔 slot、E3 prewarm / cancel-reason 带内。
+**backlog 处置（按 ADR 0017 四规则裁决）**：A4 多模态重载荷驱逐（规则①，**等真实多模态负载**）、A5 压缩相对增量基线（规则①，低优先）、spawn reject 分类细化（规则①可观测，保留）；E2 ContextEngine 可插拔 slot、E3 prewarm / cancel-reason 带内、peer 拓扑路径寻址（**挂起等需求拉动**）；hermes 侧持久化 todo / 多清单等产品级功能（规则④，**正式关闭**——todo 工作记忆原语已以 `TodoStore` + `todo_write` 落地，规则②）。
 
 ## 引用入口
 
