@@ -13,6 +13,11 @@ class SuspendReason(StrEnum):
     FORM = "form"                  # 等用户填表 → payload 成 tool output
     DATA = "data"                  # 等外部数据 → payload 成 tool output
     SYSTEM_RETRY = "system_retry"  # 限流/余额/key/LLM 错 → resume 即重试同次 sample
+    # 资源护栏触顶(max_iterations / resource_limit / denial_circuit_open)被
+    # FailureDispositionPolicy 裁决为挂起 → resume retry 即重建 runner 在迭代
+    # 边界继续采样循环(与 SYSTEM_RETRY 的"重跑同次 sample"不同:无悬空 fc、不
+    # resample);abort 即在挂起点落失败终态。detail 携带 end_reason + 护栏快照。
+    RESOURCE_LIMIT = "resource_limit"
     # call_skill 派发的子 skill 内部挂起 → 父 turn 的 call_skill 随之挂起。
     # 这是纯内核派发态（非用户可直接 resolve）：resume 时由 engine 续跑链
     # 内部核销 —— 先续跑子 thread 拿到结果，再回填父 call_skill 的 output。

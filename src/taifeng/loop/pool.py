@@ -138,6 +138,7 @@ class EnginePool:
         hooks: Any = None,
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
+        failure_policy: Any = None,
         max_parallel_tool_calls: int = 1,
         instruction_layers: list[Any] | None = None,
         hook_runner: HookRunner | None = None,
@@ -167,6 +168,8 @@ class EnginePool:
         self._max_iterations = max_iterations
         # turn-resource-guards：denial 断路器配置，透传到每个 AgentEngine。
         self._denial_breaker_config = denial_breaker_config
+        # failure-suspension-policy：失败处置裁决 policy,透传到每个 AgentEngine。
+        self._failure_policy = failure_policy
         # 单 turn 内一批 tool call 的最大并发；默认 1=串行。透传到 AgentEngine。
         self._max_parallel_tool_calls = max_parallel_tool_calls
         # Phase 0: instruction_layers 仅占位存储 + 透传到 AgentEngine
@@ -218,6 +221,7 @@ class EnginePool:
         hooks: Any = None,
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
+        failure_policy: Any = None,
         max_parallel_tool_calls: int = 1,
         auto_watch_skills: bool = False,
         watch_poll_interval_seconds: float = 1.0,
@@ -309,6 +313,7 @@ class EnginePool:
             hooks=hooks,
             max_iterations=max_iterations,
             denial_breaker_config=denial_breaker_config,
+            failure_policy=failure_policy,
             max_parallel_tool_calls=max_parallel_tool_calls,
             instruction_layers=instruction_layers,
             hook_runner=hook_runner,
@@ -438,6 +443,7 @@ class EnginePool:
                 hooks=self._hooks,
                 max_iterations=self._max_iterations,
                 denial_breaker_config=self._denial_breaker_config,
+                failure_policy=self._failure_policy,
                 max_parallel_tool_calls=self._max_parallel_tool_calls,
                 instruction_layers=self._instruction_layers,
                 script_executors=self._script_executors,

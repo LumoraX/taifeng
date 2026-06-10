@@ -117,6 +117,7 @@ class AgentEngine:
         hooks: Any = None,
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
+        failure_policy: Any = None,
         max_parallel_tool_calls: int = 1,
         event_queue_size: int = 1024,
         submission_queue_size: int = 256,
@@ -172,6 +173,9 @@ class AgentEngine:
         # turn-resource-guards：denial 断路器配置（DenialBreakerConfig | None；
         # None=不启用零变化）。实例由各 TurnRunner 每 turn 新建（turn 级生命周期）。
         self._denial_breaker_config = denial_breaker_config
+        # failure-suspension-policy：失败处置裁决 policy
+        # （FailureDispositionPolicy | None;None → turn 层保守默认,零行为变化）
+        self._failure_policy = failure_policy
         # config-consistency-fixes C2: 把 event_queue_size kwarg 真正生效
         # 之前此 kwarg 收下后未存到 self，subscribe / subscribe_all 内仍硬编码 1024
         self._event_queue_size = event_queue_size
@@ -848,6 +852,7 @@ class AgentEngine:
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
+            failure_policy=self._failure_policy,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(self._history),
             # B1 midturn-input-steering：与活跃 _PendingTurn 共享注入队列（同一 list
@@ -986,6 +991,7 @@ class AgentEngine:
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
+            failure_policy=self._failure_policy,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             capabilities=self._capabilities,
             spawn_registry=self._spawn_registry,
@@ -1512,6 +1518,7 @@ class AgentEngine:
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
+            failure_policy=self._failure_policy,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(items),
             permission_policy=self._permission_policy,
@@ -1770,6 +1777,7 @@ class AgentEngine:
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
+            failure_policy=self._failure_policy,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(self._history),
             cache_anchor_index=self._cache_anchor_index,

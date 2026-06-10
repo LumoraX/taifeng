@@ -244,3 +244,162 @@ async def test_prompter_timeout_deny_counts_toward_breaker(guard_skills, threads
     await engine.submit(taifeng.loop.Shutdown())
     await asyncio.wait_for(task, timeout=5.0)
     await pool.close()
+
+
+# ============================================================
+# failure-suspension-policy：护栏触顶经 policy 裁决为 RESOURCE_LIMIT 挂起
+# ============================================================
+
+
+def _echo_turn(i: int) -> MockTurn:
+    return MockTurn(text=f"第{i}轮。", tool_calls=[
+        {"id": f"g{i}", "name": "echo", "arguments": "{}"}])
+
+
+async def test_max_iterations_suspends_then_resume_retry_completes(
+    guard_skills, threads_dir
+):
+    """SuspendByDefault 下 max_iterations 触顶 → RESOURCE_LIMIT 挂起(非终态);
+    Resume retry 重建 runner(预算按原 cap 重置)续跑至 completed,不丢已走历史。"""
+    from taifeng import SuspendByDefaultPolicy
+
+    client = RoutingMockClient(routes={
+        # 前 2 轮 echo 耗尽 cap=2;第 3 个 MockTurn 留给 resume 后的续跑(纯文本完成)
+        "GUARD_ENTRY_MARK": [_echo_turn(1), _echo_turn(2),
+                             MockTurn(text="续跑完成。")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=guard_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], extra_tools=[_echo_tool()], max_iterations=2,
+        failure_policy=SuspendByDefaultPolicy(),
+    )
+    engine = await pool.get_or_create(session_id="fsp1", entry_skill_id="guard-entry")
+
+    sub_id = await engine.submit(taifeng.UserMessage(text="开始"))
+    suspended = None
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind == "turn_suspended":
+            suspended = ev.msg.data
+            break
+        assert ev.msg.kind != "turn_completed", "SuspendByDefault 下触顶不应直接完成"
+
+    assert suspended is not None
+    pending = suspended["pending"]
+    assert len(pending) == 1
+    assert pending[0]["reason"] == "resource_limit"
+    assert pending[0]["detail"]["end_reason"] == "max_iterations"
+
+    # Resume retry:重建 runner 续跑 → 第 3 个 MockTurn 纯文本 → completed
+    resume_id = await engine.submit(taifeng.Resume(
+        thread_id=suspended["thread_id"],
+        resolutions={pending[0]["request_id"]: {"action": "retry"}},
+    ))
+    kinds = []
+    async for ev in engine.subscribe(resume_id):
+        kinds.append(ev.msg.kind)
+        if ev.msg.kind == "turn_completed":
+            assert ev.msg.data["end_reason"] == "completed"
+            break
+    assert "suspension_resolved" in kinds
+    await pool.close()
+
+
+async def test_denial_circuit_suspends_with_guard_snapshot(guard_skills, threads_dir):
+    """SuspendByDefault 下断路触发 → denial_circuit_open 仍恰好一次 +
+    RESOURCE_LIMIT 挂起,detail 携带断路器快照(consecutive/recent,R3)。"""
+    import asyncio as _asyncio
+
+    from taifeng import SuspendByDefaultPolicy
+
+    client = RoutingMockClient(routes={
+        "GUARD_ENTRY_MARK": [_call_skill_turn(1), _call_skill_turn(2),
+                             _call_skill_turn(3)],
+    })
+    policy = PermissionPolicy.from_dict({"deny": ["Skill(*)"]})
+    pool = await taifeng.EnginePool.create(
+        skills_dir=guard_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], permission_policy=policy,
+        denial_breaker_config=DenialBreakerConfig(max_consecutive_denials=2),
+        failure_policy=SuspendByDefaultPolicy(),
+    )
+    engine = await pool.get_or_create(session_id="fsp2", entry_skill_id="guard-entry")
+    events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev.msg)
+            if ev.msg.kind == "shutdown":
+                break
+
+    task = _asyncio.create_task(watch())
+    await _asyncio.sleep(0)
+    sub_id = await engine.submit(taifeng.UserMessage(text="开始"))
+    suspended = None
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind == "turn_suspended":
+            suspended = ev.msg.data
+            break
+
+    assert suspended is not None
+    pending = suspended["pending"]
+    assert pending[0]["reason"] == "resource_limit"
+    assert pending[0]["detail"]["end_reason"] == "denial_circuit_open"
+    # R3:断路器快照随挂起 detail 透出
+    assert pending[0]["detail"]["guard_snapshot"]["consecutive"] == 2
+    # 断路事件仍恰好一次(裁决挂起不改变 emit 语义)
+    opened = [m for m in events if m.kind == "denial_circuit_open"]
+    assert len(opened) == 1
+    await engine.submit(taifeng.loop.Shutdown())
+    await _asyncio.wait_for(task, timeout=5.0)
+    await pool.close()
+
+
+async def test_resource_limit_abort_ends_without_continuation(
+    guard_skills, threads_dir
+):
+    """RESOURCE_LIMIT abort:核销后不续跑(turn 已在挂起点终止),与 SYSTEM_RETRY
+    abort 同形;abort 后无新 turn_started/turn_completed。"""
+    import asyncio as _asyncio
+
+    from taifeng import SuspendByDefaultPolicy
+
+    client = RoutingMockClient(routes={
+        "GUARD_ENTRY_MARK": [_echo_turn(1), _echo_turn(2),
+                             MockTurn(text="不应被采样。")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=guard_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[], extra_tools=[_echo_tool()], max_iterations=2,
+        failure_policy=SuspendByDefaultPolicy(),
+    )
+    engine = await pool.get_or_create(session_id="fsp3", entry_skill_id="guard-entry")
+    events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev.msg)
+            if ev.msg.kind == "shutdown":
+                break
+
+    task = _asyncio.create_task(watch())
+    await _asyncio.sleep(0)
+    sub_id = await engine.submit(taifeng.UserMessage(text="开始"))
+    suspended = None
+    async for ev in engine.subscribe(sub_id):
+        if ev.msg.kind == "turn_suspended":
+            suspended = ev.msg.data
+            break
+    pending = suspended["pending"]
+
+    await engine.submit(taifeng.Resume(
+        thread_id=suspended["thread_id"],
+        resolutions={pending[0]["request_id"]: {"action": "abort"}},
+    ))
+    await _asyncio.sleep(0.2)
+    resolved = [m for m in events if m.kind == "suspension_resolved"]
+    assert resolved, "abort 也应核销挂起记录"
+    started = [m for m in events if m.kind == "turn_started"]
+    assert len(started) == 1, "abort 后不应再续跑新 turn"
+    await engine.submit(taifeng.loop.Shutdown())
+    await _asyncio.wait_for(task, timeout=5.0)
+    await pool.close()

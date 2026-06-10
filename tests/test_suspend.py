@@ -354,7 +354,9 @@ max_call_depth: 2
 
 
 def test_should_suspend_classifies_recoverable():
-    """_should_suspend_on_error:可恢复 / 等外部介入 → True;确定性失败 → False。"""
+    """保守判据(原 _should_suspend_on_error,已收编进 ConservativeFailurePolicy):
+    真实 LLMError 实例经 _llm_failure_context 构造上下文后,可恢复 / 等外部介入 →
+    SUSPEND;确定性失败 → TERMINAL。"""
     from taifeng.llm.errors import (
         AuthenticationError,
         ContentFilterError,
@@ -362,17 +364,26 @@ def test_should_suspend_classifies_recoverable():
         InvalidRequestError,
         RateLimitError,
     )
-    from taifeng.loop.turn import _should_suspend_on_error
+    from taifeng.loop.failure_policy import (
+        ConservativeFailurePolicy,
+        FailureDisposition,
+    )
+    from taifeng.loop.turn import _llm_failure_context
+
+    policy = ConservativeFailurePolicy()
+
+    def _decide(err: Exception) -> FailureDisposition:
+        return policy.decide(
+            _llm_failure_context(err, is_root=True, iteration=1)
+        )
 
     # 可恢复(retryable=True)/ 等外部条件(provider_auth) → 挂起
-    assert _should_suspend_on_error(RateLimitError("rl")) is True
-    assert _should_suspend_on_error(AuthenticationError("bad key")) is True
-    # 确定性失败(retryable=False 且 failure_class 不在等外部介入类) → 不挂起,硬失败
-    assert _should_suspend_on_error(ContentFilterError("blocked")) is False
-    assert _should_suspend_on_error(ContextOverflowError("too long")) is False
-    assert _should_suspend_on_error(InvalidRequestError("bad req")) is False
-    # 非 LLMError → 不挂起
-    assert _should_suspend_on_error(ValueError("x")) is False
+    assert _decide(RateLimitError("rl")) is FailureDisposition.SUSPEND
+    assert _decide(AuthenticationError("bad key")) is FailureDisposition.SUSPEND
+    # 确定性失败(retryable=False 且 failure_class 不在等外部介入类) → 终态硬失败
+    assert _decide(ContentFilterError("blocked")) is FailureDisposition.TERMINAL
+    assert _decide(ContextOverflowError("too long")) is FailureDisposition.TERMINAL
+    assert _decide(InvalidRequestError("bad req")) is FailureDisposition.TERMINAL
 
 
 async def test_system_retry_suspends_turn(skills_dir, threads_dir):
@@ -1488,3 +1499,39 @@ max_call_depth: 2
     assert events[-1] == "turn_suspended", (
         f"subscribe 必须以 turn_suspended 自然终结(不依赖手动 break)，实得 {events}"
     )
+
+
+# ============================================================
+# failure-suspension-policy task 1.2：RESOURCE_LIMIT 的 resolver 分支
+# ============================================================
+
+
+def test_resolver_resource_limit_retry_no_resample():
+    """RESOURCE_LIMIT retry:不置 resample(重建 runner 续跑,非重跑同次 sample)。"""
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
+    plan = SuspensionResolver().plan(rec, {"r1": {"action": "retry"}})
+    assert plan.resample is False
+    assert plan.abort is False
+
+
+def test_resolver_resource_limit_abort():
+    """RESOURCE_LIMIT abort:与 SYSTEM_RETRY abort 同语义,置 abort 位。"""
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
+    plan = SuspensionResolver().plan(rec, {"r1": {"action": "abort"}})
+    assert plan.abort is True
+    assert plan.resample is False
+
+
+def test_resolver_resource_limit_invalid_action_rejected():
+    """RESOURCE_LIMIT 非法 action:显式 ResolveError,禁静默兜底。"""
+    import pytest
+
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+    rec = _rec(PendingRequest(request_id="r1", reason=SuspendReason.RESOURCE_LIMIT))
+    with pytest.raises(ResolveError, match="invalid_resource_limit_action"):
+        SuspensionResolver().plan(rec, {"r1": {"action": "whatever"}})

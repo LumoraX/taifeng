@@ -173,6 +173,24 @@ async def run_turn(turn_ctx: TurnContext, cancel: CancellationToken) -> TurnOutc
             continue
 ```
 
+### 失败处置数据流（failure-suspension-policy）
+
+turn 内两类失败点的「挂起 vs 终态」由注入的 `FailureDispositionPolicy`（`loop/failure_policy.py`）裁决，turn 层只构造 `FailureContext` 不做判断：
+
+```
+_sample_once except LLMError(重试耗尽)
+  → policy.decide(origin="llm_error", failure_class, retryable, ...)
+       ├─ SUSPEND  → SuspendSignal(SYSTEM_RETRY) → 既有挂起落盘
+       └─ TERMINAL → 上抛 → TurnFailed(硬失败,带 G3 recovery 配方)
+
+run() 三个护栏 break 点(max_iterations / resource_limit_exceeded / denial_circuit_open)
+  → policy.decide(origin="guard_trip", end_reason, ...)
+       ├─ SUSPEND  → SuspendSignal(RESOURCE_LIMIT, detail={end_reason, 护栏快照})
+       └─ TERMINAL → 既有 end_reason break(默认 policy 恒走此路,零变化)
+```
+
+内置 `ConservativeFailurePolicy`（默认 = 历史行为）与 `SuspendByDefaultPolicy`（失败一律挂起等人裁决）；注入链 `EnginePool.create(failure_policy=...)` → engine → 全部 TurnRunner 构造点，子 runner（call_skill / spawn）继承。resume 语义与 spawn 链交互见 [capabilities/suspend-resume.md](capabilities/suspend-resume.md)。
+
 ## §1.6 Instructions 注入（instructions-injection）
 
 参照：codex `core/src/agents_md.rs` —— 但只学"分层 + 合并"范式，不抄文件读取（taifeng 是 infra 库，没有 cwd / 文件假设）。

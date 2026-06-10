@@ -45,6 +45,12 @@ from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
+from taifeng.loop.failure_policy import (
+    DEFAULT_FAILURE_POLICY,
+    FailureContext,
+    FailureDisposition,
+    FailureDispositionPolicy,
+)
 from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.event import (
     AssistantReasoning,
@@ -116,31 +122,31 @@ def _history_orphan_call_ids(history: list[ResponseItem]) -> set[str]:
     return {cid for cid in (fc ^ fco) if cid is not None}
 
 
-def _should_suspend_on_error(err: Exception) -> bool:
-    """LLMError 是否转 SYSTEM_RETRY 挂起(等外部条件清除后重跑同次 sample 可过)。
+def _llm_failure_context(
+    err: Exception, *, is_root: bool, iteration: int
+) -> FailureContext:
+    """从采样阶段的 LLMError 构造失败裁决上下文(origin=llm_error)。
 
-    判据(见 spec §5.3):retryable 为真,或 failure_class 属"等外部介入"类
-    (鉴权 / 配额 / 余额)。ContentFilter / ContextOverflow / InvalidRequest
-    这类确定性失败不挂起,照旧硬失败(resume 也救不回,只会无限挂)。
+    原 ``_should_suspend_on_error`` 的硬编码判据已收编进
+    :class:`~taifeng.loop.failure_policy.ConservativeFailurePolicy`(内核默认,
+    零行为变化);turn 层只负责构造上下文,裁决交注入的 policy。
 
     Args:
-        err: 待判定的异常;非 LLMError 一律返回 False(不挂起)。
+        err: 采样阶段重试耗尽后的异常(调用方保证为 LLMError)。
+        is_root: 当前 runner 是否 root turn。
+        iteration: 失败发生时的迭代序号(1-based)。
 
     Returns:
-        True 表示应转 SYSTEM_RETRY 挂起;False 表示硬失败照旧上抛。
+        供 FailureDispositionPolicy.decide 的不可变上下文。
     """
-    from taifeng.llm.errors import LLMError
-
-    if not isinstance(err, LLMError):
-        return False
-    # retryable 为真(限流 / 瞬时网络 / 5xx)→ 外部条件清除后重跑可过
-    if getattr(err, "retryable", False):
-        return True
-    # 等外部介入类:鉴权(本仓库 provider_auth);配额 / 余额命名保留以兼容其他 provider
-    return getattr(err, "failure_class", None) in (
-        "provider_auth",
-        "provider_quota",
-        "provider_balance",
+    return FailureContext(
+        origin="llm_error",
+        failure_class=getattr(err, "failure_class", None),
+        end_reason=None,
+        error_kind=type(err).__name__,
+        retryable=bool(getattr(err, "retryable", False)),
+        is_root=is_root,
+        iteration=iteration,
     )
 
 
@@ -214,6 +220,10 @@ class TurnRunner:
     # turn-resource-guards：denial 断路器配置（None=不启用，零行为变化）。
     # 实例为 turn 级生命周期（run() 新建、turn 结束即弃），见 denial_breaker.py。
     denial_breaker_config: DenialBreakerConfig | None = None
+    # failure-suspension-policy：失败处置裁决 policy（挂起 vs 终态）。
+    # None → 模块默认 ConservativeFailurePolicy（复刻历史判据，零行为变化）；
+    # 子 runner（call_skill / spawn）继承父实例。业务侧经 EnginePool 注入。
+    failure_policy: FailureDispositionPolicy | None = None
     # 单 turn 内一批 tool call 的最大并发数；默认 1 = 严格串行（等同历史行为，零回归）
     max_parallel_tool_calls: int = 1
     # turn-级累积 usage
@@ -302,6 +312,54 @@ class TurnRunner:
             await self.emit(EventMsg(submission_id=self.submission_id, msg=msg))
         except Exception:
             logger.exception("emit failed")
+
+    def _maybe_suspend_on_guard_trip(
+        self, end_reason: str, guard_snapshot: dict[str, Any] | None = None
+    ) -> None:
+        """护栏触顶时问失败处置 policy:SUSPEND → 抛 RESOURCE_LIMIT 挂起;TERMINAL → 返回。
+
+        三个护栏(max_iterations / resource_limit_exceeded / denial_circuit_open)
+        的 break 点都在迭代边界——当轮 fc/output 已配对(K5),此处抛 SuspendSignal
+        不产生孤儿;信号被 run() 的 ``except SuspendSignal`` 捕获后落盘挂起。
+        resume retry = 重建 runner 续跑采样循环(预算 / 断路器随重建按原 cap 重置);
+        abort = 在挂起点落失败终态。默认 policy(保守)对 guard_trip 恒 TERMINAL,
+        本方法直接返回 → 调用方走既有 break,零行为变化。
+
+        Args:
+            end_reason: 触顶的护栏 end_reason(进 FailureContext 与挂起 detail)。
+            guard_snapshot: 护栏快照(如断路器 consecutive/recent,R3 可观测);
+                None 时 detail 只携带 end_reason。
+
+        Raises:
+            SuspendSignal: policy 裁决 SUSPEND 时,携带 RESOURCE_LIMIT pending。
+        """
+        from taifeng.suspend.reason import PendingRequest, SuspendReason
+
+        policy = self.failure_policy or DEFAULT_FAILURE_POLICY
+        disposition = policy.decide(FailureContext(
+            origin="guard_trip",
+            failure_class=None,
+            end_reason=end_reason,
+            error_kind=None,
+            retryable=False,
+            is_root=self._is_root,
+            iteration=self._current_iteration,
+        ))
+        if disposition is not FailureDisposition.SUSPEND:
+            return
+        detail: dict[str, Any] = {"end_reason": end_reason}
+        if guard_snapshot:
+            detail["guard_snapshot"] = guard_snapshot
+        raise SuspendSignal(PendingRequest(
+            request_id=self._suspend_id_factory(),
+            reason=SuspendReason.RESOURCE_LIMIT,
+            payload_schema={
+                "type": "object",
+                "properties": {"action": {"enum": ["retry", "abort"]}},
+            },
+            related_call_id=None,
+            detail=detail,
+        ))
 
     async def _prefetch_memory(self) -> None:
         """K3 page-in：按最近用户消息 prefetch 长期记忆 → ``_prefetched_memory``。
@@ -477,6 +535,8 @@ class TurnRunner:
                 while True:
                     self.cancel.raise_if_cancelled()
                     if not iter_budget.consume():
+                        # failure-suspension-policy:裁决 SUSPEND 时此处抛挂起信号
+                        self._maybe_suspend_on_guard_trip("max_iterations")
                         end_reason = "max_iterations"
                         break
                     rounds += 1
@@ -507,6 +567,11 @@ class TurnRunner:
                             "limit": self.max_session_tokens or 0,
                             "scope": "turn_aborted",
                         }))
+                        # failure-suspension-policy:裁决 SUSPEND 时此处抛挂起信号
+                        self._maybe_suspend_on_guard_trip(
+                            "resource_limit_exceeded",
+                            {"used": used, "limit": self.max_session_tokens or 0},
+                        )
                         end_reason = "resource_limit_exceeded"
                         break
 
@@ -524,6 +589,11 @@ class TurnRunner:
                     # turn-resource-guards：断路器闩锁已置（本圈 deny 记账触发）→
                     # 迭代边界提前终止——当轮 fc/output 已配对落史，无孤儿（K5 一致）。
                     if self._denial_breaker is not None and self._denial_breaker.opened:
+                        # failure-suspension-policy:裁决 SUSPEND 时此处抛挂起信号
+                        # (当轮 fc/output 已配对落史,K5 一致,无孤儿)
+                        self._maybe_suspend_on_guard_trip(
+                            "denial_circuit_open", self._denial_breaker.snapshot()
+                        )
                         end_reason = "denial_circuit_open"
                         break
 
@@ -836,8 +906,14 @@ class TurnRunner:
                 )
                 # 单次重采样：递归深度恒为 1（标志已置 True，二次必走硬失败）
                 return await self._sample_once(iteration)
-            if _should_suspend_on_error(e):
-                # 可恢复错误且重试已耗尽 → 转 SYSTEM_RETRY 挂起,等业务侧 resume 重跑同次 sample。
+            # failure-suspension-policy:裁决权交注入的 policy(None → 保守默认,
+            # 零行为变化)。policy 只回答挂还是不挂;真正的裁决人是 Resume 提交者。
+            policy = self.failure_policy or DEFAULT_FAILURE_POLICY
+            disposition = policy.decide(_llm_failure_context(
+                e, is_root=self._is_root, iteration=iteration,
+            ))
+            if disposition is FailureDisposition.SUSPEND:
+                # 裁决挂起且重试已耗尽 → 转 SYSTEM_RETRY 挂起,等业务侧 resume 重跑同次 sample。
                 # 该 SuspendSignal 穿透回 run_turn 的 except SuspendSignal(Task 7 已加),落盘挂起。
                 from taifeng.suspend.reason import PendingRequest, SuspendReason
                 from taifeng.suspend.signal import SuspendSignal as _SuspendSignal
@@ -1456,6 +1532,8 @@ class TurnRunner:
                 else None
             ),
             denial_breaker_config=self.denial_breaker_config,
+            # failure-suspension-policy: 子 turn 继承父的失败处置裁决 policy
+            failure_policy=self.failure_policy,
             max_parallel_tool_calls=self.max_parallel_tool_calls,
             # G4a: 子 turn 继承同一运行时能力快照
             capabilities=self.capabilities,

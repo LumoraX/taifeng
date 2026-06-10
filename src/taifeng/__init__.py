@@ -93,6 +93,13 @@ from taifeng.loop import (
 )
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.engine import AgentEngine
+from taifeng.loop.failure_policy import (
+    ConservativeFailurePolicy,
+    FailureContext,
+    FailureDisposition,
+    FailureDispositionPolicy,
+    SuspendByDefaultPolicy,
+)
 from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.pool import EnginePool
 from taifeng.loop.submission import Resume, SendToPeer
@@ -159,9 +166,14 @@ __all__ = [
     "CompressionOrchestrator",
     "CompressionResult",
     "CompressionStrategy",
+    "ConservativeFailurePolicy",
     "DenialBreaker",
     "DenialBreakerConfig",
+    "FailureContext",
+    "FailureDisposition",
+    "FailureDispositionPolicy",
     "IterationBudget",
+    "SuspendByDefaultPolicy",
     "ContextBudget",
     "DirectoryError",
     "DispatchPolicy",
