@@ -307,6 +307,8 @@ final_text = 最后一步各 child 输出 join；run() 照常 emit TurnCompleted
 
 **复用而非另起**：编排不写并发代码——并行组直接调上文的 `dispatch_batch`，仅把声明翻译成「一串 dispatch_batch 调用」。`OrchestrationConditionError` 不单独 catch，propagate 到 run() 通用 `except` → `TurnFailed`（end_reason=error）。R 线随 dispatch_batch 继承（R2/R4/R5），新增 R3 两个编排事件。
 
+**子挂起传递与重放**（orchestration-suspension-propagation）：批内子 skill 挂起时，完成子照常配对回填、挂起子只留悬空 fc（占位文本不入史），整批 pending 抛 `_BatchSuspend` → 编排 turn 以 suspended 终结（CHILD_SKILL 上浮，走既有嵌套 resume 链）。resume 重入按确定性 call_id（`orch_{entry}_{step}_{sid}_{idx}`）重放 history 中已配对的子——已完成段零派发跳过、when 判定由重放输出重建；`tool_batch_dispatched.count` 只计实际派发数。契约见 [capabilities/skill-orchestration.md](capabilities/skill-orchestration.md)。
+
 ## Cancellation 父子化
 
 参照 codex `tokio_util::CancellationToken`：

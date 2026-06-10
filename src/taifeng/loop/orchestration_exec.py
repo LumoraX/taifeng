@@ -128,6 +128,19 @@ async def _resolve_when(
     return step.then if flag else step.otherwise
 
 
+def _replay_paired_output(runner: TurnRunner, call_id: str) -> str | None:
+    """重放查询:history 中该 call_id 已有 function_call_output → 返回其 output。
+
+    resume 重入幂等的坐标即确定性 call_id(orch_{entry}_{step}_{sid}_{idx});
+    gap 回填(挂起子被 Resume 补的 output)同样命中。无配对 → None(需派发)。
+    """
+    for item in runner.history_buffer:
+        if (item.kind == "function_call_output"
+                and item.payload.get("call_id") == call_id):
+            return str(item.payload.get("output", ""))
+    return None
+
+
 async def _execute_leaf(
     runner: TurnRunner,
     leaf: ParallelStep | SerialStep,
@@ -144,13 +157,30 @@ async def _execute_leaf(
     - serial 段：强制 Semaphore(1)（即便全局 cap 高也串行）
     - ``step_idx``：顶层 step 序号，拼进 call_id 保证 thread 内全局唯一（同一 skill 跨段
       多次出现时，避免 call_id 碰撞 → 否则压缩边界检测会按 call_id 误配 function_call/output）。
+    - **重放**（orchestration-suspension-propagation）：派发前按确定性 call_id 查
+      history，已配对的子直接复用 output 不重派发——resume 重入时已完成段零派发跳过。
+    - **挂起分流**：``DispatchOutcome.suspend`` 非 None 的子只追加悬空 fc（不回填占位
+      fco），批内任一挂起 → 抛 ``_BatchSuspend`` 由 run() 既有路径落盘挂起（与 LLM
+      路径 ``_dispatch_tools`` 混合批语义同形）。
+
     返回各 child 输出文本（按发起序），供 when 判定 / upstream 注入 / 末步汇总。
+
+    Raises:
+        _BatchSuspend: 批内存在挂起子（收集全部 pending,编排 turn 转 suspended）。
     """
     skill_ids = leaf.skill_ids
     cap = 1 if isinstance(leaf, SerialStep) else max(1, runner.max_parallel_tool_calls)
 
+    # 输出槽按 idx 预置;重放命中的直接填值,其余派发后回填
+    outputs: dict[int, str] = {}
     requests: list[ToolCallRequest] = []
     for idx, sid in enumerate(skill_ids):
+        call_id = f"orch_{runner.entry_skill.id}_{step_idx}_{sid}_{idx}"
+        # 重放:resume 重入时已完成(含 gap 回填)的子零派发复用
+        cached = _replay_paired_output(runner, call_id)
+        if cached is not None:
+            outputs[idx] = cached
+            continue
         child_args: dict[str, Any] = {"input": seed}
         if upstream:
             child_args["upstream"] = list(upstream)
@@ -162,7 +192,7 @@ async def _execute_leaf(
         requests.append(
             ToolCallRequest(
                 index=idx,
-                call_id=f"orch_{runner.entry_skill.id}_{step_idx}_{sid}_{idx}",
+                call_id=call_id,
                 name="call_skill",
                 arguments=call_args,
                 arguments_raw=json.dumps(call_args, ensure_ascii=False),
@@ -171,6 +201,7 @@ async def _execute_leaf(
             )
         )
 
+    # R3:count 只计实际派发数 —— 全命中重放时 count=0,重放命中率可观测
     await emit(ToolBatchDispatched(data={"count": len(requests), "max_parallel": cap}))
     semaphore = asyncio.Semaphore(cap)
 
@@ -190,8 +221,10 @@ async def _execute_leaf(
         entry_skill_id=runner.entry_skill.id,
     )
 
-    # 历史按发起序以 (call, output) 配对回填（R5 resume；与 A 阶段 3 一致）。
-    # 编排 turn 无 assistant_message（不采样 LLM），但 fc/fco 成对追加 → 配对完整性不破。
+    # 历史按发起序回填（R5 resume；与 A 阶段 3 一致）。编排 turn 无 assistant_message
+    # （不采样 LLM）。完成子 (fc, fco) 成对追加;挂起子只追加悬空 fc —— 占位文本
+    # "<suspended>" 不得入史(原 silent fallback 根因),pending 收集后整批上抛。
+    suspended_pending: list[Any] = []
     for req, outcome in zip(requests, outcomes, strict=True):
         fc_item = function_call(
             call_id=req.call_id, name=req.name,
@@ -199,11 +232,23 @@ async def _execute_leaf(
         )
         runner.history_buffer.append(fc_item)
         await runner.store.append(fc_item)
+        if outcome.suspend is not None:
+            # 挂起子:留无 output 的 fc,resume 时由 SuspensionRecord 重导 gap 回填
+            suspended_pending.append(outcome.suspend)
+            continue
         fco_item = function_call_output(
             call_id=req.call_id, output=outcome.result.output,
             thread_id=runner.thread_id, is_error=outcome.result.is_error,
         )
         runner.history_buffer.append(fco_item)
         await runner.store.append(fco_item)
+        outputs[req.index] = outcome.result.output
 
-    return tuple(o.result.output for o in outcomes)
+    if suspended_pending:
+        # 整批挂起 pending 上抛 → run() 既有 except _BatchSuspend 落盘挂起,
+        # 编排 turn 以 suspended 终结(延迟 import 避免与 turn.py 的环)
+        from taifeng.loop.turn import _BatchSuspend
+
+        raise _BatchSuspend(tuple(suspended_pending))
+
+    return tuple(outputs[i] for i in range(len(skill_ids)))
