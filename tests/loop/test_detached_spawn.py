@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.spawn_handle import SpawnHandleRegistry
 
 
@@ -96,9 +96,9 @@ async def test_spawn_returns_handle_nonblocking(
     skills_dir, threads_dir
 ) -> None:
     """engine.spawn_skill 立即返回句柄(非阻塞),后台分离 task 跑完后句柄转 done。"""
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="风格结论")],
-        "code-reviewer": [MockTurn(text="主")],
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="风格结论")],
+        "code-reviewer": [SimTurn(text="主")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -131,9 +131,9 @@ async def test_spawn_seed_id_consistent_store_vs_memory(
     """
     import json
 
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="风格结论2")],
-        "code-reviewer": [MockTurn(text="主2")],
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="风格结论2")],
+        "code-reviewer": [SimTurn(text="主2")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -180,9 +180,9 @@ async def test_spawn_k1_slot_released_on_create_thread_failure(
     """
     from unittest.mock import AsyncMock, patch
 
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="ok")],
-        "code-reviewer": [MockTurn(text="主")],
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="ok")],
+        "code-reviewer": [SimTurn(text="主")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -216,9 +216,9 @@ async def test_spawn_k1_slot_released_on_create_thread_failure(
 @pytest.mark.asyncio
 async def test_same_skill_multiple_instances(skills_dir, threads_dir):
     """同一 skill 同时 spawn 三个实例，各自拥有独立句柄和独立 child thread。"""
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="路线1"), MockTurn(text="路线2"), MockTurn(text="路线3")],
-        "code-reviewer": [MockTurn(text="主")],
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="路线1"), SimTurn(text="路线2"), SimTurn(text="路线3")],
+        "code-reviewer": [SimTurn(text="主")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
@@ -240,9 +240,9 @@ async def test_same_skill_multiple_instances(skills_dir, threads_dir):
 @pytest.mark.asyncio
 async def test_spawn_independent_completion_events(skills_dir, threads_dir):
     """两个独立 spawn 各自发出独立的 spawn_completed 事件，handle_id 互不混淆。"""
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="A结论"), MockTurn(text="B结论")],
-        "code-reviewer": [MockTurn(text="主")]})
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="A结论"), SimTurn(text="B结论")],
+        "code-reviewer": [SimTurn(text="主")]})
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
     engine = await pool.get_or_create(session_id="s2b", entry_skill_id="code-reviewer")
@@ -334,27 +334,27 @@ def expert_skills(tmp_path):
 async def test_spawn_staggered_hitl(expert_skills, threads_dir):
     """A: spawn→HITL挂起→Resume(A)→完成; 之后 B: spawn→HITL→Resume(B)→完成. 错峰、互不耦合。"""
     import taifeng
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
     from taifeng.loop.submission import Resume
     from taifeng.suspend.record import SuspensionRecord
     from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
     # 每个专家：turn1 调 request_user_input（挂起）；Resume 后 turn2 出最终文本。
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "EXPERT_A_MARK": [
-            MockTurn(text="A 向用户提问", tool_calls=[
+            SimTurn(text="A 向用户提问", tool_calls=[
                 {"id": "call_a", "name": "request_user_input",
                  "arguments": '{"prompt": "A 需要补充信息"}'},
             ]),
-            MockTurn(text="A 最终结论 A_DONE"),
+            SimTurn(text="A 最终结论 A_DONE"),
         ],
         "EXPERT_B_MARK": [
-            MockTurn(text="B 向用户提问", tool_calls=[
+            SimTurn(text="B 向用户提问", tool_calls=[
                 {"id": "call_b", "name": "request_user_input",
                  "arguments": '{"prompt": "B 需要补充信息"}'},
             ]),
-            MockTurn(text="B 最终结论 B_DONE"),
+            SimTurn(text="B 最终结论 B_DONE"),
         ],
     })
 
@@ -441,9 +441,9 @@ async def test_spawn_staggered_hitl(expert_skills, threads_dir):
 @pytest.mark.asyncio
 async def test_join_skill_nonblocking_and_kill_isolates(skills_dir, threads_dir):
     """spawn_status 非阻塞读;kill_spawn 未知句柄显式 KeyError(不静默)。"""
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="A done"), MockTurn(text="B done")],
-        "code-reviewer": [MockTurn(text="主")]})
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="A done"), SimTurn(text="B done")],
+        "code-reviewer": [SimTurn(text="主")]})
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
     engine = await pool.get_or_create(session_id="s3", entry_skill_id="code-reviewer")
@@ -460,18 +460,18 @@ async def test_has_live_spawns_keepalive(expert_skills, threads_dir):
     """有未终结(suspended)spawn 时 engine.has_live_spawns()==True 且 engine 不被释放;
     kill 后全终结 → False。同 session get_or_create 始终返回同一实例(未被 evict)。"""
     import taifeng
-    from taifeng.llm.providers import MockTurn
-    from taifeng.llm.providers.mock import RoutingMockClient
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
     from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
     # 专家 turn1 调 request_user_input → 挂起(非终态);永不 resume → 保持 live。
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "EXPERT_A_MARK": [
-            MockTurn(text="A 提问", tool_calls=[
+            SimTurn(text="A 提问", tool_calls=[
                 {"id": "call_a", "name": "request_user_input",
                  "arguments": '{"prompt": "需要补充"}'},
             ]),
-            MockTurn(text="A 最终"),
+            SimTurn(text="A 最终"),
         ],
     })
     pool = await taifeng.EnginePool.create(
@@ -513,9 +513,9 @@ async def test_has_live_spawns_keepalive(expert_skills, threads_dir):
 @pytest.mark.asyncio
 async def test_join_barrier_fires_when_all_done(skills_dir, threads_dir):
     """两个 spawn 全 done → barrier 自动起聚合 turn,emit join_barrier_fired。"""
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="结论A"), MockTurn(text="结论B")],
-        "code-reviewer": [MockTurn(text="汇总:综合A+B")],  # 聚合 skill 用 code-reviewer 占位
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="结论A"), SimTurn(text="结论B")],
+        "code-reviewer": [SimTurn(text="汇总:综合A+B")],  # 聚合 skill 用 code-reviewer 占位
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
@@ -551,18 +551,18 @@ async def test_join_barrier_with_failed_expert(expert_skills, threads_dir):
 
     from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         # expert-a:首 turn 挂起(request_user_input),永不 resume → 等被 kill
         "EXPERT_A_MARK": [
-            MockTurn(text="A 提问", tool_calls=[
+            SimTurn(text="A 提问", tool_calls=[
                 {"id": "call_a", "name": "request_user_input",
                  "arguments": '{"prompt": "需要补充"}'},
             ]),
         ],
         # expert-b:直接给结论 → done
-        "EXPERT_B_MARK": [MockTurn(text="B 结论 B_DONE")],
+        "EXPERT_B_MARK": [SimTurn(text="B 结论 B_DONE")],
         # orchestrator 作聚合 skill 占位(独立根 turn,无 entry 门控也允许 entry)
-        "ORCH_MARK": [MockTurn(text="汇总综合")],
+        "ORCH_MARK": [SimTurn(text="汇总综合")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=expert_skills, threads_dir=threads_dir, model_client=client,
@@ -617,13 +617,13 @@ async def test_settle_failed_idempotent_on_terminal(expert_skills, threads_dir):
         make_request_user_input_tool,
     )
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "EXPERT_A_MARK": [
-            MockTurn(text="A 提问", tool_calls=[
+            SimTurn(text="A 提问", tool_calls=[
                 {"id": "call_a", "name": "request_user_input",
                  "arguments": '{"prompt": "需要补充"}'}]),
         ],
-        "ORCH_MARK": [MockTurn(text="orch idle")],
+        "ORCH_MARK": [SimTurn(text="orch idle")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=expert_skills, threads_dir=threads_dir, model_client=client,
@@ -669,11 +669,11 @@ async def test_settle_failed_barrier_error_isolation(expert_skills, threads_dir)
 
     ask = {"id": "call_a", "name": "request_user_input",
            "arguments": '{"prompt": "需要补充"}'}
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         # 两次 spawn 各消费一个挂起 turn
-        "EXPERT_A_MARK": [MockTurn(text="问1", tool_calls=[dict(ask)]),
-                          MockTurn(text="问2", tool_calls=[dict(ask, id="c2")])],
-        "ORCH_MARK": [MockTurn(text="orch idle")],
+        "EXPERT_A_MARK": [SimTurn(text="问1", tool_calls=[dict(ask)]),
+                          SimTurn(text="问2", tool_calls=[dict(ask, id="c2")])],
+        "ORCH_MARK": [SimTurn(text="orch idle")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=expert_skills, threads_dir=threads_dir, model_client=client,
@@ -781,10 +781,10 @@ async def test_llm_spawn_via_tools(spawn_orch_skills, threads_dir):
         make_spawn_skill_tool,
     )
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         # orchestrator：首 turn 两个 spawn_skill，次 turn 收尾文本
         "SPAWN_ORCH_MARK": [
-            MockTurn(text="发起两个并发分析", tool_calls=[
+            SimTurn(text="发起两个并发分析", tool_calls=[
                 {"id": "sp_call_1", "name": "spawn_skill",
                  "arguments":
                     '{"skill_id":"style-checker","reason":"a","args":{}}'},
@@ -792,10 +792,10 @@ async def test_llm_spawn_via_tools(spawn_orch_skills, threads_dir):
                  "arguments":
                     '{"skill_id":"style-checker","reason":"b","args":{}}'},
             ]),
-            MockTurn(text="已发起，编排结束"),
+            SimTurn(text="已发起，编排结束"),
         ],
         # 两个子 spawn 各跑出一条结论
-        "style-checker": [MockTurn(text="结论A"), MockTurn(text="结论B")],
+        "style-checker": [SimTurn(text="结论A"), SimTurn(text="结论B")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=spawn_orch_skills, threads_dir=threads_dir,
@@ -849,9 +849,9 @@ async def test_cold_recovery_rebuilds_handles_and_barrier(skills_dir, threads_di
     重载后新 engine 扫描 parent thread 的 spawn 锚 → 重建句柄,再据各子 thread
     的终态(done/suspended/中断)推断状态。两个已 done 的 spawn 重载后仍判 done。
     """
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="A"), MockTurn(text="B")],
-        "code-reviewer": [MockTurn(text="汇总")],
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="A"), SimTurn(text="B")],
+        "code-reviewer": [SimTurn(text="汇总")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -883,9 +883,9 @@ async def test_cold_recovery_rebuilds_handles_and_barrier(skills_dir, threads_di
 @pytest.mark.asyncio
 async def test_cold_recovery_barrier_idempotent(skills_dir, threads_dir):
     """冷恢复幂等:已触发的 barrier 重载后不二次触发(从 fired 标记重建守卫集)。"""
-    client = RoutingMockClient(routes={
-        "style-checker": [MockTurn(text="A"), MockTurn(text="B")],
-        "code-reviewer": [MockTurn(text="汇总1"), MockTurn(text="汇总2")],
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="A"), SimTurn(text="B")],
+        "code-reviewer": [SimTurn(text="汇总1"), SimTurn(text="汇总2")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -940,9 +940,9 @@ async def test_spawn_rejections(skills_dir, threads_dir):
       - kill_spawn 未知句柄 → KeyError
     spawn_status 未知句柄是只读、返回 {"status":"unknown"} 不 raise（不在此测）。
     """
-    client = RoutingMockClient(routes={
-        "code-reviewer": [MockTurn(text="主")],
-        "style-checker": [MockTurn(text="x")],
+    client = RoutingSimClient(routes={
+        "code-reviewer": [SimTurn(text="主")],
+        "style-checker": [SimTurn(text="x")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -981,9 +981,9 @@ async def test_spawn_not_in_whitelist_rejected(skills_dir, threads_dir):
     code-reviewer 的 child_skills 仅含 style-checker；尝试 spawn code-reviewer
     本身（存在但不在自身白名单，且为 entry）→ DispatchPolicy.check 拒绝 → 显式报错。
     """
-    client = RoutingMockClient(routes={
-        "code-reviewer": [MockTurn(text="主")],
-        "style-checker": [MockTurn(text="x")],
+    client = RoutingSimClient(routes={
+        "code-reviewer": [SimTurn(text="主")],
+        "style-checker": [SimTurn(text="x")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -1093,18 +1093,18 @@ async def test_spawn_quota_rejected(hold_skills, threads_dir):
         timeout_seconds=30.0,
     )
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "HOLD_A_MARK": [
-            MockTurn(text="A 长占", tool_calls=[
+            SimTurn(text="A 长占", tool_calls=[
                 {"id": "call_a", "name": "hold_slot", "arguments": "{}"},
             ]),
-            MockTurn(text="A 完成"),
+            SimTurn(text="A 完成"),
         ],
         "HOLD_B_MARK": [
-            MockTurn(text="B 长占", tool_calls=[
+            SimTurn(text="B 长占", tool_calls=[
                 {"id": "call_b", "name": "hold_slot", "arguments": "{}"},
             ]),
-            MockTurn(text="B 完成"),
+            SimTurn(text="B 完成"),
         ],
     })
     # K1：并发上限设为 1（knob 真名为 max_concurrent_spawns，透传到 SpawnSlotRegistry）
@@ -1173,12 +1173,12 @@ async def test_kill_running_spawn_emits_exactly_one_cancelled(
         timeout_seconds=30.0,
     )
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "HOLD_A_MARK": [
-            MockTurn(text="A 长占", tool_calls=[
+            SimTurn(text="A 长占", tool_calls=[
                 {"id": "call_a", "name": "hold_slot", "arguments": "{}"},
             ]),
-            MockTurn(text="A 完成"),
+            SimTurn(text="A 完成"),
         ],
     })
     pool = await taifeng.EnginePool.create(

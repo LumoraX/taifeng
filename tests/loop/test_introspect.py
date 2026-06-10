@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 
@@ -15,8 +15,8 @@ from taifeng.llm.types import TokenUsage
 async def test_engine_introspect_shape_and_updates(
     skills_dir: Path, threads_dir: Path
 ) -> None:
-    client = MockClient(turns=[
-        MockTurn(text="ok", usage=TokenUsage(input_tokens=30, total_tokens=30)),
+    client = SimClient(turns=[
+        SimTurn(text="ok", usage=TokenUsage(input_tokens=30, total_tokens=30)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -65,7 +65,7 @@ async def test_introspect_pending_exposes_cancel_state(
 
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
-        model_client=MockClient(turns=[MockTurn(text="ok")]), compressors=[],
+        model_client=SimClient(turns=[SimTurn(text="ok")]), compressors=[],
     )
     engine = await pool.get_or_create(session_id="s1", entry_skill_id="code-reviewer")
 
@@ -92,7 +92,7 @@ async def test_pool_introspect_lists_active_engines(
 ) -> None:
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
-        model_client=MockClient(turns=[MockTurn(text="ok")]), compressors=[],
+        model_client=SimClient(turns=[SimTurn(text="ok")]), compressors=[],
     )
     await pool.get_or_create(session_id="s1", entry_skill_id="code-reviewer")
     await pool.get_or_create(session_id="s2", entry_skill_id="code-reviewer")

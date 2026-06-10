@@ -12,7 +12,7 @@ import pytest
 
 import taifeng
 from taifeng.context.budget import ContextBudget
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.turn import TurnRunner
@@ -42,7 +42,7 @@ async def _make_runner(skills_dir: Path) -> TurnRunner:
     return TurnRunner(
         entry_skill=entry,
         snapshot=snap,
-        model_client=MockClient(turns=[]),
+        model_client=SimClient(turns=[]),
         tool_runtime=ToolCallRuntime(ToolRegistry()),
         store=None,  # 指纹方法不触碰 store
         compressors=None,
@@ -99,9 +99,9 @@ async def test_engine_cache_stats_persist_and_detect_break_across_turns(
     回归点：此前 cache_stats 每 turn 新建，last_cache_read 重置为 None，
     turn 间的 drop 永远检不出。现 engine 持久化 → 必能检出。
     """
-    client = MockClient(turns=[
-        MockTurn(text="一", cache_read=100, usage=TokenUsage(input_tokens=100)),
-        MockTurn(text="二", cache_read=10, usage=TokenUsage(input_tokens=100)),
+    client = SimClient(turns=[
+        SimTurn(text="一", cache_read=100, usage=TokenUsage(input_tokens=100)),
+        SimTurn(text="二", cache_read=10, usage=TokenUsage(input_tokens=100)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,

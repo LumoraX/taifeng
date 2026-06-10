@@ -15,7 +15,7 @@ import asyncio
 import pytest
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.submission import SendToPeer
 from taifeng.tool.builtins.send_message import make_send_message_tool
 from taifeng.tool.builtins.spawn_skill import make_spawn_skill_tool
@@ -50,7 +50,7 @@ name: expert
 description: 专家
 version: 1.0.0
 type: composite
-tool_names: [gate_wait, send_message]
+tool_names: [gate_wait, send_message, request_user_input]
 max_call_depth: 2
 ---
 # EXPERT_MARK 专家
@@ -121,8 +121,8 @@ def test_send_to_peer_op_shape() -> None:
 @pytest.mark.asyncio
 async def test_queue_only_idle_child_persists(peer_skills, threads_dir) -> None:
     """QueueOnly 投空闲(done)专家:即时落子 thread 历史(R5),事件 delivered_via=history。"""
-    client = RoutingMockClient(routes={
-        "EXPERT_MARK": [MockTurn(text="专家结论")],
+    client = RoutingSimClient(routes={
+        "EXPERT_MARK": [SimTurn(text="专家结论")],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client)
     h = await engine.spawn_skill(skill_id="expert", args={}, reason="x")
@@ -166,8 +166,8 @@ async def test_queue_only_idle_child_persists(peer_skills, threads_dir) -> None:
 @pytest.mark.asyncio
 async def test_handle_id_and_parent_addressing(peer_skills, threads_dir) -> None:
     """handle_id 等价寻址;"parent" 解析为 root thread(落 engine 历史)。"""
-    client = RoutingMockClient(routes={
-        "EXPERT_MARK": [MockTurn(text="结论")],
+    client = RoutingSimClient(routes={
+        "EXPERT_MARK": [SimTurn(text="结论")],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client)
     h = await engine.spawn_skill(skill_id="expert", args={}, reason="x")
@@ -197,7 +197,7 @@ async def test_handle_id_and_parent_addressing(peer_skills, threads_dir) -> None
 @pytest.mark.asyncio
 async def test_unknown_target_explicit_error(peer_skills, threads_dir) -> None:
     """未知目标 → 显式 ValueError(不静默丢弃)。"""
-    client = RoutingMockClient(routes={})
+    client = RoutingSimClient(routes={})
     pool, engine = await _make_engine(peer_skills, threads_dir, client)
     with pytest.raises(ValueError, match="unknown_peer_target"):
         await engine.deliver_peer_message(
@@ -209,7 +209,7 @@ async def test_unknown_target_explicit_error(peer_skills, threads_dir) -> None:
 @pytest.mark.asyncio
 async def test_trigger_turn_root_rejected(peer_skills, threads_dir) -> None:
     """TriggerTurn 打 root 被拒;QueueOnly 投 root 正常落史。"""
-    client = RoutingMockClient(routes={})
+    client = RoutingSimClient(routes={})
     pool, engine = await _make_engine(peer_skills, threads_dir, client)
     with pytest.raises(ValueError, match="trigger_turn_root_forbidden"):
         await engine.deliver_peer_message(
@@ -225,8 +225,8 @@ async def test_trigger_turn_root_rejected(peer_skills, threads_dir) -> None:
 @pytest.mark.asyncio
 async def test_trigger_turn_wakes_idle_child(peer_skills, threads_dir) -> None:
     """TriggerTurn 唤醒空闲(done)专家:落史 → 新 detached turn → 句柄重回 done。"""
-    client = RoutingMockClient(routes={
-        "EXPERT_MARK": [MockTurn(text="首轮结论"), MockTurn(text="被唤醒后的补充")],
+    client = RoutingSimClient(routes={
+        "EXPERT_MARK": [SimTurn(text="首轮结论"), SimTurn(text="被唤醒后的补充")],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client)
     h = await engine.spawn_skill(skill_id="expert", args={}, reason="x")
@@ -267,11 +267,11 @@ async def test_trigger_turn_running_downgrades(peer_skills, threads_dir) -> None
     """TriggerTurn 投运行中专家 → 降级 QueueOnly(pending_input),mode_downgraded=true;
     drain 后消息并入子 thread 历史。"""
     gate = asyncio.Event()
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "EXPERT_MARK": [
-            MockTurn(text="先等门", tool_calls=[
+            SimTurn(text="先等门", tool_calls=[
                 {"id": "g1", "name": "gate_wait", "arguments": "{}"}]),
-            MockTurn(text="门开后收尾"),
+            SimTurn(text="门开后收尾"),
         ],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client,
@@ -315,9 +315,9 @@ async def test_suspended_child_not_woken(peer_skills, threads_dir) -> None:
         make_request_user_input_tool,
     )
     gate = asyncio.Event()
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "EXPERT_MARK": [
-            MockTurn(text="需要补充", tool_calls=[
+            SimTurn(text="需要补充", tool_calls=[
                 {"id": "r1", "name": "request_user_input",
                  "arguments": '{"prompt": "补充血脂?"}'}]),
         ],
@@ -362,11 +362,11 @@ async def test_suspended_child_not_woken(peer_skills, threads_dir) -> None:
 async def test_wait_peer_terminal_and_timeout(peer_skills, threads_dir) -> None:
     """wait_peer:等到终态返回 status/result;未终态超时返回 timeout。"""
     gate = asyncio.Event()
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "EXPERT_MARK": [
-            MockTurn(text="等门", tool_calls=[
+            SimTurn(text="等门", tool_calls=[
                 {"id": "g1", "name": "gate_wait", "arguments": "{}"}]),
-            MockTurn(text="完成"),
+            SimTurn(text="完成"),
         ],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client,
@@ -399,11 +399,11 @@ async def test_wait_peer_terminal_and_timeout(peer_skills, threads_dir) -> None:
 async def test_wait_peer_cancel_cascades(peer_skills, threads_dir) -> None:
     """等待期间取消 → 立即中止(CancelledError 沿既有取消路径)。"""
     gate = asyncio.Event()
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "EXPERT_MARK": [
-            MockTurn(text="等门", tool_calls=[
+            SimTurn(text="等门", tool_calls=[
                 {"id": "g1", "name": "gate_wait", "arguments": "{}"}]),
-            MockTurn(text="完成"),
+            SimTurn(text="完成"),
         ],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client,
@@ -429,8 +429,8 @@ async def test_wait_peer_cancel_cascades(peer_skills, threads_dir) -> None:
 @pytest.mark.asyncio
 async def test_send_to_peer_op_same_path(peer_skills, threads_dir) -> None:
     """SendToPeer Op 与 deliver_peer_message 同路径:事件一致、消息落史。"""
-    client = RoutingMockClient(routes={
-        "EXPERT_MARK": [MockTurn(text="结论")],
+    client = RoutingSimClient(routes={
+        "EXPERT_MARK": [SimTurn(text="结论")],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client)
     h = await engine.spawn_skill(skill_id="expert", args={}, reason="x")
@@ -461,21 +461,21 @@ async def test_send_to_peer_op_same_path(peer_skills, threads_dir) -> None:
 async def test_llm_sibling_messaging_e2e(peer_skills, threads_dir) -> None:
     """旗舰 e2e:LLM 在 coordinator turn 内 spawn 专家 → 专家完成后经 send_message
     (trigger_turn)唤醒,专家新 turn 看到 peer 消息并产出补充结论;wait_peer 等到终态。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "COORD_MARK": [
             # 第一 turn:迭代1 spawn,迭代2 收尾
-            MockTurn(text="先派专家", tool_calls=[
+            SimTurn(text="先派专家", tool_calls=[
                 {"id": "s1", "name": "spawn_skill", "arguments":
                  '{"skill_id":"expert","reason":"collab","args":{}}'}]),
-            MockTurn(text="已派出"),
+            SimTurn(text="已派出"),
             # 第二 turn:迭代1 send_message(占位符在提交前替换),迭代2 收尾
-            MockTurn(text="专家已完成,推送发现并唤醒", tool_calls=[
+            SimTurn(text="专家已完成,推送发现并唤醒", tool_calls=[
                 {"id": "m1", "name": "send_message", "arguments":
                  '{"target":"__CHILD_TID__","text":"补充:患者有家族史",'
                  '"mode":"trigger_turn"}'}]),
-            MockTurn(text="协调完毕"),
+            SimTurn(text="协调完毕"),
         ],
-        "EXPERT_MARK": [MockTurn(text="初步结论"), MockTurn(text="结合家族史的补充结论")],
+        "EXPERT_MARK": [SimTurn(text="初步结论"), SimTurn(text="结合家族史的补充结论")],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client)
 

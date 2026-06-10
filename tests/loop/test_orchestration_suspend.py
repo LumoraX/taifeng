@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.suspend.reason import SuspendReason
 from taifeng.suspend.record import SuspensionRecord
@@ -100,14 +100,14 @@ async def test_orch_suspend_resume_replay_e2e(tmp_path: Path, threads_dir: Path)
     ))
     _write(skills, "asker", _ASKER)
     _write(skills, "plain", _PLAIN)
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         # plain 只有 1 个脚本:若重入被重派发,第二次会拿到空文本(脚本耗尽)→ 断言可抓
-        "PLAIN_MARK": [MockTurn(text="PLAIN_DONE")],
+        "PLAIN_MARK": [SimTurn(text="PLAIN_DONE")],
         "ASKER_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "aq1", "name": "request_user_input",
                  "arguments": '{"prompt": "请补充"}'}]),
-            MockTurn(text="ASKER_DONE"),
+            SimTurn(text="ASKER_DONE"),
         ],
     })
     pool = await taifeng.EnginePool.create(
@@ -185,13 +185,13 @@ async def test_orch_mixed_parallel_batch(tmp_path: Path, threads_dir: Path) -> N
     ))
     _write(skills, "asker", _ASKER)
     _write(skills, "plain", _PLAIN)
-    client = RoutingMockClient(routes={
-        "PLAIN_MARK": [MockTurn(text="PLAIN_DONE")],
+    client = RoutingSimClient(routes={
+        "PLAIN_MARK": [SimTurn(text="PLAIN_DONE")],
         "ASKER_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "aq2", "name": "request_user_input",
                  "arguments": '{"prompt": "补充?"}'}]),
-            MockTurn(text="ASKER_DONE"),
+            SimTurn(text="ASKER_DONE"),
         ],
     })
     pool = await taifeng.EnginePool.create(
@@ -259,15 +259,15 @@ async def test_orch_when_branch_replay_consistent(
     ))
     _write(skills, "asker", _ASKER)
     _write(skills, "closer", _CLOSER)
-    client = RoutingMockClient(routes={
-        "PICKER_MARK": [MockTurn(text='{"go": true}')],
+    client = RoutingSimClient(routes={
+        "PICKER_MARK": [SimTurn(text='{"go": true}')],
         "ASKER_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "aq3", "name": "request_user_input",
                  "arguments": '{"prompt": "补充?"}'}]),
-            MockTurn(text="ASKER_DONE"),
+            SimTurn(text="ASKER_DONE"),
         ],
-        "CLOSER_MARK": [MockTurn(text="CLOSER_SHOULD_NOT_RUN")],
+        "CLOSER_MARK": [SimTurn(text="CLOSER_SHOULD_NOT_RUN")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills, threads_dir=threads_dir, model_client=client,
@@ -317,8 +317,8 @@ async def test_orch_second_user_message_full_redispatch(
         "orchestration:\n  steps:\n    - serial: [plain]\n", ["plain"]))
     _write(skills, "plain", _PLAIN)
     # 两个脚本:第二轮若被误重放(零派发),ANSWER_TWO 永不产生 → 断言可抓
-    client = RoutingMockClient(routes={
-        "PLAIN_MARK": [MockTurn(text="ANSWER_ONE"), MockTurn(text="ANSWER_TWO")],
+    client = RoutingSimClient(routes={
+        "PLAIN_MARK": [SimTurn(text="ANSWER_ONE"), SimTurn(text="ANSWER_TWO")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills, threads_dir=threads_dir, model_client=client,
@@ -369,16 +369,16 @@ def _two_asker_routes() -> dict:
     """A/B 两个问询子的 Mock 路由:各先挂起再收尾。"""
     return {
         "ASKA_MARK": [
-            MockTurn(text="问A", tool_calls=[
+            SimTurn(text="问A", tool_calls=[
                 {"id": "qa", "name": "request_user_input",
                  "arguments": '{"prompt": "A?"}'}]),
-            MockTurn(text="ASKA_DONE"),
+            SimTurn(text="ASKA_DONE"),
         ],
         "ASKB_MARK": [
-            MockTurn(text="问B", tool_calls=[
+            SimTurn(text="问B", tool_calls=[
                 {"id": "qb", "name": "request_user_input",
                  "arguments": '{"prompt": "B?"}'}]),
-            MockTurn(text="ASKB_DONE"),
+            SimTurn(text="ASKB_DONE"),
         ],
     }
 
@@ -392,7 +392,7 @@ async def _two_asker_pool(tmp_path, threads_dir, session_id: str):
         ["aska", "askb"]))
     _write(skills, "aska", _asker_named("aska", "ASKA_MARK"))
     _write(skills, "askb", _asker_named("askb", "ASKB_MARK"))
-    client = RoutingMockClient(routes=_two_asker_routes())
+    client = RoutingSimClient(routes=_two_asker_routes())
     pool = await tf.EnginePool.create(
         skills_dir=skills, threads_dir=threads_dir, model_client=client,
         compressors=[], extra_tools=[make_request_user_input_tool()],

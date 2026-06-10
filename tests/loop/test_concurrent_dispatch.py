@@ -3,7 +3,7 @@
 - max_parallel>1 时一批 parallel_safe 工具并发执行（wall-clock 明显 < 串行和）
 - max_parallel=1 退化为串行
 - Semaphore 上限分批
-均通过自定义带 ``asyncio.sleep`` 的 parallel_safe 工具 + MockClient 脚本驱动。
+均通过自定义带 ``asyncio.sleep`` 的 parallel_safe 工具 + SimClient 脚本驱动。
 """
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
-from taifeng.llm.providers.mock import RoutingMockClient
+from taifeng.llm.providers import SimClient, SimTurn
+from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -39,21 +39,42 @@ def _slow_tool(delay: float) -> ToolSpec:
     )
 
 
-def _client(n: int) -> MockClient:
+def _client(n: int) -> SimClient:
     """首轮吐 n 个 slow_read 调用，次轮空文本结束。"""
     calls = [
         {"id": f"c{i}", "name": "slow_read", "arguments": "{}"} for i in range(n)
     ]
-    return MockClient(turns=[
-        MockTurn(text="批量读取", tool_calls=calls),
-        MockTurn(text="完成。"),
+    return SimClient(turns=[
+        SimTurn(text="批量读取", tool_calls=calls),
+        SimTurn(text="完成。"),
     ])
+
+
+_BATCH_READER = """---
+name: batch-reader
+description: 批量读取入口（声明 slow_read，LLM 才看得到该工具）
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: []
+tool_names: [slow_read]
+max_call_depth: 2
+---
+# 批量读取
+"""
 
 
 async def _run_once(
     skills_dir: Path, threads_dir: Path, *, n: int, delay: float, cap: int
 ) -> float:
     """跑一次 turn，返回 wall-clock 秒。"""
+    # conformance 响应侧反查要求脚本调用的工具必须声明进 skill tool_names——
+    # 共享 conftest skill 未声明 slow_read，这里建专用 entry
+    (skills_dir / "batch-reader").mkdir(exist_ok=True)
+    (skills_dir / "batch-reader" / "SKILL.md").write_text(
+        _BATCH_READER, encoding="utf-8"
+    )
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
         threads_dir=threads_dir,
@@ -62,7 +83,7 @@ async def _run_once(
         extra_tools=[_slow_tool(delay)],
         max_parallel_tool_calls=cap,
     )
-    engine = await pool.get_or_create(session_id="s1", entry_skill_id="code-reviewer")
+    engine = await pool.get_or_create(session_id="s1", entry_skill_id="batch-reader")
     start = time.monotonic()
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     async for ev in engine.subscribe(sub_id):
@@ -149,24 +170,24 @@ def _build_two_route_skills(tmp_path: Path) -> Path:
     return skills
 
 
-def _planner_routing_client() -> RoutingMockClient:
-    """RoutingMockClient：entry 首轮吐两个 call_skill；两条子线路各 sleep 0.3s。
+def _planner_routing_client() -> RoutingSimClient:
+    """RoutingSimClient：entry 首轮吐两个 call_skill；两条子线路各 sleep 0.3s。
 
     路由 key 取各 skill body 内的唯一标记（entry prompt 不含子 body，子 turn
     prompt 含自身 body → 标记互不串扰）。ENTRY_MARK 放首位优先匹配。
     """
-    return RoutingMockClient(routes={
+    return RoutingSimClient(routes={
         "ENTRY_MARK": [
-            MockTurn(text="并行规划两条线路", tool_calls=[
+            SimTurn(text="并行规划两条线路", tool_calls=[
                 {"id": "c0", "name": "call_skill",
                  "arguments": '{"skill_id": "route-a", "reason": "plan A"}'},
                 {"id": "c1", "name": "call_skill",
                  "arguments": '{"skill_id": "route-b", "reason": "plan B"}'},
             ]),
-            MockTurn(text="两条线路规划完毕。"),
+            SimTurn(text="两条线路规划完毕。"),
         ],
-        "CHILD_A_MARK": [MockTurn(text="线路甲完成", delay_seconds=0.3)],
-        "CHILD_B_MARK": [MockTurn(text="线路乙完成", delay_seconds=0.3)],
+        "CHILD_A_MARK": [SimTurn(text="线路甲完成", delay_seconds=0.3)],
+        "CHILD_B_MARK": [SimTurn(text="线路乙完成", delay_seconds=0.3)],
     })
 
 

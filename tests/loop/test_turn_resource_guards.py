@@ -11,8 +11,8 @@ import asyncio
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockTurn
-from taifeng.llm.providers.mock import RoutingMockClient
+from taifeng.llm.providers import SimTurn
+from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.loop.denial_breaker import DenialBreakerConfig
 from taifeng.permission import PermissionPolicy
 from taifeng.tool.spec import ToolResult, ToolSpec
@@ -72,15 +72,15 @@ def guard_skills(tmp_path):
     return skills
 
 
-def _call_skill_turn(i: int) -> MockTurn:
-    return MockTurn(text=f"第{i}次派发。", tool_calls=[
+def _call_skill_turn(i: int) -> SimTurn:
+    return SimTurn(text=f"第{i}次派发。", tool_calls=[
         {"id": f"c{i}", "name": "call_skill",
          "arguments": '{"skill_id": "guard-sub", "args": {}}'}])
 
 
 async def test_denial_circuit_opens_and_terminates(guard_skills, threads_dir):
     """连续 2 次 permission deny → 断路恰好一次 + end_reason=denial_circuit_open。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "GUARD_ENTRY_MARK": [_call_skill_turn(1), _call_skill_turn(2),
                              _call_skill_turn(3)],
     })
@@ -122,10 +122,10 @@ async def test_denial_circuit_opens_and_terminates(guard_skills, threads_dir):
 
 async def test_refund_tool_does_not_consume_budget(guard_skills, threads_dir):
     """refunds_iteration 工具成功轮不耗预算：max_iterations=3 跑 5 轮 echo 仍 completed。"""
-    turns = [MockTurn(text=f"第{i}轮。", tool_calls=[
+    turns = [SimTurn(text=f"第{i}轮。", tool_calls=[
         {"id": f"e{i}", "name": "echo", "arguments": "{}"}]) for i in range(5)]
-    turns.append(MockTurn(text="完成 REFUND_DONE"))
-    client = RoutingMockClient(routes={"GUARD_ENTRY_MARK": turns})
+    turns.append(SimTurn(text="完成 REFUND_DONE"))
+    client = RoutingSimClient(routes={"GUARD_ENTRY_MARK": turns})
     pool = await taifeng.EnginePool.create(
         skills_dir=guard_skills, threads_dir=threads_dir, model_client=client,
         compressors=[], extra_tools=[_echo_tool(refunds=True)],
@@ -151,11 +151,11 @@ async def test_refund_tool_does_not_consume_budget(guard_skills, threads_dir):
 
 async def test_child_budget_independent_e2e(guard_skills, threads_dir):
     """子 turn 独立预算：父 cap=3 耗 1 步派发后，子仍可独立跑满 3 圈。"""
-    sub_turns = [MockTurn(text=f"子第{i}轮。", tool_calls=[
+    sub_turns = [SimTurn(text=f"子第{i}轮。", tool_calls=[
         {"id": f"s{i}", "name": "echo", "arguments": "{}"}]) for i in range(2)]
-    sub_turns.append(MockTurn(text="子完成 SUB_DONE"))
-    client = RoutingMockClient(routes={
-        "GUARD_ENTRY_MARK": [_call_skill_turn(1), MockTurn(text="父完成 PARENT_DONE")],
+    sub_turns.append(SimTurn(text="子完成 SUB_DONE"))
+    client = RoutingSimClient(routes={
+        "GUARD_ENTRY_MARK": [_call_skill_turn(1), SimTurn(text="父完成 PARENT_DONE")],
         "GUARD_SUB_MARK": sub_turns,  # 子需 3 圈（2 echo + 1 文本）
     })
     pool = await taifeng.EnginePool.create(
@@ -206,7 +206,7 @@ async def test_prompter_timeout_deny_counts_toward_breaker(guard_skills, threads
     async def _never_answers(request):  # 模拟前端永不响应
         await asyncio.sleep(60)
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "GUARD_ENTRY_MARK": [_call_skill_turn(1), _call_skill_turn(2),
                              _call_skill_turn(3)],
     })
@@ -251,8 +251,8 @@ async def test_prompter_timeout_deny_counts_toward_breaker(guard_skills, threads
 # ============================================================
 
 
-def _echo_turn(i: int) -> MockTurn:
-    return MockTurn(text=f"第{i}轮。", tool_calls=[
+def _echo_turn(i: int) -> SimTurn:
+    return SimTurn(text=f"第{i}轮。", tool_calls=[
         {"id": f"g{i}", "name": "echo", "arguments": "{}"}])
 
 
@@ -263,10 +263,10 @@ async def test_max_iterations_suspends_then_resume_retry_completes(
     Resume retry 重建 runner(预算按原 cap 重置)续跑至 completed,不丢已走历史。"""
     from taifeng import SuspendByDefaultPolicy
 
-    client = RoutingMockClient(routes={
-        # 前 2 轮 echo 耗尽 cap=2;第 3 个 MockTurn 留给 resume 后的续跑(纯文本完成)
+    client = RoutingSimClient(routes={
+        # 前 2 轮 echo 耗尽 cap=2;第 3 个 SimTurn 留给 resume 后的续跑(纯文本完成)
         "GUARD_ENTRY_MARK": [_echo_turn(1), _echo_turn(2),
-                             MockTurn(text="续跑完成。")],
+                             SimTurn(text="续跑完成。")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=guard_skills, threads_dir=threads_dir, model_client=client,
@@ -289,7 +289,7 @@ async def test_max_iterations_suspends_then_resume_retry_completes(
     assert pending[0]["reason"] == "resource_limit"
     assert pending[0]["detail"]["end_reason"] == "max_iterations"
 
-    # Resume retry:重建 runner 续跑 → 第 3 个 MockTurn 纯文本 → completed
+    # Resume retry:重建 runner 续跑 → 第 3 个 SimTurn 纯文本 → completed
     resume_id = await engine.submit(taifeng.Resume(
         thread_id=suspended["thread_id"],
         resolutions={pending[0]["request_id"]: {"action": "retry"}},
@@ -311,7 +311,7 @@ async def test_denial_circuit_suspends_with_guard_snapshot(guard_skills, threads
 
     from taifeng import SuspendByDefaultPolicy
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "GUARD_ENTRY_MARK": [_call_skill_turn(1), _call_skill_turn(2),
                              _call_skill_turn(3)],
     })
@@ -363,9 +363,9 @@ async def test_resource_limit_abort_ends_without_continuation(
 
     from taifeng import SuspendByDefaultPolicy
 
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "GUARD_ENTRY_MARK": [_echo_turn(1), _echo_turn(2),
-                             MockTurn(text="不应被采样。")],
+                             SimTurn(text="不应被采样。")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=guard_skills, threads_dir=threads_dir, model_client=client,

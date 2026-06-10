@@ -13,7 +13,7 @@ import taifeng
 
 if TYPE_CHECKING:
     from pathlib import Path
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 
 
 @pytest.mark.asyncio
@@ -21,12 +21,12 @@ async def test_two_tool_calls_paired_in_emission_order(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """首轮吐两个 read_skill（c0/c1），默认串行：历史应是 c0 call→c0 out→c1 call→c1 out。"""
-    client = MockClient(turns=[
-        MockTurn(text="并行读两个 skill", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="并行读两个 skill", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id": "style-checker"}'},
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id": "style-checker"}'},
         ]),
-        MockTurn(text="读取完毕，给出结论。"),
+        SimTurn(text="读取完毕，给出结论。"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -61,12 +61,12 @@ async def test_tool_batch_dispatched_event_emitted(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """有 tool call 的轮次应 emit tool_batch_dispatched，count=2、max_parallel=1。"""
-    client = MockClient(turns=[
-        MockTurn(text="读", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="读", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id": "style-checker"}'},
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id": "style-checker"}'},
         ]),
-        MockTurn(text="完毕。"),
+        SimTurn(text="完毕。"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],

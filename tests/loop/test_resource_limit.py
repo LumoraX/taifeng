@@ -8,12 +8,14 @@ import pytest
 
 import taifeng
 from taifeng.context.budget import ContextBudget
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.conversation.models import user_message
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.turn import TurnRunner
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.skill.registry import FilesystemSkillRegistry
+from taifeng.tool.builtins import make_read_skill_tool
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
 
@@ -38,7 +40,7 @@ def test_session_limit_exceeded_helper(skills_dir: Path) -> None:
 
     runner = TurnRunner(
         entry_skill=entry, snapshot=reg.snapshot(),
-        model_client=MockClient(turns=[]), tool_runtime=ToolCallRuntime(ToolRegistry()),
+        model_client=SimClient(turns=[]), tool_runtime=ToolCallRuntime(ToolRegistry()),
         store=_FakeStore(), compressors=None, dispatch_policy=DispatchPolicy(),
         budget=ContextBudget(), thread_id="t", submission_id="s",
         emit=_emit, cancel=CancellationToken(name="t"),
@@ -59,22 +61,25 @@ async def test_turn_aborts_when_token_ceiling_hit_with_pending_work(
     reg = await FilesystemSkillRegistry.load(skills_dir)
     entry = reg.get("code-reviewer")
     assert entry is not None
-    # 一个带 tool_call 的 turn，usage 直接超 100；tool 不存在→unknown_tool（不影响）
-    client = MockClient(turns=[
-        MockTurn(
-            text="", tool_calls=[{"id": "c1", "name": "nope", "arguments": "{}"}],
+    # 一个带 tool_call 的 turn，usage 直接超 100；read_skill 空参→工具错误结果（不影响）
+    client = SimClient(turns=[
+        SimTurn(
+            text="", tool_calls=[{"id": "c1", "name": "read_skill", "arguments": "{}"}],
             usage=TokenUsage(input_tokens=200, total_tokens=200),
         ),
-        MockTurn(text="should-not-reach"),
+        SimTurn(text="should-not-reach"),
     ])
     events: list = []
 
     async def _emit(ev) -> None:  # noqa: ANN001
         events.append(ev.msg)
 
+    registry = ToolRegistry()
+    registry.register(make_read_skill_tool())  # 脚本要吐 read_skill,必须真注册进请求 tools
     runner = TurnRunner(
         entry_skill=entry, snapshot=reg.snapshot(),
-        model_client=client, tool_runtime=ToolCallRuntime(ToolRegistry()),
+        history_buffer=[user_message("go", thread_id="t")],
+        model_client=client, tool_runtime=ToolCallRuntime(registry),
         store=_FakeStore(), compressors=None, dispatch_policy=DispatchPolicy(),
         budget=ContextBudget(), thread_id="t", submission_id="s",
         emit=_emit, cancel=CancellationToken(name="t"),
@@ -93,9 +98,9 @@ async def test_engine_refuses_new_turn_after_session_limit(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """跨 turn：turn1 耗尽预算 → turn2 在 pre-turn 守卫被拒。"""
-    client = MockClient(turns=[
-        MockTurn(text="一", usage=TokenUsage(input_tokens=200, total_tokens=200)),
-        MockTurn(text="二", usage=TokenUsage(input_tokens=10, total_tokens=10)),
+    client = SimClient(turns=[
+        SimTurn(text="一", usage=TokenUsage(input_tokens=200, total_tokens=200)),
+        SimTurn(text="二", usage=TokenUsage(input_tokens=10, total_tokens=10)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -149,10 +154,10 @@ async def test_k2_suspend_retry_requires_extend_and_unblocks(
     ③ retry+extend_tokens 抬顶后真实续跑完成,不再立即触顶。"""
     from taifeng.loop.submission import Resume
 
-    client = MockClient(turns=[
-        MockTurn(text="", tool_calls=[{"id": "c1", "name": "nope", "arguments": "{}"}],
+    client = SimClient(turns=[
+        SimTurn(text="", tool_calls=[{"id": "c1", "name": "read_skill", "arguments": "{}"}],
                  usage=TokenUsage(input_tokens=200, total_tokens=200)),
-        MockTurn(text="K2_DONE", usage=TokenUsage(input_tokens=10, total_tokens=10)),
+        SimTurn(text="K2_DONE", usage=TokenUsage(input_tokens=10, total_tokens=10)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client,
@@ -199,9 +204,9 @@ async def test_k2_turn_refused_goes_through_policy(
     retry+extend 后该 turn 正常执行(user_message 已入史,续跑即跑)。"""
     from taifeng.loop.submission import Resume
 
-    client = MockClient(turns=[
-        MockTurn(text="一", usage=TokenUsage(input_tokens=200, total_tokens=200)),
-        MockTurn(text="REFUSED_THEN_DONE",
+    client = SimClient(turns=[
+        SimTurn(text="一", usage=TokenUsage(input_tokens=200, total_tokens=200)),
+        SimTurn(text="REFUSED_THEN_DONE",
                  usage=TokenUsage(input_tokens=10, total_tokens=10)),
     ])
     pool = await taifeng.EnginePool.create(
@@ -242,7 +247,7 @@ async def test_request_too_large_precheck_goes_through_policy(
     # SuspendByDefault → 挂起
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
-        model_client=MockClient(turns=[MockTurn(text="x")]), compressors=[],
+        model_client=SimClient(turns=[SimTurn(text="x")]), compressors=[],
         budget=ContextBudget(max_request_bytes=10),
         failure_policy=taifeng.SuspendByDefaultPolicy(),
     )
@@ -259,7 +264,7 @@ async def test_request_too_large_precheck_goes_through_policy(
     # Conservative → 终态零变化
     pool2 = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
-        model_client=MockClient(turns=[MockTurn(text="x")]), compressors=[],
+        model_client=SimClient(turns=[SimTurn(text="x")]), compressors=[],
         budget=ContextBudget(max_request_bytes=10),
     )
     engine2 = await pool2.get_or_create(session_id="rtl2", entry_skill_id="code-reviewer")

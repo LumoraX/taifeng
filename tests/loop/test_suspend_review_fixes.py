@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
@@ -56,12 +56,12 @@ max_call_depth: 2
 """
 
 
-def _expert_turns() -> list[MockTurn]:
+def _expert_turns() -> list[SimTurn]:
     return [
-        MockTurn(text="问", tool_calls=[
+        SimTurn(text="问", tool_calls=[
             {"id": "q1", "name": "request_user_input",
              "arguments": '{"prompt": "补充?"}'}]),
-        MockTurn(text="EXPERT_DONE"),
+        SimTurn(text="EXPERT_DONE"),
     ]
 
 
@@ -112,8 +112,8 @@ async def test_spawn_concurrent_resume_single_settlement_async_store(
     skills = tmp_path / "s"
     _write(skills, "host", _HOST)
     _write(skills, "expert", _EXPERT)
-    client = RoutingMockClient(routes={
-        "HOST_MARK": [MockTurn(text="host idle")],
+    client = RoutingSimClient(routes={
+        "HOST_MARK": [SimTurn(text="host idle")],
         "EXPERT_MARK": _expert_turns(),
     })
     pool = await taifeng.EnginePool.create(
@@ -166,7 +166,7 @@ async def test_spawn_concurrent_resume_single_settlement_async_store(
     await pool.close()
 
 
-class _AlwaysFilteredClient(RoutingMockClient):
+class _AlwaysFilteredClient(RoutingSimClient):
     """每次采样抛确定性 ContentFilterError(spawn 谱系熔断测试用)。"""
 
     def __init__(self) -> None:
@@ -261,13 +261,13 @@ max_call_depth: 2
 # 问询 ASK_MARK
 先问人。
 """)
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "ASK_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "q1", "name": "request_user_input",
                  "arguments": '{"prompt": "补充?"}'}]),
-            MockTurn(text="ASK_DONE"),
-            MockTurn(text="SECOND_DONE"),
+            SimTurn(text="ASK_DONE"),
+            SimTurn(text="SECOND_DONE"),
         ],
     })
     pool = await taifeng.EnginePool.create(
@@ -324,12 +324,12 @@ async def test_pool_ctor_rejects_bad_limits(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="max_session_tokens"):
         await taifeng.EnginePool.create(
             skills_dir=skills, threads_dir=threads,
-            model_client=RoutingMockClient(routes={}), compressors=[],
+            model_client=RoutingSimClient(routes={}), compressors=[],
             max_session_tokens=0)
     with pytest.raises(ValueError, match="failure_suspend_max_auto_retries"):
         await taifeng.EnginePool.create(
             skills_dir=skills, threads_dir=threads,
-            model_client=RoutingMockClient(routes={}), compressors=[],
+            model_client=RoutingSimClient(routes={}), compressors=[],
             failure_suspend_max_auto_retries=0)
 
 
@@ -353,12 +353,12 @@ max_call_depth: 2
 # 问询 ASK_MARK
 先问人。
 """)
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "ASK_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "q1", "name": "request_user_input",
                  "arguments": '{"prompt": "补充?"}'}]),
-            MockTurn(text="不应被采样"),
+            SimTurn(text="不应被采样"),
         ],
     })
     pool = await taifeng.EnginePool.create(
@@ -418,13 +418,13 @@ max_call_depth: 2
 先问人。
 """)
     from taifeng.llm.types import TokenUsage
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "ASK_MARK": [
-            MockTurn(text="问", tool_calls=[
+            SimTurn(text="问", tool_calls=[
                 {"id": "q1", "name": "request_user_input",
                  "arguments": '{"prompt": "补充?"}'}],
                 usage=TokenUsage(input_tokens=200, total_tokens=200)),
-            MockTurn(text="不应被采样"),
+            SimTurn(text="不应被采样"),
         ],
     })
     pool = await taifeng.EnginePool.create(

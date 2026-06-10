@@ -17,8 +17,8 @@ import asyncio
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockTurn
-from taifeng.llm.providers.mock import RoutingMockClient
+from taifeng.llm.providers import SimTurn
+from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
@@ -76,24 +76,24 @@ def d3_skills(tmp_path):
 async def test_spawn_nested_depth3_resume(d3_skills, threads_dir):
     """深度 3：spawn d3l1 → call d3l2 → call d3l3 → leaf HITL 挂起 → Resume → 逐层回填
     （中间父层 d3l2 经 _resume_parent_level 续跑）→ 根 d3l1 重跑 → spawn_completed。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "D3L1_MARK": [
-            MockTurn(text="L1 调用 L2。", tool_calls=[
+            SimTurn(text="L1 调用 L2。", tool_calls=[
                 {"id": "c_l2", "name": "call_skill",
                  "arguments": '{"skill_id": "d3l2", "args": {}}'}]),
-            MockTurn(text="L1 最终 D3_DONE"),
+            SimTurn(text="L1 最终 D3_DONE"),
         ],
         "D3L2_MARK": [
-            MockTurn(text="L2 调用 L3。", tool_calls=[
+            SimTurn(text="L2 调用 L3。", tool_calls=[
                 {"id": "c_l3", "name": "call_skill",
                  "arguments": '{"skill_id": "d3l3", "args": {}}'}]),
-            MockTurn(text="L2 结论 L2_OK"),
+            SimTurn(text="L2 结论 L2_OK"),
         ],
         "D3L3_MARK": [
-            MockTurn(text="L3 补问。", tool_calls=[
+            SimTurn(text="L3 补问。", tool_calls=[
                 {"id": "l3_ask", "name": "request_user_input",
                  "arguments": '{"prompt": "L3 补充"}'}]),
-            MockTurn(text="L3 结论 L3_OK"),
+            SimTurn(text="L3 结论 L3_OK"),
         ],
     })
     pool = await taifeng.EnginePool.create(
@@ -169,8 +169,8 @@ def entry_target_skills(tmp_path):
 @pytest.mark.asyncio
 async def test_spawn_entry_target_allowed(entry_target_skills, threads_dir):
     """allow_entry_target：spawn 一个 entry=true 目标应放行（修复前 cannot_call_entry）。"""
-    client = RoutingMockClient(routes={
-        "ET_TARGET_MARK": [MockTurn(text="entry 目标完成 ET_DONE")],
+    client = RoutingSimClient(routes={
+        "ET_TARGET_MARK": [SimTurn(text="entry 目标完成 ET_DONE")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=entry_target_skills, threads_dir=threads_dir,
@@ -190,7 +190,7 @@ async def test_spawn_entry_target_allowed(entry_target_skills, threads_dir):
 @pytest.mark.asyncio
 async def test_spawn_non_whitelisted_still_rejected(entry_target_skills, threads_dir):
     """白名单门未被一并放开：spawn 非白名单目标仍拒（allow_entry_target 只豁免 entry 门）。"""
-    client = RoutingMockClient(routes={})
+    client = RoutingSimClient(routes={})
     pool = await taifeng.EnginePool.create(
         skills_dir=entry_target_skills, threads_dir=threads_dir,
         model_client=client, compressors=[],
@@ -218,20 +218,20 @@ def barrier_skills(tmp_path):
 @pytest.mark.asyncio
 async def test_join_barrier_fires_after_nested_resume(barrier_skills, threads_dir):
     """专家嵌套挂起 → 登记 join-barrier → Resume 完成专家 → barrier 应 fire（聚合起跑）。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "B_EXPERT_MARK": [
-            MockTurn(text="专家调子步。", tool_calls=[
+            SimTurn(text="专家调子步。", tool_calls=[
                 {"id": "c_step", "name": "call_skill",
                  "arguments": '{"skill_id": "b-step", "args": {}}'}]),
-            MockTurn(text="专家完成 B_EXPERT_DONE"),
+            SimTurn(text="专家完成 B_EXPERT_DONE"),
         ],
         "B_STEP_MARK": [
-            MockTurn(text="子步补问。", tool_calls=[
+            SimTurn(text="子步补问。", tool_calls=[
                 {"id": "s_ask", "name": "request_user_input",
                  "arguments": '{"prompt": "补充"}'}]),
-            MockTurn(text="子步结论 B_STEP_OK"),
+            SimTurn(text="子步结论 B_STEP_OK"),
         ],
-        "CONSULT_MARK": [MockTurn(text="汇总聚合 CONSULT_DONE")],
+        "CONSULT_MARK": [SimTurn(text="汇总聚合 CONSULT_DONE")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=barrier_skills, threads_dir=threads_dir, model_client=client,

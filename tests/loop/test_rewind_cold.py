@@ -8,7 +8,7 @@ from taifeng.conversation.models import (
     function_call_output,
     user_message,
 )
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.rewind import derive_rewind_log
 from taifeng.loop.submission import Rewind
 
@@ -134,25 +134,25 @@ async def test_parity_derive_equals_live_recorded_events(
     import asyncio
 
     import taifeng
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
 
     # 脚本覆盖：圈 1/2 各一次 read_skill，圈 3 无工具纯文本收尾
-    client = MockClient(turns=[
-        MockTurn(text="圈1推理", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1推理", tool_calls=[
             {
                 "id": "tc1",
                 "name": "read_skill",
                 "arguments": '{"skill_id":"style-checker"}',
             },
         ]),
-        MockTurn(text="圈2推理", tool_calls=[
+        SimTurn(text="圈2推理", tool_calls=[
             {
                 "id": "tc2",
                 "name": "read_skill",
                 "arguments": '{"skill_id":"style-checker"}',
             },
         ]),
-        MockTurn(text="收尾推理"),  # 圈 3：无工具调用
+        SimTurn(text="收尾推理"),  # 圈 3：无工具调用
     ])
 
     pool = await taifeng.EnginePool.create(
@@ -285,16 +285,16 @@ async def test_rewind_marker_persists_cut_index(
     import asyncio
 
     # 三圈模型：圈 1/2 各一次 read_skill，圈 3 收尾；rewind 后重推用第 4 条
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
         ]),
-        MockTurn(text="圈2", tool_calls=[
+        SimTurn(text="圈2", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
         ]),
-        MockTurn(text="原收尾"),
+        SimTurn(text="原收尾"),
         # rewind 重推消费：直接无工具收尾
-        MockTurn(text="REDRIVE-DONE"),
+        SimTurn(text="REDRIVE-DONE"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,  # type: ignore[arg-type]
@@ -363,7 +363,7 @@ async def test_cold_load_rebuilds_rewind_table(
 
     import taifeng
     from taifeng.conversation.transcript import JsonlMessageStore
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.skill.registry import FilesystemSkillRegistry
     from taifeng.tool.builtins import (
         make_call_skill_tool,
@@ -374,11 +374,11 @@ async def test_cold_load_rebuilds_rewind_table(
     from taifeng.tool.runtime import ToolCallRuntime
 
     # ── 步骤 1：热跑一个 turn ──────────────────────────────────────────────
-    client = MockClient(turns=[
-        MockTurn(text="圈1推理", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1推理", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
         ]),
-        MockTurn(text="收尾"),   # 圈 2，无工具
+        SimTurn(text="收尾"),   # 圈 2，无工具
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,  # type: ignore[arg-type]
@@ -487,12 +487,12 @@ async def test_cold_load_then_re_reason_executes(
     from taifeng.tool.runtime import ToolCallRuntime
 
     # ── 步骤 1：热跑一个包含两圈的 turn ─────────────────────────────────
-    # 热跑的 MockClient：圈 1 有 read_skill 派发，圈 2 收尾
-    hot_client = MockClient(turns=[
-        MockTurn(text="圈1推理", tool_calls=[
+    # 热跑的 SimClient：圈 1 有 read_skill 派发，圈 2 收尾
+    hot_client = SimClient(turns=[
+        SimTurn(text="圈1推理", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
         ]),
-        MockTurn(text="原收尾"),  # 圈 2，无工具
+        SimTurn(text="原收尾"),  # 圈 2，无工具
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,  # type: ignore[arg-type]
@@ -538,9 +538,9 @@ async def test_cold_load_then_re_reason_executes(
     tools.register(make_call_skill_tool())
     tools.register(make_run_script_tool())
 
-    # 冷 engine 的 MockClient：仅提供 rewind 重推消费的那一轮 LLM 回答
-    cold_client = MockClient(turns=[
-        MockTurn(text="COLD-REDRIVE-DONE"),  # re_reason 重推从 it1 截点采样，直接无工具收尾
+    # 冷 engine 的 SimClient：仅提供 rewind 重推消费的那一轮 LLM 回答
+    cold_client = SimClient(turns=[
+        SimTurn(text="COLD-REDRIVE-DONE"),  # re_reason 重推从 it1 截点采样，直接无工具收尾
     ])
     cold_engine = taifeng.AgentEngine(
         entry_skill=entry,
@@ -612,7 +612,7 @@ async def test_cold_load_empty_history_empty_table(
 
     import taifeng
     from taifeng.conversation.transcript import JsonlMessageStore
-    from taifeng.llm.providers import MockClient, MockTurn
+    from taifeng.llm.providers import SimClient, SimTurn
     from taifeng.skill.registry import FilesystemSkillRegistry
     from taifeng.tool.builtins import (
         make_call_skill_tool,
@@ -632,7 +632,7 @@ async def test_cold_load_empty_history_empty_table(
     tools.register(make_run_script_tool())
 
     store = JsonlMessageStore(Path(str(threads_dir)))  # type: ignore[arg-type]
-    client = MockClient(turns=[MockTurn(text="hello")])
+    client = SimClient(turns=[SimTurn(text="hello")])
 
     # 空 initial_history（明确传入空列表，模拟"有 initial_history 但内容为空"）
     cold_engine = taifeng.AgentEngine(
@@ -691,15 +691,15 @@ async def test_cold_then_new_turn_node_ids_no_collision(
     from taifeng.tool.runtime import ToolCallRuntime
 
     # ── 步骤 1：热跑第一 turn ─────────────────────────────────────────────
-    hot_client = MockClient(turns=[
-        MockTurn(text="圈1推理", tool_calls=[
+    hot_client = SimClient(turns=[
+        SimTurn(text="圈1推理", tool_calls=[
             {
                 "id": "c1",
                 "name": "read_skill",
                 "arguments": '{"skill_id":"style-checker"}',
             },
         ]),
-        MockTurn(text="原收尾"),  # 圈 2，无工具
+        SimTurn(text="原收尾"),  # 圈 2，无工具
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,  # type: ignore[arg-type]
@@ -758,9 +758,9 @@ async def test_cold_then_new_turn_node_ids_no_collision(
     tools.register(make_call_skill_tool())
     tools.register(make_run_script_tool())
 
-    # 冷 engine 的 MockClient：第二 turn 消费
-    cold_client = MockClient(turns=[
-        MockTurn(text="第二轮收尾"),  # 新 turn，无工具，直接收尾
+    # 冷 engine 的 SimClient：第二 turn 消费
+    cold_client = SimClient(turns=[
+        SimTurn(text="第二轮收尾"),  # 新 turn，无工具，直接收尾
     ])
     cold_engine = taifeng.AgentEngine(
         entry_skill=entry,
@@ -877,11 +877,11 @@ async def test_cold_rewind_resolves_instructions(
     instruction_text = "COLD_REWIND_INSTRUCTION_SENTINEL_XYZ"
 
     # ── 步骤 1：热跑一个含两圈的 turn，持久化 transcript ──────────────────
-    hot_client = MockClient(turns=[
-        MockTurn(text="圈1推理", tool_calls=[
+    hot_client = SimClient(turns=[
+        SimTurn(text="圈1推理", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'},
         ]),
-        MockTurn(text="原收尾"),  # 圈 2，无工具
+        SimTurn(text="原收尾"),  # 圈 2，无工具
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,  # type: ignore[arg-type]
@@ -938,8 +938,8 @@ async def test_cold_rewind_resolves_instructions(
     tools.register(make_call_skill_tool())
     tools.register(make_run_script_tool())
 
-    cold_client = MockClient(turns=[
-        MockTurn(text="COLD-INSTR-REWIND-DONE"),  # re_reason 重推直接无工具收尾
+    cold_client = SimClient(turns=[
+        SimTurn(text="COLD-INSTR-REWIND-DONE"),  # re_reason 重推直接无工具收尾
     ])
     cold_engine = taifeng.AgentEngine(
         entry_skill=entry,
@@ -1129,7 +1129,7 @@ async def test_cold_rewind_compacted_thread_reconstructed_correctly(
     tools.register(make_call_skill_tool())
     tools.register(make_run_script_tool())
 
-    cold_client = MockClient(turns=[MockTurn(text="COLD-COMPACTED-REWIND-DONE")])
+    cold_client = SimClient(turns=[SimTurn(text="COLD-COMPACTED-REWIND-DONE")])
     cold_engine = taifeng.AgentEngine(
         entry_skill=entry,
         skill_snapshot=snapshot,
@@ -1319,7 +1319,7 @@ async def test_resume_compacted_thread_no_superseded_items(
         entry_skill=entry,
         skill_snapshot=snapshot,
         tool_runtime=ToolCallRuntime(tools),
-        model_client=MockClient(turns=[]),  # resume 不触发 turn，无需 LLM 回答
+        model_client=SimClient(turns=[]),  # resume 不触发 turn，无需 LLM 回答
         store=store,
         thread_id=tid,
         session_id="s_resume_compacted",
@@ -1463,7 +1463,7 @@ async def test_cold_rewind_uses_construction_entry_skill_not_history_origin(
 
     # ── 步骤 1：热态在 reviewer-a 下跑一个单圈 turn，持久化 transcript ──────────
     hot_source = _EntrySkillEchoSource()
-    hot_client = MockClient(turns=[MockTurn(text="原推理收尾")])  # 单圈，无工具 → t1:it1
+    hot_client = SimClient(turns=[SimTurn(text="原推理收尾")])  # 单圈，无工具 → t1:it1
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,  # type: ignore[arg-type]
         threads_dir=threads_dir,  # type: ignore[arg-type]
@@ -1514,7 +1514,7 @@ async def test_cold_rewind_uses_construction_entry_skill_not_history_origin(
     tools.register(make_run_script_tool())
 
     cold_source = _EntrySkillEchoSource()
-    cold_client = MockClient(turns=[MockTurn(text="COLD-ENTRY-REWIND-DONE")])
+    cold_client = SimClient(turns=[SimTurn(text="COLD-ENTRY-REWIND-DONE")])
     cold_engine = taifeng.AgentEngine(
         entry_skill=entry_b,
         skill_snapshot=snapshot,

@@ -1,4 +1,4 @@
-"""声明式编排端到端（走 EnginePool + RoutingMockClient）：
+"""声明式编排端到端（走 EnginePool + RoutingSimClient）：
 
 - parallel 段：cap≥2 真并发（wall-clock < 串行和）；cap=1 退化串行（回归对照）
 - serial 段：即便 cap 高也强制 Semaphore(1) 串行
@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import taifeng
-from taifeng.llm.providers.mock import MockTurn, RoutingMockClient
+from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -65,7 +65,7 @@ def _write(skills: Path, name: str, body: str) -> None:
 
 
 async def _run(
-    skills: Path, threads_dir: Path, client: RoutingMockClient, *, cap: int
+    skills: Path, threads_dir: Path, client: RoutingSimClient, *, cap: int
 ) -> tuple[float, list, set[str]]:
     """跑 trip 编排，返回 (根 turn wall-clock, 全事件列表, returned 子 skill 集合)。
 
@@ -118,9 +118,9 @@ async def test_parallel_step_concurrent(tmp_path: Path, threads_dir: Path) -> No
     ))
     _write(skills, "route-a", _child("route-a", "A_MARK"))
     _write(skills, "route-b", _child("route-b", "B_MARK"))
-    client = RoutingMockClient(routes={
-        "A_MARK": [MockTurn(text="线路甲完成", delay_seconds=0.3)],
-        "B_MARK": [MockTurn(text="线路乙完成", delay_seconds=0.3)],
+    client = RoutingSimClient(routes={
+        "A_MARK": [SimTurn(text="线路甲完成", delay_seconds=0.3)],
+        "B_MARK": [SimTurn(text="线路乙完成", delay_seconds=0.3)],
     })
     elapsed, _events, returned = await _run(skills, threads_dir, client, cap=2)
     assert returned == {"route-a", "route-b"}
@@ -137,9 +137,9 @@ async def test_parallel_step_serial_when_cap_one(tmp_path: Path, threads_dir: Pa
     ))
     _write(skills, "route-a", _child("route-a", "A_MARK"))
     _write(skills, "route-b", _child("route-b", "B_MARK"))
-    client = RoutingMockClient(routes={
-        "A_MARK": [MockTurn(text="线路甲完成", delay_seconds=0.2)],
-        "B_MARK": [MockTurn(text="线路乙完成", delay_seconds=0.2)],
+    client = RoutingSimClient(routes={
+        "A_MARK": [SimTurn(text="线路甲完成", delay_seconds=0.2)],
+        "B_MARK": [SimTurn(text="线路乙完成", delay_seconds=0.2)],
     })
     elapsed, _events, returned = await _run(skills, threads_dir, client, cap=1)
     assert returned == {"route-a", "route-b"}
@@ -156,9 +156,9 @@ async def test_serial_step_forces_sequential(tmp_path: Path, threads_dir: Path) 
     ))
     _write(skills, "route-a", _child("route-a", "A_MARK"))
     _write(skills, "route-b", _child("route-b", "B_MARK"))
-    client = RoutingMockClient(routes={
-        "A_MARK": [MockTurn(text="甲", delay_seconds=0.2)],
-        "B_MARK": [MockTurn(text="乙", delay_seconds=0.2)],
+    client = RoutingSimClient(routes={
+        "A_MARK": [SimTurn(text="甲", delay_seconds=0.2)],
+        "B_MARK": [SimTurn(text="乙", delay_seconds=0.2)],
     })
     elapsed, _events, returned = await _run(skills, threads_dir, client, cap=4)
     assert returned == {"route-a", "route-b"}
@@ -178,10 +178,10 @@ async def test_upstream_injected_into_serial_step(tmp_path: Path, threads_dir: P
     _write(skills, "route-a", _child("route-a", "A_MARK"))
     _write(skills, "route-b", _child("route-b", "B_MARK"))
     _write(skills, "summarizer", _child("summarizer", "SUM_MARK"))
-    client = RoutingMockClient(routes={
-        "A_MARK": [MockTurn(text="线路甲完成")],
-        "B_MARK": [MockTurn(text="线路乙完成")],
-        "SUM_MARK": [MockTurn(text="汇总完毕")],
+    client = RoutingSimClient(routes={
+        "A_MARK": [SimTurn(text="线路甲完成")],
+        "B_MARK": [SimTurn(text="线路乙完成")],
+        "SUM_MARK": [SimTurn(text="汇总完毕")],
     })
     _elapsed, _events, returned = await _run(skills, threads_dir, client, cap=2)
     assert returned == {"route-a", "route-b", "summarizer"}
@@ -206,9 +206,9 @@ async def test_when_true_branch(tmp_path: Path, threads_dir: Path) -> None:
     ))
     _write(skills, "probe", _child("probe", "PROBE_MARK"))
     _write(skills, "weather", _child("weather", "WEATHER_MARK"))
-    client = RoutingMockClient(routes={
-        "PROBE_MARK": [MockTurn(text='{"needs_weather": true}')],
-        "WEATHER_MARK": [MockTurn(text="天气已查")],
+    client = RoutingSimClient(routes={
+        "PROBE_MARK": [SimTurn(text='{"needs_weather": true}')],
+        "WEATHER_MARK": [SimTurn(text="天气已查")],
     })
     _elapsed, _events, returned = await _run(skills, threads_dir, client, cap=2)
     assert "weather" in returned, f"needs_weather=true 应执行 weather；returned={returned}"
@@ -228,9 +228,9 @@ async def test_when_false_skips_when_no_else(tmp_path: Path, threads_dir: Path) 
     ))
     _write(skills, "probe", _child("probe", "PROBE_MARK"))
     _write(skills, "weather", _child("weather", "WEATHER_MARK"))
-    client = RoutingMockClient(routes={
-        "PROBE_MARK": [MockTurn(text='{"needs_weather": false}')],
-        "WEATHER_MARK": [MockTurn(text="天气已查")],
+    client = RoutingSimClient(routes={
+        "PROBE_MARK": [SimTurn(text='{"needs_weather": false}')],
+        "WEATHER_MARK": [SimTurn(text="天气已查")],
     })
     _elapsed, _events, returned = await _run(skills, threads_dir, client, cap=2)
     assert "weather" not in returned, f"needs_weather=false 应跳过 weather；returned={returned}"
@@ -250,9 +250,9 @@ async def test_when_missing_flag_hard_fails(tmp_path: Path, threads_dir: Path) -
     ))
     _write(skills, "probe", _child("probe", "PROBE_MARK"))
     _write(skills, "weather", _child("weather", "WEATHER_MARK"))
-    client = RoutingMockClient(routes={
-        "PROBE_MARK": [MockTurn(text='{"other": 1}')],
-        "WEATHER_MARK": [MockTurn(text="天气已查")],
+    client = RoutingSimClient(routes={
+        "PROBE_MARK": [SimTurn(text='{"other": 1}')],
+        "WEATHER_MARK": [SimTurn(text="天气已查")],
     })
     _elapsed, events, _returned = await _run(skills, threads_dir, client, cap=2)
     kinds = [e.msg.kind for e in events]
@@ -283,10 +283,10 @@ async def test_when_then_parallel_injects_upstream(tmp_path: Path, threads_dir: 
     _write(skills, "probe", _child("probe", "PROBE_MARK"))
     _write(skills, "weather", _child("weather", "WEATHER_MARK"))
     _write(skills, "traffic", _child("traffic", "TRAFFIC_MARK"))
-    client = RoutingMockClient(routes={
-        "PROBE_MARK": [MockTurn(text='{"needs_weather": true}')],
-        "WEATHER_MARK": [MockTurn(text="天气已查")],
-        "TRAFFIC_MARK": [MockTurn(text="路况已查")],
+    client = RoutingSimClient(routes={
+        "PROBE_MARK": [SimTurn(text='{"needs_weather": true}')],
+        "WEATHER_MARK": [SimTurn(text="天气已查")],
+        "TRAFFIC_MARK": [SimTurn(text="路况已查")],
     })
     _elapsed, _events, returned = await _run(skills, threads_dir, client, cap=4)
     assert {"weather", "traffic"} <= returned
@@ -348,7 +348,7 @@ async def test_plan_resolved_emitted(tmp_path: Path, threads_dir: Path) -> None:
         ["route-a"],
     ))
     _write(skills, "route-a", _child("route-a", "A_MARK"))
-    client = RoutingMockClient(routes={"A_MARK": [MockTurn(text="甲")]})
+    client = RoutingSimClient(routes={"A_MARK": [SimTurn(text="甲")]})
     _elapsed, events, _returned = await _run(skills, threads_dir, client, cap=2)
     resolved = [e for e in events if e.msg.kind == "orchestration_plan_resolved"]
     assert len(resolved) == 1

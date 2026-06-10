@@ -17,7 +17,7 @@ from taifeng.context.compressor import (
 )
 from taifeng.context.pinned_state import PinnedStateRegistry
 from taifeng.conversation.models import user_message
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.turn import TurnRunner
 from taifeng.skill.dispatch import DispatchPolicy
@@ -122,7 +122,7 @@ async def _make_runner(
     return TurnRunner(
         entry_skill=entry,
         snapshot=registry.snapshot(),
-        model_client=MockClient(turns=[MockTurn(text="ok")]),
+        model_client=SimClient(turns=[SimTurn(text="ok")]),
         tool_runtime=ToolCallRuntime(ToolRegistry()),
         store=store if store is not None else _FakeStore(),
         compressors=compressors,

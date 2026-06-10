@@ -18,7 +18,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 if TYPE_CHECKING:
@@ -106,9 +106,9 @@ async def test_empty_subskill_completion_is_tolerated(tmp_path: Path, caplog) ->
     threads = tmp_path / "threads"
     threads.mkdir()
 
-    client = MockClient(turns=[
+    client = SimClient(turns=[
         # entry turn 1 → 派发 leaf
-        MockTurn(
+        SimTurn(
             text="派发到 leaf",
             tool_calls=[{
                 "id": "tc_leaf",
@@ -118,9 +118,9 @@ async def test_empty_subskill_completion_is_tolerated(tmp_path: Path, caplog) ->
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
         # leaf turn 1 → 空回复（无显式错误）：决策 B 视为正常空结果
-        MockTurn(text="", usage=TokenUsage(input_tokens=10, output_tokens=0, total_tokens=10)),
+        SimTurn(text="", usage=TokenUsage(input_tokens=10, output_tokens=0, total_tokens=10)),
         # entry turn 2 → 拿到空结果后继续给最终文本
-        MockTurn(
+        SimTurn(
             text="entry 收尾：子结果为空，已据现有信息继续",
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),

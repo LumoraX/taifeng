@@ -18,8 +18,8 @@ import pytest
 import taifeng
 from taifeng import SuspendByDefaultPolicy
 from taifeng.llm.errors import ContentFilterError
-from taifeng.llm.providers import MockTurn
-from taifeng.llm.providers.mock import RoutingMockClient
+from taifeng.llm.providers import SimTurn
+from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.suspend.reason import SuspendReason
 from taifeng.suspend.record import SuspensionRecord
@@ -66,8 +66,8 @@ def _echo_tool() -> ToolSpec:
     )
 
 
-def _echo_turn(i: int) -> MockTurn:
-    return MockTurn(text=f"第{i}轮。", tool_calls=[
+def _echo_turn(i: int) -> SimTurn:
+    return SimTurn(text=f"第{i}轮。", tool_calls=[
         {"id": f"x{i}", "name": "echo", "arguments": "{}"}])
 
 
@@ -111,11 +111,11 @@ async def _spawn_until_suspended(pool, engine):
 async def test_spawn_resource_limit_resume_retry_to_done(chain_skills, threads_dir):
     """spawn 专家触顶挂起 → Resume(child_tid, retry) 续跑至 done,
     已走历史保留(续跑轮文本接续),句柄经既有 suspended 路由,零新增状态机。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         # 2 轮 echo 耗尽 cap=2 → 挂起;第 3 个脚本留给 resume 续跑(纯文本完成)
         "BUDGET_EXPERT_MARK": [_echo_turn(1), _echo_turn(2),
-                               MockTurn(text="EXPERT_DONE")],
-        "HOST_MARK": [MockTurn(text="host idle")],
+                               SimTurn(text="EXPERT_DONE")],
+        "HOST_MARK": [SimTurn(text="host idle")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=chain_skills, threads_dir=threads_dir, model_client=client,
@@ -142,10 +142,10 @@ async def test_spawn_resource_limit_resume_retry_to_done(chain_skills, threads_d
 async def test_spawn_resource_limit_resume_abort_to_failed(chain_skills, threads_dir):
     """spawn 专家触顶挂起 → Resume(child_tid, abort) → 句柄 error + SpawnFailed
     (人显式放弃成终态,barrier 全终态条件得以推进)。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "BUDGET_EXPERT_MARK": [_echo_turn(1), _echo_turn(2),
-                               MockTurn(text="不应被采样")],
-        "HOST_MARK": [MockTurn(text="host idle")],
+                               SimTurn(text="不应被采样")],
+        "HOST_MARK": [SimTurn(text="host idle")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=chain_skills, threads_dir=threads_dir, model_client=client,
@@ -180,14 +180,14 @@ async def test_spawn_resource_limit_resume_abort_to_failed(chain_skills, threads
     await pool.close()
 
 
-class _FlakyOnceClient(RoutingMockClient):
+class _FlakyOnceClient(RoutingSimClient):
     """指定 marker 的第 1 次采样抛确定性 ContentFilterError,之后走正常脚本。
 
     模拟「子 skill 确定性 LLM 失败一次,人工裁决 retry 后恢复」——
     SuspendByDefault 下该失败应转挂起而非终态(这正是与保守 policy 的差异点)。
     """
 
-    def __init__(self, *, routes: dict[str, list[MockTurn]], flaky_marker: str) -> None:
+    def __init__(self, *, routes: dict[str, list[SimTurn]], flaky_marker: str) -> None:
         super().__init__(routes=routes)
         self._flaky_marker = flaky_marker
         self._raised = False
@@ -230,13 +230,13 @@ async def test_call_skill_chain_inherits_policy_and_nested_resume(
         routes={
             # host:第 1 轮派 call_skill;续跑轮收到子结果后给最终文本
             "HOST_MARK": [
-                MockTurn(text="派发专家", tool_calls=[
+                SimTurn(text="派发专家", tool_calls=[
                     {"id": "ck1", "name": "call_skill",
                      "arguments": '{"skill_id": "budget-expert", "args": {}}'}]),
-                MockTurn(text="HOST_DONE"),
+                SimTurn(text="HOST_DONE"),
             ],
             # 专家:第 1 次采样被 flaky 拦截(抛 content_filter);retry 后直接出结论
-            "BUDGET_EXPERT_MARK": [MockTurn(text="EXPERT_OK")],
+            "BUDGET_EXPERT_MARK": [SimTurn(text="EXPERT_OK")],
         },
         flaky_marker="BUDGET_EXPERT_MARK",
     )
@@ -306,11 +306,11 @@ async def test_call_skill_chain_inherits_policy_and_nested_resume(
     await pool.close()
 
 
-class _CancelRaisingClient(RoutingMockClient):
+class _CancelRaisingClient(RoutingSimClient):
     """首次采样抛 llm.errors.CancelledError —— 模拟按 ModelClient 协议字面实现的
     provider 在检测到取消时上抛(suspension-ttl-hardening 边界)。"""
 
-    def __init__(self, *, routes: dict[str, list[MockTurn]]) -> None:
+    def __init__(self, *, routes: dict[str, list[SimTurn]]) -> None:
         super().__init__(routes=routes)
         self._raised = False
 
@@ -344,7 +344,7 @@ async def test_cancelled_error_bypasses_policy(chain_skills, threads_dir) -> Non
     import taifeng
 
     client = _CancelRaisingClient(routes={
-        "HOST_MARK": [MockTurn(text="host done")],
+        "HOST_MARK": [SimTurn(text="host done")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=chain_skills, threads_dir=threads_dir, model_client=client,

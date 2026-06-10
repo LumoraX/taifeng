@@ -22,7 +22,7 @@ from taifeng.llm.events import (
     server_model,
     text_delta,
 )
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import ApiRequest, TokenUsage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import _PendingTurn
@@ -69,7 +69,7 @@ async def _make_runner(
     return TurnRunner(
         entry_skill=entry,
         snapshot=registry.snapshot(),
-        model_client=model_client or MockClient(turns=[MockTurn(text="ok")]),
+        model_client=model_client or SimClient(turns=[SimTurn(text="ok")]),
         tool_runtime=ToolCallRuntime(ToolRegistry()),
         store=_FakeStore(),
         compressors=None,
@@ -128,7 +128,7 @@ async def test_inject_routed_to_active_turn(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """有活跃 turn → 注入投进其 pending 队列、emit delivered=true、不落历史。"""
-    client = MockClient(turns=[MockTurn(text="ok")])
+    client = SimClient(turns=[SimTurn(text="ok")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client, compressors=[],
@@ -160,7 +160,7 @@ async def test_inject_no_active_turn_no_new_turn(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """无活跃 turn → 落历史不起新 turn、emit delivered=false。"""
-    client = MockClient(turns=[MockTurn(text="ok")])
+    client = SimClient(turns=[SimTurn(text="ok")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client, compressors=[],
@@ -189,13 +189,13 @@ async def test_inject_consumed_by_running_turn_e2e(
 ) -> None:
     """真端到端：运行中 turn 在后续迭代 drain 消费注入，文本进入 history。
 
-    多轮 MockClient（前两轮各带 tool call 维持 turn）确保注入有迭代边界可消费。
+    多轮 SimClient（前两轮各带 tool call 维持 turn）确保注入有迭代边界可消费。
     """
     # delay_seconds 模拟真实 LLM 每轮采样的秒级延迟 —— 确保注入往返落在 turn
     # 运行窗口内（mock 无延迟时 turn 会在 polling 间隙跑完，inject 错过窗口）。
-    client = MockClient(
+    client = SimClient(
         turns=[
-            MockTurn(
+            SimTurn(
                 text="第1轮",
                 delay_seconds=0.05,
                 tool_calls=[
@@ -203,7 +203,7 @@ async def test_inject_consumed_by_running_turn_e2e(
                      "arguments": '{"skill_id": "style-checker"}'}
                 ],
             ),
-            MockTurn(
+            SimTurn(
                 text="第2轮",
                 delay_seconds=0.05,
                 tool_calls=[
@@ -211,7 +211,7 @@ async def test_inject_consumed_by_running_turn_e2e(
                      "arguments": '{"skill_id": "style-checker"}'}
                 ],
             ),
-            MockTurn(text="最终结论", delay_seconds=0.05),
+            SimTurn(text="最终结论", delay_seconds=0.05),
         ]
     )
     pool = await taifeng.EnginePool.create(

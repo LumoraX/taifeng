@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import taifeng
 from taifeng.context.strategies import HandoffCompactionStrategy
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import CompactNow
 
@@ -35,8 +35,8 @@ class _PlanSrc:
 
 
 def _handoff_compressor() -> list:
-    summary_client = MockClient(turns=[
-        MockTurn(text="## 摘要", usage=TokenUsage(input_tokens=100, output_tokens=10))
+    summary_client = SimClient(turns=[
+        SimTurn(text="## 摘要", usage=TokenUsage(input_tokens=100, output_tokens=10))
         for _ in range(4)
     ])
     return [HandoffCompactionStrategy(model_client=summary_client)]
@@ -72,7 +72,7 @@ async def test_ctor_sources_reinjected_after_compact_now(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """构造期 pinned_state_sources → 手动压缩后 pinned 项钉回 history 尾。"""
-    client = MockClient(turns=[MockTurn(text=f"r{i}") for i in range(8)])
+    client = SimClient(turns=[SimTurn(text=f"r{i}") for i in range(8)])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client,
         compressors=_handoff_compressor(),
@@ -99,7 +99,7 @@ async def test_runtime_register_unregister(
     断言走事件级(pinned_state_reinjected 是否出现)——旧 pinned 项作为普通
     历史可能被后续压缩吸收,条目计数不是稳定信号。
     """
-    client = MockClient(turns=[MockTurn(text=f"r{i}") for i in range(12)])
+    client = SimClient(turns=[SimTurn(text=f"r{i}") for i in range(12)])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client,
         compressors=_handoff_compressor(),
@@ -135,7 +135,7 @@ async def test_pinned_item_survives_resume(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """R5:pinned 项经 store 持久化;新 pool resume 同 thread 后历史仍含该项。"""
-    client = MockClient(turns=[MockTurn(text=f"r{i}") for i in range(8)])
+    client = SimClient(turns=[SimTurn(text=f"r{i}") for i in range(8)])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client,
         compressors=_handoff_compressor(),
@@ -150,7 +150,7 @@ async def test_pinned_item_survives_resume(
 
     pool2 = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
-        model_client=MockClient(turns=[MockTurn(text="ok")]),
+        model_client=SimClient(turns=[SimTurn(text="ok")]),
         compressors=_handoff_compressor(),
     )
     engine2 = await pool2.get_or_create(
@@ -188,7 +188,7 @@ async def test_pinned_coexists_with_memory_salvage(
         async def on_session_end(self, *, thread_id: str) -> None:
             return None
 
-    client = MockClient(turns=[MockTurn(text=f"r{i}") for i in range(8)])
+    client = SimClient(turns=[SimTurn(text=f"r{i}") for i in range(8)])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client,
         compressors=_handoff_compressor(),

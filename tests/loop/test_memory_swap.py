@@ -14,7 +14,7 @@ from taifeng.conversation.models import (
     compacted,
     user_message,
 )
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.turn import TurnRunner
 from taifeng.skill.dispatch import DispatchPolicy
@@ -71,7 +71,7 @@ async def _runner(skills_dir: Path, **extra: object) -> TurnRunner:
 
     return TurnRunner(
         entry_skill=entry, snapshot=reg.snapshot(),
-        model_client=MockClient(turns=[MockTurn(text="ok")]),
+        model_client=SimClient(turns=[SimTurn(text="ok")]),
         tool_runtime=ToolCallRuntime(ToolRegistry()), store=_FakeStore(),
         compressors=None, dispatch_policy=DispatchPolicy(), budget=ContextBudget(),
         thread_id="t", submission_id="s", emit=_emit,
@@ -151,7 +151,7 @@ async def test_engine_on_session_end_on_shutdown(
     mem = _RecordingMemory()
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
-        model_client=MockClient(turns=[MockTurn(text="ok")]),
+        model_client=SimClient(turns=[SimTurn(text="ok")]),
         compressors=[], memory_store=mem,
     )
     engine = await pool.get_or_create(session_id="s1", entry_skill_id="code-reviewer")

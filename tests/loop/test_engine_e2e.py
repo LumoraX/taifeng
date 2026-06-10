@@ -8,17 +8,17 @@ from pathlib import Path
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 
 @pytest.mark.asyncio
 async def test_pool_engine_basic_turn(skills_dir: Path, threads_dir: Path) -> None:
-    client = MockClient(turns=[
-        MockTurn(text="分析中...", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="分析中...", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id": "style-checker"}'}
         ], usage=TokenUsage(input_tokens=100, output_tokens=20, total_tokens=120)),
-        MockTurn(text="最终结论：右上叶 8mm 结节。", usage=TokenUsage(input_tokens=200, output_tokens=30, total_tokens=230)),
+        SimTurn(text="最终结论：右上叶 8mm 结节。", usage=TokenUsage(input_tokens=200, output_tokens=30, total_tokens=230)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -57,7 +57,7 @@ async def test_pool_engine_basic_turn(skills_dir: Path, threads_dir: Path) -> No
 
 @pytest.mark.asyncio
 async def test_engine_persists_thread(skills_dir: Path, threads_dir: Path) -> None:
-    client = MockClient(turns=[MockTurn(text="ok", usage=TokenUsage(input_tokens=50, output_tokens=5))])
+    client = SimClient(turns=[SimTurn(text="ok", usage=TokenUsage(input_tokens=50, output_tokens=5))])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
     )
@@ -81,7 +81,7 @@ async def test_engine_persists_thread(skills_dir: Path, threads_dir: Path) -> No
 @pytest.mark.asyncio
 async def test_entry_skill_validation(skills_dir: Path, threads_dir: Path) -> None:
     """atomic skill 不允许作为 entry。"""
-    client = MockClient(turns=[])
+    client = SimClient(turns=[])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
     )
@@ -92,7 +92,7 @@ async def test_entry_skill_validation(skills_dir: Path, threads_dir: Path) -> No
 
 @pytest.mark.asyncio
 async def test_unknown_skill_rejected(skills_dir: Path, threads_dir: Path) -> None:
-    client = MockClient(turns=[])
+    client = SimClient(turns=[])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
     )
@@ -105,7 +105,7 @@ async def test_unknown_skill_rejected(skills_dir: Path, threads_dir: Path) -> No
 async def test_engine_run_script_e2e(tmp_path: Path) -> None:
     """LLM 调用 run_script → script 实际执行 → 结果回流到 LLM。
 
-    搭一个最小 skill 含 1 个 shell script，MockClient 第一轮调 run_script，
+    搭一个最小 skill 含 1 个 shell script，SimClient 第一轮调 run_script，
     第二轮返回最终 text。验证 ScriptExecutor 被 EnginePool 注入并执行。
     """
     from taifeng.skill.scripts.shell import ShellScriptExecutor
@@ -136,7 +136,7 @@ type: composite
 entry: true
 model: mock-model
 child_skills: [helper]
-tool_names: []
+tool_names: [run_script]
 scripts:
   - name: greet
     path: scripts/greet.sh
@@ -156,8 +156,8 @@ scripts:
     threads = tmp_path / "threads"
     threads.mkdir()
 
-    client = MockClient(turns=[
-        MockTurn(
+    client = SimClient(turns=[
+        SimTurn(
             text="先跑 script",
             tool_calls=[{
                 "id": "c1",
@@ -169,7 +169,7 @@ scripts:
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
-        MockTurn(
+        SimTurn(
             text="script 输出: hello-from-greet",
             usage=TokenUsage(input_tokens=20, output_tokens=5, total_tokens=25),
         ),

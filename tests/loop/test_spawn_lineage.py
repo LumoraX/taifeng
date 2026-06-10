@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from taifeng.context.budget import ContextBudget
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.turn import TurnRunner
 from taifeng.skill.dispatch import CallStack, DispatchPolicy
@@ -53,7 +53,7 @@ async def test_sub_skill_persists_parent_lineage_into_extra(skills_dir: Path) ->
 
     runner = TurnRunner(
         entry_skill=entry, snapshot=reg.snapshot(),
-        model_client=MockClient(turns=[MockTurn(text="ok")]),
+        model_client=SimClient(turns=[SimTurn(text="ok")]),
         tool_runtime=ToolCallRuntime(ToolRegistry()), store=rec,
         compressors=None, dispatch_policy=DispatchPolicy(), budget=ContextBudget(),
         thread_id="parent-thread", submission_id="s", emit=_emit,

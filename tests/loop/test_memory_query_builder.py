@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from taifeng.context.budget import ContextBudget
 from taifeng.conversation.models import ResponseItem, user_message
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.turn import TurnRunner
 from taifeng.skill.dispatch import DispatchPolicy
@@ -62,7 +62,7 @@ async def _run(skills_dir: Path, *, builder=None) -> _RecordingMemory:
 
     runner = TurnRunner(
         entry_skill=entry, snapshot=reg.snapshot(),
-        model_client=MockClient(turns=[MockTurn(text="ok")]),
+        model_client=SimClient(turns=[SimTurn(text="ok")]),
         tool_runtime=ToolCallRuntime(ToolRegistry()), store=_FakeStore(),
         compressors=None, dispatch_policy=DispatchPolicy(),
         budget=ContextBudget(),

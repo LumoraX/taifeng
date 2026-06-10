@@ -8,7 +8,7 @@ import pytest
 
 import taifeng
 from taifeng.context.budget import ContextBudget
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import (
     CompactNow,
@@ -20,7 +20,7 @@ from taifeng.loop.submission import (
 
 @pytest.mark.asyncio
 async def test_engine_exposes_budget_and_history(skills_dir: Path, threads_dir: Path) -> None:
-    client = MockClient(turns=[MockTurn(text="hi", usage=TokenUsage(input_tokens=10, output_tokens=5))])
+    client = SimClient(turns=[SimTurn(text="hi", usage=TokenUsage(input_tokens=10, output_tokens=5))])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
     )
@@ -36,14 +36,14 @@ async def test_engine_exposes_budget_and_history(skills_dir: Path, threads_dir: 
 async def test_max_iterations_configurable(skills_dir: Path, threads_dir: Path) -> None:
     # 模拟一个永远调 tool 的 LLM
     turns = [
-        MockTurn(
+        SimTurn(
             text="t",
             tool_calls=[{"id": f"c{i}", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}],
             usage=TokenUsage(input_tokens=10, output_tokens=5),
         )
         for i in range(20)
     ]
-    client = MockClient(turns=turns)
+    client = SimClient(turns=turns)
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client,
         compressors=[], max_iterations=3,
@@ -60,7 +60,7 @@ async def test_max_iterations_configurable(skills_dir: Path, threads_dir: Path) 
 
 @pytest.mark.asyncio
 async def test_update_budget_at_runtime(skills_dir: Path, threads_dir: Path) -> None:
-    client = MockClient(turns=[MockTurn(text="hi")])
+    client = SimClient(turns=[SimTurn(text="hi")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
     )
@@ -87,11 +87,11 @@ async def test_update_budget_at_runtime(skills_dir: Path, threads_dir: Path) -> 
 async def test_thread_rollback_drops_recent_turns(
     skills_dir: Path, threads_dir: Path
 ) -> None:
-    client = MockClient(
+    client = SimClient(
         turns=[
-            MockTurn(text="t1"),
-            MockTurn(text="t2"),
-            MockTurn(text="t3"),
+            SimTurn(text="t1"),
+            SimTurn(text="t2"),
+            SimTurn(text="t3"),
         ]
     )
     pool = await taifeng.EnginePool.create(
@@ -133,12 +133,12 @@ async def test_compact_now_with_params(skills_dir: Path, threads_dir: Path) -> N
     """CompactNow(force=True, preserve_tail=2) 即使未达阈值也强制压缩。"""
     from taifeng.context.strategies import HandoffCompactionStrategy
 
-    summary_client = MockClient(
-        turns=[MockTurn(text="## 摘要", usage=TokenUsage(input_tokens=100, output_tokens=10))]
+    summary_client = SimClient(
+        turns=[SimTurn(text="## 摘要", usage=TokenUsage(input_tokens=100, output_tokens=10))]
     )
     # 主 chat 用 mock 也行
-    main_client = MockClient(
-        turns=[MockTurn(text=f"reply {i}") for i in range(10)]
+    main_client = SimClient(
+        turns=[SimTurn(text=f"reply {i}") for i in range(10)]
     )
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -194,7 +194,7 @@ async def test_event_queue_size_kwarg_takes_effect(
     """
     import asyncio
 
-    client = MockClient(turns=[MockTurn(text="hi")])
+    client = SimClient(turns=[SimTurn(text="hi")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client, compressors=[],
@@ -264,7 +264,7 @@ async def test_event_queue_size_default_is_1024(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """不传 event_queue_size → 默认 1024（向后兼容）。"""
-    client = MockClient(turns=[MockTurn(text="hi")])
+    client = SimClient(turns=[SimTurn(text="hi")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client, compressors=[],
@@ -278,7 +278,7 @@ async def test_event_queue_size_default_is_1024(
 
 @pytest.mark.asyncio
 async def test_refresh_snapshot_op(skills_dir: Path, threads_dir: Path) -> None:
-    client = MockClient(turns=[MockTurn(text="hi")])
+    client = SimClient(turns=[SimTurn(text="hi")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
     )

@@ -20,8 +20,8 @@ import asyncio
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockTurn
-from taifeng.llm.providers.mock import RoutingMockClient
+from taifeng.llm.providers import SimTurn
+from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
@@ -98,22 +98,22 @@ def nested_skills(tmp_path):
 async def test_spawn_nested_child_skill_hitl_resume(nested_skills, threads_dir):
     """spawn composite 专家 → 其子 skill HITL 挂起（嵌套 CHILD_SKILL）→ Resume(spawn 子
     thread, leaf 的 request_id) → 子 skill 续跑 → 专家 top 续跑 → spawn_completed。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         # 专家 top：turn1 call_skill(nested-step)；子 skill 回流后 turn2 出最终结论。
         "NESTED_EXPERT_MARK": [
-            MockTurn(text="专家编排：调用子步骤。", tool_calls=[
+            SimTurn(text="专家编排：调用子步骤。", tool_calls=[
                 {"id": "call_step", "name": "call_skill",
                  "arguments": '{"skill_id": "nested-step", "args": {}}'},
             ]),
-            MockTurn(text="专家最终结论 EXPERT_DONE"),
+            SimTurn(text="专家最终结论 EXPERT_DONE"),
         ],
         # 子 skill（leaf）：turn1 request_user_input（挂起）；Resume 后 turn2 出结论。
         "NESTED_STEP_MARK": [
-            MockTurn(text="子步骤补问。", tool_calls=[
+            SimTurn(text="子步骤补问。", tool_calls=[
                 {"id": "step_ask", "name": "request_user_input",
                  "arguments": '{"prompt": "子步骤需要补充信息"}'},
             ]),
-            MockTurn(text="子步骤结论 STEP_DONE"),
+            SimTurn(text="子步骤结论 STEP_DONE"),
         ],
     })
 
@@ -257,27 +257,27 @@ def nested2_skills(tmp_path):
 @pytest.mark.asyncio
 async def test_spawn_nested_multi_round_hitl_resume(nested2_skills, threads_dir):
     """spawn 两步专家 → step-a 挂起 → Resume → step-b 又挂起（多轮）→ Resume → 全跑完。"""
-    client = RoutingMockClient(routes={
+    client = RoutingSimClient(routes={
         "EXPERT2_MARK": [
-            MockTurn(text="调用 step-a。", tool_calls=[
+            SimTurn(text="调用 step-a。", tool_calls=[
                 {"id": "call_a", "name": "call_skill",
                  "arguments": '{"skill_id": "step-a", "args": {}}'}]),
-            MockTurn(text="调用 step-b。", tool_calls=[
+            SimTurn(text="调用 step-b。", tool_calls=[
                 {"id": "call_b", "name": "call_skill",
                  "arguments": '{"skill_id": "step-b", "args": {}}'}]),
-            MockTurn(text="两步完成 EXPERT2_DONE"),
+            SimTurn(text="两步完成 EXPERT2_DONE"),
         ],
         "STEP_A_MARK": [
-            MockTurn(text="A 补问。", tool_calls=[
+            SimTurn(text="A 补问。", tool_calls=[
                 {"id": "a_ask", "name": "request_user_input",
                  "arguments": '{"prompt": "A 需要补充"}'}]),
-            MockTurn(text="A 结论 A_OK"),
+            SimTurn(text="A 结论 A_OK"),
         ],
         "STEP_B_MARK": [
-            MockTurn(text="B 补问。", tool_calls=[
+            SimTurn(text="B 补问。", tool_calls=[
                 {"id": "b_ask", "name": "request_user_input",
                  "arguments": '{"prompt": "B 需要补充"}'}]),
-            MockTurn(text="B 结论 B_OK"),
+            SimTurn(text="B 结论 B_OK"),
         ],
     })
 

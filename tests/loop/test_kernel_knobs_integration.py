@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 
@@ -50,14 +50,14 @@ async def test_all_kernel_knobs_wired_through_public_api(
     K3 三个钩子（prefetch / writeback / on_session_end）都被回调；K4 计数到位。
     """
     mem = _SpyMemory()
-    client = MockClient(turns=[
-        MockTurn(
+    client = SimClient(turns=[
+        SimTurn(
             text="加载规则…",
             tool_calls=[{"id": "tc1", "name": "read_skill",
                          "arguments": '{"skill_id": "style-checker"}'}],
             usage=TokenUsage(input_tokens=200, output_tokens=30, total_tokens=230),
         ),
-        MockTurn(
+        SimTurn(
             text="函数 120>80，建议拆分。",
             usage=TokenUsage(input_tokens=380, output_tokens=55, total_tokens=435,
                              cache_read_input_tokens=190),
@@ -107,9 +107,9 @@ async def test_session_token_oom_refuses_next_turn(
     第一轮真实消耗 5000 token（> 1000 上限）→ 会话累计触顶；第二轮入队时
     pre-turn 守卫应拒绝并 emit resource_limit_exceeded（而非静默继续）。
     """
-    client = MockClient(turns=[
-        MockTurn(text="第一轮", usage=TokenUsage(input_tokens=5000, total_tokens=5000)),
-        MockTurn(text="第二轮", usage=TokenUsage(input_tokens=5000, total_tokens=5000)),
+    client = SimClient(turns=[
+        SimTurn(text="第一轮", usage=TokenUsage(input_tokens=5000, total_tokens=5000)),
+        SimTurn(text="第二轮", usage=TokenUsage(input_tokens=5000, total_tokens=5000)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,

@@ -20,7 +20,7 @@ import pytest
 
 import taifeng
 from taifeng.hooks.types import HookContext, HookDecision, HookKind
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.permission.types import PermissionPolicy
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
@@ -78,8 +78,8 @@ max_call_depth: 2
     (skills_dir / "spy-skill").mkdir()
     (skills_dir / "spy-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
-    client = MockClient(turns=[
-        MockTurn(
+    client = SimClient(turns=[
+        SimTurn(
             text="calling spy",
             tool_calls=[{
                 "id": "tc1",
@@ -88,7 +88,7 @@ max_call_depth: 2
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5),
         ),
-        MockTurn(
+        SimTurn(
             text="done",
             usage=TokenUsage(input_tokens=20, output_tokens=5),
         ),
@@ -143,13 +143,13 @@ max_call_depth: 2
     (skills_dir / "spy-skill").mkdir()
     (skills_dir / "spy-skill" / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
-    client = MockClient(turns=[
-        MockTurn(
+    client = SimClient(turns=[
+        SimTurn(
             text="x",
             tool_calls=[{"id": "tc1", "name": "spy", "arguments": "{}"}],
             usage=TokenUsage(input_tokens=10, output_tokens=5),
         ),
-        MockTurn(text="done", usage=TokenUsage(input_tokens=10, output_tokens=5)),
+        SimTurn(text="done", usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ])
 
     pool = await taifeng.EnginePool.create(

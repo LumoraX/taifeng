@@ -23,7 +23,7 @@ from taifeng.llm.events import (
     server_model,
     text_delta,
 )
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import ApiRequest, TokenUsage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.turn import TurnRunner
@@ -133,10 +133,10 @@ async def _make_runner(
 
 
 def _summary_compressor() -> CompressionOrchestrator:
-    """handoff 压缩器，摘要由独立 MockClient 提供（不影响被测 client 的计数）。"""
-    summary_client = MockClient(
+    """handoff 压缩器，摘要由独立 SimClient 提供（不影响被测 client 的计数）。"""
+    summary_client = SimClient(
         turns=[
-            MockTurn(
+            SimTurn(
                 text="## 进度\n摘要内容",
                 usage=TokenUsage(input_tokens=400, output_tokens=20),
             )

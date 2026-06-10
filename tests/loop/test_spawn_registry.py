@@ -76,7 +76,7 @@ class _FakeStore:
 async def test_run_sub_skill_rejects_when_registry_exhausted(skills_dir) -> None:
     """K1 接线：registry 耗尽 → run_sub_skill 不派发、emit 拒绝事件、返回 error。"""
     from taifeng.context.budget import ContextBudget
-    from taifeng.llm.providers import MockClient
+    from taifeng.llm.providers import SimClient
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.turn import TurnRunner
     from taifeng.skill.dispatch import CallStack, DispatchPolicy
@@ -98,7 +98,7 @@ async def test_run_sub_skill_rejects_when_registry_exhausted(skills_dir) -> None
     runner = TurnRunner(
         entry_skill=entry,
         snapshot=reg.snapshot(),
-        model_client=MockClient(turns=[]),
+        model_client=SimClient(turns=[]),
         tool_runtime=ToolCallRuntime(ToolRegistry()),
         store=_FakeStore(),
         compressors=None,

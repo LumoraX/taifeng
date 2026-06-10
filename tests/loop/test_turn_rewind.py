@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.submission import Rewind, Submission
 
 
@@ -114,12 +114,12 @@ async def test_checkpoints_cover_iterations_and_dispatches(
     并验证 dispatch 节点的 re_reason 切点(history_len)== 所属 iteration 的 history_len,
     inner_history_len(retry_tool 切点)严格大于 re_reason 切点(夹在 fc 与 fco 之间)。
     """
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="圈2", tool_calls=[
+        SimTurn(text="圈2", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="收尾"),
+        SimTurn(text="收尾"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -164,12 +164,12 @@ async def test_rewind_checkpoint_recorded_events_emitted(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """root turn 每记一个回访节点 → 发一条 rewind_checkpoint_recorded 事件(R3)。"""
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="圈2", tool_calls=[
+        SimTurn(text="圈2", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="收尾"),
+        SimTurn(text="收尾"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -203,7 +203,7 @@ async def _drain(engine: taifeng.AgentEngine, sub_id: str) -> tuple[list[str], s
 @pytest.mark.asyncio
 async def test_rewind_unknown_node_rejected(skills_dir: Path, threads_dir: Path) -> None:
     """node_id 不存在 → rewind_rejected(unknown_node),history 不动。"""
-    client = MockClient(turns=[MockTurn(text="hi")])
+    client = SimClient(turns=[SimTurn(text="hi")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
     )
@@ -228,14 +228,14 @@ async def test_rewind_re_reason_truncates_and_redrives(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """rewind 到 iteration 节点(re_reason)→ 截到该圈采样前 + 重采样,走出新路径。"""
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="圈2", tool_calls=[
+        SimTurn(text="圈2", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="原收尾"),
+        SimTurn(text="原收尾"),
         # 重推消费:rewind 到 it2 后重采样,直接无工具收尾(证明走了新路径)
-        MockTurn(text="REDRIVE-DONE"),
+        SimTurn(text="REDRIVE-DONE"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -263,10 +263,10 @@ async def test_rewind_mode_kind_mismatch_rejected(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """对 iteration 节点用 retry_tool → mode_kind_mismatch 拒绝。"""
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="收尾"),
+        SimTurn(text="收尾"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -290,12 +290,12 @@ async def test_rewind_dispatch_retry_tool_reruns_and_continues(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """retry_tool：保留 assistant 的 function_call,补跑该工具,再续推到新结果。"""
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="原收尾"),
-        # retry_tool 后:seed 补跑 read_skill(不耗 MockTurn),续推消费这条
-        MockTurn(text="RETRY-TOOL-DONE"),
+        SimTurn(text="原收尾"),
+        # retry_tool 后:seed 补跑 read_skill(不耗 SimTurn),续推消费这条
+        SimTurn(text="RETRY-TOOL-DONE"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -319,16 +319,16 @@ async def test_rewind_retry_tool_reruns_call_skill(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """头号场景:retry_tool 重跑自治链里的一次 call_skill —— 子 skill 真被重跑、父续推。"""
-    client = MockClient(turns=[
+    client = SimClient(turns=[
         # code-reviewer 圈1:派发 call_skill(style-checker)
-        MockTurn(text="派发风格审查", tool_calls=[{
+        SimTurn(text="派发风格审查", tool_calls=[{
             "id": "cs0", "name": "call_skill",
             "arguments": '{"skill_id":"style-checker","reason":"审查风格","args":{}}'}]),
-        MockTurn(text="风格结论-A"),   # style-checker 子 turn(首跑)
-        MockTurn(text="综合-A"),        # code-reviewer 圈2 收尾
+        SimTurn(text="风格结论-A"),   # style-checker 子 turn(首跑)
+        SimTurn(text="综合-A"),        # code-reviewer 圈2 收尾
         # —— retry_tool 后:seed 重跑 call_skill → 新子 turn + 父续推 ——
-        MockTurn(text="风格结论-B"),   # style-checker 子 turn(重跑)
-        MockTurn(text="综合-B"),        # code-reviewer 续推
+        SimTurn(text="风格结论-B"),   # style-checker 子 turn(重跑)
+        SimTurn(text="综合-B"),        # code-reviewer 续推
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -353,11 +353,11 @@ async def test_rewind_dispatch_re_reason_cuts_to_iteration(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """对 dispatch 节点用 re_reason → 截点归一到所属 iteration 采样前(非 inner 切点)。"""
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="原收尾"),
-        MockTurn(text="RE-REASON-DONE"),
+        SimTurn(text="原收尾"),
+        SimTurn(text="RE-REASON-DONE"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -384,11 +384,11 @@ async def test_rewind_retry_tool_new_args_rewrites_call(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """retry_tool + new_args:改写悬空 fc 的入参后重跑该工具,续推到新结果。"""
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="原收尾"),
-        MockTurn(text="NEW-ARGS-DONE"),
+        SimTurn(text="原收尾"),
+        SimTurn(text="NEW-ARGS-DONE"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -422,10 +422,10 @@ async def test_rewind_cache_break_marked_expected(
     """rewind 蓄意回退 cache_anchor → 该失效记为 expected,不计入 unexpected_breaks(R2)。"""
     from taifeng.llm.types import TokenUsage
 
-    client = MockClient(turns=[
-        MockTurn(text="原", cache_read=100, usage=TokenUsage(input_tokens=100)),
+    client = SimClient(turns=[
+        SimTurn(text="原", cache_read=100, usage=TokenUsage(input_tokens=100)),
         # 重推首采样:cache_read 跌破 → 若不标 expected 会误记 unexpected break
-        MockTurn(text="重推", cache_read=10, usage=TokenUsage(input_tokens=100)),
+        SimTurn(text="重推", cache_read=10, usage=TokenUsage(input_tokens=100)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
@@ -447,11 +447,11 @@ async def test_rewind_store_append_only_preserved(
     skills_dir: Path, threads_dir: Path
 ) -> None:
     """rewind 只在内存截 history;store(JSONL)append-only,旧 items 不被物理删(R5)。"""
-    client = MockClient(turns=[
-        MockTurn(text="圈1", tool_calls=[
+    client = SimClient(turns=[
+        SimTurn(text="圈1", tool_calls=[
             {"id": "c0", "name": "read_skill", "arguments": '{"skill_id":"style-checker"}'}]),
-        MockTurn(text="ORIGINAL-TAIL"),
-        MockTurn(text="REDRIVEN"),
+        SimTurn(text="ORIGINAL-TAIL"),
+        SimTurn(text="REDRIVEN"),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],

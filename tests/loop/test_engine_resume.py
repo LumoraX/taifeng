@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
 
@@ -25,7 +25,7 @@ async def _run_first_session(
 
     返回 thread_id 供第二个 pool resume 用。
     """
-    client = MockClient(turns=[MockTurn(
+    client = SimClient(turns=[SimTurn(
         text="第一轮的回答",
         usage=TokenUsage(input_tokens=10, output_tokens=5),
     )])
@@ -54,7 +54,7 @@ async def test_resume_loads_history(
     thread_id = await _run_first_session(skills_dir, threads_dir)
 
     # 新 pool resume
-    client2 = MockClient(turns=[])  # resume 不触发 turn
+    client2 = SimClient(turns=[])  # resume 不触发 turn
     pool2 = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client2, compressors=[],
@@ -85,7 +85,7 @@ async def test_resume_preserves_thread_id(
     """resume 后 engine.thread_id 与传入的 resume_thread_id 一致；不新建 thread。"""
     thread_id = await _run_first_session(skills_dir, threads_dir)
 
-    client2 = MockClient(turns=[])
+    client2 = SimClient(turns=[])
     pool2 = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client2, compressors=[],
@@ -106,7 +106,7 @@ async def test_resume_cache_anchor_is_reset(
     """resume 后 _cache_anchor_index 保守置 -1（跨进程 provider cache 不可信）。"""
     thread_id = await _run_first_session(skills_dir, threads_dir)
 
-    client2 = MockClient(turns=[])
+    client2 = SimClient(turns=[])
     pool2 = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client2, compressors=[],
@@ -125,7 +125,7 @@ async def test_resume_unknown_thread_id_raises(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
     """未知 thread_id 抛 ValueError，不静默 fallback 到 create_thread。"""
-    client = MockClient(turns=[])
+    client = SimClient(turns=[])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
         model_client=client, compressors=[],
@@ -202,7 +202,7 @@ async def test_resume_initial_history_is_copy(
     # 用 pool.load_thread 读出原始 items，作为 initial_history 直接传给新 pool
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
-        model_client=MockClient(turns=[]), compressors=[],
+        model_client=SimClient(turns=[]), compressors=[],
     )
     gen = await pool.store.load_thread(thread_id)
     items = [it async for it in gen]

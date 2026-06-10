@@ -19,7 +19,7 @@ from taifeng.conversation.models import (
     function_call_output,
     user_message,
 )
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import EventMsg
 from taifeng.loop.turn import TurnRunner, _history_orphan_call_ids
@@ -112,7 +112,7 @@ async def _make_runner(
     return TurnRunner(
         entry_skill=entry,
         snapshot=registry.snapshot(),
-        model_client=MockClient(turns=[MockTurn(text="ok")]),
+        model_client=SimClient(turns=[SimTurn(text="ok")]),
         tool_runtime=ToolCallRuntime(ToolRegistry()),
         store=_FakeStore(),
         compressors=compressors,

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import taifeng
-from taifeng.llm.providers import MockClient
+from taifeng.llm.providers import SimClient
 from taifeng.loop.event import EngineLog, EventMsg
 from taifeng.skill.registry import FilesystemSkillRegistry
 from taifeng.tool.registry import ToolRegistry
@@ -31,7 +31,7 @@ async def _make_engine(skills_dir: Path, **kw: object) -> taifeng.AgentEngine:
         entry_skill=entry,
         skill_snapshot=reg.snapshot(),
         tool_runtime=ToolCallRuntime(ToolRegistry()),
-        model_client=MockClient(turns=[]),
+        model_client=SimClient(turns=[]),
         store=_FakeStore(),
         thread_id="t",
         **kw,
