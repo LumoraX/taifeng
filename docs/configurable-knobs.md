@@ -811,7 +811,7 @@ async for ev in session.stream(req):
 | --- | --- |
 | openai-compat | `response_format = {"type": "json_schema", "json_schema": {"name", "schema", "strict"}}` |
 | litellm | 同上 —— litellm 内部对 Anthropic / Gemini 自动桥接到各家 native 模式 |
-| mock | `MockTurn(structured=...)` 字段配对回放 |
+| sim | `SimTurn(structured=...)` 字段配对回放 |
 
 **事件流**：
 

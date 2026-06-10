@@ -78,4 +78,4 @@ mid-turn steering 的生效**依赖 turn 持续时间 > 注入往返延迟**：�
 
 ## 测试
 
-`tests/loop/test_midturn_steering.py`：`_drain_pending_input` 单元（pending→history+store+清空+事件）、engine 路由 `delivered=true`（白盒注册活跃 `_PendingTurn`）/ `delivered=false`（无活跃 turn 落历史不起新 turn）、**`test_inject_consumed_by_running_turn_e2e` 真端到端**（多轮 turn + `MockTurn.delay_seconds` 模拟 LLM 采样延迟，确证注入被运行中 turn 在后续迭代 drain 消费、文本真进 history；连跑 5 次稳定）。
+`tests/loop/test_midturn_steering.py`：`_drain_pending_input` 单元（pending→history+store+清空+事件）、engine 路由 `delivered=true`（白盒注册活跃 `_PendingTurn`）/ `delivered=false`（无活跃 turn 落历史不起新 turn）、**`test_inject_consumed_by_running_turn_e2e` 真端到端**（多轮 turn + `SimTurn.delay_seconds` 模拟 LLM 采样延迟，确证注入被运行中 turn 在后续迭代 drain 消费、文本真进 history；连跑 5 次稳定）。

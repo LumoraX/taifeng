@@ -46,6 +46,7 @@
 | --- | --- |
 | [llm-provider-native](llm-provider-native.md) | native 四件套同构契约、ResponseEvent 流形状、各 provider 字段映射（Anthropic / Gemini / DeepSeek）、cache 字段优先级、错误分类、`record_cache_read` |
 | [llm-structured-output](llm-structured-output.md) | `ResponseFormatSpec` 字段、`structured_output` 事件、provider 翻译、解析失败策略 |
+| [llm-sim-conformance](llm-sim-conformance.md) | 有状态 conformance 模拟器（测试基础设施）：协议合同校验 / token 记账 overflow / 前缀 cache 账本 / 全保真分片 / 故障注入 / 确定性时序编排 / RequestLedger 请求侦察 |
 
 ### 工程约定
 | 契约 | 覆盖 |

@@ -87,7 +87,7 @@ LiteLLM 内部对 Anthropic / Gemini / OpenAI 自动桥接到各家 native 格�
 
 ### Requirement: mock provider 支持 structured 字段
 
-`MockTurn` SHALL 新增字段 `structured: dict | list | None = None`。
+`SimTurn` SHALL 提供字段 `structured: dict | list | None = None`。
 
 `MockSession.stream` 在 emit `completed` 之前 SHALL：
 
@@ -95,12 +95,12 @@ LiteLLM 内部对 Anthropic / Gemini / OpenAI 自动桥接到各家 native 格�
   - emit `structured_output(parsed=self._turn.structured, raw_text=json.dumps(self._turn.structured, ensure_ascii=False))`
 - 否则不 emit
 
-#### Scenario: MockTurn.structured 配置时 emit
-- **WHEN** `MockClient(turns=[MockTurn(text="", structured={"x": 1})])`
+#### Scenario: SimTurn.structured 配置时 emit
+- **WHEN** `SimClient(turns=[SimTurn(text="", structured={"x": 1})])`
 - **AND** ApiRequest 带 response_format
 - **THEN** 事件流 SHALL 含 `structured_output(parsed={"x": 1})` 且在 `completed` 之前
 
 #### Scenario: 未配置 structured 不 emit
-- **WHEN** `MockTurn(text="hi")`（structured 默认 None）+ ApiRequest 带 response_format
+- **WHEN** `SimTurn(text="hi")`（structured 默认 None）+ ApiRequest 带 response_format
 - **THEN** 事件流 SHALL **不**含 `structured_output`
 

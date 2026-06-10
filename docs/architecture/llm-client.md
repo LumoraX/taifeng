@@ -111,7 +111,7 @@ src/taifeng/llm/providers/
 ├── gemini_provider.py      # Gemini streamGenerateContent（零 google-genai-sdk）
 ├── deepseek_provider.py    # DeepSeek（openai_compat 薄子类，预设 base_url + prompt_cache_hit_tokens 映射）
 ├── litellm_provider.py     # 兜底：Bedrock / Vertex / Azure / Kimi 等非主流 provider
-├── mock.py                 # MockClient / RoutingMockClient（测试用，CI 禁真实 API）
+├── sim/                    # conformance 模拟器 SimClient / RoutingSimClient（测试用，CI 禁真实 API；契约见 capabilities/llm-sim-conformance.md）
 └── _shared.py              # classify_http_error（按 status code）/ SSE 解析 / usage 统一
 ```
 
@@ -201,7 +201,7 @@ cache 统计**不挂在 `ModelClient` 上**，而是 `Engine` 跨 turn 持有一
 
 > 全部已覆盖（`tests/` 下 provider / retry / structured-output 测试 + `tests/loop/test_cache_break_reason.py`）。
 
-- [x] provider 流式调用产出 `ResponseEvent` 序列符合规范（MockClient + native）
+- [x] provider 流式调用产出 `ResponseEvent` 序列符合规范（SimClient + native）
 - [x] 取消 `cancel.cancel()` 后，stream 在 100ms 内停止；HTTP 连接关闭
 - [x] 429 重试遵循 `Retry-After`；超 `max_attempts` 透出 `LLMError`
 - [x] `cache_breakpoints` 字段对 Anthropic 正确翻译为 `cache_control`

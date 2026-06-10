@@ -252,7 +252,7 @@ Resume(thread_id, resolutions)
 - **tier-1（默认，快）**：释放 turn 协程，engine 留在 Pool；同进程 resume 直接读内存 history。
 - **tier-2（缩容 / 进程可退）**：Pool 驱逐 engine、进程退出。挂起真相全在 store（`suspension` item + `function_call`-无-`function_call_output` 的 history-gap）；之后凭 `thread_id` 从 JSONL 重建 + `Resume` 续跑。
 
-**挂起真相** = 持久化的 `suspension` item + function_call-without-output gap。跨进程 resume 经 tier-2 重建测试证明（MockClient 模拟跨实例，从 JSONL + `SuspensionRecord` 重建续跑）。
+**挂起真相** = 持久化的 `suspension` item + function_call-without-output gap。跨进程 resume 经 tier-2 重建测试证明（SimClient 模拟跨实例，从 JSONL + `SuspensionRecord` 重建续跑）。
 
 #### Scenario: 跨进程重建续跑
 - **WHEN** engine A 挂起后进程退出；engine B 从同 `thread_id` 重建（`resume_thread_id`），随后 `Resume`

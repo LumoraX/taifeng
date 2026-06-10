@@ -74,6 +74,7 @@
 | **结构化输出** | 强类型输出 schema，provider 各自翻译 | `ResponseFormatSpec` / `structured_output` 事件 | — | [llm-structured-output.md](architecture/capabilities/llm-structured-output.md) ✅ |
 | **重试 + 错误分类** | 指数退避 + 服务端 hint delay；错误分 11 桶 + 机读恢复配方 | `retry_async` / `LLMError` / `RecoveryPlan` | — | [llm-client.md](architecture/llm-client.md) |
 | **精准 cache 计量** | 各 provider cache 字段直读（Anthropic / DeepSeek / Gemini） | `PromptCacheStats` / `TokenUsage` | [real_llm/e2e.py](../examples/real_llm/e2e.py) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ |
+| **conformance 测试模拟器** | 有状态 sim：协议合同校验（call_id 配对/前缀一致）+ token 记账 overflow + 前缀 cache 账本 + 故障注入 + 确定性时序编排（测试基础设施，替代旧 mock） | `SimClient` / `RoutingSimClient` / `SimTurn` / `sim_client` fixture | [tests/llm/test_sim_engine_integration.py](../tests/llm/test_sim_engine_integration.py) | [llm-sim-conformance.md](architecture/capabilities/llm-sim-conformance.md) ✅ |
 
 ## 五、持久化（会话怎么存、崩溃怎么 resume）
 
@@ -196,6 +197,6 @@ pool = await taifeng.EnginePool.create(
 
 ## 验证状态
 
-- 全量回归：`PYTHONPATH=src uv run pytest tests/`（CI 内全 mock，禁真实 API）。
+- 全量回归：`PYTHONPATH=src uv run pytest tests/`（CI 内全走 sim conformance 模拟器，禁真实 API）。
 - 真实 LLM 能力矩阵：[`examples/real_llm/capability_matrix.py`](../examples/real_llm/capability_matrix.py) —— 10 个能力场景逐个真实 key 跑测 + R3 可观测完整性审计（每个事件 kind 是否都有专用渲染、无静默吞没）。
 - 各能力的边界与受限项（如 overflow 真实触发不划算、单 mock 覆盖）在对应契约文档 §测试 / §能力边界中如实记录，不夸大。

@@ -24,7 +24,7 @@ uv pip install -e ".[dev]"          # + 测试工具
 ```python
 import asyncio
 import taifeng
-from taifeng.llm.providers import MockClient, MockTurn
+from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.tool import ToolRegistry
 from taifeng.tool.builtins import make_read_skill_tool, make_call_skill_tool
@@ -37,7 +37,7 @@ async def main():
     tools.register(make_read_skill_tool())
     tools.register(make_call_skill_tool())
 
-    client = MockClient(turns=[MockTurn(text="hello", usage=TokenUsage())])
+    client = SimClient(turns=[SimTurn(text="hello", usage=TokenUsage())])
 
     entry = registry.get("code-reviewer")
     thread_id = await store.create_thread(entry_skill_id=entry.id)
