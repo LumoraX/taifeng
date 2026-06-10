@@ -264,3 +264,48 @@ async def test_force_compress_bypasses_should_trigger() -> None:
     # 无策略 → None（调用方据此退化为硬失败）
     empty = CompressionOrchestrator([])
     assert await empty.force_compress(ctx, InitialContextInjection.DO_NOT_INJECT) is None
+
+
+@pytest.mark.asyncio
+async def test_sliding_do_not_inject_with_no_anchor_shrinks() -> None:
+    """回归：anchor=-1（从未压缩）+ DO_NOT_INJECT → 必须从头压、产物必须变小。
+
+    bug 形态：head_end 直接取 -1，history[:-1] 负索引切片把全部历史保住，
+    压缩产物不缩反增 → 首次 overflow 自愈必然二次超窗（sim 集成测试抓出）。
+    """
+    budget = ContextBudget(context_window=1000, preserve_tail_messages=2)
+    sliding = SlidingWindowStrategy(keep_tail=1)
+    items = [user_message(f"msg-{i} " * 30, thread_id="t") for i in range(5)]
+    ctx = CompressionContext(
+        history=items,
+        token_estimate=estimate_history_tokens(items),
+        budget=budget,
+        cache_anchor_index=-1,   # 从未压缩：无锚
+        phase="overflow",
+        available_injections=frozenset({InitialContextInjection.DO_NOT_INJECT}),
+    )
+    result = await sliding.compress(ctx, InitialContextInjection.DO_NOT_INJECT)
+    assert result.success
+    # 产物必须严格变小，且不得出现“保留全部 + 追加占位符”的增长形态
+    assert len(result.new_history) < len(items)
+    assert estimate_history_tokens(result.new_history) < ctx.token_estimate
+
+
+@pytest.mark.asyncio
+async def test_handoff_do_not_inject_with_no_anchor_shrinks() -> None:
+    """回归：handoff 同病——anchor=-1 + DO_NOT_INJECT 区间起点必须钳到 0。"""
+    budget = ContextBudget(context_window=1000, preserve_tail_messages=2)
+    client = MockClient(turns=[MockTurn(text="摘要：用户连续发了多条消息。")])
+    handoff = HandoffCompactionStrategy(model_client=client)
+    items = [user_message(f"msg-{i} " * 30, thread_id="t") for i in range(6)]
+    ctx = CompressionContext(
+        history=items,
+        token_estimate=estimate_history_tokens(items),
+        budget=budget,
+        cache_anchor_index=-1,
+        phase="overflow",
+        available_injections=frozenset({InitialContextInjection.DO_NOT_INJECT}),
+    )
+    result = await handoff.compress(ctx, InitialContextInjection.DO_NOT_INJECT)
+    assert result.success
+    assert len(result.new_history) < len(items)

@@ -55,7 +55,9 @@ class SlidingWindowStrategy:
             )
 
         if injection == InitialContextInjection.DO_NOT_INJECT:
-            head_end = ctx.cache_anchor_index
+            # anchor=-1（从未压缩/无锚）必须钳到 0：负索引会让 history[:head_end]
+            # 变成“保留到倒数第一条”，压缩产物不缩反增（首次 overflow 自愈必死）
+            head_end = max(ctx.cache_anchor_index, 0)
         else:
             head_end = 0
             while head_end < len(history) and history[head_end].kind == "system_injection":

@@ -266,8 +266,10 @@ class HandoffCompactionStrategy:
             return self._fail(ctx, "too_few_to_compact")
 
         if injection == InitialContextInjection.DO_NOT_INJECT:
-            # mid-turn：不能动 cache_anchor 之前的内容
-            start = ctx.cache_anchor_index
+            # mid-turn：不能动 cache_anchor 之前的内容。
+            # anchor=-1（从未压缩/无锚）必须钳到 0：负值会让区间切片走负索引，
+            # 压缩产物不缩反增（首次 overflow 自愈必死）；无锚即无可保，从头压合法
+            start = max(ctx.cache_anchor_index, 0)
         else:
             # pre-turn / manual：从 head 开始（但避开 system_injection 段）
             start = 0
