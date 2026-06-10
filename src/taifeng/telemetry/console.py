@@ -65,6 +65,7 @@ _KIND_TAG = {
     # turn-rewind 回访节点录制（R3 审计补：此前落 `?` 兜底渲染）
     "rewind_checkpoint_recorded": ("rwnd", _Colors.GRAY, "⊙"),
     "rewind_rejected": ("rwnd", _Colors.RED, "⊘"),
+    "turn_rewound": ("rwnd", _Colors.GREEN, "↺"),
     # detached-spawn 生命周期 + join-barrier（R3 审计补：真实回归发现全族缺渲染）
     "spawn_started": ("spwn", _Colors.MAGENTA, "⇣"),
     "spawn_suspended": ("spwn", _Colors.YELLOW, "⏸"),

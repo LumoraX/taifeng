@@ -1,0 +1,414 @@
+{
+  "run": {
+    "timestamp_utc": "2026-06-10 18:54:33 UTC",
+    "commit": "2602d2f",
+    "provider": "openai",
+    "model": "gemini-3.1-pro-preview",
+    "scenarios_run": [
+      "concurrent_fanout"
+    ]
+  },
+  "scenarios": {
+    "composite_dispatch": {
+      "scenario_id": "composite_dispatch",
+      "capability": "composite call_skill 派发 + HITL",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "skill_dispatched",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "rewind_checkpoint_recorded": 1,
+        "tool_call_started": 1,
+        "tool_batch_dispatched": 1,
+        "skill_dispatched": 1,
+        "assistant_text": 27,
+        "turn_completed": 1
+      },
+      "grants": 1,
+      "duration_s": 27.242339042015374,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "compression": {
+      "scenario_id": "compression",
+      "capability": "上下文压缩（sliding，小窗触发）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 1,
+        "rewind_checkpoint_recorded": 1,
+        "assistant_text": 55,
+        "turn_completed": 1
+      },
+      "grants": 0,
+      "duration_s": 31.436888749944046,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "concurrent_fanout": {
+      "scenario_id": "concurrent_fanout",
+      "capability": "并发 fan-out（LLM 自主并行派发）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "skill_dispatched",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "rewind_checkpoint_recorded": 1,
+        "tool_call_started": 3,
+        "tool_batch_dispatched": 1,
+        "skill_dispatched": 1,
+        "assistant_text": 17,
+        "turn_completed": 1
+      },
+      "grants": 1,
+      "duration_s": 28.38594387494959,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:54:33 UTC"
+    },
+    "kernel_knobs": {
+      "scenario_id": "kernel_knobs",
+      "capability": "K2 会话 token 天花板真实触发（resource_limit）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "resource_limit_exceeded"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 1,
+        "rewind_checkpoint_recorded": 2,
+        "tool_call_started": 1,
+        "tool_batch_dispatched": 1,
+        "tool_call_completed": 1,
+        "resource_limit_exceeded": 1,
+        "turn_completed": 1
+      },
+      "grants": 0,
+      "duration_s": 3.1707467910600826,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "numeric_loop": {
+      "scenario_id": "numeric_loop",
+      "capability": "多轮 run_script 数值调谐（工具循环）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "tool_call_started",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 1,
+        "rewind_checkpoint_recorded": 21,
+        "tool_call_started": 10,
+        "tool_batch_dispatched": 10,
+        "engine_log": 20,
+        "tool_call_completed": 10,
+        "assistant_text": 5,
+        "turn_completed": 1
+      },
+      "grants": 10,
+      "duration_s": 28.944968541967683,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "orchestration": {
+      "scenario_id": "orchestration",
+      "capability": "声明式编排 parallel/serial/when",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "skill_dispatched",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "orchestration_plan_resolved": 1,
+        "tool_batch_dispatched": 1,
+        "skill_dispatched": 1,
+        "assistant_text": 19,
+        "turn_completed": 1
+      },
+      "grants": 1,
+      "duration_s": 13.061814083019271,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "peer_messaging": {
+      "scenario_id": "peer_messaging",
+      "capability": "谱系 peer 消息投递（spawn + send_message）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "peer_message_sent",
+        "spawn_completed",
+        "spawn_started",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "rewind_checkpoint_recorded": 6,
+        "tool_call_started": 2,
+        "tool_batch_dispatched": 2,
+        "spawn_started": 1,
+        "tool_call_completed": 2,
+        "assistant_text": 6,
+        "turn_completed": 1,
+        "spawn_completed": 1,
+        "peer_message_sent": 1
+      },
+      "grants": 0,
+      "duration_s": 16.34526420896873,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "product_review": {
+      "scenario_id": "product_review",
+      "capability": "fan-out 多 reviewer + 评分聚合",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "skill_dispatched",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "rewind_checkpoint_recorded": 1,
+        "tool_call_started": 3,
+        "tool_batch_dispatched": 1,
+        "skill_dispatched": 1,
+        "assistant_text": 4,
+        "turn_completed": 1
+      },
+      "grants": 1,
+      "duration_s": 32.96349379105959,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "read_skill_lazy": {
+      "scenario_id": "read_skill_lazy",
+      "capability": "read_skill 懒加载（skill-as-context）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "tool_call_started",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 1,
+        "rewind_checkpoint_recorded": 3,
+        "tool_call_started": 1,
+        "tool_batch_dispatched": 1,
+        "tool_call_completed": 1,
+        "assistant_text": 16,
+        "turn_completed": 1
+      },
+      "grants": 0,
+      "duration_s": 10.068891083006747,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "research_pipeline": {
+      "scenario_id": "research_pipeline",
+      "capability": "串行 pipeline（采集→提炼→写作）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "skill_dispatched",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "rewind_checkpoint_recorded": 1,
+        "tool_call_started": 1,
+        "tool_batch_dispatched": 1,
+        "skill_dispatched": 1,
+        "assistant_text": 25,
+        "turn_completed": 1
+      },
+      "grants": 1,
+      "duration_s": 61.09023037494626,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:52:55 UTC"
+    },
+    "selective_approval": {
+      "scenario_id": "selective_approval",
+      "capability": "差异化授权 + 多路派发",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "skill_dispatched",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "rewind_checkpoint_recorded": 1,
+        "tool_call_started": 2,
+        "tool_batch_dispatched": 1,
+        "skill_dispatched": 1,
+        "assistant_text": 5,
+        "turn_completed": 1
+      },
+      "grants": 1,
+      "duration_s": 23.851395582896657,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "spawn_join": {
+      "scenario_id": "spawn_join",
+      "capability": "分离式并发 spawn + 错峰 HITL + join-barrier 聚合",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "join_barrier_fired",
+        "spawn_completed",
+        "spawn_started",
+        "spawn_suspended"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 6,
+        "rewind_checkpoint_recorded": 13,
+        "tool_call_started": 5,
+        "tool_batch_dispatched": 4,
+        "spawn_started": 2,
+        "tool_call_completed": 3,
+        "join_barrier_registered": 1,
+        "turn_suspended": 2,
+        "spawn_suspended": 2,
+        "suspension_resolved": 2,
+        "assistant_text": 49,
+        "turn_completed": 3,
+        "spawn_completed": 2,
+        "join_barrier_fired": 1
+      },
+      "grants": 0,
+      "duration_s": 30.815039208042435,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:53:27 UTC"
+    },
+    "suspend_resume": {
+      "scenario_id": "suspend_resume",
+      "capability": "HITL 挂起 → Resume 续跑（R5）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "suspension_resolved",
+        "turn_completed",
+        "turn_suspended"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "rewind_checkpoint_recorded": 3,
+        "tool_call_started": 1,
+        "tool_batch_dispatched": 1,
+        "turn_suspended": 1,
+        "suspension_resolved": 1,
+        "assistant_text": 4,
+        "turn_completed": 1
+      },
+      "grants": 0,
+      "duration_s": 11.972758457995951,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "travel_planner": {
+      "scenario_id": "travel_planner",
+      "capability": "三路 fan-out（航班/酒店/活动）+ 综合",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "skill_dispatched",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 2,
+        "rewind_checkpoint_recorded": 1,
+        "tool_call_started": 4,
+        "tool_batch_dispatched": 2,
+        "skill_dispatched": 1,
+        "engine_log": 2,
+        "tool_call_completed": 1,
+        "assistant_text": 7,
+        "turn_completed": 1
+      },
+      "grants": 2,
+      "duration_s": 19.808191500022076,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    },
+    "turn_rewind": {
+      "scenario_id": "turn_rewind",
+      "capability": "turn 回访重跑（Rewind re_reason）",
+      "verdict": "PASS",
+      "note": "",
+      "expect": [
+        "rewind_checkpoint_recorded",
+        "turn_completed"
+      ],
+      "missing": [],
+      "kinds": {
+        "turn_started": 4,
+        "rewind_checkpoint_recorded": 6,
+        "tool_call_started": 2,
+        "tool_batch_dispatched": 2,
+        "skill_dispatched": 2,
+        "assistant_text": 43,
+        "turn_completed": 4,
+        "skill_returned": 2,
+        "tool_call_completed": 2,
+        "turn_rewound": 1
+      },
+      "grants": 2,
+      "duration_s": 55.14324912498705,
+      "commit": "2602d2f",
+      "timestamp_utc": "2026-06-10 18:51:12 UTC"
+    }
+  },
+  "r3_audit": {
+    "emitted_kinds": [
+      "assistant_text",
+      "engine_log",
+      "orchestration_plan_resolved",
+      "peer_message_sent",
+      "resource_limit_exceeded",
+      "rewind_checkpoint_recorded",
+      "skill_dispatched",
+      "skill_returned",
+      "spawn_completed",
+      "spawn_started",
+      "suspension_resolved",
+      "tool_batch_dispatched",
+      "tool_call_completed",
+      "tool_call_started",
+      "turn_completed",
+      "turn_failed",
+      "turn_rewound",
+      "turn_started",
+      "turn_suspended"
+    ],
+    "unmapped": [],
+    "canonical_missing": []
+  }
+}

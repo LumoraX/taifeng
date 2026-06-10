@@ -114,7 +114,7 @@ SCENARIOS: list[Scenario] = [
              capability="声明式编排 parallel/serial/when",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("concurrent_fanout", "concurrent_fanout", "research-fanout",
-             "请就『城市夜间经济的利弊』做调研：请**同时**从网络、学术、新闻三个相互独立的信息源各自取证（在同一条消息里 fan-out 三个 call_skill 并发执行），最后综合成结论。",
+             "请就『家用储能电池的主流技术路线』做调研：请**同时**从网络、学术、新闻三个相互独立的信息源各自取证（在同一条消息里 fan-out 三个 call_skill 并发执行），最后综合成结论。",  # 原主题连续三次触发网关 content filter，中性化改写
              capability="并发 fan-out（LLM 自主并行派发）",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("research_pipeline", "research_assistant", "research-lead",
