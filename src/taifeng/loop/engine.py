@@ -9,7 +9,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from taifeng.context.budget import ContextBudget
 from taifeng.context.cache_stats import PromptCacheStats
@@ -44,6 +44,7 @@ from taifeng.loop.event import (
     ResourceLimitExceeded,
     RewindRejected,
     RewindTableRebuilt,
+    SuspensionExpired,
     SuspensionResolved,
     SuspensionResolveRejected,
     TurnFailed,
@@ -118,6 +119,9 @@ class AgentEngine:
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
         failure_policy: Any = None,
+        failure_suspend_ttl_seconds: int | None = None,
+        failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
+        now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         event_queue_size: int = 1024,
         submission_queue_size: int = 256,
@@ -176,6 +180,16 @@ class AgentEngine:
         # failure-suspension-policy：失败处置裁决 policy
         # （FailureDispositionPolicy | None;None → turn 层保守默认,零行为变化）
         self._failure_policy = failure_policy
+        # suspension-ttl:内核自产挂起的存活期声明(透传 TurnRunner)
+        self._failure_suspend_ttl_seconds = failure_suspend_ttl_seconds
+        self._failure_suspend_on_expire = failure_suspend_on_expire
+        # suspension-ttl：壁钟工厂(注入可固定,测试用;默认与 TurnRunner 兜底一致)
+        import time as _time
+
+        self._now_factory = now_factory or (lambda: int(_time.time()))
+        # suspension-ttl：record_id → 到期定时任务。挂起落盘(turn_suspended)武装,
+        # 人工 Resume 核销(suspension_resolved)/ shutdown 取消;先核销者胜。
+        self._ttl_timers: dict[str, asyncio.Task[None]] = {}
         # config-consistency-fixes C2: 把 event_queue_size kwarg 真正生效
         # 之前此 kwarg 收下后未存到 self，subscribe / subscribe_all 内仍硬编码 1024
         self._event_queue_size = event_queue_size
@@ -493,6 +507,16 @@ class AgentEngine:
     # -----------------------------------------------------------------
 
     async def _emit(self, ev: EventMsg) -> None:
+        # suspension-ttl:借唯一事件总线做定时器簿记——所有层级 turn(根/子/spawn)的
+        # 挂起与核销事件都流经此处,单点覆盖,无需在各续跑路径埋点。
+        kind = ev.msg.kind
+        if kind == "turn_suspended":
+            self._arm_ttl_timer(ev.msg.data)
+        elif kind == "suspension_resolved":
+            # 人工(或上一轮自动)核销 → 撤销该 record 的定时器(先核销者胜)
+            timer = self._ttl_timers.pop(ev.msg.data.get("record_id", ""), None)
+            if timer is not None:
+                timer.cancel()
         # 广播给 all subs
         for q in list(self._all_subs):
             try:
@@ -520,6 +544,115 @@ class AgentEngine:
         """
         return self._events_dropped
 
+    # -----------------------------------------------------------------
+    # suspension-ttl：挂起到期自动裁决（热武装 / 到期触发 / 冷重武装）
+    # -----------------------------------------------------------------
+
+    def _arm_ttl_timer(self, data: dict[str, Any]) -> None:
+        """按 turn_suspended 事件武装到期定时器(expires_at 为 None 则不武装)。
+
+        delay ≤ 0(装载时已过期)同样入队,任务体内立即触发裁决。重复武装同一
+        record(冷重武装 + 热事件竞态)以先到者为准,后到 no-op。
+        """
+        record_id = data.get("record_id")
+        expires_at = data.get("expires_at")
+        thread_id = data.get("thread_id")
+        if not record_id or expires_at is None or not thread_id:
+            return
+        if record_id in self._ttl_timers:
+            return
+        delay = max(0, int(expires_at) - int(self._now_factory()))
+        self._ttl_timers[record_id] = asyncio.create_task(
+            self._ttl_expire_after(delay, str(thread_id), str(record_id))
+        )
+
+    async def _ttl_expire_after(
+        self, delay: float, thread_id: str, record_id: str
+    ) -> None:
+        """到期任务体:睡到 deadline → 验证 record 仍活跃 → emit + 内核签发 auto-Resume。
+
+        先核销者胜:触发时重读该 thread 的活跃挂起,record 已被人工 Resume 核销
+        (或不是同一条)→ no-op。auto-Resume 用 EXPIRE_SENTINEL payload 经公共
+        Resume Op 提交 —— root / call_skill 嵌套 / spawn 三条续跑链零改动全复用。
+        """
+        from taifeng.suspend.resolver import EXPIRE_SENTINEL
+
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            # 验证活跃性(先核销者胜):根 thread 看内存 history,其余 load store
+            items = (
+                list(self._history) if thread_id == self._thread_id
+                else await self._load_thread_items(thread_id)
+            )
+            record = self._find_active_suspension_in(items)
+            if record is None or record.record_id != record_id:
+                return
+            await self._emit(EventMsg(
+                submission_id=record_id,
+                msg=SuspensionExpired(data={
+                    "record_id": record_id,
+                    "thread_id": thread_id,
+                    "on_expire": ",".join(sorted(
+                        {p.on_expire for p in record.pending})),
+                    "reasons": sorted({p.reason.value for p in record.pending}),
+                }),
+            ))
+            # 内核签发到期裁决:全量 request_id 配齐哨兵 payload(全量 resume 语义)
+            await self.submit(Resume(
+                thread_id=thread_id,
+                resolutions={
+                    rid: {EXPIRE_SENTINEL: True} for rid in record.request_ids()
+                },
+            ))
+        except asyncio.CancelledError:
+            # 人工 Resume 先到 / shutdown:正常撤销,非异常
+            raise
+        except Exception:
+            logger.exception("suspension ttl expiry crashed: %s", record_id)
+        finally:
+            self._ttl_timers.pop(record_id, None)
+
+    async def _rearm_ttl_timers_cold(self) -> None:
+        """冷启动重武装(R5):扫根 history + 挂起态 spawn 子 thread 的活跃挂起。
+
+        已过期 → delay=0 立即裁决;未过期 → 按剩余壁钟时长重武装。旧 JSONL 无
+        ttl 字段 → expires_at 为 None,不武装(永不过期,前向兼容)。深层
+        call_skill leaf 的 ttl 由其自身 turn_suspended 热路径覆盖;冷恢复场景
+        覆盖根 + spawn 两类 engine 可枚举的 thread(v1 边界,见能力契约)。
+        """
+        record = self._find_active_suspension()
+        if record is not None and record.expires_at is not None:
+            self._arm_ttl_timer({
+                "record_id": record.record_id,
+                "thread_id": self._thread_id,
+                "expires_at": record.expires_at,
+            })
+        # 挂起态 spawn 句柄:子 thread 的活跃挂起带 ttl 的一并重武装
+        for h in self._spawn.suspended_handles():
+            if h.status != "suspended":
+                continue
+            try:
+                items = await self._load_thread_items(h.child_thread_id)
+            except Exception:
+                logger.exception(
+                    "ttl cold rearm: load spawn thread failed: %s",
+                    h.child_thread_id)
+                continue
+            rec = self._find_active_suspension_in(items)
+            if rec is not None and rec.expires_at is not None:
+                self._arm_ttl_timer({
+                    "record_id": rec.record_id,
+                    "thread_id": h.child_thread_id,
+                    "expires_at": rec.expires_at,
+                })
+
+    def _cancel_ttl_timers(self) -> None:
+        """shutdown:取消全部到期定时器(R4,不阻塞主 actor)。"""
+        for timer in self._ttl_timers.values():
+            timer.cancel()
+        self._ttl_timers.clear()
+
     async def _memory_session_end(self) -> None:
         """K3 teardown：shutdown 时调 memory_store.on_session_end。best-effort。"""
         if self._memory_store is None:
@@ -539,6 +672,10 @@ class AgentEngine:
         self._running = True
         # detached-spawn：记下根取消 token，供 spawn 的分离 task 派生子 token（R4 可取消）。
         self._root_cancel = cancel
+        # suspension-ttl 冷重武装(R5):装载的历史里有带 ttl 的活跃挂起 →
+        # 已过期立即裁决、未过期按剩余时长武装。pool 冷恢复在 run 启动前已
+        # rebuild spawn 句柄,此处可一并枚举挂起态 spawn 子 thread。
+        await self._rearm_ttl_timers_cold()
         try:
             while self._running:
                 if cancel.is_cancelled:
@@ -549,6 +686,8 @@ class AgentEngine:
                     continue
                 if isinstance(sub.op, Shutdown):
                     self._running = False
+                    # suspension-ttl:取消全部到期定时器(R4,定时器挂 engine 生命周期)
+                    self._cancel_ttl_timers()
                     # K3 on_session_end（teardown）：会话结束最终 flush。best-effort。
                     await self._memory_session_end()
                     await self._emit(
@@ -853,6 +992,8 @@ class AgentEngine:
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
             failure_policy=self._failure_policy,
+            failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
+            failure_suspend_on_expire=self._failure_suspend_on_expire,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(self._history),
             # B1 midturn-input-steering：与活跃 _PendingTurn 共享注入队列（同一 list
@@ -992,6 +1133,8 @@ class AgentEngine:
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
             failure_policy=self._failure_policy,
+            failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
+            failure_suspend_on_expire=self._failure_suspend_on_expire,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             capabilities=self._capabilities,
             spawn_registry=self._spawn_registry,
@@ -1519,6 +1662,8 @@ class AgentEngine:
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
             failure_policy=self._failure_policy,
+            failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
+            failure_suspend_on_expire=self._failure_suspend_on_expire,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(items),
             permission_policy=self._permission_policy,
@@ -1778,6 +1923,8 @@ class AgentEngine:
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
             failure_policy=self._failure_policy,
+            failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
+            failure_suspend_on_expire=self._failure_suspend_on_expire,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(self._history),
             cache_anchor_index=self._cache_anchor_index,

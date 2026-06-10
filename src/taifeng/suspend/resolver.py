@@ -20,6 +20,18 @@ class ResolveError(Exception):
     """resolution 不合法(不全 / 多余 / 缺 related_call_id)。"""
 
 
+# suspension-ttl:内核到期裁决的哨兵 payload key(engine 定时器签发,plan() 识别)。
+# 形如 {"__expired__": True}。这样到期 auto-Resume 走公共 Resume Op,root / 嵌套 /
+# spawn 三条续跑链零改动全复用。业务侧伪造它等价于自己提交 deny / abort,
+# 无额外能力增益 —— 文档标注为内核内部形态,不列入公开 payload 契约。
+EXPIRE_SENTINEL = "__expired__"
+
+
+def _is_expire_payload(payload: Any) -> bool:
+    """是否内核到期哨兵 payload({"__expired__": True})。"""
+    return isinstance(payload, dict) and payload.get(EXPIRE_SENTINEL) is True
+
+
 @dataclass
 class ResolvePlan:
     """续跑计划。"""
@@ -55,6 +67,10 @@ class SuspensionResolver:
         plan = ResolvePlan()
         for p in record.pending:
             payload = resolutions[p.request_id]
+            # suspension-ttl:内核到期哨兵 → 按 pending 的 on_expire 裁决
+            if _is_expire_payload(payload):
+                self._apply_expiry(plan, p)
+                continue
             if p.reason is SuspendReason.PERMISSION:
                 if bool(payload.get("granted")):
                     if p.related_call_id is None:
@@ -93,3 +109,31 @@ class SuspensionResolver:
                 # 未知 reason:禁静默丢弃(CLAUDE.md 禁 silent fallback)
                 raise ResolveError(f"unhandled_suspend_reason: {p.reason}")
         return plan
+
+    @staticmethod
+    def _apply_expiry(plan: ResolvePlan, p: Any) -> None:
+        """把单个 pending 的到期裁决并入 plan(suspension-ttl)。
+
+        - SYSTEM_RETRY / RESOURCE_LIMIT:按 on_expire——retry → 自动续跑
+          (SYSTEM_RETRY 置 resample,RESOURCE_LIMIT 重建续跑无需置位);
+          abort → 终止。
+        - 人类输入类(PERMISSION / FORM / DATA)与内核派发态(CHILD_SKILL):
+          无法替用户造数据 → 悬空 fc 回填 "suspension_expired" error output
+          (保配对完整,R5)+ abort 终止。构造期已禁 on_expire="retry"。
+        - 混合 record:任一 abort 性 pending 即整体 abort(record 级一次性裁决)。
+
+        Args:
+            plan: 正在累积的续跑计划(就地修改)。
+            p: 到期的 PendingRequest。
+        """
+        if p.reason in (SuspendReason.SYSTEM_RETRY, SuspendReason.RESOURCE_LIMIT):
+            if p.on_expire == "retry":
+                if p.reason is SuspendReason.SYSTEM_RETRY:
+                    plan.resample = True
+                # RESOURCE_LIMIT retry:重建 runner 续跑即继续循环,无需置位
+            else:
+                plan.abort = True
+            return
+        # 人类输入类 / 内核派发态:回填过期标记保 fc/fco 配对,整体终止
+        plan.deny_outputs[p.related_call_id or p.request_id] = "suspension_expired"
+        plan.abort = True
