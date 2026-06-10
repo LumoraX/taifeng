@@ -229,6 +229,10 @@ class TurnRunner:
     # 「限流/触顶到期自动续跑」。业务挂起(request_user_input)的 ttl 在工具工厂声明。
     failure_suspend_ttl_seconds: int | None = None
     failure_suspend_on_expire: Literal["abort", "retry"] = "abort"
+    # resource-limit-retry-semantics:本次 run 来自第 N 次「TTL 到期自动 retry」
+    # (engine 据 ResolvePlan.expired_retry 谱系递增注入;人工 Resume 不计数)。
+    # 再次挂起时落进新 pending detail 供 fire 时与上限比对。
+    auto_retry_count: int = 0
     # 单 turn 内一批 tool call 的最大并发数；默认 1 = 严格串行（等同历史行为，零回归）
     max_parallel_tool_calls: int = 1
     # turn-级累积 usage
@@ -318,6 +322,36 @@ class TurnRunner:
         except Exception:
             logger.exception("emit failed")
 
+    def _system_retry_pending(self, e: Exception) -> Any:
+        """构造 LLM 失败挂起的 SYSTEM_RETRY PendingRequest(policy 裁决 SUSPEND 后用)。
+
+        detail 携带 failure_class / retry_after / 异常类名(业务 UI 引导裁决用);
+        到期自动 retry 谱系计数(auto_retry_count)非零时一并落入,fire 时与
+        failure_suspend_max_auto_retries 比对熔断。
+        """
+        from taifeng.suspend.reason import PendingRequest, SuspendReason
+
+        detail: dict[str, Any] = {
+            "failure_class": getattr(e, "failure_class", None),
+            "retry_after_seconds": getattr(e, "retry_after_seconds", None),
+            "kind": type(e).__name__,
+        }
+        if self.auto_retry_count:
+            detail["auto_retry_count"] = self.auto_retry_count
+        return PendingRequest(
+            request_id=self._suspend_id_factory(),
+            reason=SuspendReason.SYSTEM_RETRY,
+            # suspension-ttl:内核挂起按构造期声明的存活期(默认永不过期)
+            ttl_seconds=self.failure_suspend_ttl_seconds,
+            on_expire=self.failure_suspend_on_expire,
+            payload_schema={
+                "type": "object",
+                "properties": {"action": {"enum": ["retry", "abort"]}},
+            },
+            related_call_id=None,
+            detail=detail,
+        )
+
     def _maybe_suspend_on_guard_trip(
         self, end_reason: str, guard_snapshot: dict[str, Any] | None = None
     ) -> None:
@@ -355,12 +389,19 @@ class TurnRunner:
         detail: dict[str, Any] = {"end_reason": end_reason}
         if guard_snapshot:
             detail["guard_snapshot"] = guard_snapshot
+        if self.auto_retry_count:
+            detail["auto_retry_count"] = self.auto_retry_count
+        # K2(session_tokens)到期自动 retry 无人携带预算增额、必然无效 →
+        # 恒 abort(覆写 failure_suspend_on_expire 配置);其余护栏照配置
+        on_expire: Literal["abort", "retry"] = (
+            "abort" if end_reason == "resource_limit_exceeded"
+            else self.failure_suspend_on_expire)
         raise SuspendSignal(PendingRequest(
             request_id=self._suspend_id_factory(),
             reason=SuspendReason.RESOURCE_LIMIT,
             # suspension-ttl:内核挂起按构造期声明的存活期(默认永不过期)
             ttl_seconds=self.failure_suspend_ttl_seconds,
-            on_expire=self.failure_suspend_on_expire,
+            on_expire=on_expire,
             payload_schema={
                 "type": "object",
                 "properties": {"action": {"enum": ["retry", "abort"]}},
@@ -569,17 +610,24 @@ class TurnRunner:
                     # 不再继续采样（OOM-killer，防 runaway turn 无界吃 token）。
                     if had_tool_calls and self._session_limit_exceeded():
                         used = self.session_tokens_used + self.total_usage.total_tokens
-                        await self._emit(ResourceLimitExceeded(data={
+                        rl_data = {
                             "limit_kind": "session_tokens",
                             "used": used,
                             "limit": self.max_session_tokens or 0,
-                            "scope": "turn_aborted",
-                        }))
-                        # failure-suspension-policy:裁决 SUSPEND 时此处抛挂起信号
-                        self._maybe_suspend_on_guard_trip(
-                            "resource_limit_exceeded",
-                            {"used": used, "limit": self.max_session_tokens or 0},
-                        )
+                        }
+                        # R3 scope 如实:先问 policy 再 emit —— 裁决挂起时 turn 并未
+                        # abort,scope 报 turn_suspended(resource-limit-retry-semantics)
+                        try:
+                            self._maybe_suspend_on_guard_trip(
+                                "resource_limit_exceeded",
+                                {"used": used, "limit": self.max_session_tokens or 0},
+                            )
+                        except SuspendSignal:
+                            await self._emit(ResourceLimitExceeded(
+                                data={**rl_data, "scope": "turn_suspended"}))
+                            raise
+                        await self._emit(ResourceLimitExceeded(
+                            data={**rl_data, "scope": "turn_aborted"}))
                         end_reason = "resource_limit_exceeded"
                         break
 
@@ -817,11 +865,20 @@ class TurnRunner:
         if max_bytes is not None:
             request_bytes = estimate_history_bytes(self.history_buffer)
             if request_bytes > max_bytes:
-                raise RequestTooLargeError(
+                err = RequestTooLargeError(
                     f"request body ~{request_bytes}B 超出上限 {max_bytes}B",
                     estimated_bytes=request_bytes,
                     max_bytes=max_bytes,
                 )
+                # limit 类失败进 policy(resource-limit-retry-semantics):SUSPEND →
+                # SYSTEM_RETRY 挂起(业务 CompactNow / 改参后 retry 可过);
+                # Conservative 对确定性失败仍 TERMINAL → 原样抛,零行为变化
+                policy = self.failure_policy or DEFAULT_FAILURE_POLICY
+                if policy.decide(_llm_failure_context(
+                        err, is_root=self._is_root, iteration=iteration,
+                )) is FailureDisposition.SUSPEND:
+                    raise SuspendSignal(self._system_retry_pending(err))
+                raise err
 
         sess = self.model_client.session(cancel=self.cancel)
         assistant_text = ""
@@ -931,28 +988,7 @@ class TurnRunner:
             if disposition is FailureDisposition.SUSPEND:
                 # 裁决挂起且重试已耗尽 → 转 SYSTEM_RETRY 挂起,等业务侧 resume 重跑同次 sample。
                 # 该 SuspendSignal 穿透回 run_turn 的 except SuspendSignal(Task 7 已加),落盘挂起。
-                from taifeng.suspend.reason import PendingRequest, SuspendReason
-                from taifeng.suspend.signal import SuspendSignal as _SuspendSignal
-
-                raise _SuspendSignal(
-                    PendingRequest(
-                        request_id=self._suspend_id_factory(),
-                        reason=SuspendReason.SYSTEM_RETRY,
-                        # suspension-ttl:内核挂起按构造期声明的存活期(默认永不过期)
-                        ttl_seconds=self.failure_suspend_ttl_seconds,
-                        on_expire=self.failure_suspend_on_expire,
-                        payload_schema={
-                            "type": "object",
-                            "properties": {"action": {"enum": ["retry", "abort"]}},
-                        },
-                        related_call_id=None,
-                        detail={
-                            "failure_class": getattr(e, "failure_class", None),
-                            "retry_after_seconds": getattr(e, "retry_after_seconds", None),
-                            "kind": type(e).__name__,
-                        },
-                    )
-                ) from e
+                raise SuspendSignal(self._system_retry_pending(e)) from e
             raise  # 确定性失败:照旧上抛硬失败(走 run_turn 宽 except → TurnFailed)
 
         # 落 assistant message（即使为空也记下，因为 tool calls 也在这条消息上）
@@ -1555,6 +1591,7 @@ class TurnRunner:
             failure_policy=self.failure_policy,
             failure_suspend_ttl_seconds=self.failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self.failure_suspend_on_expire,
+            auto_retry_count=self.auto_retry_count,
             max_parallel_tool_calls=self.max_parallel_tool_calls,
             # G4a: 子 turn 继承同一运行时能力快照
             capabilities=self.capabilities,

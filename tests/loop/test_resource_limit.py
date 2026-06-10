@@ -121,3 +121,151 @@ async def test_engine_refuses_new_turn_after_session_limit(
     assert rl and rl[0].data["scope"] == "turn_refused"
 
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# resource-limit-retry-semantics:K2 retry 增额 / limit 类失败进 policy
+# ---------------------------------------------------------------------------
+
+async def _drain_until(engine, events: list, pred, max_wait: float = 8.0) -> None:
+    """订阅全量事件直到谓词命中(事件累积进 events)。"""
+    import asyncio
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev.msg)
+            if pred(events):
+                return
+
+    await asyncio.wait_for(watch(), timeout=max_wait)
+
+
+@pytest.mark.asyncio
+async def test_k2_suspend_retry_requires_extend_and_unblocks(
+    skills_dir: Path, threads_dir: Path,
+) -> None:
+    """K2 触顶挂起(SuspendByDefault)闭环:① scope 如实报 turn_suspended;
+    ② 裸 retry 被拒(k2_retry_requires_extend_tokens——旧实现 retry 永久再触顶);
+    ③ retry+extend_tokens 抬顶后真实续跑完成,不再立即触顶。"""
+    from taifeng.loop.submission import Resume
+
+    client = MockClient(turns=[
+        MockTurn(text="", tool_calls=[{"id": "c1", "name": "nope", "arguments": "{}"}],
+                 usage=TokenUsage(input_tokens=200, total_tokens=200)),
+        MockTurn(text="K2_DONE", usage=TokenUsage(input_tokens=10, total_tokens=10)),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client,
+        compressors=[], max_session_tokens=100,
+        failure_policy=taifeng.SuspendByDefaultPolicy(),
+    )
+    engine = await pool.get_or_create(session_id="k2x", entry_skill_id="code-reviewer")
+    events: list = []
+    await engine.submit(taifeng.UserMessage(text="go"))
+    await _drain_until(engine, events,
+                       lambda s: any(m.kind == "turn_suspended" for m in s))
+
+    # ① scope 如实
+    rl = [m for m in events if m.kind == "resource_limit_exceeded"]
+    assert rl and rl[0].data["scope"] == "turn_suspended", \
+        f"挂起时 scope 不得谎报 turn_aborted: {[m.data for m in rl]}"
+    susp = next(m for m in events if m.kind == "turn_suspended")
+    req_id = susp.data["pending"][0]["request_id"]
+
+    # ② 裸 retry = 无效裁决(必然立即再触顶),显式拒绝
+    await engine.submit(Resume(
+        thread_id=engine.thread_id, resolutions={req_id: {"action": "retry"}}))
+    await _drain_until(engine, events, lambda s: any(
+        m.kind == "suspension_resolve_rejected" for m in s))
+    rej = next(m for m in events if m.kind == "suspension_resolve_rejected")
+    assert "k2_retry_requires_extend_tokens" in rej.data["reason"]
+
+    # ③ retry + 增额 → 抬顶续跑至完成
+    await engine.submit(Resume(
+        thread_id=engine.thread_id,
+        resolutions={req_id: {"action": "retry", "extend_tokens": 500}}))
+    await _drain_until(engine, events, lambda s: any(
+        m.kind == "turn_completed" and m.data.get("is_root") for m in s))
+
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_k2_turn_refused_goes_through_policy(
+    skills_dir: Path, threads_dir: Path,
+) -> None:
+    """K2 引擎级拒新 turn 进 policy(limit 类失败一律可 retry 的挂起):
+    SuspendByDefault 下第二条 UserMessage 落 RESOURCE_LIMIT 挂起而非 TurnFailed;
+    retry+extend 后该 turn 正常执行(user_message 已入史,续跑即跑)。"""
+    from taifeng.loop.submission import Resume
+
+    client = MockClient(turns=[
+        MockTurn(text="一", usage=TokenUsage(input_tokens=200, total_tokens=200)),
+        MockTurn(text="REFUSED_THEN_DONE",
+                 usage=TokenUsage(input_tokens=10, total_tokens=10)),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client,
+        compressors=[], max_session_tokens=100,
+        failure_policy=taifeng.SuspendByDefaultPolicy(),
+    )
+    engine = await pool.get_or_create(session_id="k2r", entry_skill_id="code-reviewer")
+    events: list = []
+    await engine.submit(taifeng.UserMessage(text="第一问"))
+    await _drain_until(engine, events, lambda s: any(
+        m.kind == "turn_completed" and m.data.get("is_root") for m in s))
+
+    await engine.submit(taifeng.UserMessage(text="第二问"))
+    await _drain_until(engine, events,
+                       lambda s: any(m.kind == "turn_suspended" for m in s))
+    assert not any(m.kind == "turn_failed" for m in events), \
+        "SuspendByDefault 下 turn_refused 不得直落终态"
+    rl = [m for m in events if m.kind == "resource_limit_exceeded"]
+    assert rl[-1].data["scope"] == "turn_suspended"
+    susp = next(m for m in events if m.kind == "turn_suspended")
+    req_id = susp.data["pending"][0]["request_id"]
+
+    await engine.submit(Resume(
+        thread_id=engine.thread_id,
+        resolutions={req_id: {"action": "retry", "extend_tokens": 500}}))
+    await _drain_until(engine, events, lambda s: sum(
+        1 for m in s if m.kind == "turn_completed" and m.data.get("is_root")) >= 2)
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_request_too_large_precheck_goes_through_policy(
+    skills_dir: Path, threads_dir: Path,
+) -> None:
+    """RequestTooLargeError 预检进 policy:SuspendByDefault → SYSTEM_RETRY 挂起
+    (业务压缩/改参后可 retry);Conservative(默认)→ 原样 TurnFailed 零变化。"""
+    # SuspendByDefault → 挂起
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=MockClient(turns=[MockTurn(text="x")]), compressors=[],
+        budget=ContextBudget(max_request_bytes=10),
+        failure_policy=taifeng.SuspendByDefaultPolicy(),
+    )
+    engine = await pool.get_or_create(session_id="rtl1", entry_skill_id="code-reviewer")
+    events: list = []
+    await engine.submit(taifeng.UserMessage(text="超长输入" * 10))
+    await _drain_until(engine, events,
+                       lambda s: any(m.kind == "turn_suspended" for m in s))
+    susp = next(m for m in events if m.kind == "turn_suspended")
+    assert susp.data["pending"][0]["reason"] == "system_retry"
+    assert susp.data["pending"][0]["detail"]["kind"] == "RequestTooLargeError"
+    await pool.close()
+
+    # Conservative → 终态零变化
+    pool2 = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=MockClient(turns=[MockTurn(text="x")]), compressors=[],
+        budget=ContextBudget(max_request_bytes=10),
+    )
+    engine2 = await pool2.get_or_create(session_id="rtl2", entry_skill_id="code-reviewer")
+    events2: list = []
+    await engine2.submit(taifeng.UserMessage(text="超长输入" * 10))
+    await _drain_until(engine2, events2,
+                       lambda s: any(m.kind == "turn_failed" for m in s))
+    assert not any(m.kind == "turn_suspended" for m in events2)
+    await pool2.close()

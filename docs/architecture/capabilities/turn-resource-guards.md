@@ -48,6 +48,13 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
 ### Requirement: 触顶经失败处置 policy 判定（failure-suspension-policy）
 - 三类护栏触顶（`max_iterations` / `resource_limit_exceeded` / `denial_circuit_open`）在终结 turn 前经注入的 `FailureDispositionPolicy` 判定（`origin="guard_trip"`）：TERMINAL → 既有 end_reason 终结路径（默认 policy 恒 TERMINAL，零行为变化）；SUSPEND → 改落 `RESOURCE_LIMIT` 挂起（detail 携带 `end_reason` + 护栏快照，断路触发时 `denial_circuit_open` 事件仍恰好一次）。retry 续跑时预算与断路器随 runner 重建按原 cap 重置。完整契约见 [suspend-resume.md](suspend-resume.md) §失败处置裁决 policy。
 
+### Requirement: limit 类失败 retry 语义（resource-limit-retry-semantics）
+- **K2 retry = 预算增额裁决**：`limit_kind="session_tokens"` 触顶挂起的 retry payload 必须携带 `{"action":"retry","extend_tokens":N>0}`（engine 抬升 `_max_session_tokens`,触顶条件随之清除）;裸 retry / 非法增额 → `ResolveError`（触顶条件跨 turn 单调递增,裸 retry 必然立即再触顶 = 无效裁决,禁 silent 循环）。该挂起 `on_expire` 恒 abort（覆写配置——自动 retry 无人携带增额必然无效）。
+- **Resume 续跑路径过 K2 闸门**：与 UserMessage 路径同判;会话已触顶的续跑不得静默烧 token,按 policy 再裁决（挂起 / 终态）。
+- **limit 类失败全面进 policy**：K2 引擎级拒新 turn（policy SUSPEND → engine 级 RESOURCE_LIMIT 挂起,user_message 已入史,retry+增额后该 turn 正常执行）与 RequestTooLargeError 预检（SUSPEND → SYSTEM_RETRY 挂起,业务 CompactNow / 改参后 retry 可过）均咨询 policy;Conservative 对两者恒 TERMINAL,零行为变化。
+- **自动 retry 有界**：pending detail 携带 `auto_retry_count` 谱系计数（TTL 到期自动 retry 续跑 +1;人工 Resume 恒 0）;达 `failure_suspend_max_auto_retries`（None=不限）后到期裁决强制 abort,`suspension_expired.data` 标注 `auto_retry_exhausted: true`——熔断无人值守无界循环。
+- **观测如实（R3）**：护栏触顶经 policy 裁决 SUSPEND 时 `ResourceLimitExceeded.scope` 为 `"turn_suspended"`（turn 并未 abort）;TERMINAL 时维持 `"turn_aborted"` / `"turn_refused"`。
+
 ## R1–R5 影响
 
 - **R1**：✅ 计数与记账无业务语义；阈值业务注入。
@@ -58,4 +65,4 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
 
 ## 测试
 
-`tests/loop/test_iteration_budget.py`（5：耗尽/refund clamp/子独立/显式子 cap）、`tests/loop/test_denial_breaker.py`（6：连续/重置/滑窗/驱逐/无阈值/snapshot）、`tests/loop/test_turn_resource_guards.py`（3 e2e：连续 deny 断路恰好一次 + end_reason；refunds 工具 5 轮跑过 cap=3 净耗 1；父 cap=3 耗 1 后子独立跑满 3 圈）。行为等价由全量回归（零断言改动）守护。
+`tests/loop/test_iteration_budget.py`（5：耗尽/refund clamp/子独立/显式子 cap）、`tests/loop/test_denial_breaker.py`（6：连续/重置/滑窗/驱逐/无阈值/snapshot）、`tests/loop/test_turn_resource_guards.py`（3 e2e：连续 deny 断路恰好一次 + end_reason；refunds 工具 5 轮跑过 cap=3 净耗 1；父 cap=3 耗 1 后子独立跑满 3 圈）。行为等价由全量回归（零断言改动）守护。`tests/loop/test_resource_limit.py`（K2 触顶挂起 retry 增额闭环 / turn_refused 进 policy / RequestTooLarge 预检双 policy）、`tests/test_suspension_ttl.py::test_auto_retry_lineage_exhaustion_forces_abort`（谱系熔断）。

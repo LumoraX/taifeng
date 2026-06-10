@@ -28,6 +28,11 @@ class ResolveError(Exception):
 # 无额外能力增益 —— 文档标注为内核内部形态,不列入公开 payload 契约。
 EXPIRE_SENTINEL = "__expired__"
 
+# resource-limit-retry-semantics:到期裁决叠加「自动 retry 谱系已达上限」标记 ——
+# engine 在 fire 时判定 auto_retry_count ≥ failure_suspend_max_auto_retries 后置入,
+# resolver 据此强制 abort(即便 on_expire="retry"),熔断无人值守自动循环。
+EXPIRE_EXHAUSTED = "__exhausted__"
+
 
 def _is_expire_payload(payload: Any) -> bool:
     """是否内核到期哨兵 payload({"__expired__": True})。"""
@@ -42,6 +47,11 @@ class ResolvePlan:
     direct_outputs: dict[str, Any] = field(default_factory=dict)  # call_id → output(form/data)
     deny_outputs: dict[str, str] = field(default_factory=dict)  # call_id → deny reason(permission)
     abort: bool = False  # system_retry / resource_limit 的 action=abort
+    # K2(会话 token 硬顶)retry 携带的预算增额;engine 应用到 _max_session_tokens
+    extend_session_tokens: int = 0
+    # 本 plan 是否到期自动 retry(谱系计数用:engine 据此给续跑 runner 的
+    # auto_retry_count +1,再挂起时落进新 pending detail)
+    expired_retry: bool = False
     # 注:无 resample 位——SYSTEM_RETRY retry 的「重跑同次 sample」由挂起点 history
     # 形态天然保证(挂起时无失败轮 assistant 消息,重建续跑即重新采样),无需标志位
 
@@ -79,7 +89,8 @@ class SuspensionResolver:
             payload = resolutions[p.request_id]
             # suspension-ttl:内核到期哨兵 → 按 pending 的 on_expire 裁决
             if _is_expire_payload(payload):
-                self._apply_expiry(plan, p)
+                self._apply_expiry(
+                    plan, p, exhausted=bool(payload.get(EXPIRE_EXHAUSTED)))
                 continue
             # 结构化 payload 的 reason:非 dict 形态显式拒绝(禁 AttributeError 逃逸
             # 致 resume 任务静默崩溃——create_task 派发的异常无人消费)
@@ -112,13 +123,23 @@ class SuspensionResolver:
                     plan.abort = True
                 # retry:无需置位——重建续跑天然重新采样
             elif p.reason is SuspendReason.RESOURCE_LIMIT:
-                # 护栏触顶挂起:retry = 重建 runner 在迭代边界继续采样循环,
-                # **不置 resample**(挂起点无悬空 fc,无"同次 sample"可重跑);
-                # abort 与 SYSTEM_RETRY 同语义(在挂起点落失败终态)。
+                # 护栏触顶挂起:retry = 重建 runner 在迭代边界继续采样循环
+                # (挂起点无悬空 fc);abort 与 SYSTEM_RETRY 同语义(落失败终态)。
                 action = payload.get("action")
                 if action == "abort":
                     plan.abort = True
-                elif action != "retry":
+                elif action == "retry":
+                    # K2(session_tokens 硬顶)的触顶条件跨 turn 单调递增,裸 retry
+                    # 必然立即再触顶 = 无效裁决 → 必须携带预算增额(显式抬顶)
+                    if p.detail.get("end_reason") == "resource_limit_exceeded":
+                        extend = payload.get("extend_tokens")
+                        if not isinstance(extend, int) or extend <= 0:
+                            raise ResolveError(
+                                f"k2_retry_requires_extend_tokens: {p.request_id} "
+                                f"(retry payload 需带 extend_tokens: int > 0)"
+                            )
+                        plan.extend_session_tokens += extend
+                else:
                     # 非法 action:禁静默兜底,显式拒绝
                     raise ResolveError(
                         f"invalid_resource_limit_action: {action!r} (want retry|abort)"
@@ -129,7 +150,7 @@ class SuspensionResolver:
         return plan
 
     @staticmethod
-    def _apply_expiry(plan: ResolvePlan, p: Any) -> None:
+    def _apply_expiry(plan: ResolvePlan, p: Any, *, exhausted: bool = False) -> None:
         """把单个 pending 的到期裁决并入 plan(suspension-ttl)。
 
         - SYSTEM_RETRY / RESOURCE_LIMIT:按 on_expire——retry → 自动续跑
@@ -144,8 +165,10 @@ class SuspensionResolver:
             p: 到期的 PendingRequest。
         """
         if p.reason in (SuspendReason.SYSTEM_RETRY, SuspendReason.RESOURCE_LIMIT):
-            # retry:不 abort 即续跑(重建 runner 重新采样);abort:终止
-            if p.on_expire != "retry":
+            # retry:不 abort 即续跑(重建 runner 重新采样);abort / 谱系上限熔断:终止
+            if p.on_expire == "retry" and not exhausted:
+                plan.expired_retry = True
+            else:
                 plan.abort = True
             return
         # 人类输入类 / 内核派发态:回填过期标记保 fc/fco 配对,整体终止。

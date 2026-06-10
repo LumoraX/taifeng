@@ -129,7 +129,7 @@ Resume(thread_id, resolutions)
 - **permission deny**（`granted=false`）：回填 `is_error=True` 的 `function_call_output`（`permission_denied: <reason>`），让模型据此改写后续。
 - **form / data**：`resolutions[request_id]` 直接 JSON 序列化成该 `related_call_id` 的 `function_call_output`（`is_error=False`），**不重跑 tool**。
 - **system_retry**：`action=retry`（默认）→ 不动 history，重跑那次 `_sample_once`（获全新 retry 预算）；`action=abort` → turn 终止不续跑。retry 自动机制：`_sample_once` 命中可恢复错误先走 `RetryConfig`（默认 `max_attempts=3`）自动退避重试；**3 次耗尽**或确定性"等外部介入"类（`provider_auth` / `provider_quota` / `provider_balance`）才转 `SYSTEM_RETRY` 挂起。`ContentFilter` / `ContextOverflow` / `InvalidRequest` 这类确定性失败在**默认（保守）policy** 下不挂起、照旧硬失败；注入 `SuspendByDefaultPolicy` 后同样转 `SYSTEM_RETRY` 挂起（裁决权见下「失败处置裁决 policy」）。
-- **resource_limit**：`action=retry` → 重建 runner 以挂起点 history 继续采样循环（挂起发生在迭代边界、fc/output 已配对；IterationBudget / DenialBreaker 随 runner 重建按原 cap 重新起算。注意：配合 `failure_suspend_on_expire="retry"` 时 retry 由 TTL 自动签发,**存在自动循环**——熔断上限旋钮见 change resource-limit-retry-semantics）；`action=abort` → 与 system_retry abort 同形。
+- **resource_limit**：`action=retry` → 重建 runner 以挂起点 history 继续采样循环（挂起发生在迭代边界、fc/output 已配对；IterationBudget / DenialBreaker 随 runner 重建按原 cap 重新起算）；`action=abort` → 与 system_retry abort 同形。**K2(session_tokens)例外**：触顶条件跨 turn 单调递增,裸 retry 必然立即再触顶 → retry payload 必须携带 `extend_tokens: int > 0` 显式抬顶,否则 `ResolveError`;其 `on_expire` 恒为 abort（自动 retry 无人携带增额必然无效）。配合 `failure_suspend_on_expire="retry"` 时其余护栏存在 TTL 自动循环——以 `failure_suspend_max_auto_retries` 谱系上限熔断（到期强制 abort + `auto_retry_exhausted` 标注;人工 Resume 不计数）。
 
 ### Requirement: 失败处置裁决 policy（FailureDispositionPolicy）
 

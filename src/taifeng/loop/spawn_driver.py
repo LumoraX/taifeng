@@ -449,6 +449,8 @@ class SpawnDriver:
                         "record_id": record.record_id, "detail": {}}),
                 ))
                 return
+            # 会话级副作用(K2 增额 / 谱系计数;spawn 重跑链路 v1 不透传计数)
+            eng._apply_plan_session_effects(plan, record)  # noqa: SLF001
             # 补 gap（复用与 leaf resume 同一机制；marker 由全量达成判定后签发）
             await eng._apply_plan_on_thread(  # noqa: SLF001
                 child_tid, handle.skill_id, record, plan)

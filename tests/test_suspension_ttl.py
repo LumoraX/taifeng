@@ -672,3 +672,70 @@ async def test_engine_pool_ctor_rejects_nonpositive_failure_ttl(
             model_client=RoutingMockClient(routes={}), compressors=[],
             failure_suspend_ttl_seconds=-1,
         )
+
+
+class _AlwaysFilteredClient(RoutingMockClient):
+    """每次采样都抛确定性 ContentFilterError —— 测自动 retry 谱系熔断用。"""
+
+    def __init__(self) -> None:
+        super().__init__(routes={})
+        self.sample_count = 0
+
+    def session(self, *, cancel, model=None):  # noqa: ANN001, ANN201
+        outer = self
+
+        class _S:
+            async def __aenter__(self):  # noqa: ANN204
+                return self
+
+            async def __aexit__(self, *exc):  # noqa: ANN002, ANN204
+                pass
+
+            async def stream(self, request):  # noqa: ANN001, ANN201
+                from taifeng.llm.errors import ContentFilterError
+                outer.sample_count += 1
+                raise ContentFilterError("always blocked")
+                yield  # pragma: no cover - 使其成为 async generator
+
+        return _S()
+
+
+async def test_auto_retry_lineage_exhaustion_forces_abort(ask_skills, threads_dir):
+    """自动 retry 谱系熔断(resource-limit-retry-semantics):确定性失败 +
+    on_expire=retry + max_auto_retries=1 → 首次到期自动 retry(再失败再挂起,
+    谱系计数 1),第二次到期判定达上限 → 强制 abort + 事件标注
+    auto_retry_exhausted,终止无界自动循环。"""
+    import taifeng as tf
+
+    client = _AlwaysFilteredClient()
+    pool = await tf.EnginePool.create(
+        skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
+        compressors=[],
+        failure_policy=tf.SuspendByDefaultPolicy(),
+        failure_suspend_ttl_seconds=60,
+        failure_suspend_on_expire="retry",
+        failure_suspend_max_auto_retries=1,
+        now_factory=_future_now,
+    )
+    engine = await pool.get_or_create(session_id="ttl-ex", entry_skill_id="ask-skill")
+    await engine.submit(taifeng.UserMessage(text="开始"))
+
+    # 等到带 exhausted 标注的到期事件(第二次 fire)
+    seen = await _collect_until(
+        engine,
+        lambda s: any(m.kind == "suspension_expired"
+                      and m.data.get("auto_retry_exhausted") for m in s),
+        max_wait=8.0,
+    )
+    expired = [m for m in seen if m.kind == "suspension_expired"]
+    assert len(expired) == 2, f"应恰两次到期(retry 一次 + 熔断一次),实得 {len(expired)}"
+    assert "auto_retry_exhausted" not in expired[0].data, "首次到期应正常 retry"
+    assert expired[1].data.get("auto_retry_exhausted") is True
+
+    # 熔断后不再自动续跑:采样总数 = 2(首发 + 1 次自动 retry),不会无界增长
+    await asyncio.sleep(0.3)
+    assert client.sample_count == 2, \
+        f"熔断后不得继续自动采样,实采 {client.sample_count} 次"
+
+    await engine.submit(taifeng.loop.Shutdown())
+    await pool.close()

@@ -1563,3 +1563,30 @@ def test_resolver_rejects_non_dict_payload():
         request_id="r1", reason=SuspendReason.DATA, related_call_id="c1"))
     plan = SuspensionResolver().plan(rec, {"r1": "自由文本回答"})
     assert plan.direct_outputs["c1"] == "自由文本回答"
+
+
+def test_resolver_k2_retry_requires_extend_tokens():
+    """K2(session_tokens)触顶挂起的 retry 必须携带正整数 extend_tokens:
+    裸 retry / 非法增额 → ResolveError;合法增额落 plan.extend_session_tokens;
+    其他护栏(如 max_iterations)的 retry 不受此约束。"""
+    import pytest
+
+    from taifeng.suspend.reason import PendingRequest, SuspendReason
+    from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+
+    k2 = _rec(PendingRequest(
+        request_id="r1", reason=SuspendReason.RESOURCE_LIMIT,
+        detail={"end_reason": "resource_limit_exceeded"}))
+    for bad in ({"action": "retry"}, {"action": "retry", "extend_tokens": 0},
+                {"action": "retry", "extend_tokens": "100"}):
+        with pytest.raises(ResolveError, match="k2_retry_requires_extend_tokens"):
+            SuspensionResolver().plan(k2, {"r1": bad})
+    plan = SuspensionResolver().plan(
+        k2, {"r1": {"action": "retry", "extend_tokens": 500}})
+    assert plan.extend_session_tokens == 500 and not plan.abort
+    # 非 K2 护栏:裸 retry 合法
+    iters = _rec(PendingRequest(
+        request_id="r1", reason=SuspendReason.RESOURCE_LIMIT,
+        detail={"end_reason": "max_iterations"}))
+    plan2 = SuspensionResolver().plan(iters, {"r1": {"action": "retry"}})
+    assert not plan2.abort and plan2.extend_session_tokens == 0

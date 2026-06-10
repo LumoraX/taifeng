@@ -50,6 +50,7 @@ from taifeng.loop.event import (
     SuspensionResolveRejected,
     TurnFailed,
     TurnRewound,
+    TurnSuspended,
     UserInputInjected,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
@@ -121,6 +122,7 @@ class AgentEngine:
         denial_breaker_config: Any = None,
         failure_policy: Any = None,
         failure_suspend_ttl_seconds: int | None = None,
+        failure_suspend_max_auto_retries: int | None = None,
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
@@ -190,6 +192,14 @@ class AgentEngine:
                 f"failure_suspend_ttl_seconds must be positive or None, "
                 f"got {failure_suspend_ttl_seconds}")
         self._failure_suspend_ttl_seconds = failure_suspend_ttl_seconds
+        # resource-limit-retry-semantics:TTL 自动 retry 谱系上限(None=不限,
+        # 配 on_expire="retry" 时强烈建议设置——否则确定性失败会无界自动循环)
+        if (failure_suspend_max_auto_retries is not None
+                and failure_suspend_max_auto_retries <= 0):
+            raise ValueError(
+                f"failure_suspend_max_auto_retries must be positive or None, "
+                f"got {failure_suspend_max_auto_retries}")
+        self._failure_suspend_max_auto_retries = failure_suspend_max_auto_retries
         self._failure_suspend_on_expire = failure_suspend_on_expire
         # suspension-ttl：壁钟工厂(注入可固定,测试用;默认与 TurnRunner 兜底一致)
         import time as _time
@@ -590,7 +600,7 @@ class AgentEngine:
         (或不是同一条)→ no-op。auto-Resume 用 EXPIRE_SENTINEL payload 经公共
         Resume Op 提交 —— root / call_skill 嵌套 / spawn 三条续跑链零改动全复用。
         """
-        from taifeng.suspend.resolver import EXPIRE_SENTINEL
+        from taifeng.suspend.resolver import EXPIRE_EXHAUSTED, EXPIRE_SENTINEL
 
         try:
             if delay > 0:
@@ -630,26 +640,37 @@ class AgentEngine:
             if (record is None or record.record_id != record_id
                     or record_id in self._resolving_records):
                 return
-            await self._emit(EventMsg(
-                submission_id=record_id,
-                msg=SuspensionExpired(data={
-                    "record_id": record_id,
-                    "thread_id": thread_id,
-                    "on_expire": ",".join(sorted(
-                        {p.on_expire for p in record.pending})),
-                    "reasons": sorted({p.reason.value for p in record.pending}),
-                }),
-            ))
             # 内核签发到期裁决:只对**未核销** pending 配哨兵(request 级核销下,
             # 已部分结算的 pending 再发哨兵会产生重复 fco)
             pending_left = self._unsettled_pendings(record, items)
             if not pending_left:
                 return
+            # 自动 retry 谱系熔断(resource-limit-retry-semantics):任一 retry 位
+            # pending 的谱系计数已达上限 → 本次裁决强制 abort,终止无界自动循环
+            max_auto = self._failure_suspend_max_auto_retries
+            exhausted = max_auto is not None and any(
+                p.on_expire == "retry"
+                and int(p.detail.get("auto_retry_count", 0) or 0) >= max_auto
+                for p in pending_left)
+            expired_data: dict[str, Any] = {
+                "record_id": record_id,
+                "thread_id": thread_id,
+                "on_expire": ",".join(sorted(
+                    {p.on_expire for p in record.pending})),
+                "reasons": sorted({p.reason.value for p in record.pending}),
+            }
+            if exhausted:
+                expired_data["auto_retry_exhausted"] = True
+            await self._emit(EventMsg(
+                submission_id=record_id,
+                msg=SuspensionExpired(data=expired_data),
+            ))
+            sentinel: dict[str, Any] = {EXPIRE_SENTINEL: True}
+            if exhausted:
+                sentinel[EXPIRE_EXHAUSTED] = True
             await self.submit(Resume(
                 thread_id=route_tid,
-                resolutions={
-                    p.request_id: {EXPIRE_SENTINEL: True} for p in pending_left
-                },
+                resolutions={p.request_id: dict(sentinel) for p in pending_left},
             ))
         except asyncio.CancelledError:
             # 人工 Resume 先到 / shutdown:正常撤销,非异常
@@ -1028,30 +1049,117 @@ class AgentEngine:
                 self._turn_index += 1
                 return
 
-        # K2 跨 turn 守卫：会话累计 token 已触顶 → 拒绝开新 turn（不再消耗）。
-        if (
-            self._max_session_tokens is not None
-            and self._session_tokens >= self._max_session_tokens
-        ):
-            await self._emit(EventMsg(submission_id=sub.id, msg=ResourceLimitExceeded(
-                data={
-                    "limit_kind": "session_tokens",
-                    "used": self._session_tokens,
-                    "limit": self._max_session_tokens,
-                    "scope": "turn_refused",
-                },
-            )))
-            await self._emit(EventMsg(submission_id=sub.id, msg=TurnFailed(data={
-                "error": "session_token_limit_exceeded",
-                "kind": "resource_limit_exceeded",
-                "iterations": 0,
-                "is_root": True,
-            })))
+        # K2 跨 turn 守卫：会话累计 token 已触顶 → 经 failure policy 裁决
+        # (resource-limit-retry-semantics):TERMINAL → 拒绝开新 turn(现状);
+        # SUSPEND → engine 级 RESOURCE_LIMIT 挂起,retry+extend_tokens 抬顶后续跑。
+        if await self._gate_session_tokens(sub.id):
             self._pending.pop(sub.id, None)
             self._turn_index += 1
             return
 
         await self._build_and_run_runner(sub.id, turn_cancel, resolved_for_turn)
+
+    async def _gate_session_tokens(self, submission_id: str) -> bool:
+        """K2 引擎级闸门:触顶时按 policy 裁决终态 / 挂起。
+
+        Returns:
+            True = 本次 turn 被闸(已 emit 终态或挂起事件,调用方收尾返回);
+            False = 未触顶,照常开跑。
+
+        SUSPEND 路径:在 engine 级直接落 SuspensionRecord(user_message 已入史,
+        Resume retry+extend_tokens 抬顶后经既有根续跑链跑该 turn)。
+        """
+        if (self._max_session_tokens is None
+                or self._session_tokens < self._max_session_tokens):
+            return False
+        from taifeng.loop.failure_policy import (
+            DEFAULT_FAILURE_POLICY,
+            FailureContext,
+            FailureDisposition,
+        )
+        policy = self._failure_policy or DEFAULT_FAILURE_POLICY
+        disposition = policy.decide(FailureContext(
+            origin="guard_trip",
+            failure_class=None,
+            end_reason="resource_limit_exceeded",
+            error_kind=None,
+            retryable=False,
+            is_root=True,
+            iteration=0,
+        ))
+        suspended = disposition is FailureDisposition.SUSPEND
+        await self._emit(EventMsg(
+            submission_id=submission_id, msg=ResourceLimitExceeded(
+                data={
+                    "limit_kind": "session_tokens",
+                    "used": self._session_tokens,
+                    "limit": self._max_session_tokens,
+                    # R3 scope 如实:挂起时 turn 并未被拒杀,报 turn_suspended
+                    "scope": "turn_suspended" if suspended else "turn_refused",
+                })))
+        if not suspended:
+            await self._emit(EventMsg(submission_id=submission_id, msg=TurnFailed(
+                data={
+                    "error": "session_token_limit_exceeded",
+                    "kind": "resource_limit_exceeded",
+                    "iterations": 0,
+                    "is_root": True,
+                })))
+            return True
+        await self._suspend_engine_gate(submission_id)
+        return True
+
+    async def _suspend_engine_gate(self, submission_id: str) -> None:
+        """落 engine 级 K2 挂起记录(turn 未开跑,record 直接挂根 history)。
+
+        与 turn 内护栏挂起同形(RESOURCE_LIMIT / related_call_id=None /
+        on_expire 恒 abort——自动 retry 无人携带增额必然无效);Resume
+        retry+extend_tokens 经既有根续跑链(_handle_resume)直接跑该 turn。
+        """
+        import secrets as _secrets
+
+        from taifeng.suspend.reason import PendingRequest, SuspendReason
+        from taifeng.suspend.record import SuspensionRecord
+
+        pending = PendingRequest(
+            request_id=f"sr_{_secrets.token_hex(6)}",
+            reason=SuspendReason.RESOURCE_LIMIT,
+            ttl_seconds=self._failure_suspend_ttl_seconds,
+            on_expire="abort",
+            payload_schema={
+                "type": "object",
+                "properties": {"action": {"enum": ["retry", "abort"]}},
+            },
+            related_call_id=None,
+            detail={
+                "end_reason": "resource_limit_exceeded",
+                "guard_snapshot": {
+                    "used": self._session_tokens,
+                    "limit": self._max_session_tokens,
+                },
+                "gate": "turn_refused",
+            },
+        )
+        record = SuspensionRecord(
+            record_id=f"sr_{_secrets.token_hex(6)}",
+            thread_id=self._thread_id,
+            submission_id=submission_id,
+            turn_index=self._turn_index,
+            pending=(pending,),
+            created_at=int(self._now_factory()),
+        )
+        item = record.to_item()
+        async with self._lock:
+            self._history.append(item)
+        await self._store.append(item)
+        await self._emit(EventMsg(submission_id=submission_id, msg=TurnSuspended(
+            data={
+                "thread_id": self._thread_id,
+                "record_id": record.record_id,
+                "pending": item.payload["pending"],
+                "cache_invalidated": True,
+                "expires_at": record.expires_at,
+            })))
 
     async def _build_and_run_runner(
         self,
@@ -1061,6 +1169,7 @@ class AgentEngine:
         *,
         seed_pending_call_id: str | None = None,
         cache_break_expected_reason: str | None = None,
+        auto_retry_count: int = 0,
     ) -> None:
         """构造 TurnRunner(基于当前 self._history)→ run → 回写 engine 状态。
 
@@ -1096,6 +1205,7 @@ class AgentEngine:
             failure_policy=self._failure_policy,
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
+            auto_retry_count=auto_retry_count,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(self._history),
             # B1 midturn-input-steering：与活跃 _PendingTurn 共享注入队列（同一 list
@@ -1436,11 +1546,18 @@ class AgentEngine:
             data={"record_id": record.record_id, "request_ids": sorted(record.request_ids())})))
 
         # 6. 续跑（abort 则不续；turn 已在挂起点终止，gap 已补齐即收尾）
+        auto_retries = self._apply_plan_session_effects(plan, record)
         if plan.abort:
+            return
+        # Resume 续跑同样过 K2 闸门(resource-limit-retry-semantics):未经增额的
+        # 续跑在会话已触顶时不得静默烧 token——按 policy 再裁决(挂起 / 终态)
+        if await self._gate_session_tokens(sub.id):
             return
         turn_cancel = root_cancel.child(f"sub:{sub.id}")
         self._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
-        await self._build_and_run_runner(sub.id, turn_cancel, list(self._last_resolved or []))
+        await self._build_and_run_runner(
+            sub.id, turn_cancel, list(self._last_resolved or []),
+            auto_retry_count=auto_retries)
 
     # -----------------------------------------------------------------
     # 子 thread resume：续跑链（leaf 子 thread → 逐层回填父 call_skill → 根）
@@ -1639,11 +1756,13 @@ class AgentEngine:
         await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
             data={"record_id": record.record_id,
                   "request_ids": sorted(record.request_ids())})))
+        auto_retries = self._apply_plan_session_effects(plan, record)
         if plan.abort:
             # system_retry abort：子 turn 在挂起点终止，不续跑 → 视为失败回传父
             return f"sub_skill_aborted: {record.record_id}"
         outcome = await self._run_thread_turn(
-            sub, leaf_tid, leaf_skill_id, root_cancel, submission_id=submission_id)
+            sub, leaf_tid, leaf_skill_id, root_cancel, submission_id=submission_id,
+            auto_retry_count=auto_retries)
         if outcome.end_reason == "suspended":
             # 子续跑又挂起：本层 emit 了 turn_suspended，续跑链中止（等下次 Resume）
             return None
@@ -1881,6 +2000,7 @@ class AgentEngine:
     async def _run_thread_turn(
         self, sub: Submission, thread_id: str, entry_skill_id: str,
         root_cancel: CancellationToken, *, submission_id: str | None = None,
+        auto_retry_count: int = 0,
     ) -> Any:
         """为指定（非根）thread 构造 TurnRunner 并续跑一轮，返回 TurnOutcome。
 
@@ -1927,6 +2047,7 @@ class AgentEngine:
             failure_policy=self._failure_policy,
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
+            auto_retry_count=auto_retry_count,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             history_buffer=list(items),
             permission_policy=self._permission_policy,
@@ -2086,6 +2207,23 @@ class AgentEngine:
         if pend is not None and pend.reason is not SuspendReason.PERMISSION:
             return f"suspension_expired: {reason_text}"
         return f"permission_denied: {reason_text}"
+
+    def _apply_plan_session_effects(self, plan: Any, record: SuspensionRecord) -> int:
+        """应用 ResolvePlan 的会话级副作用,返回续跑 runner 的 auto_retry_count。
+
+        - K2 retry 增额:extend_session_tokens > 0 → 抬升 `_max_session_tokens`
+          (显式抬顶;触顶条件随之清除,retry 真实有效)。
+        - 谱系计数:plan 来自 TTL 到期自动 retry(expired_retry)→ 续跑计数 =
+          record 内既有计数 + 1(人工 Resume 恒 0,不计数)。
+        """
+        if getattr(plan, "extend_session_tokens", 0) and self._max_session_tokens:
+            self._max_session_tokens += plan.extend_session_tokens
+        if not getattr(plan, "expired_retry", False):
+            return 0
+        prior = max(
+            (int(p.detail.get("auto_retry_count", 0) or 0) for p in record.pending),
+            default=0)
+        return prior + 1
 
     def _settle_lock(self, record_id: str) -> asyncio.Lock:
         """取 record 级结算锁(惰性创建;record 终结后残留的空锁可忽略不计)。"""

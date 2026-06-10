@@ -140,6 +140,7 @@ class EnginePool:
         denial_breaker_config: Any = None,
         failure_policy: Any = None,
         failure_suspend_ttl_seconds: int | None = None,
+        failure_suspend_max_auto_retries: int | None = None,
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
@@ -180,6 +181,7 @@ class EnginePool:
                 f"failure_suspend_ttl_seconds must be positive or None, "
                 f"got {failure_suspend_ttl_seconds}")
         self._failure_suspend_ttl_seconds = failure_suspend_ttl_seconds
+        self._failure_suspend_max_auto_retries = failure_suspend_max_auto_retries
         self._failure_suspend_on_expire = failure_suspend_on_expire
         # suspension-ttl：壁钟工厂(测试可注入固定时钟),透传到每个 AgentEngine。
         self._now_factory = now_factory
@@ -236,6 +238,7 @@ class EnginePool:
         denial_breaker_config: Any = None,
         failure_policy: Any = None,
         failure_suspend_ttl_seconds: int | None = None,
+        failure_suspend_max_auto_retries: int | None = None,
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
@@ -331,6 +334,7 @@ class EnginePool:
             denial_breaker_config=denial_breaker_config,
             failure_policy=failure_policy,
             failure_suspend_ttl_seconds=failure_suspend_ttl_seconds,
+            failure_suspend_max_auto_retries=failure_suspend_max_auto_retries,
             failure_suspend_on_expire=failure_suspend_on_expire,
             now_factory=now_factory,
             max_parallel_tool_calls=max_parallel_tool_calls,
@@ -464,6 +468,7 @@ class EnginePool:
                 denial_breaker_config=self._denial_breaker_config,
                 failure_policy=self._failure_policy,
                 failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
+                failure_suspend_max_auto_retries=self._failure_suspend_max_auto_retries,
                 failure_suspend_on_expire=self._failure_suspend_on_expire,
                 now_factory=self._now_factory,
                 max_parallel_tool_calls=self._max_parallel_tool_calls,
