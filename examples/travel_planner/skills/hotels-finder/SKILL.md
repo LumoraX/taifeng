@@ -2,10 +2,7 @@
 name: hotels-finder
 description: 酒店候选查询 —— 由 trip-planner call_skill 触发
 version: 1.0.0
-type: composite
-child_skills: []
-tool_names: [run_script]
-max_call_depth: 2
+type: atomic
 scripts:
   - name: mock_hotels
     path: scripts/mock_hotels.sh
