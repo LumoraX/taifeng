@@ -10,11 +10,13 @@
 6. token 记账（超窗抛 ``ContextOverflowError`` 走 engine 真实自愈路径）
    + 前缀 cache 账本自动折算 prompt_cache；
 7. 时序编排（await_signal / emit_signal / delay）后按全保真流式产出事件
-   （text 8-char 切片、tool_call arguments 16-char delta 分片 + done 收尾）。
+   （text 8-char 切片、tool_call arguments 16-char delta 分片）。
 
-与旧 ``MockClient`` 的回放语义兼容点：事件骨架同构
-（created → server_model → text_delta* → tool_call* → structured_output? →
-prompt_cache → completed）、``CancellationToken`` 检查点保留（R4）。
+事件骨架以**金样校准**对齐真实 openai_compat 流（llm-golden-calibration）：
+created → server_model → reasoning_delta* → text_delta* → tool_call_delta*
+（全部 call 连续）→ prompt_cache → tool_call_done*（聚流末）→
+structured_output? → completed(response_id=null)。
+``CancellationToken`` 检查点保留（R4）。
 """
 
 from __future__ import annotations
@@ -167,7 +169,13 @@ class _SimSession:
     def _compose_events(
         self, turn: SimTurn, request: ApiRequest, cache_read: int, cache_creation: int
     ) -> Iterator[ResponseEvent]:
-        """按服务端事件骨架顺序生成本 turn 的完整事件序列（同步生成器）。"""
+        """按服务端事件骨架顺序生成本 turn 的完整事件序列（同步生成器）。
+
+        骨架顺序以**金样校准**对齐真实 openai_compat 流（tests/llm/golden/，
+        llm-golden-calibration 首录裁决）：全部 delta 连续产出（多工具的
+        arguments 分片也聚成一段）→ prompt_cache（usage chunk 流末到达）→
+        tool_call_done 全部聚流末 → structured_output? → completed。
+        """
         yield created()
         yield server_model(self._model)
         # reasoning 先于 text（与真实 thinking provider 产出顺序一致），8 字符切片
@@ -177,19 +185,29 @@ class _SimSession:
         text = turn.text
         for i in range(0, len(text), _TEXT_CHUNK):
             yield text_delta(text[i : i + _TEXT_CHUNK])
-        # tool_call：默认 delta 分片（首片带 name）+ done 收尾；可关闭退化为一次性 done
+        # tool_call arguments delta：所有 call 的分片连续产出（done 不插在中间——金样实测
+        # 真实流 done 全部聚流末）；每片都带 name（ModelClient 适配层语义：openai_compat
+        # 的累积器使 name 自首片起持久，线缆层「仅首片有 name」不会透传到本层）
         malformed = turn.fault is not None and turn.fault.kind == "malformed_arguments"
+        resolved: list[tuple[str, str, str]] = []  # (call_id, name, arguments)
         for tc in turn.tool_calls:
             call_id = str(tc.get("id", ""))
             name = str(tc.get("name", ""))
             arguments = _MALFORMED_ARGS if malformed else str(tc.get("arguments", "{}"))
+            resolved.append((call_id, name, arguments))
             if self._client.chunked_tool_calls:
                 for j in range(0, len(arguments), _ARGS_CHUNK):
                     yield tool_call_delta(
-                        call_id=call_id,
-                        name=name if j == 0 else None,
-                        delta=arguments[j : j + _ARGS_CHUNK],
+                        call_id=call_id, name=name, delta=arguments[j : j + _ARGS_CHUNK]
                     )
+        # prompt_cache：账本自动折算（或剧本覆写），每 turn 必发——cache 行为全程可观测。
+        # 位置在 done 之前：真实流的 usage chunk 是流末数据 chunk，先于流后合成的 done
+        yield prompt_cache(cache_read=cache_read, cache_creation=cache_creation)
+        # content_filter finish：镜像真实 provider 行为（抛错而非伪造成功空回复；
+        # 真实判定仅在无 tool_call 时触发，位置同真实——usage 已到、无 done）
+        if turn.finish == "content_filter":
+            raise ContentFilterError("sim: response blocked by content filter")
+        for call_id, name, arguments in resolved:
             yield tool_call_done(call_id=call_id, name=name, arguments=arguments)
         # structured_output：仅当请求要求强类型输出且剧本配了回放数据
         if request.response_format is not None and turn.structured is not None:
@@ -197,16 +215,12 @@ class _SimSession:
                 parsed=turn.structured,
                 raw_text=json.dumps(turn.structured, ensure_ascii=False),
             )
-        # prompt_cache：账本自动折算（或剧本覆写），每 turn 必发——cache 行为全程可观测
-        yield prompt_cache(cache_read=cache_read, cache_creation=cache_creation)
-        # content_filter finish：镜像真实 provider 行为（抛错而非伪造成功空回复）
-        if turn.finish == "content_filter":
-            raise ContentFilterError("sim: response blocked by content filter")
         # 并发编排信号在终态前点亮
         if turn.emit_signal is not None:
             self._client.coordinator.signal(turn.emit_signal)
         yield completed(
-            response_id="sim-resp",
+            # 金样实测真实 openai_compat 流 response_id 恒为 null —— 对齐不再伪造
+            response_id=None,
             usage=turn.usage,
             end_turn=_end_turn(turn),
             request_id=turn.request_id,

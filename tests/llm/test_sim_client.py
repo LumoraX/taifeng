@@ -75,7 +75,8 @@ async def test_tool_call_chunked_delta_then_done():
     dones = [ev for ev in events if ev.kind == "tool_call_done"]
     assert len(deltas) >= 2
     assert deltas[0].data["name"] == "call_skill"
-    assert deltas[1].data.get("name") is None  # 后续分片不带 name（OpenAI 语义）
+    # 每片都带 name（ModelClient 适配层语义，金样实测；线缆层「仅首片有 name」不透传到本层）
+    assert deltas[1].data["name"] == "call_skill"
     assert "".join(d.data["delta"] for d in deltas) == arguments
     assert len(dones) == 1
     assert dones[0].data["arguments"] == arguments

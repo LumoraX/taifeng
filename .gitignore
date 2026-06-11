@@ -152,6 +152,8 @@ cython_debug/
 .taifeng/
 threads/
 *.jsonl
+# 金样 fixture 是离线测试资产（llm-golden-calibration），不属运行时产物
+!tests/llm/golden/*.jsonl
 *.db
 *.db-shm
 *.db-wal
