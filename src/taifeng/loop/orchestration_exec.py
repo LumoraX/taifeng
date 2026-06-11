@@ -234,6 +234,8 @@ async def _execute_leaf(
         thread_id=runner.thread_id,
         submission_id=runner.submission_id,
         entry_skill_id=runner.entry_skill.id,
+        # 编排 turn 只合成 call_skill（内核发起非 LLM 幻觉面），仍传声明层可见集保持同源
+        visible_tools=runner.entry_skill.visible_tool_names(),
     )
 
     # 历史按发起序回填（R5 resume；与 A 阶段 3 一致）。编排 turn 无 assistant_message

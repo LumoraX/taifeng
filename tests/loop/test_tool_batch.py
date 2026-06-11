@@ -52,6 +52,8 @@ async def _run(reqs: list[ToolCallRequest], runtime: _FakeRuntime, cap: int):
         thread_id="t1",
         submission_id="s1",
         entry_skill_id="e1",
+        # 测试 fake 工具名 a..z 全部视为本轮已提供（白名单校验另有专测）
+        visible_tools=frozenset({chr(c) for c in range(ord("a"), ord("z") + 1)}),
     )
     return outcomes, events
 
@@ -94,6 +96,7 @@ async def test_g5a_pre_tool_use_hook_args_override() -> None:
         [req], runtime=runtime, ctx_for=_ctx, hooks=runner, emit=emit,
         semaphore=asyncio.Semaphore(4),
         thread_id="t1", submission_id="s1", entry_skill_id="e1",
+        visible_tools=frozenset({"file_read"}),
     )
     assert outcomes[0].result.output == "out:file_read"
     # dispatch 实际收到的是被 hook 改写后的 args
@@ -166,6 +169,7 @@ async def test_dispatch_batch_cancel_cascades_to_all_branches() -> None:
             _reqs(2), runtime=runtime, ctx_for=ctx_for, hooks=None, emit=emit,
             semaphore=asyncio.Semaphore(2),
             thread_id="t1", submission_id="s1", entry_skill_id="e1",
+            visible_tools=frozenset({"a", "b"}),
         ),
         canceller(),
     )

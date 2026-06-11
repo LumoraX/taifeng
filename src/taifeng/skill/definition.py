@@ -99,6 +99,21 @@ class SkillDefinition:
     scripts: tuple[ScriptDescriptor, ...] = ()
     source: SkillSource = "user"
 
+    def visible_tool_names(self) -> frozenset[str]:
+        """本 skill 作 entry 时的可见工具名集 —— 「声明↔可见」的单一真相。
+
+        组成（tool-whitelist 契约）：
+        - ``tool_names`` 显式声明（atomic 恒为空）；
+        - ``read_skill`` / ``call_skill`` 内核恒备（skill-as-context 范式基座）；
+        - ``scripts`` 非空 → 自动并入 ``run_script``——声明脚本即可见，
+          atomic / composite 一致（修复「atomic + scripts 结构性不可用」）。
+
+        消费点（如 turn 请求组装）MUST 经本函数派生，不得内联重复集合逻辑；
+        registry 未注册项由消费点过滤（可见集只管「声明层应可见什么」）。
+        """
+        auto = frozenset({"run_script"}) if self.scripts else frozenset()
+        return self.tool_names | {"read_skill", "call_skill"} | auto
+
     def validate(self) -> None:
         """启动期约束校验。失败立即抛 ``SkillValidationError``。"""
         if self.type == "atomic":
@@ -123,12 +138,14 @@ class SkillDefinition:
                     f"atomic skill {self.id!r} 不能声明 orchestration"
                 )
         elif self.type == "composite":
-            # composite = 有 agency 的 skill：可调子 skill、可调工具，二者至少其一。
-            # 两者皆空 = 戴帽子的 atomic（无意义空壳）→ fail-fast 拒绝。
-            # （参照 ADR 0013：放松"必须有 child_skills"为"二者至少其一"。）
-            if not self.child_skills and not self.tool_names:
+            # composite = 有 agency 的 skill：可调子 skill、可调工具、可跑脚本，
+            # 三者至少其一。全空 = 戴帽子的 atomic（无意义空壳）→ fail-fast 拒绝。
+            # （参照 ADR 0013 放松"必须有 child_skills"；tool-whitelist 变更后
+            # scripts 自动并入 run_script 可见集，scripts-only composite 同样有 agency。）
+            if not self.child_skills and not self.tool_names and not self.scripts:
                 raise SkillValidationError(
-                    f"composite skill {self.id!r} 必须至少声明 child_skills 或 tool_names 之一"
+                    f"composite skill {self.id!r} 必须至少声明 "
+                    "child_skills / tool_names / scripts 之一"
                 )
             if self.max_call_depth < 1:
                 raise SkillValidationError(

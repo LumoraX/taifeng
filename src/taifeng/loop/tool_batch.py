@@ -75,6 +75,7 @@ async def dispatch_batch(
     thread_id: str,
     submission_id: str,
     entry_skill_id: str,
+    visible_tools: frozenset[str],
 ) -> list[ToolCallOutcome]:
     """并发执行一批 tool call,返回按 ``index`` 升序的结果列表。
 
@@ -82,6 +83,8 @@ async def dispatch_batch(
     - 安全:RwLock 在 ``runtime.dispatch`` 内;本层不加锁。
     - 异常:``_dispatch_one`` 不抛(异常已被 runtime/hook 吞成 ``ToolResult.error``)。
     - ``thread_id`` / ``submission_id`` / ``entry_skill_id``:构造 HookContext 用。
+    - ``visible_tools``:本轮**实际注入请求**的工具名集(与请求严格同源,tool-whitelist
+      契约)——LLM 调用集合外的工具在 hook 之前被拒,以 is_error 输出核销。
     """
 
     async def _run(req: ToolCallRequest) -> ToolCallOutcome:
@@ -90,7 +93,7 @@ async def dispatch_batch(
             return await _dispatch_one(
                 req, runtime=runtime, ctx_for=ctx_for, hooks=hooks, emit=emit,
                 thread_id=thread_id, submission_id=submission_id,
-                entry_skill_id=entry_skill_id,
+                entry_skill_id=entry_skill_id, visible_tools=visible_tools,
             )
 
     outcomes = await asyncio.gather(*(_run(r) for r in requests))
@@ -108,14 +111,33 @@ async def _dispatch_one(
     thread_id: str,
     submission_id: str,
     entry_skill_id: str,
+    visible_tools: frozenset[str],
 ) -> ToolCallOutcome:
-    """执行单条:PreToolUse hook → dispatch → PostToolUse hook → emit Completed。
+    """执行单条:可执行校验 → PreToolUse hook → dispatch → PostToolUse hook → emit。
 
     若执行链抛 SuspendSignal(如 SuspendingPrompter / request_user_input 触发),
     捕获为带 suspend=pending 的 outcome,不让其冒泡打断整批(挂起不是错误)。
     """
     ctx = ctx_for(req.call_id)
     start = time.monotonic()
+
+    # tool-whitelist 可执行校验(hook 之前):LLM 幻觉调用本轮未提供的工具 →
+    # is_error 输出核销 call_id(LLM 可见错误自行恢复,turn 不中断),
+    # 不消耗 hook / 权限 / 锁资源;registry 有但本轮没提供的同样拒(可见才可执行)
+    if req.name not in visible_tools:
+        result = ToolResult.error(
+            f"tool_not_offered: {req.name}", reason="not_offered"
+        )
+        duration_ms = int((time.monotonic() - start) * 1000)
+        await emit(ToolCallCompleted(data={
+            "call_id": req.call_id, "name": req.name,
+            "output": result.output, "is_error": True,
+            "duration_ms": duration_ms,
+        }))
+        return ToolCallOutcome(
+            index=req.index, call_id=req.call_id, name=req.name,
+            result=result, duration_ms=duration_ms,
+        )
 
     try:
         return await _dispatch_one_inner(

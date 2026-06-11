@@ -79,6 +79,7 @@ async def test_dispatch_batch_exactly_one_outcome_per_call_under_cancel() -> Non
         reqs, runtime=rt, ctx_for=ctx_for, hooks=None, emit=emit,
         semaphore=asyncio.Semaphore(4), thread_id="t",
         submission_id="s", entry_skill_id="e",
+        visible_tools=frozenset({"t"}),
     )
     # 恰好一次：4 个 request → 4 个 outcome，index 升序，各自 cancelled
     assert [o.index for o in outcomes] == [0, 1, 2, 3]

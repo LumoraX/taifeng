@@ -834,9 +834,10 @@ class TurnRunner:
                 "history_len": cp.history_len, "target_id": None,
             }))
 
-        # 取可用 tool 集合（白名单）
+        # 取可用 tool 集合：声明层可见集（单一真相，含 scripts 自动并入 run_script，
+        # 见 SkillDefinition.visible_tool_names）∩ registry 已注册（未注册静默不可见，现状保留）
         tools = []
-        for name in sorted(self.entry_skill.tool_names | {"read_skill", "call_skill"}):
+        for name in sorted(self.entry_skill.visible_tool_names()):
             spec = self.tool_runtime._registry.get(name)  # noqa: SLF001
             if spec is not None:
                 tools.append(spec.to_ref())
@@ -1089,6 +1090,8 @@ class TurnRunner:
             thread_id=self.thread_id,
             submission_id=self.submission_id,
             entry_skill_id=self.entry_skill.id,
+            # tool-whitelist：与本轮请求严格同源的名集（registry 过滤后）——可见才可执行
+            visible_tools=frozenset(t.name for t in tools),
         )
 
         # === 阶段 3：按发起序以 (call, output) 配对写历史 ===
@@ -1238,6 +1241,8 @@ class TurnRunner:
             semaphore=asyncio.Semaphore(1),
             thread_id=self.thread_id, submission_id=self.submission_id,
             entry_skill_id=self.entry_skill.id,
+            # retry 重跑仍受声明层可见集约束（原始派发已过校验；热重载移除声明则如实拒）
+            visible_tools=self.entry_skill.visible_tool_names(),
         )
         outcome = outcomes[0]
         if outcome.suspend is not None:
