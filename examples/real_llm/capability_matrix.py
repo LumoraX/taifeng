@@ -38,6 +38,7 @@ from _provider_bootstrap import (  # noqa: E402
     build_model_client,
     load_dotenv_files,
 )
+from _recorder import RecordingClient  # noqa: E402
 
 load_dotenv_files()
 
@@ -305,6 +306,12 @@ def _verdict(res: Result) -> tuple[str, str]:
 async def main() -> None:
     parser = argparse.ArgumentParser(description="真实 LLM 能力矩阵跑测")
     parser.add_argument("--only", help="只跑指定 scenario_id（台账增量合并，其余标 stale）")
+    parser.add_argument(
+        "--record", action="store_true",
+        help="金样录制模式（需真实 key）：把 PASS 场景的事件流形状签名写入 "
+             "tests/llm/golden/<scenario>.jsonl（FAIL/PART 场景不动旧金样）；"
+             "与 --only 组合时只更新该场景金样",
+    )
     args = parser.parse_args()
     scenarios = SCENARIOS
     if args.only:
@@ -318,7 +325,13 @@ async def main() -> None:
     except ProviderBootstrapError as exc:
         print(f"❌ {exc}", file=sys.stderr)
         sys.exit(1)
-    print(f"[setup] provider={meta['provider']} model={meta['model']}")
+    recorder: RecordingClient | None = None
+    if args.record:
+        # 金样录制：包装 client（ModelClient 协议同构），PASS 场景跑完统一 flush
+        recorder = RecordingClient(client)
+        client = recorder
+    print(f"[setup] provider={meta['provider']} model={meta['model']}"
+          + (" [金样录制中]" if recorder else ""))
     print(f"[setup] 共 {len(scenarios)} 个能力场景，真实 LLM 逐个跑\n")
 
     with tempfile.TemporaryDirectory() as td:
@@ -327,6 +340,8 @@ async def main() -> None:
         results: list[Result] = []
         for i, sc in enumerate(scenarios, 1):
             print(f"\n{'━' * 70}\n[{i}/{len(scenarios)}] {sc.demo_id} —— {sc.capability}\n{'━' * 70}")
+            if recorder is not None:
+                recorder.begin_scenario(sc.demo_id)
             try:
                 results.append(await run_scenario(client, sc, logs_dir))
             except Exception as exc:  # noqa: BLE001  —— 单场景异常不拖垮整矩阵
@@ -395,6 +410,23 @@ async def main() -> None:
             full_run=args.only is None,
         )
         print(f"\n  台账已更新: {jp.name} + {mp.name}（docs/）")
+
+        # ── 金样落盘（--record：只固化 PASS 场景，FAIL/PART 不动旧金样）──
+        if recorder is not None:
+            flushed = []
+            for r in results:
+                tag, _ = _verdict(r)
+                if not tag.startswith("✅"):
+                    continue
+                gp = recorder.flush_golden(
+                    r.scenario.demo_id,
+                    provider=meta["provider"], model=meta["model"],
+                    commit=run_commit, recorded_at=now_utc,
+                )
+                if gp is not None:
+                    flushed.append(gp.name)
+            print(f"  金样已落盘: {len(flushed)} 个场景 → tests/llm/golden/ "
+                  f"(截断签名滤除 {recorder.truncated_skipped} 条)")
 
         ok = npass == len(results) and not unmapped
         print(f"\n{'=' * 70}\n{'✅ 全能力场景真实 LLM 通过 + 日志完整' if ok else '⚠️ 见上方未通过/不完整项'}\n{'=' * 70}")
