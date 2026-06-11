@@ -111,7 +111,7 @@ skill 设计者可在三种编排间自由选择：
 
 1. **LLM 编排**：在 composite 的 skill body 内由 LLM 读 body 自主决策 `call_skill`（默认；不声明 orchestration 时走这条）。
 2. **声明式编排（B）**：在 frontmatter 声明 `orchestration` 块（见上文「orchestration」节），引擎按 `steps` 确定性驱动、**不采样 LLM**。适合固定的 fork-join 流程。
-3. **脚本编排**：在 composite 的 `scripts/` 目录放脚本，经 `run_script` 工具执行（见下文「scripts 与执行器」节）。
+3. **脚本编排**：在 skill 的 `scripts/` 目录放脚本，经 `run_script` 工具执行（见下文「scripts 与执行器」节）。`scripts:` 非空时 `run_script` **自动并入可见工具集**（`visible_tool_names()`，tool-whitelist 契约），无需也不必手写 `tool_names: [run_script]`——atomic 与 composite 均可用（atomic + scripts 是合法组合）。
 
 > ⚠️ 脚本经 `run_script` 在 **subprocess 隔离**中执行（argv spawn + env 白名单 + stdin DEVNULL），**不能** in-process `import taifeng...` 回调 `call_skill`。需要"脚本里再调子 skill"的确定性流程，请用**声明式编排**而非脚本。
 
@@ -168,10 +168,12 @@ class SkillDefinition:
             if self.entry:
                 raise SkillValidationError(f"atomic skill {self.id!r} 默认不可作为 entry")
         elif self.type == "composite":
-            # composite = 有 agency：child_skills 或 tool_names 至少其一非空（ADR 0013）
-            if not self.child_skills and not self.tool_names:
+            # composite = 有 agency：child_skills / tool_names / scripts 至少其一非空
+            # （ADR 0013 + tool-whitelist：scripts 自动并入 run_script 可见集）
+            if not self.child_skills and not self.tool_names and not self.scripts:
                 raise SkillValidationError(
-                    f"composite skill {self.id!r} 必须至少声明 child_skills 或 tool_names 之一")
+                    f"composite skill {self.id!r} 必须至少声明 "
+                    "child_skills / tool_names / scripts 之一")
 ```
 
 ```python
@@ -375,7 +377,7 @@ class CallSkillTool:
 
 ## scripts 与执行器（scripts-runtime）
 
-SKILL.md 中 `scripts:` 字段声明的脚本不是装饰品 —— 由 `run_script` 内置工具暴露给 LLM 执行。详见 ADR 0009 / `capabilities/script-execution.md`。
+SKILL.md 中 `scripts:` 字段声明的脚本不是装饰品 —— 由 `run_script` 内置工具暴露给 LLM 执行（`scripts:` 非空即自动进可见集，见 `capabilities/tool-whitelist.md`）。详见 ADR 0009 / `capabilities/script-execution.md`。
 
 ### 数据流
 

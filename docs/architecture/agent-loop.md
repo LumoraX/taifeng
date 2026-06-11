@@ -274,6 +274,8 @@ class ToolCallRuntime:
 
 当 LLM 在**一条 assistant 消息**里吐出多个 tool call（含多个 `call_skill`），`TurnRunner._sample_once` 通过 `loop/tool_batch.py::dispatch_batch` 并发派发，而非逐个串行 `await`。并发度由构造期旋钮 `max_parallel_tool_calls` 控制（默认 `1` = 严格串行，等同历史行为，零回归；`>1` 开启并发）。
 
+**可见才可执行（tool-whitelist）**：`dispatch_batch` 必填 `visible_tools`——本轮实际注入请求的工具名集（由 `SkillDefinition.visible_tool_names()` ∩ registry 派生，与请求严格同源）。LLM 幻觉调用集合外的工具在 PreToolUse hook **之前**被拒：is_error 的 `function_call_output` 核销 call_id（`tool_not_offered`），不消耗 hook / 权限 / 锁，turn 不中断；engine 的 resume 重放与业务直发 Op 不经此层（豁免）。详见 `capabilities/tool-whitelist.md`。
+
 ```
 阶段 1（顺序、按发起序）：解析 arguments + 计算 parallel_safe + emit ToolCallStarted + 建 ToolCallRequest（暂不写历史）
 阶段 2（并发）：emit ToolBatchDispatched{count, max_parallel}

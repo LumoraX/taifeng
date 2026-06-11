@@ -1,11 +1,11 @@
 {
   "run": {
-    "timestamp_utc": "2026-06-11 01:10:24 UTC",
-    "commit": "4fbabb6",
+    "timestamp_utc": "2026-06-11 08:39:25 UTC",
+    "commit": "f6efbb5",
     "provider": "openai",
     "model": "gemini-3.1-pro-preview",
     "scenarios_run": [
-      "selective_approval"
+      "travel_planner"
     ]
   },
   "scenarios": {
@@ -354,9 +354,9 @@
         "turn_completed": 1
       },
       "grants": 2,
-      "duration_s": 19.07486666692421,
-      "commit": "4fbabb6",
-      "timestamp_utc": "2026-06-11 01:09:38 UTC"
+      "duration_s": 33.217927457997575,
+      "commit": "f6efbb5",
+      "timestamp_utc": "2026-06-11 08:39:25 UTC"
     },
     "turn_rewind": {
       "scenario_id": "turn_rewind",

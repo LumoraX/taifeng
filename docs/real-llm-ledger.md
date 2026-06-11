@@ -3,29 +3,29 @@
 > **本文件由 `examples/real_llm/capability_matrix.py` 自动生成（数据源 `real-llm-ledger.json`），勿手编辑。**
 > 回归红线：基础层（`src/taifeng/{llm,loop,context,conversation}/`）变更必须全量重跑并提交本台账；详见 CLAUDE.md §测试约束。
 
-- **最近一次回归**：2026-06-11 01:10:24 UTC @ `4fbabb6`
+- **最近一次回归**：2026-06-11 08:39:25 UTC @ `f6efbb5`
 - **Provider / Model**：openai / gemini-3.1-pro-preview
-- **本次跑测场景**：selective_approval
+- **本次跑测场景**：travel_planner
 
 ## 逐场景结果
 
 | 场景 | 能力 | 结果 | 日期 @ commit | 耗时 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-06-11 @ `4fbabb6` | 38s |  |
-| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-06-11 @ `4fbabb6` | 47s |  |
-| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-06-11 @ `4fbabb6` | 21s |  |
-| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-06-11 @ `4fbabb6` | 5s |  |
-| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-06-11 @ `4fbabb6` | 45s |  |
-| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-06-11 @ `4fbabb6` | 17s |  |
-| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-06-11 @ `4fbabb6` | 15s |  |
-| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-06-11 @ `4fbabb6` | 20s |  |
-| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-06-11 @ `4fbabb6` | 16s |  |
-| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-06-11 @ `4fbabb6` | 44s |  |
-| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-06-11 @ `4fbabb6` | 23s |  |
-| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-06-11 @ `4fbabb6` | 29s |  |
-| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-06-11 @ `4fbabb6` | 14s |  |
-| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-06-11 @ `4fbabb6` | 19s |  |
-| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-06-11 @ `4fbabb6` | 41s |  |
+| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 38s |  |
+| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 47s |  |
+| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 21s |  |
+| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 5s |  |
+| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 45s |  |
+| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 17s |  |
+| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 15s |  |
+| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 20s |  |
+| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 16s |  |
+| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 44s |  |
+| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 23s |  |
+| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 29s |  |
+| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 14s |  |
+| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-06-11 @ `f6efbb5` | 33s |  |
+| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-06-11 @ `4fbabb6`（stale） | 41s |  |
 
 ## R3 可观测完整性审计（最近一次全量）
 
