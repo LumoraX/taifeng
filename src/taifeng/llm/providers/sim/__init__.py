@@ -9,6 +9,7 @@
 - ``contract`` 协议合同校验（RequestContractValidator / SimContractViolation）
 - ``server``   服务端状态机与请求侦察（SimServerState / RequestLedger）
 - ``client``   ModelClient 组装（SimClient / RoutingSimClient / SimCoordinator）
+- ``shape``    形状签名抽取（ShapeSignature / extract_shape —— 金样校准单一真相）
 """
 
 from __future__ import annotations
@@ -34,6 +35,11 @@ from taifeng.llm.providers.sim.server import (
     RequestLedger,
     SimServerState,
 )
+from taifeng.llm.providers.sim.shape import (
+    ShapeSignature,
+    extract_shape,
+    shape_class_key,
+)
 
 __all__ = [
     "RecordedRequest",
@@ -49,4 +55,7 @@ __all__ = [
     "SimFinish",
     "SimScriptExhausted",
     "SimTurn",
+    "ShapeSignature",
+    "extract_shape",
+    "shape_class_key",
 ]
