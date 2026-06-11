@@ -75,6 +75,7 @@
 | **重试 + 错误分类** | 指数退避 + 服务端 hint delay；错误分 11 桶 + 机读恢复配方 | `retry_async` / `LLMError` / `RecoveryPlan` | — | [llm-client.md](architecture/llm-client.md) | — |
 | **精准 cache 计量** | 各 provider cache 字段直读（Anthropic / DeepSeek / Gemini） | `PromptCacheStats` / `TokenUsage` | [real_llm/e2e.py](../examples/real_llm/e2e.py) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | — |
 | **conformance 测试模拟器** | 有状态 sim：协议合同校验（call_id 配对/前缀一致）+ token 记账 overflow + 前缀 cache 账本 + 故障注入 + 确定性时序编排（测试基础设施，替代旧 mock） | `SimClient` / `RoutingSimClient` / `SimTurn` / `sim_client` fixture | [tests/llm/test_sim_engine_integration.py](../tests/llm/test_sim_engine_integration.py) | [llm-sim-conformance.md](architecture/capabilities/llm-sim-conformance.md) ✅ | (sim 自身——CI 全量回归) |
+| **金样校准（形状漂移红线）** | 真实流形状签名录成脱敏 fixture 锚定 sim；漂移即红测（重录需人工 review diff，比对器无宽松开关） | `extract_shape` / `--record` / `tests/llm/golden/` | [tests/llm/test_golden_calibration.py](../tests/llm/test_golden_calibration.py) | [llm-sim-conformance.md](architecture/capabilities/llm-sim-conformance.md) §金样校准 ✅ | 金样即录自全量真实回归（[ledger](real-llm-ledger.md)） |
 
 ## 五、持久化（会话怎么存、崩溃怎么 resume）
 

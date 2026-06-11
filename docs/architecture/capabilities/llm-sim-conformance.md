@@ -37,7 +37,35 @@
 ## 测试接入
 
 - pytest fixture `sim_client`（`tests/conftest.py`）：工厂构造 + teardown 自动断言 `ledger.violations == []`（异常被引擎兜底吞掉时仍能红）。
-- 单测：`tests/llm/test_sim_*.py`（script / contract / ledger / server / client / routing / timing）；引擎链路集成：`tests/llm/test_sim_engine_integration.py`。
+- 单测：`tests/llm/test_sim_*.py`（script / contract / ledger / server / client / routing / timing / shape）；引擎链路集成：`tests/llm/test_sim_engine_integration.py`；金样校准：`tests/llm/test_golden_calibration.py`。
+
+## 金样校准（形状漂移红线）
+
+sim 的事件流形状以**真实 provider 录制的金样**锚定，防手工合成的骨架随 provider / 适配层演进而无感漂移（mock 重设计三部曲之三）。
+
+**形状签名**（单一真相：`sim/shape.py` 的 `extract_shape`，录制端与校验端共用）：
+
+| 维度 | 内容 | 比对方式 |
+| --- | --- | --- |
+| `kind_sequence` | 事件 kind 序列；连续 delta 类事件（可混 kind）折叠为单项 `delta[...]`（分块数与交错顺序不影响签名） | 完全相等 |
+| `terminal` | 终止类别：completed / error / truncated | 完全相等 |
+| `field_shapes` | 各 kind 的 `data` 字段名 + 值类型类别（`completed.usage` 协议嵌套展开一层；`structured_output.parsed` 是业务载荷只校类型） | 完全相等 |
+| `presence` | has_reasoning / has_text / has_tool_calls / has_structured / has_prompt_cache / request_id 与 end_turn 存在性 | 完全相等 |
+| `chunking` / `observed_env` | delta 块数；`rate_limits` 出现与否（取决于网关 HTTP 头，环境因素） | **只录不比** |
+
+签名零文本零数值——脱敏是结构性保证（fixture 无原始事件，想泄漏没有载体）。
+
+**录制 / 重录**（需真实 key，仅手动；CI 离线读 fixture）：
+
+```bash
+cd taifeng
+PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --record          # 全量
+PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --only <场景> --record  # 单场景
+```
+
+只有 **PASS 场景**落金样（`tests/llm/golden/<scenario>.jsonl`，content filter 等环境噪声不固化）；truncated 终态滤除（消费侧断流与 provider 截断录制端不可区分）；每行带 recorded_at / commit / provider / model 元数据可对账台账。
+
+**漂移红线语义**：校准测试按金样签名特征参数化构造 SimTurn 比对；金样出现 sim 表达不了的形状类别（error 终态 / 未知 kind）→ 测试红并打印类别 key。失败处方二选一——重录金样 + **人工 review diff**（重录而非手改 fixture），或给 sim 补合成能力（走 PR review）。比对器**无任何宽松开关**；sim 能产生金样未观测到的形状不构成失败（sim 可为超集，金样只锚定真实观测）。
 
 ## R1–R5 影响
 
