@@ -399,6 +399,26 @@ class AgentEngine:
         """
         return list(self._rewind_checkpoints)
 
+    async def rewind_nodes_for(self, thread_id: str) -> list[RewindCheckpoint]:
+        """按 thread_id 查询 rewind 节点表(thread-addressable rewind 的只读入口)。
+
+        - 根 thread:直接返回内存表(等价 ``rewind_nodes()``,零 IO);
+        - 其他 thread(典型为 detached spawn 子 thread):load raw store 项 →
+          ``reconstruct_logical_history`` 折叠压缩区间/重放 rewind marker 的
+          cut_index → ``derive_rewind_log`` 派生节点表。**禁止对 raw 直接
+          derive**——raw 含被折叠/被截断的废弃项,坐标会错位(design D3)。
+
+        Args:
+            thread_id: 目标 thread;不存在的 thread 自然得到空表(load 空)。
+
+        Returns:
+            该 thread 的可寻址节点列表(turn_root / iteration / dispatch)。
+        """
+        if thread_id == self._thread_id:
+            return list(self._rewind_checkpoints)
+        raw = await self._load_thread_items(thread_id)
+        return derive_rewind_log(reconstruct_logical_history(raw))
+
     def estimate_tokens(self) -> int:
         """估算当前 history 的 token 占用 —— 业务侧可据此决定是否 CompactNow。"""
         from taifeng.context.budget import estimate_history_tokens

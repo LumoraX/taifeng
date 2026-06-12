@@ -159,12 +159,18 @@ class Rewind(BaseModel):
       改了入参,同步改写 function_call.arguments 保持历史自洽。
 
     ``new_args`` 仅 ``retry_tool`` + dispatch 节点有意义,其余模式忽略。
+
+    ``thread_id``(thread-addressable rewind):缺省 None = root thread(向后兼容,
+    既有语义零变更);指向某 detached spawn 句柄的 ``child_thread_id`` 时,rewind
+    作用于该子 thread(节点表经 ``engine.rewind_nodes_for`` 查询)——与 ``Resume``
+    的 thread 寻址对称。活性守卫与重推语义见能力契约 thread-addressable-rewind。
     """
 
     kind: Literal["rewind"] = "rewind"
     node_id: str
     mode: Literal["retry_tool", "re_reason"] = "re_reason"
     new_args: dict[str, Any] | None = None
+    thread_id: str | None = None
 
 
 class SendToPeer(BaseModel):
