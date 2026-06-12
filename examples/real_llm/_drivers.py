@@ -75,6 +75,40 @@ async def drive_turn_rewind(engine: Any, res: Any) -> None:
         raise TimeoutError(f"Rewind 被拒: {rej.data}")
 
 
+async def drive_thread_rewind(engine: Any, res: Any) -> None:
+    """thread 寻址 rewind:spawn 子 thread 跑到终态 → 对其节点截断重推。
+
+    程序化 spawn(确定性,不依赖 LLM 自主派发)→ 等首次 spawn_completed →
+    ``rewind_nodes_for(child_tid)`` 从 store 推导子 thread 节点表 →
+    ``Rewind(thread_id=child_tid, mode=re_reason)`` 截断重推 → 等 turn_rewound
+    + 第二次 spawn_completed(重推终态经 _finalize_spawn 收敛)。
+    盯 rewind_rejected 快速失败(守卫误拒即真实回归红)。
+    """
+    out = await engine.spawn_skill(
+        skill_id="analyzer",
+        args={"topic": "远程办公对睡眠质量的影响"},
+        reason="thread-rewind 真实验证")
+    child_tid = out["child_thread_id"]
+    await _wait_for(res, lambda m: m.kind == "spawn_completed",
+                    what="首次 spawn_completed", wait_seconds=240.0)
+    nodes = await engine.rewind_nodes_for(child_tid)
+    if not nodes:
+        raise TimeoutError("spawn 终态后 rewind_nodes_for(child) 为空")
+    await engine.submit(Rewind(
+        node_id=nodes[0].node_id, thread_id=child_tid, mode="re_reason"))
+    await _wait_for(
+        res,
+        lambda m: m.kind == "turn_rewound" or m.kind == "rewind_rejected",
+        what="turn_rewound", wait_seconds=120.0)
+    if any(m.kind == "rewind_rejected" for m in res.events):
+        rej = next(m for m in res.events if m.kind == "rewind_rejected")
+        raise TimeoutError(f"thread rewind 被拒: {rej.data}")
+    await _wait_for(
+        res,
+        lambda m: res.kinds.get("spawn_completed", 0) >= 2,
+        what="重推后第二次 spawn_completed", wait_seconds=240.0)
+
+
 async def drive_spawn_join(engine: Any, res: Any) -> None:
     """并发 spawn 多专科 → 错峰 HITL 各自 Resume → join-barrier 聚合。"""
     await engine.submit(taifeng.UserMessage(
@@ -122,6 +156,7 @@ async def drive_peer_messaging(engine: Any, res: Any) -> None:
 DRIVERS: dict[str, Any] = {
     "suspend_resume": drive_suspend_resume,
     "turn_rewind": drive_turn_rewind,
+    "thread_rewind": drive_thread_rewind,
     "spawn_join": drive_spawn_join,
     "peer_messaging": drive_peer_messaging,
 }

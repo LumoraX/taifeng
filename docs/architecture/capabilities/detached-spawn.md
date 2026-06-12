@@ -8,9 +8,10 @@
 
 决策记录：[ADR 0015](../../decisions/0015-detached-skill-spawn.md)
 
-实现（四模块，状态由 `SpawnDriver` 单一持有，子协调器无状态、持 driver 引用，见 spawn-module-structure 契约）：
+实现（五模块，状态由 `SpawnDriver` 单一持有，子协调器无状态、持 driver 引用，见 spawn-module-structure 契约）：
 - `src/taifeng/loop/spawn_driver.py`（`SpawnDriver`：运行态四表 + 发起/驱动/终态收敛 + 查询/终止/保活 + 公共入口转发器）
 - `src/taifeng/loop/spawn_resume.py`（`SpawnResumeChain`：错峰续跑链——直接挂起核销重跑 / 嵌套挂起下探回填）
+- `src/taifeng/loop/spawn_rewind.py`（`SpawnRewindChain`：thread 寻址 rewind——活性守卫 / 截断落 marker / 重推收敛，见 [turn-rewind](turn-rewind.md) §thread 寻址）
 - `src/taifeng/loop/spawn_barrier.py`（`JoinBarrierCoordinator`：join-barrier 登记/重查/触发 + 冷恢复重建）
 - `src/taifeng/loop/spawn_handle.py`（`SpawnHandle`、`SpawnHandleRegistry`、`JoinBarrier`）
 - `src/taifeng/loop/engine.py`（薄转发层：`spawn_skill / set_join_barrier / spawn_status / kill_spawn / has_live_spawns`）
@@ -116,6 +117,8 @@ running → done | error | cancelled
 **关键**：直接挂起（DATA/FORM/permission 落在 spawn 子 thread 自身）不复用 `_handle_child_resume`，因为后者假设父 turn 此刻仍挂在 `CHILD_SKILL` pending gap 上并需要沿链回填；detached spawn 的父 turn 早已结束，不存在这条链。
 
 再次挂起（多轮 HITL）→ 句柄重标 `suspended`，可再 `Resume`（无限轮次，直到终态）。
+
+**对称能力——thread 寻址 rewind**：`Rewind(thread_id=<child_thread_id>, node_id=...)` 同样按 thread_id 路由到 `SpawnDriver.rewind_spawn`（`loop/spawn_rewind.py`）——对 error / done / 中断遗留 running 的子 thread 截断重推（典型：失败 spawn 从失败步人工 retry）；挂起态拒绝（`turn_suspended`，与 Resume 职责不重叠）、热跑中拒绝（`thread_running`）。重推同样复用 `_build_child_runner` + `_finalize_spawn` 收敛。完整契约见 [`turn-rewind`](turn-rewind.md) §thread 寻址。
 
 #### Requirement: 嵌套挂起（CHILD_SKILL）经 `resume_spawn_nested` 续跑
 

@@ -47,6 +47,13 @@ SIM_ROUTES = {
             SimTurn(text="结论 v2（重推）：需配套异步协作机制。"),
         ],
     },
+    "thread_rewind": {
+        # turn_rewind analyzer body 标记(被 spawn 的子 thread:首跑 + 重推各一)
+        "专科分析": [
+            SimTurn(text="子结论 v1：影响轻微。"),
+            SimTurn(text="子结论 v2（重推）：存在显著个体差异。"),
+        ],
+    },
 }
 
 

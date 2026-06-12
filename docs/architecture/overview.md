@@ -100,6 +100,7 @@ src/taifeng/
 │   ├── spawn.py          # K1 SpawnSlotRegistry —— 广度准入（fork-bomb 防护）
 │   ├── spawn_driver.py   # detached spawn 协调器（状态单一持有 + 发起/驱动/终态收敛 + 查询/终止）
 │   ├── spawn_resume.py   # 挂起 spawn 错峰续跑链（直接核销重跑 / 嵌套下探回填）
+│   ├── spawn_rewind.py   # thread 寻址 rewind：spawn 子 thread 截断重推（活性守卫）
 │   ├── spawn_barrier.py  # join-barrier 生命周期（登记/重查/触发聚合）+ 冷恢复重建
 │   ├── peer_mailbox.py   # peer-mailbox：谱系内点对点投递 / TriggerTurn 唤醒 / wait_peer
 │   ├── prompt.py         # build_prompt + history ↔ api messages 转换

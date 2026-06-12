@@ -174,7 +174,7 @@ class TenantPolicySource:
 | **`RefreshSnapshot`** | 拉最新 SkillSnapshot | — |
 | **`UpdateInstructions`** | 热更指定 layer 的 source；缓存立即失效；下个 turn 生效 | `layer_name`, `new_source` (str 或 `InstructionSource`) |
 | **`Resume`** | 续跑一个挂起的 thread（`end_reason="suspended"` 的 turn）。配对 `resolutions` → 补齐 history-gap → 续采样。详见 §8 与 [suspend-resume 契约](architecture/capabilities/suspend-resume.md) | `thread_id`, `resolutions: {request_id: payload}` |
-| **`Rewind`** | 回退到 root turn 内某回访节点并重推。`re_reason` 截到节点采样前重采样（LLM 重决下游）；`retry_tool`（仅 dispatch 节点）保留 assistant 的 function_call、只重跑该工具。配 `engine.rewind_nodes()` 取节点。详见 [turn-rewind 契约](architecture/capabilities/turn-rewind.md) + ADR 0014 | `node_id`, `mode ∈ {re_reason, retry_tool}`, `new_args?` |
+| **`Rewind`** | 回退到某回访节点并重推。`re_reason` 截到节点采样前重采样（LLM 重决下游）；`retry_tool`（仅 dispatch 节点）保留 assistant 的 function_call、只重跑该工具。缺省作用于 root turn（配 `engine.rewind_nodes()` 取节点）；`thread_id` 指向 spawn 子 thread 时对其截断重推（失败 spawn 从失败步人工 retry，配 `engine.rewind_nodes_for(tid)` 取节点）。详见 [turn-rewind 契约](architecture/capabilities/turn-rewind.md) + ADR 0014/0018 | `node_id`, `mode ∈ {re_reason, retry_tool}`, `new_args?`, `thread_id?` |
 | `Shutdown` | 关闭 engine | — |
 
 加粗的 6 个是本轮新增。
@@ -192,6 +192,7 @@ engine.entry_skill             # SkillDefinition（只读）
 engine.thread_id               # 当前 thread_id
 engine.history_snapshot()      # list[ResponseItem] 副本（业务侧只读）
 engine.rewind_nodes()          # list[RewindCheckpoint]：最近一次 root turn 的回访节点表（供 Rewind Op / UI 渲染可点节点）
+await engine.rewind_nodes_for(tid)  # 按 thread_id 查节点表（spawn 子 thread 从 store 推导;根 tid 等价 rewind_nodes()）
 engine.estimate_tokens()       # 当前 history 估算 token 数
 engine.usage_ratio()           # 占 context_window 的比例 (0.0~1.0+)
 engine.instructions_snapshot() # list[ResolvedInstruction] 副本（按 priority 升序，frozen）
