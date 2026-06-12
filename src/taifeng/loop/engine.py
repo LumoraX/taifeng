@@ -2588,6 +2588,13 @@ class AgentEngine:
         op = sub.op
         assert isinstance(op, Rewind)
 
+        # thread-addressable rewind:thread_id 指向非根 thread → 路由到 spawn
+        # 子 thread rewind 链(守卫/截断/重推在 spawn_rewind.py;与 Resume 的
+        # thread 寻址分流同形)。缺省 None 或显式指根 → 既有根路径零变更。
+        if op.thread_id is not None and op.thread_id != self._thread_id:
+            await self._spawn.rewind_spawn(sub)
+            return
+
         # 1. 查 checkpoint(最近一次 root turn 回写的节点表)
         cp = next(
             (c for c in self._rewind_checkpoints if c.node_id == op.node_id), None

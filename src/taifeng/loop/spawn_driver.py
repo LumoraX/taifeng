@@ -39,6 +39,7 @@ from taifeng.loop.peer_mailbox import PeerMailbox
 from taifeng.loop.spawn_barrier import JoinBarrierCoordinator
 from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
 from taifeng.loop.spawn_resume import SpawnResumeChain
+from taifeng.loop.spawn_rewind import SpawnRewindChain
 
 if TYPE_CHECKING:
     from taifeng.loop.cancellation import CancellationToken
@@ -79,11 +80,15 @@ class SpawnDriver:
         # QueueOnly 投运行中目标需要拿到其 pending_input(B1 steering 同一队列);
         # 各驱动路径(首发 / resume / 唤醒)run 前登记、finally 弹出。
         self._live_runners: dict[str, Any] = {}
+        # thread-addressable rewind:rewind 在飞的 child_thread_id 集合。
+        # 并发双 Rewind 拒后到者(占位期间二次 rewind 报 thread_running)。
+        self._rewinding_threads: set[str] = set()
         # 子协调器（spawn-module-structure 契约:无自有状态,经本 driver 访问
         # 上述运行态表;公共入口由本类同名转发器暴露,外部契约不变）。
         self._peers = PeerMailbox(self)
         self._barriers = JoinBarrierCoordinator(self)
         self._resume = SpawnResumeChain(self)
+        self._rewind = SpawnRewindChain(self)
 
     async def _await_root_cancel_ready(self) -> None:
         """有界让步等待根取消 token 就绪，超时显式抛错（不无限自旋、不静默跳过）。
@@ -435,6 +440,14 @@ class SpawnDriver:
         """
         await self._resume.resume_spawn(sub, handle)
 
+    async def rewind_spawn(self, sub: Submission) -> None:
+        """转发到 ``SpawnRewindChain.rewind_spawn``(thread-addressable rewind)。
+
+        守卫(活性判定)、截断(marker 落子 thread store)与重推的实现体在
+        loop/spawn_rewind.py;终态统一回本类收敛点
+        (_finalize_spawn / _settle_failed)。
+        """
+        await self._rewind.rewind_spawn(sub)
 
     def spawn_status(self, handle_ids: list[str]) -> dict[str, dict[str, Any]]:
         """查询一批 spawn 句柄的状态 / 结果（业务侧轮询 / join 检查用）。

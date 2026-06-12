@@ -168,6 +168,87 @@ async def test_rewind_nodes_for_root_equals_property(
     await pool.close()
 
 
+# ──────────────────────────────────────────────────────────────────────
+# T2 活性守卫:unknown_thread / thread_running / turn_suspended / unknown_node
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rewind_unknown_thread_rejected(rw_skills, threads_dir) -> None:
+    """thread_id 不属于任何 spawn 句柄 → rewind_rejected(unknown_thread)。"""
+    pool, _ = await _make_pool(rw_skills, threads_dir, routes={
+        "HOST_MARK": [SimTurn(text="主")],
+    })
+    engine = await pool.get_or_create(session_id="g1", entry_skill_id="host")
+    sub_id = await engine.submit(Rewind(node_id="t1:it1", thread_id="no-such"))
+    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=3)
+    assert data["reason"] == "unknown_thread"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_running_spawn_rejected(rw_skills, threads_dir) -> None:
+    """子 thread 热跑中(live runner)→ rewind_rejected(thread_running)。"""
+    pool, client = await _make_pool(rw_skills, threads_dir, routes={
+        # 子 turn 卡在 await_signal,保持 live 状态直到测试放行
+        "WORKER_MARK": [SimTurn(text="慢", await_signal="release")],
+        "HOST_MARK": [SimTurn(text="主")],
+    }, max_iterations=3)
+    engine = await pool.get_or_create(session_id="g2", entry_skill_id="host")
+    out = await engine.spawn_skill(skill_id="worker", args={}, reason="t")
+    hid, ctid = out["handle_id"], out["child_thread_id"]
+    try:
+        # spawn 后立即 rewind:子 runner 还卡在采样信号上(running + live)
+        sub_id = await engine.submit(Rewind(node_id="t1:it1", thread_id=ctid))
+        data = await asyncio.wait_for(
+            _collect_rejected(engine, sub_id), timeout=3)
+        assert data["reason"] == "thread_running"
+    finally:
+        client.coordinator.signal("release")
+        await _wait(
+            lambda: engine.spawn_status([hid])[hid]["status"] == "done")
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_suspended_spawn_rejected(rw_skills, threads_dir) -> None:
+    """子 thread 活跃挂起 → rewind_rejected(turn_suspended),挂起走 Resume。"""
+    from taifeng import SuspendByDefaultPolicy
+
+    pool, _ = await _make_pool(rw_skills, threads_dir, routes={
+        "WORKER_MARK": [_tool_turn(1)],
+        "HOST_MARK": [SimTurn(text="主")],
+    }, failure_policy=SuspendByDefaultPolicy())
+    engine = await pool.get_or_create(session_id="g3", entry_skill_id="host")
+    out = await engine.spawn_skill(skill_id="worker", args={}, reason="t")
+    hid, ctid = out["handle_id"], out["child_thread_id"]
+    assert await _wait(
+        lambda: engine.spawn_status([hid])[hid]["status"] == "suspended"
+    ), "SuspendByDefaultPolicy 下触顶应挂起"
+    sub_id = await engine.submit(Rewind(node_id="t1:it1", thread_id=ctid))
+    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=3)
+    assert data["reason"] == "turn_suspended"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_unknown_node_on_child_rejected(
+    rw_skills, threads_dir
+) -> None:
+    """error 终态子 thread + 不存在的 node_id → rewind_rejected(unknown_node)。"""
+    pool, _ = await _make_pool(rw_skills, threads_dir, routes={
+        "WORKER_MARK": [_tool_turn(1)],
+        "HOST_MARK": [SimTurn(text="主")],
+    })
+    engine = await pool.get_or_create(session_id="g4", entry_skill_id="host")
+    _hid, ctid = await _spawn_until_error(engine)
+    sub_id = await engine.submit(
+        Rewind(node_id="does-not-exist", thread_id=ctid))
+    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=3)
+    assert data["reason"] == "unknown_node"
+    await pool.close()
+
+
 @pytest.mark.asyncio
 async def test_rewind_nodes_for_failed_spawn_has_dispatch(
     rw_skills, threads_dir
