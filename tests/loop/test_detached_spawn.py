@@ -432,6 +432,68 @@ async def test_spawn_staggered_hitl(expert_skills, threads_dir):
     await pool.close()
 
 
+@pytest.mark.asyncio
+async def test_spawn_suspended_carries_record_id(expert_skills, threads_dir):
+    """spawn_suspended 事件必须带 record_id（消费方据此与 thread 落盘的挂起 record
+    对齐做幂等去重 / 分轮）—— 与 turn_suspended 的 record_id 同源。"""
+    import taifeng
+    from taifeng.llm.providers import SimTurn
+    from taifeng.llm.providers.sim import RoutingSimClient
+    from taifeng.suspend.record import SuspensionRecord
+    from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+
+    client = RoutingSimClient(routes={
+        "EXPERT_A_MARK": [
+            SimTurn(text="A 向用户提问", tool_calls=[
+                {"id": "call_a", "name": "request_user_input",
+                 "arguments": '{"prompt": "A 需要补充信息"}'},
+            ]),
+            SimTurn(text="A 最终结论 A_DONE"),
+        ],
+    })
+
+    pool = await taifeng.EnginePool.create(
+        skills_dir=expert_skills, threads_dir=threads_dir,
+        model_client=client, compressors=[],
+        extra_tools=[make_request_user_input_tool()])
+    engine = await pool.get_or_create(
+        session_id="spawn-record-id", entry_skill_id="orchestrator")
+
+    events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev)
+            if ev.msg.kind == "shutdown":
+                break
+
+    watch_task = asyncio.create_task(watch())
+    await asyncio.sleep(0)
+
+    def _find(kind: str, handle_id: str):
+        for ev in events:
+            if ev.msg.kind == kind and ev.msg.data.get("handle_id") == handle_id:
+                return ev
+        return None
+
+    a = await engine.spawn_skill(skill_id="expert-a", args={}, reason="A")
+    a_hid, a_tid = a["handle_id"], a["child_thread_id"]
+    assert await _wait(lambda: _find("spawn_suspended", a_hid) is not None), \
+        "expert-a 未挂起"
+
+    # spawn_suspended 带 record_id，且与子 thread 落盘的挂起 record 同一 record_id。
+    susp = _find("spawn_suspended", a_hid)
+    items = [it async for it in await pool.store.load_thread(a_tid)]
+    rec_items = [it for it in items if it.kind == "suspension"]
+    assert len(rec_items) == 1
+    rec = SuspensionRecord.from_item(rec_items[0])
+    assert susp.msg.data["record_id"] == rec.record_id
+    assert susp.msg.data["record_id"]  # 非空
+
+    watch_task.cancel()
+    await pool.close()
+
+
 # ---------------------------------------------------------------------------
 # Task 7: spawn_status(非阻塞) / kill_spawn(单 spawn 隔离取消) /
 #         has_live_spawns(引用计数保活：有未终结 spawn 不释放 engine)。

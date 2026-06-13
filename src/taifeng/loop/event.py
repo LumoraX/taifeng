@@ -633,7 +633,13 @@ class SpawnStarted(_Msg):
 
 
 class SpawnSuspended(_Msg):
-    """data = {handle_id, thread_id, pending}(= 该 child thread 的挂起)"""
+    """data = {handle_id, thread_id, record_id, pending}(= 该 child thread 的挂起)。
+
+    ``record_id`` 与 ``turn_suspended`` 同源(子 thread 落盘挂起 record 的幂等键):
+    消费方按 (handle_id, record_id) 去重 / 分轮 —— 首挂与每次二次挂起(Resume 续跑
+    后再挂)各带不同 record_id(新挂起点 = 新 record);同一 record_id 重放(冷恢复 /
+    部分核销后仍挂)视作同一逻辑挂起。子 thread 无挂起 record 的边界下为 None。
+    """
 
     kind: Literal["spawn_suspended"] = "spawn_suspended"
 

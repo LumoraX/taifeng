@@ -308,6 +308,14 @@ async def test_spawn_nested_multi_round_hitl_resume(nested2_skills, threads_dir)
             if ev.msg.kind == "spawn_suspended"
             and ev.msg.data.get("handle_id") == hid)
 
+    def _suspend_record_ids() -> list[str]:
+        """按观测顺序取本 handle 各次 spawn_suspended 的 record_id（幂等键）。"""
+        return [
+            ev.msg.data["record_id"]
+            for ev in events
+            if ev.msg.kind == "spawn_suspended"
+            and ev.msg.data.get("handle_id") == hid]
+
     def _latest_data_req() -> str | None:
         """最近一条 leaf DATA turn_suspended 的 request_id（按观测顺序取末条）。"""
         found = None
@@ -332,6 +340,13 @@ async def test_spawn_nested_multi_round_hitl_resume(nested2_skills, threads_dir)
     assert req2 is not None and req2 != req1
     await engine.submit(
         Resume(thread_id=child_tid, resolutions={req2: {"answer": "b"}}))
+
+    # 二次挂起幂等键：首挂 / 二次挂的 spawn_suspended 各带 record_id 且互不相同，
+    # 消费方据此区分「新一轮挂起」与「同一挂起的重放」。
+    rec_ids = _suspend_record_ids()
+    assert len(rec_ids) >= 2
+    assert all(rec_ids), "每条 spawn_suspended 都应带非空 record_id"
+    assert rec_ids[0] != rec_ids[1], "首挂与二次挂的 record_id 应不同"
 
     # 全跑完
     assert await _wait(

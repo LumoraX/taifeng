@@ -496,7 +496,7 @@ R2：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`re
 child task 运行（独立 TurnRunner @ child thread）：
   → 正常完成  → _finalize_spawn → emit spawn_completed
               → _check_barriers（每次终态均检查）
-  → HITL 挂起 → 挂起 record 落 child thread → emit spawn_suspended{handle_id, thread_id, pending}
+  → HITL 挂起 → 挂起 record 落 child thread → emit spawn_suspended{handle_id, thread_id, record_id, pending}
               → task 退栈，K1 slot 释放（suspended 不占并发额度）
   → 错误      → emit spawn_failed → _check_barriers
   → 取消      → emit spawn_cancelled → _check_barriers

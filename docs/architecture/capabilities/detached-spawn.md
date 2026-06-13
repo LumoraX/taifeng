@@ -63,7 +63,7 @@ running → done | error | cancelled
 | kind | 触发时机 | data 关键字段 |
 | --- | --- | --- |
 | `spawn_started` | spawn 分离任务启动后 | `handle_id, skill_id, child_thread_id` |
-| `spawn_suspended` | spawn 内部 HITL 挂起，任务退栈 | `handle_id, thread_id, pending` |
+| `spawn_suspended` | spawn 内部 HITL 挂起，任务退栈 | `handle_id, thread_id, record_id, pending` |
 | `spawn_completed` | spawn 正常结束 | `handle_id, result` |
 | `spawn_failed` | spawn 以 error 终止 | `handle_id, error` |
 | `spawn_cancelled` | `kill_spawn` / 根取消 触发 | `handle_id` |
@@ -102,7 +102,7 @@ running → done | error | cancelled
 
 ### Requirement: 各自独立 HITL — staggered Resume 路由
 
-每个 spawn 的 HITL 挂起记录落**该 spawn 的 child thread**，不落父 thread。`spawn_suspended{handle_id, thread_id, pending}` 发出后，该 spawn 的 detached asyncio 任务**退栈**（父 turn 不受影响，父 thread 无 pending gap）。
+每个 spawn 的 HITL 挂起记录落**该 spawn 的 child thread**，不落父 thread。`spawn_suspended{handle_id, thread_id, record_id, pending}` 发出后，该 spawn 的 detached asyncio 任务**退栈**（父 turn 不受影响，父 thread 无 pending gap）。`record_id` 与该 child thread 落盘挂起 record 同源（即 `turn_suspended` 的同一 `record_id`），消费方按 `(handle_id, record_id)` 做幂等键：首挂与每次二次挂起各带不同 record_id（新挂起点 = 新 record），同一 record_id 重放（冷恢复重放 / 部分核销后仍挂）视作同一逻辑挂起。
 
 业务凭 `Resume(thread_id=<child_thread_id>, resolutions={request_id: payload})` 提交。Engine 在 `Resume` 分发时：
 
@@ -145,6 +145,7 @@ running → done | error | cancelled
 
 - **WHEN** A Resume 后再次 HITL
 - **THEN** emit 第二条 `spawn_suspended{handle_id=A}`，handle 状态回 `suspended`
+- **AND** 第二条事件携带**新的** `record_id`（≠ 首挂），消费方据 `(handle_id, record_id)` 分轮去重
 - **AND** 再次 `Resume(thread_id=A_child_thread_id)` 仍可续跑
 
 ### Requirement: join-barrier 全终态自动触发聚合

@@ -324,16 +324,23 @@ class SpawnDriver:
             self._spawn_handles.set_result(
                 handle_id, status="suspended", result=None
             )
+            # record_id 与 pending 同源派生：消费方按 (handle_id, record_id) 做幂等键
+            # —— 首挂 / 每次二次挂起各带不同 record_id（新挂起点 = 新 record），
+            # 同一 record_id 重放（冷恢复 / 部分核销后仍挂）视作同一逻辑挂起。
+            # 与 turn_suspended 的 record_id 同源，便于跨事件对齐。
+            suspension = outcome.suspension
             pending = (
-                outcome.suspension.to_item().payload["pending"]
-                if outcome.suspension is not None
+                suspension.to_item().payload["pending"]
+                if suspension is not None
                 else []
             )
+            record_id = suspension.record_id if suspension is not None else None
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnSuspended(data={
                     "handle_id": handle_id,
                     "thread_id": child_thread_id,
+                    "record_id": record_id,
                     "pending": pending,
                 }),
             ))
