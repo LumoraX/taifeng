@@ -1,207 +1,208 @@
-# Taifeng 能力总览矩阵
+# Taifeng Capability Matrix
 
-> **这份文档回答一个问题：taifeng 到底实现了什么、怎么接、去哪看。**
+> **This document answers one question: what has Taifeng implemented, how do I integrate it, and where is the authoritative contract?**
 >
-> 面向**使用 taifeng 的业务方**：扫一眼就能确定「这个功能 tf 有没有 / 落地了没 / 入口是哪个 API / 有没有现成示例」，不必翻源码或猜测。
->
-> 三层文档分工：
-> - **本文档**＝能力清单（能做什么 + 落地状态 + 入口 + 示例）——先看这里。
-> - [`usage.md`](usage.md)＝怎么写代码接进来（安装 + 三层使用粒度 + 各能力代码骨架）。
-> - [`configurable-knobs.md`](configurable-knobs.md)＝所有可配置参数的字段级清单。
-> - [`architecture/capabilities/`](architecture/capabilities/README.md)＝每个能力的字段级稳定契约（数据结构 / 协议签名 / 事件 / 约束）。
+> It is written for teams integrating Taifeng into a host system. A quick scan should tell you whether a capability exists, whether it has landed, which API or tool is the entry point, and where to find examples and contracts.
 
-## 状态图例
+Documentation layers:
 
-| 标记 | 含义 |
+- **This document**: capability inventory, status, entry points, examples, and contract links.
+- [`usage.md`](usage.md): installation, usage levels, and code skeletons.
+- [`configurable-knobs.md`](configurable-knobs.md): field-level list of construction-time and runtime configuration.
+- [`architecture/capabilities/`](architecture/capabilities/README.md): stable field-level contracts for data structures, protocols, events, and constraints.
+
+## Status Legend
+
+| Marker | Meaning |
 | --- | --- |
-| ✅ | 已落地，有测试 + 可跑示例，可直接在生产接入 |
-| 🧪 | 已落地，验证以 mock 为主（真实场景受限已如实记录，见契约文档） |
+| ✅ | Implemented, covered by tests and runnable examples, ready for production integration |
+| 🧪 | Implemented, primarily validated with simulator/mock coverage; real-world limits are documented in the contract |
 
-> 截至当前分支，下表能力**全部 ✅/🧪 已落地**。能力完善度进度（P0/P1/P2 清零）见 [`architecture/hermes-gap-roadmap.md`](architecture/hermes-gap-roadmap.md)，内核原语进度（K1–K4 已落、K5 待补）见 [`architecture/kernel-gap-analysis.md`](architecture/kernel-gap-analysis.md)。
-
----
-
-## 一、Skill 系统（让 LLM 按需调度文档化技能）
-
-| 能力 | 一句话 | 入口（API / 工具 / Op） | 示例 | 契约 | 真实 LLM 验证 |
-| --- | --- | --- | --- | --- | --- |
-| **Skill = markdown** | skill 是 SKILL.md 文档，不是 function tool；LLM 是调度器 | `FilesystemSkillRegistry.load(dir)` / SKILL.md frontmatter | [basic/minimal_chat.py](../examples/basic/minimal_chat.py) | [skill-system.md](architecture/skill-system.md) | [`composite_dispatch`](real-llm-ledger.md) |
-| **read_skill 懒加载** | 子 skill 列表只给 id+description，LLM 按需 `read_skill` 拉 body（cache 友好） | `read_skill` 工具 | [read_skill_lazy/](../examples/read_skill_lazy/) | [skill-system.md](architecture/skill-system.md) | [`read_skill_lazy`](real-llm-ledger.md) |
-| **call_skill 派发** | composite skill 递归派发子 skill，独立子 turn；深度 + 环检测 | `call_skill` 工具 / `DispatchPolicy` | [basic/composite_skill.py](../examples/basic/composite_skill.py) | [skill-dispatch.md](architecture/capabilities/skill-dispatch.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
-| **声明式编排** | SKILL.md `orchestration:` 声明 parallel/serial/when，执行器不采样 LLM、确定性跑 | SKILL.md `orchestration` 字段 | [orchestration/demo.py](../examples/orchestration/demo.py) | [skill-orchestration.md](architecture/capabilities/skill-orchestration.md) ✅ | [`orchestration`](real-llm-ledger.md) |
-| **并发 fan-out** | LLM 在一条消息里发多个 call_skill，`max_parallel_tool_calls>1` 时真并发 | `max_parallel_tool_calls` | [concurrent_fanout/](../examples/concurrent_fanout/) | [skill-dispatch.md](architecture/capabilities/skill-dispatch.md) ✅ | [`concurrent_fanout`](real-llm-ledger.md) |
-| **分离式并发 spawn + join-barrier** | `spawn_skill` 立即返回句柄不阻塞、各 child 独立 HITL；`await_skills` 全终态自动聚合；**spawn 目标可为 entry**（与 call_skill 不同） | `spawn_skill` / `await_skills` / `join_skill` / `kill_skill` 工具 | [multi_expert_consult/](../examples/multi_expert_consult/) | [detached-spawn.md](architecture/capabilities/detached-spawn.md) ✅ | [`spawn_join`](real-llm-ledger.md) |
-| **嵌套专科错峰 HITL 续跑** | 被 spawn 的 composite 专科其**子 skill** HITL 挂起（CHILD_SKILL）→ `Resume` 走 `resume_spawn_nested` 续跑链恢复（真实 MDT 拓扑） | `Resume(thread_id=<spawn 子 thread>)` | [nested_hitl_demo.py](../examples/multi_expert_consult/nested_hitl_demo.py) | [detached-spawn.md](architecture/capabilities/detached-spawn.md) ✅ | — |
-| **SKILL.md scripts 运行时** | SKILL.md `scripts:` 声明的脚本经 `run_script` 工具执行，权限 + hook 双门控 | `script_executors=` + `run_script` 工具 | [basic/skill_with_script.py](../examples/basic/skill_with_script.py) | [script-execution.md](architecture/capabilities/script-execution.md) ✅ | [`numeric_loop`](real-llm-ledger.md) |
-| **SKILL.md 热更** | 文件监听，改 SKILL.md 不重启进程即生效 | `auto_watch_skills=True` | — | [skill-system.md](architecture/skill-system.md) | — |
-| **运行时资格门控** | composite 子 skill 按 `requires` / `exposure` × 业务 `RuntimeCapabilities` 动态可见 | SKILL.md `requires` / `exposure` | [subagent_isolation/](../examples/subagent_isolation/) | [skill-system.md](architecture/skill-system.md) | — |
-
-## 二、主循环 / 工具（turn 怎么跑、怎么调度、怎么取消）
-
-| 能力 | 一句话 | 入口（API / 工具 / Op） | 示例 | 契约 | 真实 LLM 验证 |
-| --- | --- | --- | --- | --- | --- |
-| **turn 主循环** | Submission/EventMsg 双总线 actor；turn 跑在独立 task 不阻塞主循环 | `AgentEngine` / `engine.submit` / `engine.subscribe` | [basic/minimal_chat.py](../examples/basic/minimal_chat.py) | [agent-loop.md](architecture/agent-loop.md) | [`composite_dispatch`](real-llm-ledger.md) |
-| **多 engine 复用 + resume** | 一进程多会话 engine 缓存；`resume_thread_id` 续接历史 | `EnginePool.create` / `get_or_create(resume_thread_id=)` | [persistence/](../examples/persistence/) | [agent-loop.md](architecture/agent-loop.md) | [`suspend_resume`](real-llm-ledger.md) |
-| **取消 turn** | 协作式取消，父子 token 级联 | `CancelTurn` Op / `CancellationToken` | [web_ui/](../examples/web_ui/) | [agent-loop.md](architecture/agent-loop.md) | — |
-| **mid-turn 输入注入（steering）** | turn 运行中投增量用户输入，下个迭代边界并入、不中止 turn；无活跃 turn 退化落历史 | `InjectUserInput` Op / `user_input_injected` 事件 | [web_ui/](../examples/web_ui/) | [midturn-input-steering.md](architecture/capabilities/midturn-input-steering.md) ✅ | — |
-| **注入业务 system 消息** | turn 间投 system 注记，不影响活跃 turn | `InjectSystemMessage` Op | — | [agent-loop.md](architecture/agent-loop.md) | — |
-| **turn 回访重跑（rewind）** | 把 root turn 拆成可寻址节点表，回退到任意 call_skill / 采样圈重跑 | `Rewind` Op（re_reason / retry_tool） | [turn_rewind/](../examples/turn_rewind/) | [turn-rewind.md](architecture/capabilities/turn-rewind.md) ✅ | [`turn_rewind`](real-llm-ledger.md) |
-| **thread 寻址 rewind（spawn 子 thread）** | 失败 spawn 从失败步人工 retry：对 error / done / 中断遗留态子 thread 截断重推，保留前序步骤与已答 HITL；挂起 / 热跑中按活性守卫拒绝 | `Rewind(thread_id=child_tid)` / `engine.rewind_nodes_for(tid)` | — | [turn-rewind.md](architecture/capabilities/turn-rewind.md) §thread 寻址 ✅ + ADR 0018 | [`thread_rewind`](real-llm-ledger.md) |
-| **HITL 挂起 / 跨实例恢复** | 表单采集等待用户输入 → 释放实例 → 跨进程重建 → `Resume` 续跑 | `request_user_input` 工具 / `Resume` Op / `SuspensionResolver` | [suspend_resume/](../examples/suspend_resume/) | [suspend-resume.md](architecture/capabilities/suspend-resume.md) ✅ | [`suspend_resume`](real-llm-ledger.md) |
-| **HITL 权限审批** | 动作级 HITL（skill 派发 / script / network），typed `PermissionRequest`，可超时 | `permission_policy=` / `PermissionPolicy` / `CallbackPrompter` | [permission/](../examples/permission/) · [selective_approval/](../examples/selective_approval/) | [permission-gate.md](architecture/capabilities/permission-gate.md) ✅ | [`selective_approval`](real-llm-ledger.md) |
-| **Hooks（claw-code 范式）** | 8 种 hook（Pre/Post ToolUse / SkillDispatch / ScriptUse、PreTurn、PreCompact）拦截关键路径 | `hooks=` / `HookRunner` | [hooks_showcase/](../examples/hooks_showcase/) | [hooks.md](architecture/capabilities/hooks.md) ✅ | — |
-| **指令分层注入 + 热更** | engine/session/turn 三档 scope 注入 system 指令（codex AGENTS.md 角色），协议化、可热更 | `instruction_layers=` / `UpdateInstructions` Op / `InstructionSource` | [basic/instructions_basic.py](../examples/basic/instructions_basic.py) | [instructions-injection.md](architecture/capabilities/instructions-injection.md) ✅ | — |
-| **工具白名单一致性** | 可见集单一真相（scripts 自动并入 run_script，atomic+scripts 开箱可用）+ dispatch 侧 not_offered 校验（可见才可执行） | `SkillDefinition.visible_tool_names()` / `dispatch_batch(visible_tools=)` | [travel_planner/](../examples/travel_planner/)（atomic+scripts 活样例） | [tool-whitelist.md](architecture/capabilities/tool-whitelist.md) ✅ | [`travel_planner`](real-llm-ledger.md) |
-| **内置工具集** | read_skill / call_skill / file_read / file_write / shell_exec / apply_patch / http_request / run_in_background / wait_for_task / run_script / request_user_input / spawn 四件套 | `extra_tools=` / `make_*_tool()` | [numeric_loop/](../examples/numeric_loop/) | [tool-builtins-extended.md](architecture/capabilities/tool-builtins-extended.md) ✅ | [`numeric_loop`](real-llm-ledger.md) |
-| **后台任务** | LLM 发起长任务后台跑 + 轮询等待 | `run_in_background` / `wait_for_task` 工具 / `BackgroundTaskRegistry` | — | [tool-builtins-extended.md](architecture/capabilities/tool-builtins-extended.md) ✅ | — |
-
-## 三、上下文压缩（溢出怎么压、cache 怎么保）
-
-| 能力 | 一句话 | 入口（API / Op） | 示例 | 契约 | 真实 LLM 验证 |
-| --- | --- | --- | --- | --- | --- |
-| **本地 budget 主动压缩** | 到达配置 `context_window` 上限即主动压缩，**不依赖 provider 报 overflow** | `budget=ContextBudget(...)` / `compressors=` | [compression_showcase/demo.py](../examples/compression_showcase/demo.py)（mock） | [context-compression.md](architecture/context-compression.md) | [`compression`](real-llm-ledger.md) |
-| **Handoff 压缩** | codex 范式 LLM-to-LLM 接力摘要 + 质量审计 + 健康回滚 | `HandoffCompactionStrategy` | [overflow_demo.py](../examples/compression_showcase/overflow_demo.py)（mock）· [capability_matrix.py](../examples/real_llm/capability_matrix.py)（需 key） | [context-compression.md](architecture/context-compression.md) | — |
-| **滑窗压缩** | 保尾 N 条 + 图像 marker | `SlidingWindowStrategy` | [compression_showcase/demo.py](../examples/compression_showcase/demo.py)（mock） | [context-compression.md](architecture/context-compression.md) | [`compression`](real-llm-ledger.md) |
-| **overflow 有界自愈** | provider 判超长（本地估算偏低漏网窗口）→ 强制压缩一次 + 重采样一次，不硬失败丢 turn | 自动（配了 `compressors` 即生效）/ `provider_retry` 事件 | [overflow_demo.py](../examples/compression_showcase/overflow_demo.py)（mock） | [reactive-compaction-recovery.md](architecture/capabilities/reactive-compaction-recovery.md) 🧪 | — |
-| **手动触发压缩** | 业务侧主动压一次 | `CompactNow` Op | — | [context-compression.md](architecture/context-compression.md) | — |
-| **cache 友好契约** | 每次压缩显式标注 `cache_invalidated` / `anchor_preserved_until`；mid-turn 只动 tail | `CompressionResult` / `cache_break_detected` 事件 | [observability/](../examples/observability/) | [context-compression.md](architecture/context-compression.md) | — |
-| **运行时改预算** | turn 间动态调 context_window | `UpdateBudget` Op | — | [configurable-knobs.md](configurable-knobs.md) | — |
-
-## 四、LLM 客户端（多 provider 统一、事件流标准化）
-
-| 能力 | 一句话 | 入口（API） | 示例 | 契约 | 真实 LLM 验证 |
-| --- | --- | --- | --- | --- | --- |
-| **native 四件套 + LiteLLM 兜底** | OpenAICompat / Anthropic / Gemini / DeepSeek 零 SDK 直连 + LiteLLM 覆盖其余 | `model_client=` | [real_llm/e2e.py](../examples/real_llm/e2e.py) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
-| **统一 ResponseEvent 流** | 11 类 EventKind（text/tool_call/reasoning/prompt_cache/rate_limits/structured_output…）跨 provider 同构 | `ModelClient` 协议 / `ResponseEvent` | [observability/](../examples/observability/) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
-| **结构化输出** | 强类型输出 schema，provider 各自翻译 | `ResponseFormatSpec` / `structured_output` 事件 | — | [llm-structured-output.md](architecture/capabilities/llm-structured-output.md) ✅ | — |
-| **重试 + 错误分类** | 指数退避 + 服务端 hint delay；错误分 11 桶 + 机读恢复配方 | `retry_async` / `LLMError` / `RecoveryPlan` | — | [llm-client.md](architecture/llm-client.md) | — |
-| **精准 cache 计量** | 各 provider cache 字段直读（Anthropic / DeepSeek / Gemini） | `PromptCacheStats` / `TokenUsage` | [real_llm/e2e.py](../examples/real_llm/e2e.py) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | — |
-| **conformance 测试模拟器** | 有状态 sim：协议合同校验（call_id 配对/前缀一致）+ token 记账 overflow + 前缀 cache 账本 + 故障注入 + 确定性时序编排（测试基础设施，替代旧 mock） | `SimClient` / `RoutingSimClient` / `SimTurn` / `sim_client` fixture | [tests/llm/test_sim_engine_integration.py](../tests/llm/test_sim_engine_integration.py) | [llm-sim-conformance.md](architecture/capabilities/llm-sim-conformance.md) ✅ | (sim 自身——CI 全量回归) |
-| **金样校准（形状漂移红线）** | 真实流形状签名录成脱敏 fixture 锚定 sim；漂移即红测（重录需人工 review diff，比对器无宽松开关） | `extract_shape` / `--record` / `tests/llm/golden/` | [tests/llm/test_golden_calibration.py](../tests/llm/test_golden_calibration.py) | [llm-sim-conformance.md](architecture/capabilities/llm-sim-conformance.md) §金样校准 ✅ | 金样即录自全量真实回归（[ledger](real-llm-ledger.md)） |
-
-## 五、持久化（会话怎么存、崩溃怎么 resume）
-
-| 能力 | 一句话 | 入口（API） | 示例 | 契约 | 真实 LLM 验证 |
-| --- | --- | --- | --- | --- | --- |
-| **JSONL 追加写主存** | 一 thread 一文件、首行 metadata、POSIX 原子追加、损坏行容错；source-of-truth | `JsonlMessageStore` / `MessageWriter` 协议 | [persistence/](../examples/persistence/) | [jsonl-transcript.md](architecture/capabilities/jsonl-transcript.md) ✅ | [`suspend_resume`](real-llm-ledger.md) |
-| **SQLite 旁路索引（零配置）** | stdlib sqlite3 + WAL 索引，可从 JSONL 自愈重建 | 默认开启 / `rebuild_index()` | [persistence/](../examples/persistence/) | [thread-directory.md](architecture/capabilities/thread-directory.md) ✅ | — |
-| **换后端（Redis / PG）** | 元数据 + list 查询走业务后端，主存 JSONL 不变 | `thread_directory=` / `ThreadDirectory` 协议 | [persistence/redis_thread_directory.py](../examples/persistence/redis_thread_directory.py) · [postgres_thread_directory.py](../examples/persistence/postgres_thread_directory.py) | [thread-directory.md](architecture/capabilities/thread-directory.md) ✅ | — |
-| **投递审计 / ES / Kafka** | thread 生命周期事件 fire-and-forget 投递 | `index_hook=` / `IndexHook` 协议 | [observability/audit_index_hook.py](../examples/observability/audit_index_hook.py) | [index-hook.md](architecture/capabilities/index-hook.md) ✅ | — |
-| **历史回滚** | 把 thread 截到某条之前 | `ThreadRollback` Op | — | [conversation.md](architecture/conversation.md) | — |
-
-## 六、可观测 / 集成（接出去给前端、监控）
-
-| 能力 | 一句话 | 入口（API） | 示例 | 契约 | 真实 LLM 验证 |
-| --- | --- | --- | --- | --- | --- |
-| **EventMsg 事件总线** | 关键路径全打点；`subscribe(sub_id)` 单提交 / `subscribe_all()` 全局 | `engine.subscribe` / `subscribe_all` | [web_ui/](../examples/web_ui/) | [agent-loop.md](architecture/agent-loop.md) | [`composite_dispatch`](real-llm-ledger.md) |
-| **Console / JSONL sink** | 开箱即用的人读 / 机读落盘 sink | `attach_console_sink` / `attach_jsonl_sink` | [observability/](../examples/observability/) | [agent-loop.md](architecture/agent-loop.md) | [`composite_dispatch`](real-llm-ledger.md) |
-| **OTel 接入** | EventMsg → OTLP（Jaeger / Tempo / Grafana / ARMS），PII 过滤、span 嵌套、预建 counter | `OtelTelemetrySink` / `OtelSinkConfig`（`[telemetry-otel]` extra） | — | [telemetry-otel.md](architecture/capabilities/telemetry-otel.md) ✅ | — |
-| **taifeng 作为 MCP server** | 把 skill turn 暴露成 MCP tool 给 Claude Code / Cursor，双向 elicitation | `McpStdioServer` / CLI `mcp serve` | [mcp_basic/](../examples/mcp_basic/) · [mcp_showcase/](../examples/mcp_showcase/) | [mcp-server.md](architecture/capabilities/mcp-server.md) ✅ | — |
-| **taifeng 作为 MCP client** | 连外部 MCP server 自动注册其 tools | `McpStdioClient` | [mcp_basic/](../examples/mcp_basic/) · [mcp_hitl/](../examples/mcp_hitl/) | [mcp-server.md](architecture/capabilities/mcp-server.md) ✅ | — |
-| **Web 实时面板（参考实现）** | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限可视化 + resume | [web_ui/server.py](../examples/web_ui/) | [web_ui/](../examples/web_ui/) | — | — |
-
-## 七、内核资源旋钮（把 tf 当 OS 微内核：准入 / 强制 / 流控 / 内存）
-
-> 机制在内核、策略（上限值 / 后端）由业务注入（守 R1）。全部开箱即有安全默认，不注入也能跑。详见 [configurable-knobs.md §1.0](configurable-knobs.md)。
-
-| 旋钮 | 维度 | 一句话 | 入口 | 示例 | 真实 LLM 验证 |
-| --- | --- | --- | --- | --- | --- |
-| `max_concurrent_spawns` / `max_total_spawns` | K1 广度准入 | 并发在飞 spawn 上限（防 fork-bomb）；HITL 挂起不占额度 | `EnginePool.create(max_concurrent_spawns=)` | [kernel_knobs/](../examples/kernel_knobs/) | [`kernel_knobs`](real-llm-ledger.md) |
-| `max_session_tokens` | K2 资源强制 | 会话累计 token 硬天花板（OOM-killer），触顶拒新 turn / 停采样 | `EnginePool.create(max_session_tokens=)` | [kernel_knobs/](../examples/kernel_knobs/) | [`kernel_knobs`](real-llm-ledger.md) |
-| `memory_store` | K3 内存层级 | 长期记忆 swap/缺页（prefetch / writeback / on_pre_evict / on_session_end），后端业务自接 | `memory_store=` / `MemoryStore` 协议 | [memory/](../examples/memory/) | — |
-| `submission_queue_size` / `event_queue_size` | K4 流控 | 入站 backpressure / 出站事件队列 | `EnginePool.create(...)` | [kernel_knobs/](../examples/kernel_knobs/) | — |
+As of this branch, every capability below has landed as ✅ or 🧪. Feature-gap progress is tracked in [`architecture/hermes-gap-roadmap.md`](architecture/hermes-gap-roadmap.md), and kernel primitive progress is tracked in [`architecture/kernel-gap-analysis.md`](architecture/kernel-gap-analysis.md).
 
 ---
 
-## 专题：多轨并发可观测（前端怎么展示「多个 skill 并发执行」）
+## 1. Skill System
 
-> 典型场景：多专家会诊——编排 skill 在一个 turn 内并发 `spawn_skill` 起多个专家（高血压 / 肺结节 …），各专家独立跑、错峰 HITL、最后 join-barrier 聚合成会诊报告。**前端要把每条并发轨的流式输出、工具调用、HITL 状态各自分开渲染。**
->
-> 内核已提供全部所需信息，**不需要业务方改内核**。归轨键就是 **`EventMsg.submission_id`**。
+| Capability | Summary | Entry Point | Example | Contract | Real LLM Validation |
+| --- | --- | --- | --- | --- | --- |
+| **Skill = markdown** | A skill is a `SKILL.md` document, not a function tool; the LLM is the scheduler | `FilesystemSkillRegistry.load(dir)` / SKILL.md frontmatter | [basic/minimal_chat.py](../examples/basic/minimal_chat.py) | [skill-system.md](architecture/skill-system.md) | [`composite_dispatch`](real-llm-ledger.md) |
+| **Lazy `read_skill`** | Child skill lists expose only id + description; the LLM pulls bodies on demand for cache-friendly prompts | `read_skill` tool | [read_skill_lazy/](../examples/read_skill_lazy/) | [skill-system.md](architecture/skill-system.md) | [`read_skill_lazy`](real-llm-ledger.md) |
+| **`call_skill` dispatch** | Composite skills recursively dispatch child skills as independent child turns, guarded by depth and cycle checks | `call_skill` tool / `DispatchPolicy` | [basic/composite_skill.py](../examples/basic/composite_skill.py) | [skill-dispatch.md](architecture/capabilities/skill-dispatch.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
+| **Declarative orchestration** | `orchestration:` in SKILL.md declares `parallel`, `serial`, and `when` plans that run deterministically without LLM sampling | SKILL.md `orchestration` field | [orchestration/demo.py](../examples/orchestration/demo.py) | [skill-orchestration.md](architecture/capabilities/skill-orchestration.md) ✅ | [`orchestration`](real-llm-ledger.md) |
+| **Concurrent fan-out** | The LLM can issue multiple `call_skill` calls in one message; with `max_parallel_tool_calls > 1`, they run concurrently | `max_parallel_tool_calls` | [concurrent_fanout/](../examples/concurrent_fanout/) | [skill-dispatch.md](architecture/capabilities/skill-dispatch.md) ✅ | [`concurrent_fanout`](real-llm-ledger.md) |
+| **Detached spawn + join barrier** | `spawn_skill` returns a handle immediately; child threads run independently, can suspend for HITL, and are aggregated by `await_skills` / join barriers | `spawn_skill` / `await_skills` / `join_skill` / `kill_skill` tools | [multi_expert_consult/](../examples/multi_expert_consult/) | [detached-spawn.md](architecture/capabilities/detached-spawn.md) ✅ | [`spawn_join`](real-llm-ledger.md) |
+| **Nested specialist HITL resume** | Spawned composite specialists can suspend inside child skills and later resume through the `resume_spawn_nested` chain | `Resume(thread_id=<spawn child thread>)` | [nested_hitl_demo.py](../examples/multi_expert_consult/nested_hitl_demo.py) | [detached-spawn.md](architecture/capabilities/detached-spawn.md) ✅ | — |
+| **SKILL.md script runtime** | Scripts declared in SKILL.md run through `run_script`, behind both permission and hook gates | `script_executors=` + `run_script` tool | [basic/skill_with_script.py](../examples/basic/skill_with_script.py) | [script-execution.md](architecture/capabilities/script-execution.md) ✅ | [`numeric_loop`](real-llm-ledger.md) |
+| **SKILL.md hot reload** | Skill files can be watched so updates take effect without restarting the process | `auto_watch_skills=True` | — | [skill-system.md](architecture/skill-system.md) | — |
+| **Runtime eligibility** | Composite child skills become visible according to `requires` / `exposure` and host-provided `RuntimeCapabilities` | SKILL.md `requires` / `exposure` | [subagent_isolation/](../examples/subagent_isolation/) | [skill-system.md](architecture/skill-system.md) | — |
 
-**分轨映射：**
+## 2. Agent Loop and Tools
 
-| 轨道 | 该轨事件的 `submission_id` | 映射来源 |
-| --- | --- | --- | — |
-| 编排入口 turn | 用户提交返回的 `sub_id` | `engine.submit(UserMessage)` 返回值 | — |
-| 每个并发专家 child | = 该专家的 `child_thread_id` | `spawn_started.data = {handle_id, skill_id, child_thread_id}` | — |
-| 联合会诊聚合 turn | = `then_thread_id` | `join_barrier_fired.data = {barrier_id, then_thread_id}` | — |
+| Capability | Summary | Entry Point | Example | Contract | Real LLM Validation |
+| --- | --- | --- | --- | --- | --- |
+| **Turn loop** | Submission/EventMsg dual-bus actor; each turn runs in its own task and does not block the engine loop | `AgentEngine` / `engine.submit` / `engine.subscribe` | [basic/minimal_chat.py](../examples/basic/minimal_chat.py) | [agent-loop.md](architecture/agent-loop.md) | [`composite_dispatch`](real-llm-ledger.md) |
+| **Multi-engine reuse + resume** | One process can cache engines for many sessions; persisted threads resume by `resume_thread_id` | `EnginePool.create` / `get_or_create(resume_thread_id=)` | [persistence/](../examples/persistence/) | [agent-loop.md](architecture/agent-loop.md) | [`suspend_resume`](real-llm-ledger.md) |
+| **Turn cancellation** | Cooperative cancellation with parent-child token propagation | `CancelTurn` op / `CancellationToken` | [web_ui/](../examples/web_ui/) | [agent-loop.md](architecture/agent-loop.md) | — |
+| **Mid-turn input steering** | User input can be injected into a running turn and drained at the next iteration boundary without stopping the turn | `InjectUserInput` op / `user_input_injected` event | [web_ui/](../examples/web_ui/) | [midturn-input-steering.md](architecture/capabilities/midturn-input-steering.md) ✅ | — |
+| **System message injection** | Host systems can inject system notes between turns without affecting the active turn | `InjectSystemMessage` op | — | [agent-loop.md](architecture/agent-loop.md) | — |
+| **Turn rewind** | Root turns are indexed into addressable nodes so sampling loops or `call_skill` points can be replayed | `Rewind` op (`re_reason` / `retry_tool`) | [turn_rewind/](../examples/turn_rewind/) | [turn-rewind.md](architecture/capabilities/turn-rewind.md) ✅ | [`turn_rewind`](real-llm-ledger.md) |
+| **Thread-addressable rewind** | Failed spawn child threads can be truncated and replayed from a failed step while preserving prior steps and answered HITL records | `Rewind(thread_id=child_tid)` / `engine.rewind_nodes_for(tid)` | — | [turn-rewind.md](architecture/capabilities/turn-rewind.md) §thread addressing ✅ + ADR 0018 | [`thread_rewind`](real-llm-ledger.md) |
+| **HITL suspend / cross-instance resume** | User input collection can suspend, release the live instance, rebuild across processes, and resume with `Resume` | `request_user_input` tool / `Resume` op / `SuspensionResolver` | [suspend_resume/](../examples/suspend_resume/) | [suspend-resume.md](architecture/capabilities/suspend-resume.md) ✅ | [`suspend_resume`](real-llm-ledger.md) |
+| **HITL permission approval** | Action-level permission requests for skill dispatch, scripts, and network access, with typed payloads and timeout support | `permission_policy=` / `PermissionPolicy` / `CallbackPrompter` | [permission/](../examples/permission/) · [selective_approval/](../examples/selective_approval/) | [permission-gate.md](architecture/capabilities/permission-gate.md) ✅ | [`selective_approval`](real-llm-ledger.md) |
+| **Hooks** | 8 hook families intercept tool use, skill dispatch, script use, turns, and compaction | `hooks=` / `HookRunner` | [hooks_showcase/](../examples/hooks_showcase/) | [hooks.md](architecture/capabilities/hooks.md) ✅ | — |
+| **Layered instructions + hot reload** | Engine/session/turn instruction scopes inject system guidance through a protocolized resolver | `instruction_layers=` / `UpdateInstructions` op / `InstructionSource` | [basic/instructions_basic.py](../examples/basic/instructions_basic.py) | [instructions-injection.md](architecture/capabilities/instructions-injection.md) ✅ | — |
+| **Tool whitelist consistency** | Visible tools have one source of truth; scripts are folded into `run_script`, and dispatch rejects `not_offered` calls | `SkillDefinition.visible_tool_names()` / `dispatch_batch(visible_tools=)` | [travel_planner/](../examples/travel_planner/) | [tool-whitelist.md](architecture/capabilities/tool-whitelist.md) ✅ | [`travel_planner`](real-llm-ledger.md) |
+| **Builtin tool set** | Skill IO, file IO, shell, patching, HTTP, background tasks, script execution, HITL input, spawn tools, peer messaging, and todo state | `extra_tools=` / `make_*_tool()` | [numeric_loop/](../examples/numeric_loop/) | [tool-builtins-extended.md](architecture/capabilities/tool-builtins-extended.md) ✅ | [`numeric_loop`](real-llm-ledger.md) |
+| **Background tasks** | The LLM can start long-running background work and poll for completion | `run_in_background` / `wait_for_task` tools / `BackgroundTaskRegistry` | — | [tool-builtins-extended.md](architecture/capabilities/tool-builtins-extended.md) ✅ | — |
 
-**为什么成立（源码锚点）：**
-- `_build_child_runner` 用 `submission_id=child_thread_id` 构造每个并发子 runner（[`src/taifeng/loop/engine.py`](../src/taifeng/loop/engine.py)）；
-- 每条事件都封 `EventMsg(submission_id=self.submission_id, ...)`（[`src/taifeng/loop/turn.py`](../src/taifeng/loop/turn.py)）。
-- ⇒ `turn_started` / `assistant_text`(增量) / `tool_call_started` / `tool_call_completed` / `skill_dispatched` 都带所属轨道的 `submission_id`，**并发专家的流式输出天然可分开**。
+## 3. Context Compression
 
-**前端分轨投影配方（伪码）：**
+| Capability | Summary | Entry Point | Example | Contract | Real LLM Validation |
+| --- | --- | --- | --- | --- | --- |
+| **Local budget-triggered compaction** | Compression triggers when configured `context_window` limits are reached, without waiting for provider overflow errors | `budget=ContextBudget(...)` / `compressors=` | [compression_showcase/demo.py](../examples/compression_showcase/demo.py) | [context-compression.md](architecture/context-compression.md) | [`compression`](real-llm-ledger.md) |
+| **Handoff compaction** | Codex-style LLM-to-LLM handoff summary with quality audit and health rollback | `HandoffCompactionStrategy` | [overflow_demo.py](../examples/compression_showcase/overflow_demo.py) · [capability_matrix.py](../examples/real_llm/capability_matrix.py) | [context-compression.md](architecture/context-compression.md) | — |
+| **Sliding-window compaction** | Keeps the last N items plus image markers | `SlidingWindowStrategy` | [compression_showcase/demo.py](../examples/compression_showcase/demo.py) | [context-compression.md](architecture/context-compression.md) | [`compression`](real-llm-ledger.md) |
+| **Bounded overflow recovery** | Provider overflow triggers one forced compaction plus one retry instead of immediately failing the turn | automatic when `compressors` are configured / `provider_retry` event | [overflow_demo.py](../examples/compression_showcase/overflow_demo.py) | [reactive-compaction-recovery.md](architecture/capabilities/reactive-compaction-recovery.md) 🧪 | — |
+| **Manual compaction** | Host systems can request compaction explicitly | `CompactNow` op | — | [context-compression.md](architecture/context-compression.md) | — |
+| **Cache-friendly contract** | Every compaction reports `cache_invalidated` and `anchor_preserved_until`; mid-turn compaction touches only the tail | `CompressionResult` / `cache_break_detected` event | [observability/](../examples/observability/) | [context-compression.md](architecture/context-compression.md) | — |
+| **Runtime budget updates** | Context budgets can be changed between turns | `UpdateBudget` op | — | [configurable-knobs.md](configurable-knobs.md) | — |
+
+## 4. LLM Client
+
+| Capability | Summary | Entry Point | Example | Contract | Real LLM Validation |
+| --- | --- | --- | --- | --- | --- |
+| **Native providers + LiteLLM fallback** | OpenAI-compatible, Anthropic, Gemini, and DeepSeek native HTTP clients, plus LiteLLM for broader coverage | `model_client=` | [real_llm/e2e.py](../examples/real_llm/e2e.py) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
+| **Unified `ResponseEvent` stream** | 11 event kinds normalize text, tool calls, reasoning, prompt cache, rate limits, structured output, and more | `ModelClient` protocol / `ResponseEvent` | [observability/](../examples/observability/) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
+| **Structured output** | Strongly typed output schemas are translated into provider-specific request shapes | `ResponseFormatSpec` / `structured_output` event | — | [llm-structured-output.md](architecture/capabilities/llm-structured-output.md) ✅ | — |
+| **Retry + error classification** | Exponential backoff, server hint delays, 11 error classes, and machine-readable recovery plans | `retry_async` / `LLMError` / `RecoveryPlan` | — | [llm-client.md](architecture/llm-client.md) | — |
+| **Prompt-cache accounting** | Provider-specific cache counters are read directly and normalized into `PromptCacheStats` / `TokenUsage` | `PromptCacheStats` / `TokenUsage` | [real_llm/e2e.py](../examples/real_llm/e2e.py) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | — |
+| **Conformance simulator** | Stateful simulator validates protocol shape, token overflow, prefix cache, fault injection, deterministic timing, and request ledgers | `SimClient` / `RoutingSimClient` / `SimTurn` / `sim_client` fixture | [tests/llm/test_sim_engine_integration.py](../tests/llm/test_sim_engine_integration.py) | [llm-sim-conformance.md](architecture/capabilities/llm-sim-conformance.md) ✅ | CI simulator regression |
+| **Golden calibration** | Real stream shapes are recorded as redacted fixtures; drift becomes a red test and re-recording requires review | `extract_shape` / `--record` / `tests/llm/golden/` | [tests/llm/test_golden_calibration.py](../tests/llm/test_golden_calibration.py) | [llm-sim-conformance.md](architecture/capabilities/llm-sim-conformance.md) §golden calibration ✅ | Golden fixtures derive from the real regression ledger |
+
+## 5. Persistence
+
+| Capability | Summary | Entry Point | Example | Contract | Real LLM Validation |
+| --- | --- | --- | --- | --- | --- |
+| **Append-only JSONL store** | One file per thread, metadata first line, POSIX atomic append, corrupt-line tolerance, and source-of-truth storage | `JsonlMessageStore` / `MessageWriter` protocol | [persistence/](../examples/persistence/) | [jsonl-transcript.md](architecture/capabilities/jsonl-transcript.md) ✅ | [`suspend_resume`](real-llm-ledger.md) |
+| **SQLite side index** | Zero-config stdlib SQLite + WAL index that can rebuild itself from JSONL | default / `rebuild_index()` | [persistence/](../examples/persistence/) | [thread-directory.md](architecture/capabilities/thread-directory.md) ✅ | — |
+| **Pluggable directory backends** | Metadata and list queries can use host backends while JSONL remains the primary store | `thread_directory=` / `ThreadDirectory` protocol | [redis_thread_directory.py](../examples/persistence/redis_thread_directory.py) · [postgres_thread_directory.py](../examples/persistence/postgres_thread_directory.py) | [thread-directory.md](architecture/capabilities/thread-directory.md) ✅ | — |
+| **Audit / ES / Kafka projection** | Thread lifecycle events can be projected fire-and-forget to external indexes | `index_hook=` / `IndexHook` protocol | [audit_index_hook.py](../examples/observability/audit_index_hook.py) | [index-hook.md](architecture/capabilities/index-hook.md) ✅ | — |
+| **History rollback** | A thread can be truncated before a selected item | `ThreadRollback` op | — | [conversation.md](architecture/conversation.md) | — |
+
+## 6. Observability and Integration
+
+| Capability | Summary | Entry Point | Example | Contract | Real LLM Validation |
+| --- | --- | --- | --- | --- | --- |
+| **EventMsg bus** | Critical runtime paths emit events; callers can subscribe per submission or globally | `engine.subscribe` / `subscribe_all` | [web_ui/](../examples/web_ui/) | [agent-loop.md](architecture/agent-loop.md) | [`composite_dispatch`](real-llm-ledger.md) |
+| **Console / JSONL sinks** | Human-readable and machine-readable telemetry sinks are available out of the box | `attach_console_sink` / `attach_jsonl_sink` | [observability/](../examples/observability/) | [agent-loop.md](architecture/agent-loop.md) | [`composite_dispatch`](real-llm-ledger.md) |
+| **OpenTelemetry sink** | EventMsg to OTLP export, PII filtering, nested spans, and prebuilt counters | `OtelTelemetrySink` / `OtelSinkConfig` (`[telemetry-otel]` extra) | — | [telemetry-otel.md](architecture/capabilities/telemetry-otel.md) ✅ | — |
+| **Taifeng as MCP server** | Exposes skill turns as MCP tools for Claude Code / Cursor and supports bidirectional elicitation | `McpStdioServer` / CLI `mcp serve` | [mcp_basic/](../examples/mcp_basic/) · [mcp_showcase/](../examples/mcp_showcase/) | [mcp-server.md](architecture/capabilities/mcp-server.md) ✅ | — |
+| **Taifeng as MCP client** | Connects to external MCP servers and auto-registers their tools | `McpStdioClient` | [mcp_basic/](../examples/mcp_basic/) · [mcp_hitl/](../examples/mcp_hitl/) | [mcp-server.md](architecture/capabilities/mcp-server.md) ✅ | — |
+| **Web realtime panel** | FastAPI + SSE reference implementation for streaming agent data, demo switching, permission UI, and resume | [web_ui/server.py](../examples/web_ui/) | [web_ui/](../examples/web_ui/) | — | — |
+
+## 7. Kernel Resource Knobs
+
+The mechanisms live in the kernel; policy values and external backends are injected by host systems to preserve R1. Safe defaults exist even without host injection. See [configurable-knobs.md §1.0](configurable-knobs.md).
+
+| Knob | Kernel Dimension | Summary | Entry Point | Example | Real LLM Validation |
+| --- | --- | --- | --- | --- | --- |
+| `max_concurrent_spawns` / `max_total_spawns` | K1 breadth admission | Limits in-flight spawn breadth to prevent fork bombs; HITL-suspended children do not consume running slots | `EnginePool.create(max_concurrent_spawns=)` | [kernel_knobs/](../examples/kernel_knobs/) | [`kernel_knobs`](real-llm-ledger.md) |
+| `max_session_tokens` | K2 resource enforcement | Session-wide token hard ceiling that rejects new turns or stops sampling when reached | `EnginePool.create(max_session_tokens=)` | [kernel_knobs/](../examples/kernel_knobs/) | [`kernel_knobs`](real-llm-ledger.md) |
+| `memory_store` | K3 memory hierarchy | Long-term memory swap/page-fault surface with host-provided backend hooks | `memory_store=` / `MemoryStore` protocol | [memory/](../examples/memory/) | — |
+| `submission_queue_size` / `event_queue_size` | K4 flow control | Inbound backpressure and outbound event queue sizing | `EnginePool.create(...)` | [kernel_knobs/](../examples/kernel_knobs/) | — |
+
+---
+
+## Topic: Multi-Track Concurrency Observability
+
+Typical case: a multi-expert consultation skill spawns several experts in one turn. Each expert runs independently, can suspend for HITL at a different time, and is aggregated through a join barrier. Frontends need separate tracks for each expert's streamed output, tool calls, and HITL state.
+
+The kernel already emits everything required. The track key is **`EventMsg.submission_id`**.
+
+| Track | Event `submission_id` | Mapping Source |
+| --- | --- | --- |
+| Orchestration entry turn | The `sub_id` returned by the initial user submission | `engine.submit(UserMessage)` |
+| Each concurrent expert child | The expert's `child_thread_id` | `spawn_started.data = {handle_id, skill_id, child_thread_id}` |
+| Final consultation aggregation turn | The `then_thread_id` | `join_barrier_fired.data = {barrier_id, then_thread_id}` |
+
+Why this works:
+
+- `_build_child_runner` constructs each child runner with `submission_id=child_thread_id` ([`src/taifeng/loop/engine.py`](../src/taifeng/loop/engine.py)).
+- Every event is wrapped as `EventMsg(submission_id=self.submission_id, ...)` ([`src/taifeng/loop/turn.py`](../src/taifeng/loop/turn.py)).
+- Therefore `turn_started`, `assistant_text`, `tool_call_started`, `tool_call_completed`, and `skill_dispatched` events naturally belong to the correct concurrent track.
+
+Frontend projection sketch:
 
 ```python
-tracks = {}                         # submission_id -> 轨道视图
+tracks = {}
 async for ev in engine.subscribe_all():
     m, sid = ev.msg, ev.submission_id
-    if m.kind == "spawn_started":   # 注册一条专家轨：child_thread_id 即该轨的 submission_id
+    if m.kind == "spawn_started":
         tracks[m.data["child_thread_id"]] = {"skill": m.data["skill_id"], "state": "running"}
     elif m.kind == "spawn_suspended":
-        tracks[m.data["thread_id"]]["state"] = "hitl_waiting"   # 该轨进入错峰 HITL
+        tracks[m.data["thread_id"]]["state"] = "hitl_waiting"
     elif m.kind == "join_barrier_fired":
         tracks[m.data["then_thread_id"]] = {"skill": "consultation", "state": "running"}
-    # 流式正文按 sid 归轨渲染
     elif m.kind in ("assistant_text", "tool_call_started", "tool_call_completed"):
         tracks.setdefault(sid, {"skill": "?", "state": "running"})
-        render_into_track(sid, m)   # 高血压轨 / 肺结节轨 / 会诊轨各自更新
+        render_into_track(sid, m)
 ```
 
-**完整事件清单：** 7 类 spawn/join 生命周期事件 `spawn_started / spawn_suspended / spawn_completed / spawn_failed / spawn_cancelled / join_barrier_registered / join_barrier_fired`（字段见 [`src/taifeng/loop/event.py`](../src/taifeng/loop/event.py)）。端到端时间线 demo：[multi_expert_consult/](../examples/multi_expert_consult/)；浏览器多轨实时渲染参考实现：[web_ui/](../examples/web_ui/)（含 `multi_expert_consult` 交互 demo）。契约：[detached-spawn.md](architecture/capabilities/detached-spawn.md)。
+Spawn/join lifecycle events are `spawn_started`, `spawn_suspended`, `spawn_completed`, `spawn_failed`, `spawn_cancelled`, `join_barrier_registered`, and `join_barrier_fired`. See [multi_expert_consult/](../examples/multi_expert_consult/), [web_ui/](../examples/web_ui/), and [detached-spawn.md](architecture/capabilities/detached-spawn.md).
 
-> 业务侧在 SSE 层把 `submission_id` 改名为 `track_id` 做多轨投影即可——内核不感知业务轨道语义（R1）。
+Host SSE layers may rename `submission_id` to `track_id`; the kernel stays unaware of host UI semantics.
 
 ---
 
-## 接入入口速查
+## Integration Entry Points
 
-### EnginePool.create 全参数
+### `EnginePool.create`
 
-签名见 [`src/taifeng/loop/pool.py`](../src/taifeng/loop/pool.py) `create()`，字段级说明见 [configurable-knobs.md §1](configurable-knobs.md)。最小必填：
+The full signature is in [`src/taifeng/loop/pool.py`](../src/taifeng/loop/pool.py). Field-level documentation is in [configurable-knobs.md §1](configurable-knobs.md). Minimal construction:
 
 ```python
 pool = await taifeng.EnginePool.create(
-    skills_dir="./skills",        # SKILL.md 根目录（必填）
-    storage_dir="./data",         # JSONL 主存 + SQLite 索引（与旧名 threads_dir 等价，二选一必填）
-    model_client=client,          # ModelClient 实现（必填）
+    skills_dir="./skills",
+    storage_dir="./data",
+    model_client=client,
 )
 ```
 
-### Op 全集（运行时通过 `engine.submit(...)` 投递，共 13 种）
+### Runtime Ops
 
-| Op | 作用 |
-| --- | --- | — |
-| `UserMessage` | 发起 / 续接一个 turn | — |
-| `InjectUserInput` | turn 运行中注入增量用户输入（steering） | — |
-| `InjectSystemMessage` | 注入 system 注记（不影响活跃 turn） | — |
-| `CancelTurn` | 取消运行中的 turn | — |
-| `CompactNow` | 手动触发一次压缩 | — |
-| `Resume` | HITL 挂起后续跑 | — |
-| `Rewind` | 回退到可寻址节点重跑 | — |
-| `SendToPeer` | 谱系内 peer 点对点投递（与 `send_message` 工具同路径） | — |
-| `ThreadRollback` | 历史截断回滚 | — |
-| `UpdateBudget` | 运行时改 context 预算 | — |
-| `UpdateInstructions` | 热更某层 instruction | — |
-| `RefreshSnapshot` | 刷新 skill 快照 | — |
-| `Shutdown` | 关闭 engine | — |
+Runtime ops are submitted with `engine.submit(...)`.
 
-### 内置工具全集（`make_*_tool()`，按需 `extra_tools=` 注册）
+| Op | Purpose |
+| --- | --- |
+| `UserMessage` | Start or continue a turn |
+| `InjectUserInput` | Inject incremental user input into a running turn |
+| `InjectSystemMessage` | Add a system note without affecting the active turn |
+| `CancelTurn` | Cancel a running turn |
+| `CompactNow` | Trigger compaction manually |
+| `Resume` | Continue after HITL suspension |
+| `Rewind` | Re-run from an addressable node |
+| `SendToPeer` | Send a lineage-scoped peer message |
+| `ThreadRollback` | Truncate persisted history |
+| `UpdateBudget` | Change the context budget |
+| `UpdateInstructions` | Hot-reload an instruction layer |
+| `RefreshSnapshot` | Refresh the skill snapshot |
+| `Shutdown` | Shut down an engine |
+
+### Builtin Tools
 
 `read_skill` · `call_skill` · `file_read` · `file_write` · `shell_exec` · `apply_patch` · `http_request` · `run_in_background` · `wait_for_task` · `run_script` · `request_user_input` · `spawn_skill` · `await_skills` · `join_skill` · `kill_skill` · `send_message` · `wait_peer` · `todo_write`
 
-### 公共 API 符号
+### Public API Symbols
 
-全部可 import 符号见 [`src/taifeng/__init__.py`](../src/taifeng/__init__.py) 的 `__all__`。
+All exported symbols are listed in [`src/taifeng/__init__.py`](../src/taifeng/__init__.py) under `__all__`.
 
 ---
 
-## 验证状态
+## Verification Status
 
-- **全量回归**：`PYTHONPATH=src uv run pytest tests/`（CI 内全走 sim conformance 模拟器，禁真实 API）。
-- **真实 LLM 回归**：[`examples/real_llm/capability_matrix.py`](../examples/real_llm/capability_matrix.py) —— 15 个能力场景（含 suspend/resume、rewind、spawn/join、peer、kernel knobs 等 P0 高发链路）逐个真实 key 跑测 + R3 可观测完整性审计；跑完自动更新台账 [`real-llm-ledger.md`](real-llm-ledger.md)（日期 / commit / 模型 / 逐场景结果）。上表「真实 LLM 验证」列即能力 → 场景的静态映射。
-- **回归红线**：凡变更基础层（`src/taifeng/{llm,loop,context,conversation}/`）必须全量重跑并提交台账；新增 / 修改 LLM 策略能力必须同步登记本清单（详见 CLAUDE.md §测试约束）。
-- **烧 key 前自检**：[`examples/real_llm/selfcheck.py`](../examples/real_llm/selfcheck.py)（sim 干跑 driver 编排，零消耗）。
-- 各能力的边界与受限项在对应契约文档 §测试 / §能力边界中如实记录，不夸大。
+- **Full regression**: `PYTHONPATH=src uv run pytest tests/`. CI uses the conformance simulator and does not call real APIs.
+- **Real LLM regression**: [`examples/real_llm/capability_matrix.py`](../examples/real_llm/capability_matrix.py) runs high-risk scenarios such as suspend/resume, rewind, spawn/join, peer messaging, and kernel knobs with real provider keys, then updates [`real-llm-ledger.md`](real-llm-ledger.md).
+- **Merge red line**: changes under `src/taifeng/{llm,loop,context,conversation}/` require a full real-LLM capability matrix run and a committed ledger update.
+- **Before burning keys**: [`examples/real_llm/selfcheck.py`](../examples/real_llm/selfcheck.py) runs the driver orchestration against the simulator.
+- Capability boundaries and limitations are recorded in the matching contract documents.
