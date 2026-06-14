@@ -2,7 +2,7 @@
 
 ## Purpose
 
-审计可观测 **层1**：在不破坏 EventMsg「可丢 / 不阻塞主 actor / 吞异常」内核语义（R4）的前提下，补齐三件事——LLM request 全文留痕、事件序号自检（全局 + per-subscriber）、事件队列有界大容量 + 堆积告警。「可靠 fail-stop 审计真相源」是独立的层2 课题（留 ADR 0019），**不**搭 EventMsg 便车。
+审计可观测 **层1**：在不破坏 EventMsg「可丢 / 不阻塞主 actor / 吞异常」内核语义（R4）的前提下，补齐三件事——LLM request 全文留痕、事件序号自检（全局 + per-subscriber）、事件队列有界大容量 + 堆积告警。「可靠 fail-stop 审计真相源」是独立的层2 课题（留 ADR 0020），**不**搭 EventMsg 便车。
 
 设计文档：`docs/superpowers/specs/2026-06-13-audit-observability-design.md`。关联 ADR 0005（Submission/EventMsg 双总线）、ADR 0017（立项四规则）；扩展 [telemetry-otel](telemetry-otel.md)。
 
@@ -116,4 +116,4 @@ class DeliveredEvent:
 
 ## 层2 边界（不在本契约）
 
-可靠 fail-stop 审计真相源（同步 / 事务 / resume 级可靠的 `MessageWriter` 那一类可靠 append 线）是独立课题，留 ADR 0019，**不**改造 EventMsg emit 路径。
+可靠 fail-stop 审计真相源（同步 / 事务 / resume 级可靠的 `MessageWriter` 那一类可靠 append 线）是独立课题，留 ADR 0020，**不**改造 EventMsg emit 路径。
