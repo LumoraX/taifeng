@@ -101,6 +101,7 @@
 | [memory/](memory/) | 业务侧实现 `MemoryStore`（K3 长期记忆 backend）：4 个 swap 钩子 prefetch/writeback/on_pre_evict/on_session_end 端到端触发 + 跨 turn 召回 |
 | [memory/knowledge_demo.py](memory/knowledge_demo.py) | **知识库接入三件套**：继承 NullMemoryStore 三行只读源 + `CompositeMemoryStore` 双源组合 + `memory_query_builder` 近 N 轮检索语境（解多轮指代） | 否（Mock） |
 | [hooks_showcase/](hooks_showcase/) | 业务钩子 pre/post_skill_dispatch 按*运行时 args* 动态拦截（钩子 vs 声明式权限规则） |
+| [post_turn_review/](post_turn_review/) | **post_turn 钩子**:turn 收尾自我审计 / 记忆固化 —— 每轮真终态后**确定性**固化结论（收尾的同步一步;跨 turn 顺序须等 `post_turn_hook_fired` 再提交下一轮） |
 | [mcp_showcase/](mcp_showcase/) | taifeng 作为 MCP client：spawn 自带的最小 MCP server 子进程 + 注册其工具远程调用（已注册进 web_ui）|
 | [mcp_basic/](mcp_basic/) | MCP stdio client 连外部 server，自动注册工具 |
 | [mcp_hitl/](mcp_hitl/) | MCP 工具调用走 permission gate |

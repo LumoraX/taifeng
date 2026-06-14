@@ -428,7 +428,15 @@ LLM stream → tool_call_done
   ↓
 [ TurnRunner 循环结束 ]
   ↓
-TurnCompleted event
+TurnCompleted event（runner 内 emit）
+  ↓
+[ engine 状态回写：history / cache_anchor / rewind 节点表 / 指纹 / token ]
+  ↓
+post_turn hook ───────────────── 仅审计（root turn 真终态触发；suspended/cancelled 跳过；
+                                  本 turn 收尾的同步一步=回写之后触发；自我 review / 记忆固化落脚点。
+                                  注:引擎不串行化相邻 turn——跨 turn 顺序须宿主等 post_turn_hook_fired
+                                  再提交下一轮,而非等 turn_completed）
+  ↓ (emit post_turn_hook_fired)
 ```
 
 **关键约束（ADR 0010）**：
@@ -439,6 +447,7 @@ TurnCompleted event
 | `post_tool_use` | deny / 异常 → 只记日志，不影响 ToolResult |
 | `pre_skill_dispatch` | deny → ToolResult.error + emit；异常 → ToolResult.error |
 | `post_skill_dispatch` | **deny / 异常都被吞掉** —— `run_audit_only` 语义 |
+| `post_turn` | **deny / 异常都被吞掉**（仅审计；turn 已终结无可改）—— `run_audit_only` 语义 |
 | `pre_script_use` | deny → ToolResult.error；异常 → ToolResult.error；metadata['args_override'] 替换 args |
 | `post_script_use` | **deny / 异常都被吞掉**（仅审计） |
 | `permission_policy.check` | timeout → deny + emit `permission_prompt_timeout` |

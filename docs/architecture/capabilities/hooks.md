@@ -62,6 +62,69 @@ TBD - created by archiving change permission-gate-completeness. Update Purpose a
 
 **理由**：既有约定（`InstructionFetchError` 等）`kind` 对应**真实抛出的异常类名**。hook deny 不抛异常（`HookDecision.deny()` 返回 dataclass），无对应 exception class。此场景下 `kind` 字段值改为与对应 event kind 一致的描述性 label，保持上游 telemetry 过滤一致性。
 
+### Requirement: `post_turn` hook 调用点
+
+`AgentEngine._build_and_run_runner` 在 `runner.run()` 返回、turn 状态(history /
+cache_anchor / rewind 节点表 / 指纹 / token)回写之后,**SHALL** 对 **root turn 的真终态**
+**同步**触发 `post_turn` hook —— 即 post_turn 是 **turn N 收尾的同步一步**(回写已发生、
+在 turn N 自己的 task 结束之前)。与 `pre_turn` 作用域对称(仅 root turn;detached spawn /
+call_skill 子 turn 不触发,其收尾审计由 `post_skill_dispatch` 覆盖)。
+
+**顺序保证的精确边界(重要)**:引擎以 `create_task` 派发 turn、**不串行化相邻 turn**
+(`_run_turn_for` 仅有"活跃挂起"守卫,无"单活跃 turn"锁)。因此 post_turn 保证的是
+**「本 turn 收尾内、回写之后」**,**不是**「任何下一 turn 启动之前」——若宿主在
+`turn_completed`(它在 post_turn **之前** emit)后立即并发提交下一 turn,该 turn 可与
+post_turn 在事件循环上交错。**要跨 turn 顺序**(下一轮基于本轮固化结果),宿主须
+**等 `post_turn_hook_fired` 再提交下一轮**(而非等 `turn_completed`)。
+
+触发门控:`TurnOutcome.end_reason ∈ {"suspended", "cancelled"}` 时 **SHALL NOT** 触发
+——挂起是暂停等 Resume(续跑到真终态时才触发),取消是 teardown。其余终态(completed /
+max_iterations / resource_limit_exceeded / denial_circuit_open / error)**SHALL** 触发。
+
+`post_turn` 为**审计型**(对齐 `post_skill_dispatch`):经 `HookRunner.run_audit_only`
+触发,返回 `deny` 或抛异常都 **SHALL NOT** 改变已终结的 turn(仅写日志)。仅当注册了
+`post_turn` handler 时才执行(常见路径零开销)。
+
+`PostTurnHook` 数据载荷 **SHALL** 包含(全部取自 `TurnOutcome`,零额外快照成本):
+- `end_reason: str`
+- `success: bool`
+- `final_text: str`(本 turn 最终答案;需全量 items 时宿主自调 `engine.history_snapshot()`)
+- `iteration: int`(本 turn 的 index,= 同 turn `pre_turn` 的 iteration)
+
+**R4 可取消**:hook 执行经 `HookContext.extras["cancel"]` 拿到本 turn 的
+CancellationToken。post_turn 同步执行会占用本 turn 收尾时段,长耗时 hook 须可被中断
+(宿主重活应自行 detached)。**定位**:这是「自我 review / 记忆固化」等规则② 认知回路的
+内核 seam —— 内核只开口子,review 内容(审什么 / 学什么 / 存哪)全留 userspace
+(`spawn_skill` + 工具白名单 + `memory_store.writeback`),不入内核(R1)。
+
+#### Scenario: completed turn 触发 post_turn
+- **WHEN** 一个 root turn 以 `end_reason="completed"` 结束,且注册了 `post_turn` handler
+- **THEN** `post_turn` hook SHALL 被触发一次,入参 `success=True` / `final_text` / `iteration`
+- **AND** 触发时本 turn 的 user_message 与 assistant_message SHALL 已回写进 `engine.history`(收尾的同步一步,回写之后)
+- **AND** SHALL emit `post_turn_hook_fired` 事件(在 `turn_completed` 之后)
+
+#### Scenario: 挂起不触发,resume 跑到终态才触发
+- **WHEN** 一个 root turn 以 `end_reason="suspended"` 暂停
+- **THEN** `post_turn` hook SHALL NOT 在此刻触发
+- **WHEN** 该 turn 后续经 Resume 续跑以 `end_reason="completed"` 结束
+- **THEN** `post_turn` hook SHALL 在此刻触发一次
+
+#### Scenario: cancelled 不触发
+- **WHEN** 一个 root turn 以 `end_reason="cancelled"` 结束
+- **THEN** `post_turn` hook SHALL NOT 触发
+
+#### Scenario: 子 turn 不触发 root 级 post_turn
+- **WHEN** root turn 内经 call_skill 派发的子 turn 完成
+- **THEN** 该子 turn 完成 SHALL NOT 触发 `post_turn`;仅外层 root turn 抵达真终态时触发一次
+
+#### Scenario: 审计型不可否决
+- **WHEN** `post_turn` handler 返回 `deny` 或抛异常
+- **THEN** 已终结的 turn 结果 SHALL NOT 被修改(无 `turn_failed`、无回滚)
+
+#### Scenario: 无 handler 零开销
+- **WHEN** 未注册任何 `post_turn` handler
+- **THEN** SHALL NOT emit `post_turn_hook_fired`(不进入 hook 执行路径)
+
 ### Requirement: `pre_compact` hook 调用点
 
 `TurnRunner._maybe_compress` 在 budget 阈值判断通过后、`CompressionOrchestrator.maybe_compress` 调用前，**SHALL** 执行 `pre_compact` hook。具体顺序：
@@ -119,7 +182,7 @@ TBD - created by archiving change permission-gate-completeness. Update Purpose a
 
 ### Requirement: HookRegistry 桶位完整性（无死代码）
 
-`HookRegistry._handlers` dict SHALL 包含 8 个 kind 桶位，且所有 8 个桶位 SHALL 在 `src/taifeng/` 内有至少一个调用点（即不存在"声明但未触发"的死代码）。
+`HookRegistry._handlers` dict SHALL 包含 9 个 kind 桶位，且所有 9 个桶位 SHALL 在 `src/taifeng/` 内有至少一个调用点（即不存在"声明但未触发"的死代码）。
 
 具体调用点映射（实现层文档，spec 只约束契约）：
 
@@ -127,12 +190,13 @@ TBD - created by archiving change permission-gate-completeness. Update Purpose a
 - `post_tool_use` → `loop/turn.py::_sample_once`：仅审计 run_audit_only
 - `pre_compact` → `loop/turn.py::_maybe_compress`：deny → 跳过压缩
 - `pre_turn` → `loop/engine.py::_run_turn_for`：deny → emit turn_failed
+- `post_turn` → `loop/engine.py::_fire_post_turn_hook`（`_build_and_run_runner` 收尾）：仅审计 run_audit_only；root turn 真终态触发，emit post_turn_hook_fired
 - `pre_skill_dispatch` → `tool/builtins/call_skill.py`：deny → call_skill 返回 hook_denied error
 - `post_skill_dispatch` → `tool/builtins/call_skill.py`：仅审计 run_audit_only
 - `pre_script_use` → `tool/builtins/run_script.py`：deny → run_script 返回 hook_denied error
 - `post_script_use` → `tool/builtins/run_script.py`：仅审计 run_audit_only
 
-#### Scenario: 8 个 hook kind 都有调用点
-- **WHEN** 静态扫描 `grep -rn 'hooks.run\|hook_runner.run' src/`
-- **THEN** SHALL 至少出现以下 8 类 hook kind 的调用：上表 8 项全覆盖
+#### Scenario: 9 个 hook kind 都有调用点
+- **WHEN** 静态扫描 `grep -rn 'hooks.run\|hook_runner.run\|run_audit_only' src/`
+- **THEN** SHALL 至少出现以下 9 类 hook kind 的调用：上表 9 项全覆盖
 

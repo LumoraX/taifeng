@@ -373,11 +373,12 @@ async def my_telemetry_callback(
 
 ### Hook lifecycle 完整集
 
-`HookKind` 共 8 种，对应 8 个调用点（自 `hook-wiring-pre-compact-pre-turn` 起所有 kind 均已挂接，无 dead code）：
+`HookKind` 共 9 种，对应 9 个调用点（自 `hook-wiring-pre-compact-pre-turn` 起所有 kind 均已挂接，无 dead code）：
 
 | Hook kind | 触发位置 | deny / 异常影响 |
 |---|---|---|
 | `pre_turn` | `AgentEngine._run_turn_for`：user_message 已持久化 + instruction resolve 完成后，TurnRunner 实例化前 | deny → emit `pre_turn_hook_denied` + `turn_failed`；TurnRunner 不实例化；`_turn_index` 仍 +1 |
+| `post_turn` | `AgentEngine._fire_post_turn_hook`（`_build_and_run_runner` 收尾）：状态回写后、本 turn task 内（**收尾的同步一步**），仅 root turn 真终态（suspended/cancelled 跳过） | 审计型不可否决；deny/异常仅写日志；emit `post_turn_hook_fired`；R4 经 `ctx.extras["cancel"]` 传 token。**引擎不串行化相邻 turn**——要跨 turn 顺序须等 `post_turn_hook_fired` 再提交下一轮 |
 | `pre_compact` | `TurnRunner._maybe_compress`：budget 阈值判断后，`CompactionStarted` 之前（pre_turn / mid_turn / manual 三阶段都触发） | deny → emit `pre_compact_hook_skipped`；history / cache_anchor 不动；turn 继续 |
 | `pre_tool_use` | 工具执行前 | deny → ToolResult.error（reason=`hook_denied`） |
 | `post_tool_use` | 工具执行后 | 仅审计 |
