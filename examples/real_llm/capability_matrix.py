@@ -206,6 +206,15 @@ SCENARIOS: list[Scenario] = [
              expect={"post_turn_hook_fired", "turn_completed"},
              driver="post_turn_review",
              pool_kwargs={"hooks": _post_turn_hook_runner()}),
+    # budget-awareness：小窗(ctx_window=3000 → soft=2550/hard=2850)+ 约 9300 字符长
+    # prompt，使 pre-turn 估算用量(len/3.5≈2659)落在 soft 与 hard 之间 → 穿越 soft 注
+    # 中性预算事实。期望真实链路 emit budget_hint_injected。
+    Scenario("budget_awareness", "compression_showcase", "chatty-assistant",
+             "背景资料汇总，请通读后给出要点分析。"
+             + "这是一段需要纳入上下文的背景资料文本。" * 489,
+             capability="预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020）",
+             expect={"budget_hint_injected", "turn_completed"},
+             ctx_window=3000),
 ]
 
 
