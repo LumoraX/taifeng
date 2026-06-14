@@ -194,7 +194,7 @@ _sample_once except LLMError(重试耗尽)
        ├─ SUSPEND  → SuspendSignal(SYSTEM_RETRY) → 既有挂起落盘
        └─ TERMINAL → 上抛 → TurnFailed(硬失败,带 G3 recovery 配方)
 
-run() 三个护栏 break 点(max_iterations / resource_limit_exceeded / denial_circuit_open)
+run() 四个护栏 break 点(max_iterations / resource_limit_exceeded / denial_circuit_open / doom_loop_circuit_open)
   → policy.decide(origin="guard_trip", end_reason, ...)
        ├─ SUSPEND  → SuspendSignal(RESOURCE_LIMIT, detail={end_reason, 护栏快照})
        └─ TERMINAL → 既有 end_reason break(默认 policy 恒走此路,零变化)
@@ -597,6 +597,7 @@ K1（广度）/ K2（token）之外，turn 级还有两条 opt-in 护栏（默�
 
 - **denial 断路器**：`denial_breaker_config`（`DenialBreakerConfig{max_consecutive_denials, max_recent_denials, window_size}`）注入后，TurnRunner 每 turn 新建 `DenialBreaker`，在工具配对回填处统一观察 `ToolResult.data["reason"] ∈ {hook_denied, permission_denied}` 计数（成功重置 consecutive）；越阈值 emit `denial_circuit_open` **恰好一次** + 迭代边界以同名 `end_reason` 提前终止（当轮 fc/output 已配对落史，无孤儿）。防「被拒后在 max_iterations 内空转重试」。
 - **迭代预算分层**：裸计数器已抽成 `IterationBudget`（consume/refund/child）。`run_sub_skill` 派生子 turn 传 `budget.child()` —— 子独立预算、不回写父（父子总和可超父 cap，hermes 对标的有意语义；全局硬顶用 K2）。`ToolSpec.refunds_iteration=True` 的工具成功轮 `refund(1)` 不耗外层步数（spec 静态声明，LLM 不可触发；内核不为既有工具默认开启）。
+- **doom-loop 检测**：`doom_loop_config`（`DoomLoopConfig{max_consecutive_repeats=N}`）注入后，TurnRunner 每 turn 新建 `DoomLoopDetector`，在同一配对回填处只观察**成功**结果的 `(tool, arguments_raw)`：连续 N 次同签名 → `doom_loop_warned` + 注 `system_injection(source="doom_loop")` 中性事实（让模型自改、turn 续跑）；警后到 2N → `doom_loop_circuit_open` + 迭代边界以同名 `end_reason` 终止。补「反复同参数调同一工具、每次成功、毫无进展」的盲区（DenialBreaker 只认 deny、IterationBudget 只数总量）。ADR 0021。
 
 完整契约见 [`capabilities/turn-resource-guards.md`](capabilities/turn-resource-guards.md)。
 
@@ -629,7 +630,7 @@ steering 解决「用户 → 运行中 turn」；peer-mailbox 把同一 seam 推
 
 | end_reason | 含义 | 后续 |
 | --- | --- | --- |
-| `completed` | 正常结束（含 max_iterations / resource_limit / denial_circuit_open 等护栏收尾） | — |
+| `completed` | 正常结束（含 max_iterations / resource_limit / denial_circuit_open / doom_loop_circuit_open 等护栏收尾） | — |
 | `cancelled` | `CancelTurn` 中止 | — |
 | `error` | 未捕获异常 / 确定性 LLMError 硬失败 | TurnFailed 配方 |
 | **`suspended`** | turn 中途挂起（人类输入类 / 系统态），实例可释放 | 业务侧凭 `thread_id` 提交 `Resume` 续跑 |

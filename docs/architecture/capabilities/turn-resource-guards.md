@@ -6,8 +6,9 @@ turn 级资源护栏的两条正交契约（token 维 K2 / 广度维 K1 之外�
 
 1. **denial 断路器**：同 turn 内 permission/hook 连续拒绝越阈值 → 单次触发、迭代边界提前终止（`end_reason="denial_circuit_open"`），替代「被拒后在 max_iterations 内空转重试白烧 token」。参照 codex `guardian/mod.rs` `GuardianRejectionCircuitBreaker`。
 2. **迭代预算分层 + 退还**：裸 `while iterations < max_iterations` 计数器抽成 `IterationBudget`（consume/refund/child），子 turn 派生独立预算（父子总和可超父 cap——hermes 有意语义）、内置工具可静态声明 refund。参照 hermes `iteration_budget.py`。
+3. **doom-loop 检测**：同 turn 内反复用**相同参数**调**同一工具**、每次都**成功**、却毫无进展的空转——`DenialBreaker` 只认 deny、`IterationBudget` 只数总量，二者盖不到这个正交盲区。**先警后断**（escalate）：连续 N 次同 `(tool, arguments_raw)` 成功 → warn（注中性事实让模型自改、turn 续跑）；警后到 2N → open（断路、迭代边界以 `end_reason="doom_loop_circuit_open"` 终止）。属 ADR 0017 规则②原语（给模型补「我在原地打转」的自我状态）；参照 opencode `processor.ts`。详见 ADR 0021。
 
-第三轮对比分析 P1 缺口 C1+C2。实现：`src/taifeng/loop/denial_breaker.py`、`src/taifeng/loop/iteration_budget.py`、`loop/turn.py`（循环重构 + `_note_tool_outcome` 单点记账）、`tool/spec.py`（`refunds_iteration`）、`tool/runtime.py`（`spec_for`）、`loop/event.py`（`DenialCircuitOpen`）。
+第三轮对比分析 P1 缺口 C1+C2；doom-loop 为 2026-06-14 opensource 差距候选。实现：`src/taifeng/loop/denial_breaker.py`、`src/taifeng/loop/iteration_budget.py`、`src/taifeng/loop/doom_loop.py`、`loop/turn.py`（循环重构 + `_note_tool_outcome` 单点记账 + `_inject_doom_loop_notice`）、`tool/spec.py`（`refunds_iteration`）、`tool/runtime.py`（`spec_for`）、`loop/event.py`（`DenialCircuitOpen` / `DoomLoopWarned` / `DoomLoopCircuitOpen`）。
 
 ## 数据契约
 
@@ -33,10 +34,28 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
 
 `data = {consecutive, recent, window_size, last_denied_target}`（target 仅名字，不带 args 正文）。console sink 专用渲染（`perm ⊘` 红）。
 
+### `DoomLoopConfig`（frozen，业务注入；阈值 None = 永不触发）
+
+| 字段 | 默认 | 含义 |
+| --- | --- | --- |
+| `max_consecutive_repeats` | None | 警告阈值 N；连续 N 次同签名成功 → warn，断路阈值派生为 2N（grace 窗口 = N） |
+
+注入路径同 `DenialBreakerConfig`：`EnginePool.create(doom_loop_config=…)` / `AgentEngine(doom_loop_config=…)` → 每 TurnRunner 每 turn 新建 `DoomLoopDetector`（turn 级、无跨 turn 状态，R5 ⚪）。签名 = `(tool, arguments_raw)` 精确匹配，不归一化（首版从简、零误报）。
+
+### `DoomLoopWarned` / `DoomLoopCircuitOpen` 事件
+
+`kind ∈ {"doom_loop_warned", "doom_loop_circuit_open"}`，`data = {tool, consecutive, threshold}`（仅工具名 + 计数，不带 args 正文）。console sink 专用渲染（`loop ↻` 黄 / `loop ⊘` 红）。
+
 ## 行为契约
 
 ### Requirement: 单点记账与触发
 - deny 判定 = 工具配对回填处统一观察 `ToolResult.data["reason"] ∈ {"hook_denied", "permission_denied"}`（含 HITL ask 超时产生的 deny）；成功结果重置 consecutive；其他 error 中性。consecutive 或滑窗任一越阈值 → `DenialCircuitOpen` emit **恰好一次**（闩锁），turn 在迭代边界以 `end_reason="denial_circuit_open"` 终止——当轮 fc/output 已配对落史，无孤儿（K5 一致）。本圈无后续 tool call 时自然 `completed` 优先（断路只阻后续空转）。
+
+### Requirement: doom-loop 先警后断（escalate）
+- 只在工具配对回填处的**成功**结果上记 `(tool, arguments_raw)`（deny/error 不计，交 DenialBreaker）；签名与上次相同 → consecutive+1，否则重置并清 warned 闩锁（模型已跳出）。
+- consecutive 首达 N → `record` 返回 `"warn"`：调用方注一条 `system_injection(source="doom_loop")` **中性事实**（「同工具同参数已连续 N 次、结果一致」，不含「换路 / 该总结」等产品祈使，R1）+ emit `DoomLoopWarned` **恰好一次**，turn 续跑给模型自改机会。
+- 警告后仍连续重复到 2N → 返回 `"open"`：emit `DoomLoopCircuitOpen` + 置闩锁，turn 在迭代边界以 `end_reason="doom_loop_circuit_open"` 终止（与 denial 同语义，当轮 fc/output 已配对落史，无孤儿 K5 一致），并经失败处置 policy 判定（`origin="guard_trip"`，可裁决改为挂起）。
+- 默认 `doom_loop_config=None` → 检测器不建，行为零变化（迁移即回滚）。
 
 ### Requirement: 预算行为等价与分层
 - 默认（不注入 budget/config、不开 refund）行为与裸计数器逐项等价（全量回归零断言改动守护）；取消检查仍在 consume 之前（取消圈不计费，与原语义一致）。
@@ -61,10 +80,10 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
 
 - **R1**：✅ 计数与记账无业务语义；阈值业务注入。
 - **R2**：⚪ 不触压缩/cache。
-- **R3**：✅ `denial_circuit_open` 事件 + console 专用渲染；`end_reason` 经既有 turn 终结事件透出。
+- **R3**：✅ `denial_circuit_open` / `doom_loop_warned` / `doom_loop_circuit_open` 事件 + console 专用渲染；`end_reason` 经既有 turn 终结事件透出。
 - **R4**：✅ 断路终止走既有迭代边界终结路径（配对安全）；取消语义与原循环逐项一致。
-- **R5**：⚪ 两护栏均 turn 内瞬态，无新增持久态。
+- **R5**：⚪ 三护栏均 turn 内瞬态；doom-loop 的 warn 注入项经 `store.append` 落盘（作为普通历史 resume 回放）。
 
 ## 测试
 
-`tests/loop/test_iteration_budget.py`（5：耗尽/refund clamp/子独立/显式子 cap）、`tests/loop/test_denial_breaker.py`（6：连续/重置/滑窗/驱逐/无阈值/snapshot）、`tests/loop/test_turn_resource_guards.py`（3 e2e：连续 deny 断路恰好一次 + end_reason；refunds 工具 5 轮跑过 cap=3 净耗 1；父 cap=3 耗 1 后子独立跑满 3 圈）。行为等价由全量回归（零断言改动）守护。`tests/loop/test_resource_limit.py`（K2 触顶挂起 retry 增额闭环 / turn_refused 进 policy / RequestTooLarge 预检双 policy）、`tests/test_suspension_ttl.py::test_auto_retry_lineage_exhaustion_forces_abort`（谱系熔断）。
+`tests/loop/test_iteration_budget.py`（5：耗尽/refund clamp/子独立/显式子 cap）、`tests/loop/test_denial_breaker.py`（6：连续/重置/滑窗/驱逐/无阈值/snapshot）、`tests/loop/test_doom_loop.py`（7：opt-in off/警在 N/断在 2N/闩锁/不同签名重置/不同 tool 重置/snapshot 无 args 泄漏）、`tests/loop/test_doom_loop_integration.py`（2 e2e：同 echo 反复 → 警注提示 + 断 end_reason 终止；未启用零检测）、`tests/loop/test_turn_resource_guards.py`（3 e2e：连续 deny 断路恰好一次 + end_reason；refunds 工具 5 轮跑过 cap=3 净耗 1；父 cap=3 耗 1 后子独立跑满 3 圈）。行为等价由全量回归（零断言改动）守护。`tests/loop/test_resource_limit.py`（K2 触顶挂起 retry 增额闭环 / turn_refused 进 policy / RequestTooLarge 预检双 policy）、`tests/test_suspension_ttl.py::test_auto_retry_lineage_exhaustion_forces_abort`（谱系熔断）。
