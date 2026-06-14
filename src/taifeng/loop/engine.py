@@ -40,6 +40,7 @@ from taifeng.loop.event import (
     InstructionFetchFailed,
     InstructionUpdated,
     InstructionUpdateRejected,
+    PostTurnHookFired,
     PreTurnHookDenied,
     ResourceLimitExceeded,
     RewindRejected,
@@ -74,7 +75,7 @@ from taifeng.loop.submission import (
     UpdateInstructions,
     UserMessage,
 )
-from taifeng.loop.turn import TurnRunner
+from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.skill.registry import SkillSnapshot
@@ -1320,8 +1321,11 @@ class AgentEngine:
         if cache_break_expected_reason is not None:
             runner._next_cache_break_expected = True  # noqa: SLF001
             runner._next_cache_break_reason = cache_break_expected_reason  # noqa: SLF001
+        # post_turn 钩子需用「本 turn 的 index」(= +1 之前的值,与同 turn 的
+        # pre_turn iteration 对齐),故在 finally 自增前先捕获。
+        fired_iteration = self._turn_index
         try:
-            await runner.run()
+            outcome = await runner.run()
         finally:
             self._pending.pop(submission_id, None)
             self._turn_index += 1
@@ -1340,6 +1344,63 @@ class AgentEngine:
             self._compaction_count = runner.compaction_count
             # K2：累加本 turn 消耗，跨 turn 维护会话累计 token
             self._session_tokens += runner.total_usage.total_tokens
+
+        # post_turn 钩子：在状态回写之后、下一 turn 启动之前同步触发(顺序保证)。
+        # 仅 root turn 真终态触发(suspended/cancelled 不触发,详见 helper)。
+        await self._fire_post_turn_hook(
+            submission_id, outcome, turn_cancel, fired_iteration,
+        )
+
+    async def _fire_post_turn_hook(
+        self,
+        submission_id: str,
+        outcome: TurnOutcome,
+        turn_cancel: CancellationToken,
+        iteration: int,
+    ) -> None:
+        """root turn 真终态时同步触发 post_turn 钩子(审计型,不可否决)。
+
+        触发点在 turn 状态回写之后、下一 turn 启动之前 —— 给宿主「下一轮前必须
+        完成」的顺序保证(self-review / 记忆固化等认知回路落脚点)。仅当注册了
+        post_turn 钩子时才执行(常见路径零开销)。
+
+        门控:
+          - 挂起(suspended)= 暂停等 Resume —— 续跑到真终态才触发,此刻不触发;
+          - 取消(cancelled)= teardown —— 不触发(与 R4 可取消语义一致)。
+        R4:经 ``ctx.extras["cancel"]`` 把本 turn 的 CancellationToken 交给钩子;
+        审计型经 ``run_audit_only`` 触发(deny / 异常都不改变已终结的 turn)。
+        """
+        if self._hooks is None:
+            return
+        if outcome.end_reason in ("suspended", "cancelled"):
+            return
+        handlers = self._hooks.registry.handlers("post_turn")
+        if not handlers:
+            return
+        from taifeng.hooks.types import HookContext, PostTurnHook
+        await self._hooks.run_audit_only(
+            "post_turn",
+            PostTurnHook(
+                end_reason=outcome.end_reason,
+                success=outcome.success,
+                final_text=outcome.final_text,
+                iteration=iteration,
+            ),
+            HookContext(
+                thread_id=self._thread_id,
+                submission_id=submission_id,
+                entry_skill_id=self._entry_skill.id,
+                extras={"cancel": turn_cancel},
+            ),
+        )
+        await self._emit(EventMsg(
+            submission_id=submission_id,
+            msg=PostTurnHookFired(data={
+                "end_reason": outcome.end_reason,
+                "iteration": iteration,
+                "hook_count": len(handlers),
+            }),
+        ))
 
     # -----------------------------------------------------------------
     # detached-spawn：分离式发起子 skill（立即返回句柄，后台独立跑完）

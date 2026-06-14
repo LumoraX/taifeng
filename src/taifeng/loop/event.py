@@ -35,6 +35,7 @@ MsgKind = Literal[
     "skill_dispatch_hook_denied",
     "skill_dispatch_permission_denied",
     "pre_turn_hook_denied",
+    "post_turn_hook_fired",
     "pre_compact_hook_skipped",
     "thread_resumed",
     "subagent_policy_overridden",
@@ -323,6 +324,17 @@ class PreTurnHookDenied(_Msg):
 
     kind: Literal["pre_turn_hook_denied"] = "pre_turn_hook_denied"
     """data = {"reason": str, "user_text_preview": str, "iteration": int}"""
+
+
+class PostTurnHookFired(_Msg):
+    """post_turn hook 在 root turn 真终态被触发 —— 收尾审计点(R3)。
+
+    仅在 end_reason ∉ {suspended, cancelled} 且有注册 post_turn 钩子时 emit;
+    审计型,不改变已终结的 turn。范式对齐 ``pre_turn_hook_denied``。
+    """
+
+    kind: Literal["post_turn_hook_fired"] = "post_turn_hook_fired"
+    """data = {"end_reason": str, "iteration": int, "hook_count": int}"""
 
 
 class PreCompactHookSkipped(_Msg):
@@ -701,6 +713,7 @@ Msg = Union[
     SkillDispatchHookDenied,
     SkillDispatchPermissionDenied,
     PreTurnHookDenied,
+    PostTurnHookFired,
     PreCompactHookSkipped,
     TurnSuspended,
     SuspensionResolved,

@@ -15,6 +15,7 @@ HookKind = Literal[
     "post_tool_use",
     "pre_compact",
     "pre_turn",
+    "post_turn",
     "pre_skill_dispatch",
     "post_skill_dispatch",
     "pre_script_use",
@@ -97,6 +98,41 @@ class PreTurnHook:
 
     user_text: str
     iteration: int
+
+
+@dataclass(frozen=True)
+class PostTurnHook:
+    """root turn 抵达真终态后 —— 收尾审计点(对称 ``pre_turn``)。
+
+    触发时机:在 engine 把 turn 状态(history / cache_anchor / rewind 节点表 /
+    指纹 / token)回写之后、下一 turn 启动之前**同步**触发——给宿主「下一轮前
+    必须完成」的顺序保证(self-review / 记忆固化等认知回路的落脚点)。
+
+    **重要约束**:
+    - **仅审计,不可否决**(与 ``post_skill_dispatch`` 同义):返回 deny 或抛异常
+      都不会修改已终结的 turn,仅写日志。内核经 ``run_audit_only`` 触发。
+    - **仅 root turn**:detached spawn / call_skill 子 turn 不触发(子 turn 不经
+      ``_build_and_run_runner``);子 turn 收尾审计由 ``post_skill_dispatch`` 覆盖。
+    - **仅真终态**:``end_reason`` ∈ {suspended, cancelled} 不触发——挂起是暂停等
+      Resume(续跑到真终态才触发),取消是 teardown。
+    - **R4 可取消**:钩子执行经 ``HookContext.extras["cancel"]`` 拿到本 turn 的
+      CancellationToken;同步阻塞下一 turn 是顺序保证的预期代价,但长耗时钩子须
+      可被中断(宿主重活应自行 detached)。
+    """
+
+    end_reason: str
+    """turn 终态:completed / max_iterations / resource_limit_exceeded /
+    denial_circuit_open / error(suspended / cancelled 不会触发本钩子)。"""
+
+    success: bool
+    """turn 是否成功(失败类终态为 False —— 审计闭环)。"""
+
+    final_text: str
+    """本 turn 最终答案(取自 TurnOutcome.final_text)。需全量 items 时宿主自调
+    ``engine.history_snapshot()``。"""
+
+    iteration: int
+    """本 turn 的 index(= pre_turn 同 turn 的 iteration,非下一轮)。"""
 
 
 # 单次 PostSkillDispatchHook.output_preview 字节上限（防止 hook 数据过大）
@@ -237,6 +273,7 @@ class HookRegistry:
             "post_tool_use": [],
             "pre_compact": [],
             "pre_turn": [],
+            "post_turn": [],
             "pre_skill_dispatch": [],
             "post_skill_dispatch": [],
             "pre_script_use": [],
