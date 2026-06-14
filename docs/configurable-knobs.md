@@ -365,12 +365,39 @@ PermissionPolicy(
 
 ```python
 async def my_telemetry_callback(
-    event_kind: str,        # 当前仅 "permission_prompt_timeout"
+    event_kind: str,        # permission_prompt_timeout / permission_grant_issued
+                            #   / permission_grant_hit / permission_grant_expired
     payload: dict[str, Any], # scope / target / timeout_seconds / call_chain / thread_id / submission_id
 ) -> None:
     # 推荐：写监控系统 + 告警；超时频繁 = 业务 prompter 实现有 bug 或用户体验差
     ...
 ```
+
+### 可复用审批 grant（ADR 0022，运行时 API）
+
+把一次性预批（`preapprove`）推广为作用域化、有确定性生命周期的复用凭证——
+「人会在这个 ask 上点的 yes，提前缓存」。grant 只绕过弹窗、**绝不越过 `deny` 规则**。
+
+```python
+from taifeng import PermissionGrant
+
+# 预种 / resume 重种：让所有命中的 ask 自动放行（不再问人）
+policy.issue_grant(PermissionGrant(
+    scope="tool_use", target_pattern="shell_exec",
+    args_match={"cmd": "glob:openspec *"},   # 复用 PermissionRule 匹配
+    max_uses=10,                              # 确定性生命周期；None=不限次（禁挂钟 TTL）
+    call_chain_prefix=("root", "expert"),     # ()=全树；非空=收窄到该子树
+    thread_id="",                             # ""=任意 thread
+))
+policy.revoke_grant(grant_id)                 # 主动撤销（业务做挂钟 TTL 用）
+
+# 或：prompter 答复时顺带签发（内核自动记账，后续同模 ask 复用）
+return PermissionDecision.allow(grant=PermissionGrant(scope="tool_use", target_pattern="shell_exec"))
+```
+
+- **挂钟 TTL** 不在内核（`src/` 禁 `Date.now` 保 resume 确定性）：业务注入 clock 后自行 `revoke_grant`
+- grant 随 engine 级单例 policy 天然全树共享（spawn/peer 通用）；`call_chain_prefix` 收窄到子树
+- 命中/签发/失效发 `permission_grant_*` telemetry（审计）；resume 经 `issue_grant` 重种（`snapshot()` 反映剩余次数）
 
 ### Hook lifecycle 完整集
 

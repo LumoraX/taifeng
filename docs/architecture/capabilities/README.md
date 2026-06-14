@@ -25,7 +25,7 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | --- | --- |
 | [hooks](hooks.md) | 8 HookKind values, hook payload fields, call-site mapping, `PreTurnHookDenied`, and `PreCompactHookSkipped` events |
 | [instructions-injection](instructions-injection.md) | `InstructionSource` protocol, three scope cache levels, hot reload semantics, fail-fast behavior, and 5 event classes |
-| [permission-gate](permission-gate.md) | `PermissionRequest`, factory methods, `prompter_timeout_seconds`, tri-state `args_match`, `PermissionRule.parse` / `from_dict`, and stateless kernel constraints |
+| [permission-gate](permission-gate.md) | `PermissionRequest`, factory methods, `prompter_timeout_seconds`, tri-state `args_match`, `PermissionRule.parse` / `from_dict`, stateless kernel constraints, and reusable approval grants (`PermissionGrant` / `GrantStore`, ADR 0022) |
 | [suspend-resume](suspend-resume.md) | `SuspendReason`, `PendingRequest`, `SuspensionRecord`, `Resume` op, `ResolvePlan`, `SuspensionResolver`, resume semantics, idempotent resolved markers, tier-1/2 recovery, and cross-process rebuild |
 | [script-execution](script-execution.md) | `ScriptDescriptor` / `ScriptExecutor`, implicit discovery, subprocess isolation, timeout / cancellation, and script events |
 | [tool-whitelist](tool-whitelist.md) | Single source of truth for visible tools, `run_script` integration, dispatch-side `not_offered` checks, and replay exemptions |

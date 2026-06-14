@@ -314,3 +314,57 @@ pattern 三态语义：
 - **WHEN** 业务侧包装 prompter，在收到 `remember="always"` 时显式 `policy.rules.append(new_rule)`
 - **THEN** 下次同 request 命中 business 添加的规则，不走 prompter
 
+### Requirement: 可复用审批 grant（permission-grants）
+
+`PermissionPolicy` SHALL 内置一个 `GrantStore`，承载**可复用审批 grant**——把一次性的
+`_preapproved_call_ids`（精确 call_id、用一次即弃，resume 专用）推广为
+**作用域化、有确定性生命周期、内核消费并打事件**的凭证。grant 的语义严格是
+「人本来会在这个 ask 上点的 yes，提前缓存」，与 `remember_until`（仍 userspace 自管、内核不消费）**互补而非替代**。
+
+`PermissionGrant`（frozen dataclass）SHALL 含字段：
+
+- `scope: PermissionScope` + `target_pattern: str`（+ 可选 `args_match: dict[str,str]`）
+  —— 匹配**复用 `PermissionRule.matches`**（literal / `re:` / `glob:` 三态），不重写匹配逻辑
+- `call_chain_prefix: tuple[str,...] = ()` —— **子树收窄**：`()`=全树（贴合 engine 级单例 policy 全树共享的事实）；非空仅当它是 `request.call_chain` 的前缀时命中（子树可用、父/兄弟子树不可用）
+- `thread_id: str = ""` —— `""`=任意 thread；非空仅命中该 thread
+- `max_uses: int | None = None` —— **确定性生命周期**：`None`=不限次；否则每次命中递减、到 0 移除。**禁挂钟 TTL**（`src/` 禁 `Date.now`，保 resume 确定性）；挂钟过期留 userspace 经 `revoke_grant` 处理
+- `grant_id: str = ""` —— 审计 / 撤销键；空则 `GrantStore.add` 分配确定性计数 id（无随机、resume 可复现）
+
+`PermissionPolicy` SHALL 提供 `issue_grant(grant) -> PermissionGrant`（亦为 resume 重种入口）与 `revoke_grant(grant_id) -> bool`。
+
+**核心安全不变量**：grant 短路 SHALL 排在规则裁决**之后**——`deny`/`allow` 规则先决，grant 只在 `mode == "ask"` 时、prompter 之前介入。故 grant 只省去重复弹窗，**绝不越过 `deny` 规则、绝不提升权限上限**。
+
+grant 命中 / 签发 / 失效 SHALL 经 `PolicyTelemetryCallback` 发
+`permission_grant_hit` / `permission_grant_issued` / `permission_grant_expired` 事件（permission 包不依赖 `loop/event`，R1 干净）。
+
+grant 随 engine 级单例 `PermissionPolicy` 天然全树共享（root / call_skill / spawn_skill 子 runner 共用同一 policy），无需贯穿 pool/engine。
+
+#### Scenario: grant 命中绕过 prompter
+- **WHEN** `policy.issue_grant(PermissionGrant(scope="custom", target_pattern="x"))` 且默认 `ask`
+- **AND** `policy.check(request(scope="custom", target="x"))`
+- **THEN** 返回 `allow`（reason 以 `grant:` 开头）且 **prompter 不被调用**
+
+#### Scenario: grant 绝不越过 deny 规则
+- **WHEN** policy 含一条 `deny` 规则命中 target，且又 `issue_grant` 同 target
+- **THEN** `policy.check` 返回 `deny`（grant 顶不翻 deny；prompter 亦不被调用）
+
+#### Scenario: prompter 签发的 grant 被记账复用
+- **WHEN** prompter 返回 `PermissionDecision.allow(grant=PermissionGrant(...))`
+- **THEN** 首次 check 走 prompter（问人一次）
+- **AND** 下次同模 request 命中该 grant、自动 `allow`、不再问人
+
+#### Scenario: _preapproved_call_ids 优先于 grant
+- **WHEN** 同时存在一张 `max_uses=1` 的 grant 与对该 call_id 的 `preapprove`
+- **THEN** check 走 `resume_preapproved`（非 grant）
+- **AND** grant 未被消耗（下次无预批时仍可命中）
+
+#### Scenario: max_uses 用尽后回落 prompter
+- **WHEN** grant `max_uses=1`，连续两次同模 check
+- **THEN** 第一次走 grant `allow`、第二次回落 prompter
+- **AND** 发 `permission_grant_expired` 事件
+
+#### Scenario: call_chain_prefix 子树收窄
+- **WHEN** grant `call_chain_prefix=("root","expert")`
+- **THEN** `request.call_chain=("root","expert","leaf")` 命中
+- **AND** `("root",)`（父）/ `("root","other")`（兄弟）均不命中
+
