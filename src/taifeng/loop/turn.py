@@ -19,6 +19,7 @@ from taifeng.context.budget import (
     estimate_history_bytes,
     estimate_history_tokens,
 )
+from taifeng.context.budget_hint import evaluate_budget_hint, render_budget_hint
 from taifeng.context.cache_stats import PromptCacheStats
 from taifeng.context.compressor import (
     CompressionContext,
@@ -65,6 +66,7 @@ from taifeng.loop.event import (
     EngineLog,
     EventMsg,
     LlmRequestRecorded,
+    BudgetHintInjected,
     PinnedStateReinjected,
     PreCompactHookSkipped,
     ProviderRetry,
@@ -249,6 +251,9 @@ class TurnRunner:
     total_usage: TokenUsage = field(default_factory=TokenUsage)
     history_buffer: list[ResponseItem] = field(default_factory=list)
     """In-memory 视图，与 store 同步追加。"""
+    # budget-awareness（ADR 0017 规则②）：是否已对当前「超 soft episode」注过预算提示。
+    # 穿越一次注一次；用量回落到 soft 以下时复位（见 _maybe_inject_budget_hint）。
+    _budget_notified: bool = False
 
     # turn-rewind：本 turn 执行轨迹的回访节点侧录（只 root turn 的会回写 engine）
     rewind_log: RewindLog = field(default_factory=RewindLog)
@@ -546,6 +551,36 @@ class TurnRunner:
         }))
         return new_history
 
+    async def _maybe_inject_budget_hint(self) -> None:
+        """预算自知（budget-awareness，ADR 0017 规则②）：pre-turn 估算用量，穿越
+        ``soft_limit`` 时往 history 尾追一条**中性预算事实**（用了百分之几 / 距 hard
+        还剩多少 token）+ emit ``BudgetHintInjected``；**穿越一次注一次**，用量回落
+        到 soft 以下时复位（见 ``evaluate_budget_hint``）。
+
+        R2：仅尾追加（不动已缓存前缀，不破 anchor），且在 pre-turn 边界；一次性
+        语义把每个超限 episode 的额外 system 消息限到 1 条，避免反复刷新打断 cache。
+        R1：只陈述客观事实，不含「该不该收敛」的产品意见——怎么做交给模型/业务侧。
+        """
+        tokens = estimate_history_tokens(self.history_buffer)
+        inject, self._budget_notified = evaluate_budget_hint(
+            tokens, self.budget, was_notified=self._budget_notified)
+        if not inject:
+            return
+        from taifeng.conversation.models import system_injection
+
+        note = system_injection(
+            render_budget_hint(tokens, self.budget),
+            thread_id=self.thread_id, source="budget_hint")
+        self.history_buffer.append(note)
+        await self.store.append(note)
+        window = self.budget.context_window
+        await self._emit(BudgetHintInjected(data={
+            "used": tokens,
+            "context_window": window,
+            "ratio": round(tokens / window, 2) if window > 0 else 0.0,
+            "remaining_to_hard": max(0, self.budget.hard_limit - tokens),
+        }))
+
     async def run(self) -> TurnOutcome:
         start = time.monotonic()
         # 判定是否为根 turn —— 关键事实：根 turn 由 Engine 直接派发，构造时
@@ -620,6 +655,10 @@ class TurnRunner:
                     # B1 midturn-input-steering：迭代边界排空注入队列（成对 fc/output
                     # 已闭合的安全点），把运行中收到的用户输入并入 history 再采样。
                     await self._drain_pending_input()
+
+                    # budget-awareness：压缩前按高水位用量判定是否注预算提示
+                    # （穿越 soft 一次注一次）。放在压缩前，使提示反映承压瞬间。
+                    await self._maybe_inject_budget_hint()
 
                     # pre-turn 压缩判断
                     await self._maybe_compress(phase="pre_turn")

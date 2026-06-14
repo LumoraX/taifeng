@@ -67,6 +67,7 @@ As of this branch, every capability below has landed as ✅ or 🧪. Feature-gap
 | **Manual compaction** | Host systems can request compaction explicitly | `CompactNow` op | — | [context-compression.md](architecture/context-compression.md) | — |
 | **Cache-friendly contract** | Every compaction reports `cache_invalidated` and `anchor_preserved_until`; mid-turn compaction touches only the tail | `CompressionResult` / `cache_break_detected` event | [observability/](../examples/observability/) | [context-compression.md](architecture/context-compression.md) | — |
 | **Runtime budget updates** | Context budgets can be changed between turns | `UpdateBudget` op | — | [configurable-knobs.md](configurable-knobs.md) | — |
+| **Budget awareness** | Pre-turn injects a neutral budget fact (used %, tokens until hard limit) when usage crosses `soft_limit`, once per crossing, so the model can self-converge (ADR 0017 rule ②) | automatic on `soft_limit` crossing / `budget_hint_injected` event | [compression_showcase/demo.py](../examples/compression_showcase/demo.py) | [budget-awareness.md](architecture/capabilities/budget-awareness.md) 🧪 | — |
 
 ## 4. LLM Client
 

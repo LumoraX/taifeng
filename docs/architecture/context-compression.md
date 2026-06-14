@@ -243,6 +243,21 @@ result.new_history
 
 契约：[capabilities/postcompact-state-reinjection.md](capabilities/postcompact-state-reinjection.md)。demo：`examples/compression_showcase/pinned_demo.py`（mock 可跑）。
 
+## 预算自知提示（budget-awareness，规则② 原语）
+
+压缩是「系统替模型收拾上下文」；预算自知是「让模型自己知道快撞上限、从而主动收敛」——
+二者互补。`TurnRunner._maybe_inject_budget_hint` 在每次迭代顶部、`_maybe_compress(pre_turn)`
+**之前**按当前 history 估算用量（复用 `estimate_history_tokens`），穿越 `soft_limit` 时往 history
+尾追一条 `system_injection(source="budget_hint")` 中性预算事实（`"Context budget: ~X% ... (~M
+tokens until the hard limit)."`）+ emit `budget_hint_injected`。
+
+复用 `soft_limit` 阈值、**穿越一次注一次**（`_budget_notified` 标志，回落到 soft 以下复位、再
+穿越重新注）——这把每个超限 episode 的额外 system 消息限到 1 条，是 R2 的关键（避免每轮刷新
+打断 cache）。纯决策抽在 `context/budget_hint.py`（`render_budget_hint` / `evaluate_budget_hint`，
+无状态可单测）。注入文本只陈述事实，不含「该收敛」的产品意见（R1）；「怎么收敛」交模型/业务。
+
+契约：[capabilities/budget-awareness.md](capabilities/budget-awareness.md)。决策：ADR 0020。
+
 ## tool_use / tool_result 边界保护
 
 参照 claw-code `compact.rs` 的关键发现：

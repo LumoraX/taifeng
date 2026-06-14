@@ -38,6 +38,7 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | [compaction-surgical-trim](compaction-surgical-trim.md) | Surgical trim passes, pair-safe output rewriting, cache-TTL triggers, glob deny precedence, `CompressionResult.detail`, and idempotent placeholders |
 | [turn-resource-guards](turn-resource-guards.md) | `DenialBreaker`, `IterationBudget`, child budget derivation, `ToolSpec.refunds_iteration`, and single-point accounting |
 | [postcompact-state-reinjection](postcompact-state-reinjection.md) | `PinnedStateSource`, pinned registry, budgeted reinjection, `system_injection(source=\"pinned:<name>\")`, events, and runtime register/unregister |
+| [budget-awareness](budget-awareness.md) | Pre-turn neutral budget-fact injection on `soft_limit` crossing, one-shot-per-crossing, `system_injection(source="budget_hint")`, `budget_hint_injected` event (ADR 0017 rule ②) |
 | [peer-mailbox-messaging](peer-mailbox-messaging.md) | Live peer messaging by thread/handle/parent address, queue-only and trigger-turn semantics, `wait_peer`, `SendToPeer`, and peer events |
 | [midturn-input-steering](midturn-input-steering.md) | `InjectUserInput`, pending input queues, iteration-boundary draining, no-active-turn fallback, delivered events, pairing protection, and cancellation guards |
 | [audit-observability](audit-observability.md) | 全局 `seq` + per-subscriber `delivery_seq`（`DeliveredEvent`）自检、事件队列有界大容量 + 高/低水位告警迟滞、`enable_request_capture` 下 `LlmRequestRecorded` 全文留痕、OtelSink 按 kind 跳过 |

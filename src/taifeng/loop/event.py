@@ -28,6 +28,7 @@ MsgKind = Literal[
     "compaction_started",
     "compaction_completed",
     "pinned_state_reinjected",
+    "budget_hint_injected",
     "cache_break_detected",
     "provider_retry",
     "llm_request_recorded",
@@ -200,6 +201,20 @@ class PinnedStateReinjected(_Msg):
     """
 
     kind: Literal["pinned_state_reinjected"] = "pinned_state_reinjected"
+
+
+class BudgetHintInjected(_Msg):
+    """上下文用量穿越 soft_limit，pre-turn 注一条中性预算事实（budget-awareness）。
+
+    ADR 0017 规则②原语：让模型自知剩余预算从而主动收敛。穿越一次注一次
+    （回落复位）。不带渲染正文外的产品意见。
+
+    data = {"used": int, "context_window": int, "ratio": float,
+            "remaining_to_hard": int}
+    ratio = used / context_window（保留两位）；remaining_to_hard = hard_limit - used。
+    """
+
+    kind: Literal["budget_hint_injected"] = "budget_hint_injected"
 
 
 class PeerMessageSent(_Msg):
@@ -722,6 +737,7 @@ Msg = Union[
     CompactionDegradationWarning,
     CompactionIntegrityRolledBack,
     PinnedStateReinjected,
+    BudgetHintInjected,
     ContextBudgetExceeded,
     CacheBreakDetected,
     ProviderRetry,
