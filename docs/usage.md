@@ -469,6 +469,52 @@ pool = await taifeng.EnginePool.create(
 
 ---
 
+## 完整审计订阅（审计可观测 层1）
+
+> **与上面的 IndexHook 区别**：IndexHook 投递的是 **thread 持久化**生命周期（create / append / metadata）；这里订阅的是 **事件总线 firehose** —— 一次会话的**全部** `EventMsg`（turn 生命周期 / tool 调用 / skill 派发 / HITL / 压缩 / 以及 LLM **request 全文**），用于排障重现、合规审计、功能/错误复现。契约见 `docs/architecture/capabilities/audit-observability.md`。
+
+要点（业务端 4 步）：
+
+1. **完整订阅走 firehose**：`engine.subscribe_all_envelopes()`（产出带 `delivery_seq` 的信封）。**只有全量流的全局 `seq` 才连续可自检**；过滤订阅 `subscribe(sub_id)` 只收子集、seq 天然跳号（=过滤非丢弃），不能用于完整审计。
+2. **全局唯一落库键 `(session_id, seq)`**：`session_id` 在 attach 时从 `engine.session_id` 取（**不**盖在事件上）；与 `ev.seq` 复合即全局唯一，跨 session 汇聚不撞键，可直接做 DB 主键。
+3. **丢失自检看 `delivery_seq`**：每订阅各自从 0 连续；队列满丢弃会「烧号」→ 收到的 `delivery_seq` 跳号 = **本订阅自己**漏了事件。与全局 seq 跳号互不混淆。
+4. **request 全文留痕**：构造时 `enable_request_capture=True`（默认关 = 零泄漏面），每次实际发往 provider 的 request 在发送前 emit 一条 `llm_request_recorded`（`data = ApiRequest.model_dump()`，retry/压缩重建各一条）。**含完整 prompt + conversation（敏感）**：可靠落盘 / 脱敏 / 加密 / 保留期 **全归业务消费者**（内核只留痕、不治理；OtelSink 已按 kind 整条跳过不外发）。
+
+```python
+class CompleteAuditSink:
+    def __init__(self, session_id: str):
+        self._sid = session_id          # attach 时从 engine.session_id 取，事件不带
+        self._expect = 0                # 期望的下一个 delivery_seq
+
+    async def run(self, engine):
+        async for env in engine.subscribe_all_envelopes():   # 全量 firehose
+            ev = env.event
+            if env.delivery_seq != self._expect:             # 本订阅丢失自检
+                self._on_gap(self._expect, env.delivery_seq) # 知道漏了哪些，自己决定补
+            self._expect = env.delivery_seq + 1
+
+            key = (self._sid, ev.seq)                         # 全局唯一落库键
+            if ev.msg.kind == "llm_request_recorded":
+                await self._sink(key, ev.msg.data)           # request 全文 → Redis/Kafka/DB（脱敏归你）
+            else:
+                await self._sink(key, {"kind": ev.msg.kind, "data": ev.msg.data})
+            if ev.msg.kind == "shutdown":
+                return
+
+# enable_request_capture=True 才留 request 全文；默认关
+pool = await taifeng.EnginePool.create(..., enable_request_capture=True)
+engine = await pool.get_or_create(session_id="...", entry_skill_id="...")
+audit = CompleteAuditSink(engine.session_id)
+asyncio.create_task(audit.run(engine))   # attach 后再 submit turn
+```
+
+- 进程内内存队列：进程崩溃 = 未消费事件丢失（固有限制；消费者落持久化后端则不丢）。「内核级 fail-stop 不丢」是 **层2**（独立 ADR 0019），不搭 EventMsg 便车。
+- 队列**有界大容量**（`event_queue_size` 默认 65536，不 OOM）+ 高/低水位 `logger.warning`；满则丢弃 + 计数 + 上述 `delivery_seq` 自检。旋钮见 `docs/configurable-knobs.md`。
+
+完整示例：`examples/audit_observability/demo.py`（端到端可跑，2 个 turn → 完整事件流 + request 全文留痕 + delivery_seq 零丢失自检）。
+
+---
+
 ## SKILL.md scripts 与 run_script（scripts-runtime · ADR 0009）
 
 SKILL.md 中 `scripts:` 声明的脚本通过内置 `run_script` 工具暴露给 LLM 执行。9 阶段流程含 `PermissionPolicy(scope='script_exec')` + `pre/post_script_use` hook 双重门控。
