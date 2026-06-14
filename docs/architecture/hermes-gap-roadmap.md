@@ -81,7 +81,7 @@ claw-code `crates/api/src/error.rs` 在发请求前估算超限并给"先压缩"
 - ✅ commit `cb17dd1`：**工具 hook 的 args 改写**（PreToolUse 支持 `args_override`，与 script hook 对齐）。
 - ✅ commit `c3773f9`（G5d）：**权限能力阶梯** `PermissionPolicy.from_capability_tier(read_only / workspace_write / danger_full_access)` —— 展开为既有 scope 规则的便利构造，契合 taifeng per-builtin 权限模型。
 - 🟦 **判为不适用（设计冲突，非待办）**：hook 返回 permission **裁决**喂"中央权限引擎"。**核实结论**：taifeng **按设计做 per-builtin 权限**（IO/network builtin 各自收 `policy`，`call_skill`/`script_exec` 有专属门控），**无中央 tool 权限引擎**。强加中央门 = 改架构 + 与 per-builtin 双重门控冲突。hook 现已能 deny（`allow=False`）——"只能更严不能放宽"本就是安全姿态。若将来要中央门，需先定架构，不作为快速能力补。
-- 🟦 **判为已可业务侧实现（非缺口）**：跨子 skill 审批委托。`PermissionRequest.call_chain` 已透传调用栈，业务在 prompter 包装层即可"按 call_chain 记忆一次批准"（permission/types.py 注释已指明 session/DB 级记忆走业务侧）。内核保持无状态（R1）——不在内核做。
+- 🟦 **判为已可业务侧实现（非缺口）**：跨子 skill 审批委托。`PermissionRequest.call_chain` 已透传调用栈，业务在 prompter 包装层即可"按 call_chain 记忆一次批准"（permission 模块注释已指明 session/DB 级记忆走业务侧：`policy.py` 的 `check` 与 `prompter.py` 的 `CliPrompter`）。内核保持无状态（R1）——不在内核做。
 
 ### 🟡 P2 — G6：内置工具能力（codex / hermes，均可选 builtin，R1 干净）
 
