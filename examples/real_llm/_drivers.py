@@ -153,10 +153,31 @@ async def drive_peer_messaging(engine: Any, res: Any) -> None:
                     what="root turn_completed", wait_seconds=300.0)
 
 
+async def drive_post_turn_review(engine: Any, res: Any) -> None:
+    """post_turn 钩子真实验证 —— 真终态后触发 + 跨 turn 顺序的正确姿势。
+
+    第 1 轮真终态后 post_turn 触发(emit post_turn_hook_fired);**等该信号再提交
+    第 2 轮**(引擎不串行化相邻 turn,turn_completed 在 post_turn 之前,只有
+    post_turn_hook_fired 标志本轮固化完成)→ 累计 2 次 post_turn_hook_fired。
+    """
+    await engine.submit(taifeng.UserMessage(
+        text="请用一句话给出你对『多轮对话每轮收尾该做什么』的结论。"))
+    await _wait_for(res, lambda m: m.kind == "post_turn_hook_fired",
+                    what="第1轮 post_turn_hook_fired", wait_seconds=240.0)
+    # 跨 turn 顺序:等本轮 post_turn(固化)完成再提交下一轮
+    await engine.submit(taifeng.UserMessage(text="再补充一条理由。"))
+    await _wait_for(
+        res,
+        lambda m: sum(1 for x in res.events
+                      if x.kind == "post_turn_hook_fired") >= 2,
+        what="第2轮 post_turn_hook_fired", wait_seconds=240.0)
+
+
 DRIVERS: dict[str, Any] = {
     "suspend_resume": drive_suspend_resume,
     "turn_rewind": drive_turn_rewind,
     "thread_rewind": drive_thread_rewind,
     "spawn_join": drive_spawn_join,
     "peer_messaging": drive_peer_messaging,
+    "post_turn_review": drive_post_turn_review,
 }

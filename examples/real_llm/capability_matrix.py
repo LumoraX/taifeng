@@ -100,6 +100,24 @@ TOOL_FACTORIES = {
     "send_message": make_send_message_tool,
 }
 
+def _post_turn_hook_runner() -> object:
+    """构造一个注册了 post_turn 钩子的 HookRunner（供 post_turn_review 场景注入）。
+
+    钩子做最小固化(校验本轮 history 已回写后返回 ok)——真实运行中触发即 emit
+    post_turn_hook_fired,矩阵据此事件判定 post_turn 在真实 LLM 链路被触发。
+    """
+    from taifeng.hooks import HookDecision, HookRegistry, HookRunner
+
+    reg = HookRegistry()
+
+    async def _consolidate(hook: Any, ctx: Any) -> object:
+        # 真实场景的"记忆固化"落脚点;此处仅审计型 no-op(事件触发即验证)
+        return HookDecision.ok()
+
+    reg.register("post_turn", _consolidate)
+    return HookRunner(reg)
+
+
 # 能力矩阵 —— skill 包与 web_ui DEMOS 同源；prompt 取代表性输入
 SCENARIOS: list[Scenario] = [
     Scenario("composite_dispatch", "code_review", "programmer",
@@ -182,6 +200,12 @@ SCENARIOS: list[Scenario] = [
              capability="K2 会话 token 天花板真实触发（resource_limit）",
              expect={"resource_limit_exceeded"},
              pool_kwargs={"max_session_tokens": 200}),
+    Scenario("post_turn_review", "compression_showcase", "chatty-assistant",
+             "",
+             capability="post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序）",
+             expect={"post_turn_hook_fired", "turn_completed"},
+             driver="post_turn_review",
+             pool_kwargs={"hooks": _post_turn_hook_runner()}),
 ]
 
 
