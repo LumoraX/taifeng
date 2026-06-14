@@ -1,18 +1,18 @@
 """PostTurn 钩子 demo —— turn 收尾自我审计 / 记忆固化(userspace 范式)。
 
-场景:多轮对话,每轮分析做完后,业务侧用 post_turn 钩子**确定性地**在下一轮开始
-前固化「本轮要记住什么」—— 这正是 post_turn 相对订阅 turn_completed 事件的增量:
-**顺序保证**(下一 turn 启动前必然完成)。
+场景:多轮对话,每轮分析做完后,业务侧用 post_turn 钩子在 turn 收尾**确定性地**固化
+「本轮要记住什么」—— post_turn 是 turn N 收尾的同步一步(状态回写之后触发)。
 
 要点(对照 ADR 0019):
     - post_turn 是内核只提供的 **seam**(审计型,不可否决,root turn 真终态触发);
     - review / 固化的**内容**(存什么、怎么存)全在 userspace —— 这里用一个进程内
       list 模拟「长期记忆」,真实业务可换成 memory_store.writeback / 向量库 / DB;
-    - 钩子同步执行,保证「固化完才进下一轮」。挂起 / 取消的 turn 不触发(非真终态)。
+    - 触发时本轮 history 已回写,固化看得到本轮结论。挂起 / 取消的 turn 不触发。
 
-钩子 vs 事件订阅(本 demo 的核心对照):
-    - 订阅 turn_completed 事件:fire-and-forget,无法保证下一轮前跑完(异步旁路);
-    - post_turn 钩子:同步、在 turn 边界内,给「下一轮前必须完成」的顺序保证。
+**跨 turn 顺序的正确姿势(关键)**:引擎**不串行化相邻 turn**,且 `turn_completed`
+在 post_turn **之前** emit。要「下一轮基于本轮固化结果」,宿主须**等
+`post_turn_hook_fired` 再提交下一轮**(而非等 `turn_completed`)。本 demo 即如此:
+每轮 submit 后 await 到 post_turn_hook_fired,固化完成才进下一轮。
 
 运行(SimClient,**无需 API key**):
 
@@ -67,7 +67,7 @@ def _build_post_turn_runner() -> HookRunner:
 
 
 async def main() -> None:
-    """跑两轮对话,观察每轮收尾 post_turn 在下一轮前确定性固化记忆。"""
+    """跑两轮对话:每轮 await 到 post_turn_hook_fired(固化完成)再进下一轮。"""
     with tempfile.TemporaryDirectory() as td:
         skills = Path(td) / "skills"
         (skills / "analyst").mkdir(parents=True)
@@ -89,18 +89,26 @@ async def main() -> None:
             session_id="demo-post-turn", entry_skill_id="analyst",
         )
 
+        # 跨 turn 顺序的正确姿势:等 post_turn_hook_fired(而非 turn_completed)再提交
+        # 下一轮 —— 引擎不串行化相邻 turn,turn_completed 在 post_turn 之前 emit,只有
+        # post_turn_hook_fired 才标志本轮固化已完成。用 subscribe_all 收该信号。
+        async def _wait_post_turn_fired() -> None:
+            async for ev in engine.subscribe_all():
+                if ev.msg.kind == "post_turn_hook_fired":
+                    return
+                if ev.msg.kind in ("turn_failed", "turn_suspended"):
+                    return  # 这两类终态不触发 post_turn,避免卡死
+
         for i, text in enumerate(["分析一下指标 A", "那要不要复查?"]):
             print(f"\n用户轮 {i}: {text}")
-            sub_id = await engine.submit(taifeng.UserMessage(text=text))
-            # 等本轮终态(post_turn 在 turn_completed 之后、下一轮前同步触发)
-            async for ev in engine.subscribe(sub_id):
-                if ev.msg.kind in ("turn_completed", "turn_failed"):
-                    break
-            await asyncio.sleep(0.05)  # 让 post_turn(turn_completed 之后)落定再进下一轮
+            waiter = asyncio.create_task(_wait_post_turn_fired())
+            await asyncio.sleep(0)  # 让 waiter 先注册到 subscribe_all,避免漏事件
+            await engine.submit(taifeng.UserMessage(text=text))
+            await waiter  # 本轮 post_turn(固化)完成后才进下一轮 —— 跨 turn 顺序保证
 
         await pool.close()
 
-    print("\n=== 固化进长期记忆的内容(post_turn 顺序保证,每轮一条)===")
+    print("\n=== 固化进长期记忆的内容(每轮等 post_turn_hook_fired 后才进下一轮)===")
     for note in CONSOLIDATED:
         print(" ", note)
     assert len(CONSOLIDATED) == 2, CONSOLIDATED  # 两轮各固化一次

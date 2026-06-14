@@ -24,11 +24,13 @@
 
 门控:`end_reason ∈ {suspended, cancelled}` **不触发**——挂起是暂停等 Resume(续跑到真终态时才触发),取消是 teardown(此刻触发与 R4 可取消语义矛盾)。其余终态(completed / max_iterations / resource_limit_exceeded / denial_circuit_open / error)均触发。
 
-### 决策三:同步钩子 vs 异步事件 —— 取同步(顺序保证)
+### 决策三:同步钩子 vs 异步事件 —— 取同步(本 turn 收尾的确定性一步)
 
-钩子与事件的分界,在于内核是否**消费返回值 / 同步暂停状态机**:`turn_completed` 事件 fire-and-forget,给不了「下一 turn 前完成」的顺序保证;`PostTurn` 同步钩子在 turn 边界内暂停、等宿主跑完才放行下一 turn。
+> **⚠️ 见文末「修正(2026-06-14)」——本节初稿把顺序保证表述过强,实际边界以修正为准。**
 
-需要权衡的是:codex ReviewTask 与 hermes background_review **其实都偏异步**,削弱「必须同步」的论据。但本 change 的目标场景(系统驱动、确定性、必须在下一轮前完成的自动复查 / 记忆固化)**要求顺序保证**——故取同步钩子。代价是钩子内重活会阻塞下一 turn(用户所求);缓解:R4 经 `HookContext.extras["cancel"]` 把本 turn CancellationToken 交给钩子,长耗时可中断,宿主重活应自行 detached。
+钩子与事件的分界,在于内核是否**消费返回值 / 同步介入状态机**:`turn_completed` 事件 fire-and-forget;`PostTurn` 同步钩子是 **turn N 收尾的同步一步**——在状态回写之后、turn N 自己的 task 结束之前确定性执行,且能看到本 turn 已落定的 history(测试 `test_post_turn_fires_after_state_writeback` 钉死)。
+
+codex ReviewTask 与 hermes background_review **其实都偏异步**,削弱「必须同步」的论据。本 change 仍取同步钩子,因为它把 review/固化作为 turn 收尾的**确定性一步**(而非 fire-and-forget 旁路),且能在本 turn 状态落定后立即介入。R4 经 `HookContext.extras["cancel"]` 把本 turn CancellationToken 交给钩子,长耗时可中断,宿主重活应自行 detached。
 
 ### 决策四:review 执行逻辑全留 userspace(R1)
 
@@ -47,3 +49,15 @@
 - **不加钩子,只补 userspace 范式文档(用 `subscribe_all` + `spawn_skill` 拼异步 review)**:若宿主可接受异步 review,事件订阅已够。未采纳——目标场景要求「下一轮前完成」的顺序保证,事件给不了。
 - **做成 `review` Op / 内置 reviewer 子 agent**:把 review 语义焊进内核,违反 R1 / 规则④。未采纳。
 - **可否决的 PostTurn**:turn 已终结无可拦,且与「审计型」语义冲突。未采纳。
+
+## 修正(2026-06-14):顺序保证边界澄清
+
+本 ADR 初稿(决策三/背景/备选)把顺序保证表述为「post_turn 在**下一 turn 启动之前**完成」「等宿主跑完才**放行下一 turn**」。复核引擎代码后**纠正**:
+
+- 引擎以 `asyncio.create_task(self._run_turn_for(...))` 派发 turn,**不串行化相邻 turn**(`_run_turn_for` 仅有"活跃挂起"守卫,无"单活跃 turn"锁)。
+- 故 post_turn 实际保证的是 **「本 turn 收尾内、状态回写之后」**(turn N 自己的 task 内),**不是**「任何下一 turn 启动之前」。
+- 且 `turn_completed` 在 post_turn **之前** emit;宿主若在 `turn_completed` 后并发提交下一 turn,该 turn 可与 post_turn 交错。
+
+**实际可用的跨 turn 顺序**:宿主须**等 `post_turn_hook_fired` 再提交下一轮**(而非等 `turn_completed`)。
+
+**决策不变**(仍取同步 post_turn 钩子,作为 turn 收尾的确定性一步);仅澄清其保证边界。契约措辞已同步更新 `capabilities/hooks.md` / `agent-loop.md` / `configurable-knobs.md`;新增测试 `test_post_turn_fires_after_state_writeback` 钉死真实保证(回写之后触发);demo `examples/post_turn_review/` 改为等 `post_turn_hook_fired` 演示跨 turn 顺序(替代原 sleep)。

@@ -477,3 +477,54 @@ async def test_post_turn_gate_by_end_reason(
     assert len(call_log) == 1
     assert call_log[0]["end_reason"] == "completed"
     assert call_log[0]["iteration"] == 3
+
+
+# --------------------------------------------------------------------
+# 8) 真实保证:post_turn 在状态回写之后触发(turn N 收尾的同步一步)
+# --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_post_turn_fires_after_state_writeback(
+    skills_dir: Path, threads_dir: Path,
+) -> None:
+    """post_turn 触发时,本 turn 的 assistant 输出已回写进 engine.history。
+
+    这是 post_turn 真正成立的「顺序」保证:它是 **turn N 收尾的同步一步**——在
+    history / cache_anchor 回写之后、turn N 自己的 task 结束之前触发。
+    (注:引擎**不**串行化相邻 turn;要「下一 turn 启动前完成」的跨 turn 顺序,
+    宿主须等 post_turn_hook_fired 再提交下一轮,而非等 turn_completed。)
+    """
+    client = SimClient(turns=[SimTurn(
+        text="本轮结论 Z", usage=TokenUsage(input_tokens=10, output_tokens=3),
+    )])
+    reg = HookRegistry()
+    holder: dict = {}
+    seen_at_fire: list[list[str]] = []
+
+    async def handler(hook, ctx) -> HookDecision:
+        # 触发时刻读 engine.history:应已含本轮 assistant_message(回写已发生)
+        snap = holder["engine"].history_snapshot()
+        seen_at_fire.append([it.kind for it in snap])
+        return HookDecision.ok()
+
+    reg.register("post_turn", handler)
+
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[], hooks=HookRunner(reg),
+    )
+    engine = await pool.get_or_create(
+        session_id="s-pt-writeback", entry_skill_id="code-reviewer",
+    )
+    holder["engine"] = engine
+    seen, task = await _start_collector(engine)
+    await engine.submit(taifeng.UserMessage(text="给个结论"))
+    await _stop_collector(task)
+    await pool.close()
+
+    assert seen_at_fire, "post_turn 未触发"
+    kinds = seen_at_fire[0]
+    # 回写已发生:本轮 user_message 与 assistant_message 都已在 history
+    assert "user_message" in kinds, kinds
+    assert "assistant_message" in kinds, kinds

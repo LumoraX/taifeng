@@ -65,10 +65,17 @@ TBD - created by archiving change permission-gate-completeness. Update Purpose a
 ### Requirement: `post_turn` hook 调用点
 
 `AgentEngine._build_and_run_runner` 在 `runner.run()` 返回、turn 状态(history /
-cache_anchor / rewind 节点表 / 指纹 / token)回写之后、下一 turn 启动之前,**SHALL**
-对 **root turn 的真终态**同步触发 `post_turn` hook。与 `pre_turn` 作用域对称(仅 root
-turn;detached spawn / call_skill 子 turn 不触发,其收尾审计由 `post_skill_dispatch`
-覆盖)。
+cache_anchor / rewind 节点表 / 指纹 / token)回写之后,**SHALL** 对 **root turn 的真终态**
+**同步**触发 `post_turn` hook —— 即 post_turn 是 **turn N 收尾的同步一步**(回写已发生、
+在 turn N 自己的 task 结束之前)。与 `pre_turn` 作用域对称(仅 root turn;detached spawn /
+call_skill 子 turn 不触发,其收尾审计由 `post_skill_dispatch` 覆盖)。
+
+**顺序保证的精确边界(重要)**:引擎以 `create_task` 派发 turn、**不串行化相邻 turn**
+(`_run_turn_for` 仅有"活跃挂起"守卫,无"单活跃 turn"锁)。因此 post_turn 保证的是
+**「本 turn 收尾内、回写之后」**,**不是**「任何下一 turn 启动之前」——若宿主在
+`turn_completed`(它在 post_turn **之前** emit)后立即并发提交下一 turn,该 turn 可与
+post_turn 在事件循环上交错。**要跨 turn 顺序**(下一轮基于本轮固化结果),宿主须
+**等 `post_turn_hook_fired` 再提交下一轮**(而非等 `turn_completed`)。
 
 触发门控:`TurnOutcome.end_reason ∈ {"suspended", "cancelled"}` 时 **SHALL NOT** 触发
 ——挂起是暂停等 Resume(续跑到真终态时才触发),取消是 teardown。其余终态(completed /
@@ -85,7 +92,7 @@ max_iterations / resource_limit_exceeded / denial_circuit_open / error)**SHALL**
 - `iteration: int`(本 turn 的 index,= 同 turn `pre_turn` 的 iteration)
 
 **R4 可取消**:hook 执行经 `HookContext.extras["cancel"]` 拿到本 turn 的
-CancellationToken。同步阻塞下一 turn 是顺序保证的预期代价,但长耗时 hook 须可被中断
+CancellationToken。post_turn 同步执行会占用本 turn 收尾时段,长耗时 hook 须可被中断
 (宿主重活应自行 detached)。**定位**:这是「自我 review / 记忆固化」等规则② 认知回路的
 内核 seam —— 内核只开口子,review 内容(审什么 / 学什么 / 存哪)全留 userspace
 (`spawn_skill` + 工具白名单 + `memory_store.writeback`),不入内核(R1)。
@@ -93,7 +100,7 @@ CancellationToken。同步阻塞下一 turn 是顺序保证的预期代价,但�
 #### Scenario: completed turn 触发 post_turn
 - **WHEN** 一个 root turn 以 `end_reason="completed"` 结束,且注册了 `post_turn` handler
 - **THEN** `post_turn` hook SHALL 被触发一次,入参 `success=True` / `final_text` / `iteration`
-- **AND** SHALL 在下一 turn 启动之前完成(顺序保证)
+- **AND** 触发时本 turn 的 user_message 与 assistant_message SHALL 已回写进 `engine.history`(收尾的同步一步,回写之后)
 - **AND** SHALL emit `post_turn_hook_fired` 事件(在 `turn_completed` 之后)
 
 #### Scenario: 挂起不触发,resume 跑到终态才触发
