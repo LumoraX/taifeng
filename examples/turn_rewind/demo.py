@@ -47,6 +47,10 @@ async def _drive(engine: taifeng.AgentEngine, sub_id: str) -> str:
         data = ev.msg.data if hasattr(ev.msg, "data") else {}
         if ev.msg.kind == "assistant_text" and data.get("delta"):
             parts.append(str(data["delta"]))
+        # rewind 被拒是终态(不会再有 turn)——必须纳入终止集合，否则 _drive 永久等待
+        # turn_completed 而挂死(本 demo 历史事故:re_reason 节点 id 写错被拒 → 静默挂起)。
+        if ev.msg.kind == "rewind_rejected":
+            return f"[rewind_rejected] {data.get('reason')}"
         if ev.msg.kind in ("turn_completed", "turn_failed") and data.get("is_root"):
             break
     return "".join(parts)
@@ -134,8 +138,13 @@ async def scenario_re_reason() -> None:
         await _settle_nodes(engine)
         _print_nodes(engine)
 
-        print("\n  → Rewind(it1, mode=re_reason):截到第 1 圈采样前,LLM 重新决定下游")
-        rsub = await engine.submit(Rewind(node_id="it1", mode="re_reason"))
+        # 取第 1 圈 iteration 节点的真实 node_id（带 thread 前缀，如 t1:it1）——
+        # 不能硬编码 "it1"：thread-addressable rewind 后节点 id 统一带 thread 前缀，
+        # 硬编码会 unknown_node 被拒（见 engine._handle_rewind 节点查找）。
+        it1 = next(n for n in engine.rewind_nodes()
+                   if n.kind == "iteration" and n.iteration_index == 1)
+        print(f"\n  → Rewind({it1.node_id}, mode=re_reason):截到第 1 圈采样前,LLM 重新决定下游")
+        rsub = await engine.submit(Rewind(node_id=it1.node_id, mode="re_reason"))
         print("  [re_reason 后] →", await _drive(engine, rsub))
         print("  ↑ 这次 LLM 没派发 analyzer,直接走出保守结论(下游自适应)")
         await pool.close()
