@@ -78,6 +78,10 @@ _KIND_TAG = {
     "suspension_resolved": ("turn", _Colors.GREEN, "▶"),
     "suspension_resolve_rejected": ("turn", _Colors.RED, "⊘"),
     "resource_limit_exceeded": ("knob", _Colors.RED, "⛔"),
+    # midturn-input-steering：运行中注入用户输入（R3 审计补：此前落 `evt` 兜底）
+    "user_input_injected": ("inje", _Colors.CYAN, "↘"),
+    # post-turn-hook：root turn 真终态收尾审计点（R3 审计补：此前落 `evt` 兜底）
+    "post_turn_hook_fired": ("hook", _Colors.GRAY, "⊛"),
     "engine_log": ("eng ", _Colors.GRAY, "·"),
     "shutdown": ("eng ", _Colors.GRAY, "⏹"),
 }
@@ -211,6 +215,16 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         parts.append(f"condition missing: {data.get('condition')} (skill={data.get('skill_id')})")
     elif ev.msg.kind == "thread_resumed":
         parts.append(f"thread={data.get('thread_id')} items={data.get('item_count', data.get('items', '?'))}")
+    elif ev.msg.kind == "user_input_injected":
+        # delivered=True 投进活跃 turn pending；False 无活跃 turn（落史未起新 turn）
+        parts.append(f"delivered={data.get('delivered')}")
+        if preview := data.get("text_preview"):
+            parts.append(_short(preview, 60))
+    elif ev.msg.kind == "post_turn_hook_fired":
+        parts.append(
+            f"end={data.get('end_reason')} iter={data.get('iteration')} "
+            f"hooks={data.get('hook_count')}"
+        )
     elif ev.msg.kind == "engine_log":
         parts.append(f"{data.get('level')}: {data.get('message')}")
     else:
