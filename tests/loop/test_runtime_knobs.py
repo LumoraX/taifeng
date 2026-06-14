@@ -221,10 +221,10 @@ async def test_event_queue_size_kwarg_takes_effect(
     assert "queue-size-probe" in engine._event_subs, (  # noqa: SLF001
         "subscribe 应注册到 _event_subs"
     )
-    per_sub_q = engine._event_subs["queue-size-probe"]  # noqa: SLF001
-    assert per_sub_q.maxsize == 42, (
+    per_sub = engine._event_subs["queue-size-probe"]  # noqa: SLF001
+    assert per_sub.queue.maxsize == 42, (
         f"per-submission queue maxsize 应为 42（配置值），"
-        f"实际 {per_sub_q.maxsize} —— 若是 1024 说明回退到硬编码"
+        f"实际 {per_sub.queue.maxsize} —— 若是默认值说明回退到硬编码"
     )
     sub_task.cancel()
     try:
@@ -246,9 +246,9 @@ async def test_event_queue_size_kwarg_takes_effect(
     assert engine._all_subs, (  # noqa: SLF001
         "subscribe_all 应注册一个 broadcast queue"
     )
-    all_q = engine._all_subs[-1]  # noqa: SLF001
-    assert all_q.maxsize == 42, (
-        f"broadcast queue maxsize 应为 42，实际 {all_q.maxsize}"
+    all_sub = engine._all_subs[-1]  # noqa: SLF001
+    assert all_sub.queue.maxsize == 42, (
+        f"broadcast queue maxsize 应为 42，实际 {all_sub.queue.maxsize}"
     )
     all_task.cancel()
     try:
@@ -260,10 +260,10 @@ async def test_event_queue_size_kwarg_takes_effect(
 
 
 @pytest.mark.asyncio
-async def test_event_queue_size_default_is_1024(
+async def test_event_queue_size_default_is_65536(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
-    """不传 event_queue_size → 默认 1024（向后兼容）。"""
+    """不传 event_queue_size → 默认 65536（审计可观测 层1：有界大容量，不 OOM）。"""
     client = SimClient(turns=[SimTurn(text="hi")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir,
@@ -272,7 +272,7 @@ async def test_event_queue_size_default_is_1024(
     engine = await pool.get_or_create(
         session_id="s_def", entry_skill_id="code-reviewer",
     )
-    assert engine._event_queue_size == 1024  # noqa: SLF001
+    assert engine._event_queue_size == 65536  # noqa: SLF001
     await pool.close()
 
 

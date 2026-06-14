@@ -128,6 +128,17 @@ class AgentEngine:
         """业务侧订阅出队接口。"""
 ```
 
+## 事件总线审计可观测（audit-observability 契约）
+
+层1 在不破坏 EventMsg「可丢 / 不阻塞主 actor」语义（R4）前提下补三件事，契约见 [audit-observability](capabilities/audit-observability.md)：
+
+- **全局序号 `seq`**：每条 `EventMsg` 带单调 `seq`，在 `engine._emit` 入口同步分配（无 await 让出点 → 原子不重不漏）。作用域单 engine（= 单 session）；落库主键用 `(session_id, seq)`，`session_id` 由订阅方在 sink 边界提供、**不**盖在事件上（`engine.session_id` 只读属性）。全局 seq 连续性自检**仅** firehose（`subscribe_all`）成立。
+- **per-subscriber 投递序号 `delivery_seq`**：`subscribe_all_envelopes` / `subscribe_envelopes` 产出 `DeliveredEvent {event, delivery_seq}`；每订阅各自从 0 连续，队列满丢弃也烧号 → 收方跳号 = 它自己漏了（过滤订阅亦可精确自检）。`subscribe_all` / `subscribe` 仍向后兼容产出裸 `EventMsg`。
+- **队列有界大容量 + 高/低水位告警**：`event_queue_size` 默认 `65536`（有界 ⇒ 内存可预测、绝不 OOM；`<=0` 为无界 opt-in 自负 OOM）。`qsize` 上穿高水位（75%）打 `logger.warning`，回落低水位（50%）才重新武装（迟滞）+ `event_warn_cooldown_sec` 限频；告警走 logger 不走事件（防自放大）。
+- **LLM request 留痕**：`enable_request_capture`（默认关）开启后，`turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（`data = ApiRequest.model_dump()`，retry/重建各一条）；含敏感正文，`OtelTelemetrySink` 按 kind 整条跳过不外发。
+
+> 「可靠 fail-stop 审计真相源」是独立的层2 课题（留 ADR 0019），不改造 EventMsg emit 路径。
+
 ## TurnRunner —— 单轮执行
 
 参考 codex `run_turn`：

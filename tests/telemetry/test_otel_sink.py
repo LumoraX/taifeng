@@ -380,6 +380,28 @@ class TestEventMapping:
         names = [e.name for e in turn_span.events]
         assert "taifeng.event.thread_resumed" in names
 
+    async def test_llm_request_recorded_skipped_entirely(
+        self,
+        sink: OtelTelemetrySink,
+        memory_tracer_provider: tuple[TracerProvider, InMemorySpanExporter],
+    ) -> None:
+        """审计可观测 层1：llm_request_recorded 整条不转 OTel（杜绝 request 正文外发）。"""
+        _, exporter = memory_tracer_provider
+        await sink.handle(_event("sub-req", "turn_started"))
+        await sink.handle(
+            _event(
+                "sub-req",
+                "llm_request_recorded",
+                {"model": "m", "messages": [{"role": "user", "content": "secret"}]},
+            )
+        )
+        await sink.handle(_event("sub-req", "turn_completed"))
+        spans = exporter.get_finished_spans()
+        turn_span = next(s for s in spans if s.name == "taifeng.turn")
+        names = [e.name for e in turn_span.events]
+        # 既不作为 generic span-event 出现，也不带任何 request 正文
+        assert "taifeng.event.llm_request_recorded" not in names
+
     async def test_handle_swallows_exception(
         self,
         sink: OtelTelemetrySink,

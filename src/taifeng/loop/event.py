@@ -30,6 +30,7 @@ MsgKind = Literal[
     "pinned_state_reinjected",
     "cache_break_detected",
     "provider_retry",
+    "llm_request_recorded",
     "user_input_injected",
     "permission_prompt_timeout",
     "skill_dispatch_hook_denied",
@@ -249,6 +250,22 @@ class ProviderRetry(_Msg):
 
     kind: Literal["provider_retry"] = "provider_retry"
     """data = {"reason": str, "iteration": int}；reason 当前取值 context_overflow。"""
+
+
+class LlmRequestRecorded(_Msg):
+    """审计可观测 层1：单次实际发往 provider 的 request 全文留痕。
+
+    在 ``turn.py`` build_api_request 之后、发送 provider 之前 emit（即便后续超时/
+    失败，request 仍留痕）；受 ``enable_request_capture`` 全局开关控制（默认关，零
+    泄漏面）。每次实际构建发送的 request 各一条（retry/压缩重建是新一轮构建 → 新一
+    条），与 ``provider_retry`` 交错可还原「哪版 request」。
+
+    ⚠️ 含完整 prompt + conversation（敏感）：OtelSink **按 kind 整条跳过**不外发；
+    可靠落盘 / 脱敏 / 访问控制 / 保留期全归业务消费者（内核只留痕、不治理）。
+    """
+
+    kind: Literal["llm_request_recorded"] = "llm_request_recorded"
+    """data = ApiRequest.model_dump()（model / system_prompt / messages / tools ...）。"""
 
 
 class UserInputInjected(_Msg):
@@ -696,6 +713,7 @@ Msg = Union[
     ContextBudgetExceeded,
     CacheBreakDetected,
     ProviderRetry,
+    LlmRequestRecorded,
     UserInputInjected,
     PermissionPromptTimeout,
     SkillDispatchHookDenied,
@@ -748,3 +766,10 @@ class EventMsg(BaseModel):
     submission_id: str
     msg: Msg = Field(discriminator="kind")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # 审计可观测 层1：事件在「某 engine 事件总线」上的全局单调序号。
+    # 由 ``engine._emit`` 入口同步分配（asyncio 单线程无 await 让出点 → 原子不重不漏）；
+    # 旧序列化数据冷读默认 0。落库主键用 ``(session_id, seq)``——session_id 由订阅方
+    # 按所属 engine 提供，不盖在事件上（详见 docs 设计文档 §4.3）。
+    # ⚠️ 全局 seq 连续性自检只对 ``subscribe_all`` 全量流成立；过滤订阅看
+    # ``DeliveredEvent.delivery_seq``（per-subscriber 投递序号）。
+    seq: int = 0

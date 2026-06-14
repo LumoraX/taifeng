@@ -54,11 +54,13 @@ async def test_submission_queue_backpressure(skills_dir: Path) -> None:
 @pytest.mark.asyncio
 async def test_event_drop_is_counted_not_silent(skills_dir: Path) -> None:
     """订阅队列满 → 丢弃被计数（events_dropped），非静默。"""
+    from taifeng.loop.engine import _Subscriber
+
     engine = await _make_engine(skills_dir, event_queue_size=1)
-    # 手动注册一个已满的 all-sub 队列
-    full_q: asyncio.Queue = asyncio.Queue(maxsize=1)
-    full_q.put_nowait("occupied")
-    engine._all_subs.append(full_q)  # noqa: SLF001
+    # 手动注册一个已满的 firehose 订阅者（_Subscriber 内队列容量 1，预先占满）
+    sub = _Subscriber(maxsize=1, high_ratio=0.75, low_ratio=0.5)
+    sub.queue.put_nowait("occupied")  # type: ignore[arg-type]
+    engine._all_subs.append(sub)  # noqa: SLF001
 
     assert engine.events_dropped == 0
     await engine._emit(  # noqa: SLF001

@@ -87,13 +87,14 @@ from taifeng.llm import (
 from taifeng.loop import (
     CancellationToken,
     EventMsg,
+    LlmRequestRecorded,
     Op,
     Submission,
     UpdateInstructions,
     UserMessage,
 )
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
-from taifeng.loop.engine import AgentEngine
+from taifeng.loop.engine import AgentEngine, DeliveredEvent
 from taifeng.loop.failure_policy import (
     ConservativeFailurePolicy,
     FailureContext,
@@ -170,6 +171,7 @@ __all__ = [
     "CompressionResult",
     "CompressionStrategy",
     "ConservativeFailurePolicy",
+    "DeliveredEvent",
     "DenialBreaker",
     "DenialBreakerConfig",
     "FailureContext",
@@ -182,6 +184,7 @@ __all__ = [
     "DispatchPolicy",
     "EnginePool",
     "EventMsg",
+    "LlmRequestRecorded",
     "FilesystemSkillRegistry",
     "HandoffCompactionStrategy",
     "IndexHook",

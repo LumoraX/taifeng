@@ -84,6 +84,49 @@ from taifeng.tool.runtime import ToolCallRuntime
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class DeliveredEvent:
+    """投递给某个订阅者的事件信封（审计可观测 层1）。
+
+    携带 per-subscriber 的投递序号 ``delivery_seq``：每个订阅各自从 0 起连续；
+    队列满被丢弃（QueueFull）时该序号仍被「烧掉」（计入但不投递），故订阅者收到的
+    ``delivery_seq`` 一旦跳号 = **它自己**漏了事件——与全局 ``event.seq`` 跳号
+    （那是过滤订阅天然只收子集所致，非丢弃）互不混淆。
+
+    属性：
+        event: 原始事件（其 ``seq`` 是该 engine 总线的全局序号）。
+        delivery_seq: 本订阅者的连续投递序号（从 0 起，含丢弃烧号）。
+    """
+
+    event: EventMsg
+    delivery_seq: int
+
+
+class _Subscriber:
+    """单个订阅的队列 + 投递簿记（审计可观测 层1）。
+
+    封装三件 per-subscriber 状态：
+    1. ``queue``：进程内 asyncio 队列（maxsize<=0 表示无界）。
+    2. ``next_delivery``：下一个投递序号（每次投递尝试 +1，含丢弃烧号）。
+    3. 高/低水位告警迟滞：``warned`` 标记 + ``last_warn`` 时戳，避免阈值附近刷屏。
+
+    参数：
+        maxsize: 队列容量（<=0 无界）。
+        high_ratio / low_ratio: 高/低水位占容量的比例（仅有界队列有意义）。
+    """
+
+    def __init__(self, *, maxsize: int, high_ratio: float, low_ratio: float) -> None:
+        self.queue: asyncio.Queue[DeliveredEvent] = asyncio.Queue(
+            maxsize=maxsize if maxsize > 0 else 0
+        )
+        self.next_delivery: int = 0
+        # 高/低水位绝对阈值：仅有界（maxsize>0）时可换算；无界时为 None → 不告警
+        self.high_water: int | None = int(maxsize * high_ratio) if maxsize > 0 else None
+        self.low_water: int | None = int(maxsize * low_ratio) if maxsize > 0 else None
+        self.warned: bool = False
+        self.last_warn: int | None = None
+
+
 @dataclass
 class _PendingTurn:
     submission_id: str
@@ -127,7 +170,11 @@ class AgentEngine:
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         reasoning_passback: bool = True,
-        event_queue_size: int = 1024,
+        enable_request_capture: bool = False,
+        event_queue_size: int = 65536,
+        event_high_water_ratio: float = 0.75,
+        event_low_water_ratio: float = 0.5,
+        event_warn_cooldown_sec: int = 5,
         submission_queue_size: int = 256,
         instruction_layers: list[InstructionLayer] | None = None,
         script_executors: dict[str, Any] | None = None,
@@ -182,6 +229,9 @@ class AgentEngine:
         # reasoning-content-passback：thinking 模型 reasoning 回传开关。透传到每个
         # TurnRunner；默认开（history 无 reasoning item 即不回传，非 thinking 零变化）。
         self._reasoning_passback = reasoning_passback
+        # 审计可观测 层1：LLM request 全文留痕开关，透传到每个 TurnRunner。
+        # 默认关 → 零泄漏面 + 零行为变化；开启后 request 在发送 provider 前留痕。
+        self._enable_request_capture = enable_request_capture
         # turn-resource-guards：denial 断路器配置（DenialBreakerConfig | None；
         # None=不启用零变化）。实例由各 TurnRunner 每 turn 新建（turn 级生命周期）。
         self._denial_breaker_config = denial_breaker_config
@@ -222,7 +272,17 @@ class AgentEngine:
         self._resolving_records: set[str] = set()
         # config-consistency-fixes C2: 把 event_queue_size kwarg 真正生效
         # 之前此 kwarg 收下后未存到 self，subscribe / subscribe_all 内仍硬编码 1024
+        # 审计可观测 层1：默认放大到 65536（按最慢逐条 fsync 落盘消费者 ~6500 events/s
+        # × 10 估算）——有界 ⇒ 内存天花板可预测、绝不 OOM；<=0 为无界 opt-in（自负 OOM）。
         self._event_queue_size = event_queue_size
+        # 高/低水位比例 + 告警限频秒数（仅有界队列生效）。穿高水位告一条 warning，
+        # 回落到低水位以下才重新武装（迟滞，防阈值附近刷屏）。
+        self._event_high_water_ratio = event_high_water_ratio
+        self._event_low_water_ratio = event_low_water_ratio
+        self._event_warn_cooldown_sec = event_warn_cooldown_sec
+        # 审计可观测 层1：全局事件序号计数器（单 engine = 单 session 内单调）。
+        # 在 _emit 入口同步分配，asyncio 单线程无 await 让出点 → 原子不重不漏。
+        self._seq: int = 0
         # permission_policy / request_metadata 透传链：
         # EnginePool → AgentEngine → TurnRunner。request_metadata 是业务侧不透明
         # 上下文（无业务命名字段，R1），合并进 PermissionRequest.metadata /
@@ -277,9 +337,10 @@ class AgentEngine:
         )
         # K4 出站丢弃计数：事件队列满时不再静默丢——累计 + 暴露（可观测）。
         self._events_dropped: int = 0
-        self._event_subs: dict[str, asyncio.Queue[EventMsg]] = {}
-        """submission_id 'all' 表示订阅全部事件。"""
-        self._all_subs: list[asyncio.Queue[EventMsg]] = []
+        # 审计可观测 层1：订阅者从裸 Queue 升级为 _Subscriber（队列 + per-subscriber
+        # 投递序号 + 水位告警迟滞）。每 submission 至多一个过滤订阅；firehose 可多个。
+        self._event_subs: dict[str, _Subscriber] = {}
+        self._all_subs: list[_Subscriber] = []
         self._pending: dict[str, _PendingTurn] = {}
         self._running = False
         # 跨 turn 持久化的 history view（用于复用 + cache）
@@ -330,6 +391,15 @@ class AgentEngine:
     @property
     def thread_id(self) -> str:
         return self._thread_id
+
+    @property
+    def session_id(self) -> str:
+        """本 engine 所属 session 标识（恒非空；未显式传入时退回 thread_id）。
+
+        审计可观测 层1：sink 在 attach 时捕获它，与事件 ``seq`` 复合成全局唯一
+        落库主键 ``(session_id, seq)``——故 ``session_id`` 不盖在每条事件上。
+        """
+        return self._session_id
 
     def register_pinned_state(self, source: Any) -> None:
         """运行时注册 pinned 状态源（生效于下一次成功压缩）。
@@ -474,39 +544,78 @@ class AgentEngine:
         await self._submissions.put(sub)
         return sub.id
 
-    async def subscribe_all(self) -> AsyncIterator[EventMsg]:
-        """订阅本 engine 的全部事件。"""
-        q: asyncio.Queue[EventMsg] = asyncio.Queue(maxsize=self._event_queue_size)
-        self._all_subs.append(q)
+    def _new_subscriber(self) -> _Subscriber:
+        """按当前队列容量/水位配置新建一个订阅者。"""
+        return _Subscriber(
+            maxsize=self._event_queue_size,
+            high_ratio=self._event_high_water_ratio,
+            low_ratio=self._event_low_water_ratio,
+        )
+
+    async def subscribe_all_envelopes(self) -> AsyncIterator[DeliveredEvent]:
+        """订阅本 engine 的全部事件（firehose），产出带 ``delivery_seq`` 的信封。
+
+        审计可观测 层1：消费者凭 ``delivery_seq`` 从 0 起的连续性自检**自己**漏没漏
+        （含「刚订阅就被丢弃」的窗口）；凭 ``event.seq`` 做全局连续性 + 组落库键。
+        """
+        sub = self._new_subscriber()
+        self._all_subs.append(sub)
         try:
             while True:
-                ev = await q.get()
-                yield ev
-                if ev.msg.kind == "shutdown":
+                env = await sub.queue.get()
+                yield env
+                if env.event.msg.kind == "shutdown":
                     return
         finally:
             try:
-                self._all_subs.remove(q)
+                self._all_subs.remove(sub)
             except ValueError:
                 pass
 
-    async def subscribe(self, submission_id: str) -> AsyncIterator[EventMsg]:
-        """订阅指定 submission 的事件。完成后自动结束。"""
-        q: asyncio.Queue[EventMsg] = asyncio.Queue(maxsize=self._event_queue_size)
-        self._event_subs[submission_id] = q
+    async def subscribe_all(self) -> AsyncIterator[EventMsg]:
+        """订阅本 engine 的全部事件（向后兼容：产出裸 ``EventMsg``）。
+
+        需 per-subscriber 投递序号自检时改用 ``subscribe_all_envelopes``。
+        """
+        async for env in self.subscribe_all_envelopes():
+            yield env.event
+
+    async def subscribe_envelopes(
+        self, submission_id: str
+    ) -> AsyncIterator[DeliveredEvent]:
+        """订阅指定 submission 的事件，产出带 ``delivery_seq`` 的信封。
+
+        ⚠️ 过滤订阅只收一个 submission 的事件，全局 ``event.seq`` 天然跳号（=过滤，
+        非丢弃）；要自检自己的丢弃**必须**看 ``delivery_seq`` 跳号。
+        """
+        sub = self._new_subscriber()
+        self._event_subs[submission_id] = sub
         try:
             while True:
-                ev = await q.get()
-                if ev.submission_id != submission_id:
+                env = await sub.queue.get()
+                if env.event.submission_id != submission_id:
                     continue
-                yield ev
+                yield env
                 # turn_suspended 是独立终结态(turn 已结束，等待 Resume)——必须纳入自动
                 # 终止集合，否则 turn 挂起时消费者的 async for 永远拿不到终结信号、卡死，
                 # 业务也无法释放实例并提交 Resume(Task 16 回归根因)。
-                if ev.msg.kind in ("turn_completed", "turn_failed", "turn_suspended", "shutdown"):
+                if env.event.msg.kind in (
+                    "turn_completed",
+                    "turn_failed",
+                    "turn_suspended",
+                    "shutdown",
+                ):
                     return
         finally:
             self._event_subs.pop(submission_id, None)
+
+    async def subscribe(self, submission_id: str) -> AsyncIterator[EventMsg]:
+        """订阅指定 submission 的事件（向后兼容：产出裸 ``EventMsg``）。完成后自动结束。
+
+        需 per-subscriber 投递序号自检时改用 ``subscribe_envelopes``。
+        """
+        async for env in self.subscribe_envelopes(submission_id):
+            yield env.event
 
     async def shutdown(self) -> None:
         await self.submit(Shutdown())
@@ -574,23 +683,59 @@ class AgentEngine:
             timer = self._ttl_timers.pop(ev.msg.data.get("record_id", ""), None)
             if timer is not None:
                 timer.cancel()
-        # 广播给 all subs
-        for q in list(self._all_subs):
-            try:
-                q.put_nowait(ev)
-            except asyncio.QueueFull:
-                # K4：不再静默丢——累计计数 + WARNING（consumer 可读 events_dropped
-                # 自检漏事件）。不阻塞 emit（慢/缺席 consumer 不得拖死主 actor，R4）。
-                self._events_dropped += 1
-                logger.warning("event queue full, drop event %s", ev.msg.kind)
-        # 投递给 per-submission sub
+        # 审计可观测 层1：全局 seq 在入口同步分配（asyncio 单线程、本函数无 await
+        # 让出点 → 并发多 turn/spawn 下原子、不重不漏）。同一 ev 广播给所有订阅，
+        # 全局 seq 对各订阅一致；per-subscriber 的 delivery_seq 由 _deliver 各自记。
+        ev.seq = self._seq
+        self._seq += 1
+        # 广播给 all subs（firehose）
+        for sub in list(self._all_subs):
+            self._deliver(sub, ev)
+        # 投递给 per-submission sub（过滤订阅）
         per = self._event_subs.get(ev.submission_id)
         if per is not None:
-            try:
-                per.put_nowait(ev)
-            except asyncio.QueueFull:
-                self._events_dropped += 1
-                logger.warning("per-sub queue full, drop event")
+            self._deliver(per, ev)
+
+    def _deliver(self, sub: _Subscriber, ev: EventMsg) -> None:
+        """把事件投递给单个订阅者：分配 per-subscriber delivery_seq（含丢弃烧号）→
+        入队 → 失败计数 → 高/低水位告警。永不阻塞主 actor（put_nowait，R4）。
+
+        delivery_seq 即使 QueueFull 丢弃也照常 +1（烧号），使订阅者凭自己收到的
+        delivery_seq 跳号即可精确自检「我漏了几条」，与全局 seq 跳号互不混淆。
+        """
+        n = sub.next_delivery
+        sub.next_delivery += 1
+        try:
+            sub.queue.put_nowait(DeliveredEvent(event=ev, delivery_seq=n))
+        except asyncio.QueueFull:
+            # K4：不再静默丢——累计计数 + WARNING（consumer 另可凭 delivery_seq 跳号
+            # 精确自检）。不阻塞 emit（慢/缺席 consumer 不得拖死主 actor，R4）。
+            self._events_dropped += 1
+            logger.warning("event queue full, drop event %s", ev.msg.kind)
+        self._maybe_warn_water(sub)
+
+    def _maybe_warn_water(self, sub: _Subscriber) -> None:
+        """有界队列堆积告警：qsize 上穿高水位告一条 WARNING，回落到低水位以下才
+        重新武装（迟滞）；告警另受 ``event_warn_cooldown_sec`` 限频。无界队列不告警。
+
+        ⚠️ 告警走 logger 而非 emit 事件——告警事件本身也会进所有队列，堆积时会
+        自我放大成告警风暴。
+        """
+        if sub.high_water is None:  # 无界队列：无容量百分比可言，不告警
+            return
+        qsize = sub.queue.qsize()
+        if qsize >= sub.high_water and not sub.warned:
+            now = self._now_factory()
+            if sub.last_warn is None or now - sub.last_warn >= self._event_warn_cooldown_sec:
+                logger.warning(
+                    "event queue high-water: %d/%d (subscriber lagging)",
+                    qsize,
+                    self._event_queue_size,
+                )
+                sub.last_warn = now
+            sub.warned = True
+        elif sub.low_water is not None and qsize <= sub.low_water and sub.warned:
+            sub.warned = False  # 回落到低水位以下 → 重新武装下次告警
 
     @property
     def events_dropped(self) -> int:
@@ -996,12 +1141,13 @@ class AgentEngine:
             # R4:任何退出路径(Shutdown / root-cancel break / 异常)统一取消全部
             # TTL 定时器——孤儿定时器到期后会向无人消费的队列 submit(可能永久阻塞)
             self._cancel_ttl_timers()
-            # 通知所有 subscriber 退出
-            for q in list(self._all_subs):
-                try:
-                    q.put_nowait(EventMsg(submission_id="*", msg=ShutdownMsg()))
-                except asyncio.QueueFull:
-                    pass
+            # 通知所有 subscriber 退出：经统一投递路径，shutdown 也获全局 seq +
+            # per-subscriber delivery_seq（保持两个序号在退出事件上同样连续可自检）。
+            shutdown_ev = EventMsg(submission_id="*", msg=ShutdownMsg())
+            shutdown_ev.seq = self._seq
+            self._seq += 1
+            for subscriber in list(self._all_subs):
+                self._deliver(subscriber, shutdown_ev)
 
     async def _run_turn_for(self, sub: Submission, root_cancel: CancellationToken) -> None:
         assert isinstance(sub.op, UserMessage)
@@ -1283,6 +1429,7 @@ class AgentEngine:
             auto_retry_count=auto_retry_count,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             reasoning_passback=self._reasoning_passback,
+            enable_request_capture=self._enable_request_capture,
             history_buffer=list(self._history),
             # B1 midturn-input-steering：与活跃 _PendingTurn 共享注入队列（同一 list
             # 引用：engine 主循环 append、runner 迭代边界 drain）
@@ -1431,6 +1578,7 @@ class AgentEngine:
             auto_retry_count=auto_retry_count,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             reasoning_passback=self._reasoning_passback,
+            enable_request_capture=self._enable_request_capture,
             capabilities=self._capabilities,
             spawn_registry=self._spawn_registry,
             session_tokens_used=self._session_tokens,
@@ -2163,6 +2311,7 @@ class AgentEngine:
             max_session_tokens=self._max_session_tokens,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             reasoning_passback=self._reasoning_passback,
+            enable_request_capture=self._enable_request_capture,
             history_buffer=list(items),
             permission_policy=self._permission_policy,
             request_metadata=self._request_metadata,
@@ -2515,6 +2664,7 @@ class AgentEngine:
             failure_suspend_on_expire=self._failure_suspend_on_expire,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
             reasoning_passback=self._reasoning_passback,
+            enable_request_capture=self._enable_request_capture,
             history_buffer=list(self._history),
             cache_anchor_index=self._cache_anchor_index,
             pinned_states=self._pinned_states,

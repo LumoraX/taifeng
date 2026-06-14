@@ -145,10 +145,14 @@ class EnginePool:
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         reasoning_passback: bool = True,
+        enable_request_capture: bool = False,
         instruction_layers: list[Any] | None = None,
         hook_runner: HookRunner | None = None,
         script_executors: dict[str, Any] | None = None,
-        event_queue_size: int = 1024,
+        event_queue_size: int = 65536,
+        event_high_water_ratio: float = 0.75,
+        event_low_water_ratio: float = 0.5,
+        event_warn_cooldown_sec: int = 5,
         submission_queue_size: int = 256,
         permission_policy: Any = None,
         request_metadata: dict[str, Any] | None = None,
@@ -200,6 +204,8 @@ class EnginePool:
         self._max_parallel_tool_calls = max_parallel_tool_calls
         # reasoning-content-passback：thinking 模型 reasoning 回传开关，透传到 AgentEngine。
         self._reasoning_passback = reasoning_passback
+        # 审计可观测 层1：LLM request 全文留痕开关，透传到 AgentEngine（默认关）
+        self._enable_request_capture = enable_request_capture
         # Phase 0: instruction_layers 仅占位存储 + 透传到 AgentEngine
         self._instruction_layers: list[Any] = list(instruction_layers or [])
         # store-protocol-decoupling: hook_runner 由 EnginePool.create 注入；用户没传 index_hook 时为 None
@@ -207,7 +213,11 @@ class EnginePool:
         # T5 scripts-runtime: ScriptLanguage → ScriptExecutor 映射
         self._script_executors: dict[str, Any] = dict(script_executors or {})
         # config-consistency-fixes C2: 透传到 AgentEngine 让 event_queue_size 真正生效
+        # 审计可观测 层1：默认 65536（有界大容量，不 OOM）+ 高/低水位/限频可配。
         self._event_queue_size = event_queue_size
+        self._event_high_water_ratio = event_high_water_ratio
+        self._event_low_water_ratio = event_low_water_ratio
+        self._event_warn_cooldown_sec = event_warn_cooldown_sec
         self._submission_queue_size = submission_queue_size
         # PermissionPolicy / request_metadata 注入路径：pool 透传到 AgentEngine
         # 再透传到 TurnRunner。request_metadata 是业务侧不透明上下文（无业务命名
@@ -258,6 +268,7 @@ class EnginePool:
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         reasoning_passback: bool = True,
+        enable_request_capture: bool = False,
         auto_watch_skills: bool = False,
         watch_poll_interval_seconds: float = 1.0,
         instruction_layers: list[Any] | None = None,
@@ -268,7 +279,11 @@ class EnginePool:
         index_hook: IndexHook | None = None,
         sink: "TelemetrySink | None" = None,
         # config-consistency-fixes C2: 透传到 AgentEngine
-        event_queue_size: int = 1024,
+        # 审计可观测 层1：默认 65536（有界大容量）+ 高/低水位比例 + 告警限频秒数
+        event_queue_size: int = 65536,
+        event_high_water_ratio: float = 0.75,
+        event_low_water_ratio: float = 0.5,
+        event_warn_cooldown_sec: int = 5,
         submission_queue_size: int = 256,
         # G1 mcp-server-hitl-elicitation T1: HITL 注入参数
         permission_policy: Any = None,
@@ -356,10 +371,14 @@ class EnginePool:
             now_factory=now_factory,
             max_parallel_tool_calls=max_parallel_tool_calls,
             reasoning_passback=reasoning_passback,
+            enable_request_capture=enable_request_capture,
             instruction_layers=instruction_layers,
             hook_runner=hook_runner,
             script_executors=script_executors,
             event_queue_size=event_queue_size,
+            event_high_water_ratio=event_high_water_ratio,
+            event_low_water_ratio=event_low_water_ratio,
+            event_warn_cooldown_sec=event_warn_cooldown_sec,
             submission_queue_size=submission_queue_size,
             permission_policy=permission_policy,
             request_metadata=request_metadata,
@@ -492,9 +511,13 @@ class EnginePool:
                 now_factory=self._now_factory,
                 max_parallel_tool_calls=self._max_parallel_tool_calls,
                 reasoning_passback=self._reasoning_passback,
+                enable_request_capture=self._enable_request_capture,
                 instruction_layers=self._instruction_layers,
                 script_executors=self._script_executors,
                 event_queue_size=self._event_queue_size,
+                event_high_water_ratio=self._event_high_water_ratio,
+                event_low_water_ratio=self._event_low_water_ratio,
+                event_warn_cooldown_sec=self._event_warn_cooldown_sec,
                 submission_queue_size=self._submission_queue_size,
                 initial_history=initial_history if resume_thread_id else None,
                 permission_policy=self._permission_policy,

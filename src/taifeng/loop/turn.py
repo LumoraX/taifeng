@@ -64,6 +64,7 @@ from taifeng.loop.event import (
     ContextBudgetExceeded,
     EngineLog,
     EventMsg,
+    LlmRequestRecorded,
     PinnedStateReinjected,
     PreCompactHookSkipped,
     ProviderRetry,
@@ -241,6 +242,9 @@ class TurnRunner:
     # history 无 reasoning item 即不回传,非 thinking 模型零变化。落史本身无旋钮
     # (R5 数据完整性;只在 provider 实际吐过 reasoning_delta 时才有内容)。
     reasoning_passback: bool = True
+    # 审计可观测 层1:LLM request 全文留痕开关(默认关,零泄漏面)。开启后每次实际
+    # 构建发送的 request 在发送 provider 前 emit 一条 LlmRequestRecorded。
+    enable_request_capture: bool = False
     # turn-级累积 usage
     total_usage: TokenUsage = field(default_factory=TokenUsage)
     history_buffer: list[ResponseItem] = field(default_factory=list)
@@ -866,6 +870,13 @@ class TurnRunner:
             # reasoning-content-passback:thinking 模型 reasoning 回传开关
             reasoning_passback=self.reasoning_passback,
         )
+
+        # 审计可观测 层1:request 全文留痕。注入点选在「build 之后、发送 provider
+        # 之前」——即便 provider 超时/失败,request 仍已留痕;mid-turn 压缩重建会走到
+        # 新一轮 _run_sample 再次 build → 再 emit 一条,故「每次实发各一条」自然成立。
+        # 默认关(enable_request_capture=False),零泄漏面 + 零行为变化。
+        if self.enable_request_capture:
+            await self._emit(LlmRequestRecorded(data=request.model_dump()))
 
         # G2b：发送前预检 —— 即便经过压缩，估算 token 仍超 hard limit 时 emit
         # 非阻塞告警（估算偏粗，不据此拒发；供业务侧主动限流 / 排查 provider 400）

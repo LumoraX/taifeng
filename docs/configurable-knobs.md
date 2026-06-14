@@ -27,7 +27,11 @@
 | `watch_poll_interval_seconds` | `1.0` | 文件监听轮询间隔 | — |
 | **`instruction_layers`** | `None` | `list[InstructionLayer]`；业务侧注入的系统指令层（类似 codex 的 AGENTS.md 角色，但走协议而非读文件）。详见下方 §1.1 | codex `~/.codex/AGENTS.md` |
 | **`script_executors`** | `{}` | `dict[ScriptLanguage, ScriptExecutor]`；run_script 工具按 `descriptor.language` 在此查执行器。src 默认提供 `ShellScriptExecutor / PythonScriptExecutor`；未注入对应 language → `no_executor_for_language` 错误。详见 ADR 0009 / §1.2 | — |
-| **`event_queue_size`** | `1024` | 每个 `subscribe()` / `subscribe_all()` 创建的事件队列 maxsize。慢消费者环境调大可降丢事件；高频实时场景调小以早 backpressure（QueueFull 时 emit 走 logger.warning）。修复自 change `config-consistency-fixes` C2 —— 之前 kwarg 被吞，硬编码 1024 | claw-code `EventChannelConfig` |
+| **`event_queue_size`** | `65536` | 每个 `subscribe*()` 创建的事件队列 maxsize。**审计可观测 层1**：默认放大到 65536（按最慢逐条 fsync 落盘消费者 ~6500 events/s × 10 估算），有界 ⇒ 内存天花板可预测（~128MB/队列）、绝不 OOM；`<=0` 为无界 opt-in（业务自负 OOM）。满则丢弃 + 计数 + `logger.warning`，消费者凭 `(session_id, seq)` / `delivery_seq` 自检。详见 [audit-observability](architecture/capabilities/audit-observability.md) | claw-code `EventChannelConfig` |
+| **`event_high_water_ratio`** | `0.75` | 有界事件队列高水位比例。`qsize` 上穿 → 一条 high-water `logger.warning`（告警走 logger 不走事件，防自放大） | — |
+| **`event_low_water_ratio`** | `0.5` | 有界事件队列低水位比例。回落到此以下才重新武装下次告警（迟滞，防阈值附近刷屏） | — |
+| **`event_warn_cooldown_sec`** | `5` | 高水位告警限频秒数（即便持续高位，至多每 N 秒一条） | — |
+| **`enable_request_capture`** | `False` | **审计可观测 层1**：LLM request 全文留痕开关。开启后 `turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（`data = ApiRequest.model_dump()`，retry/重建各一条）；含敏感正文，OtelSink 按 kind 跳过不外发，可靠落盘/脱敏归业务 sink。默认关 = 零泄漏面 + 零行为变化 | codex request 留痕 |
 
 #### §1.0 内核资源/内存旋钮（K1–K4，业务可注入）
 

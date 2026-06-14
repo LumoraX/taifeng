@@ -247,6 +247,11 @@ class OtelTelemetrySink:
         data = ev.msg.data
         submission_id = ev.submission_id
 
+        # 审计可观测 层1：llm_request_recorded 含完整 prompt+conversation（敏感），
+        # 整条不转 OTel（按 kind 跳过比逐字段黑名单更稳，杜绝 request 正文外发）。
+        if kind == "llm_request_recorded":
+            return
+
         if kind == "turn_started":
             self._on_turn_started(submission_id, data)
         elif kind == "turn_completed":
