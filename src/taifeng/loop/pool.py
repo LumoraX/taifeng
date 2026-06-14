@@ -138,6 +138,7 @@ class EnginePool:
         hooks: Any = None,
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
+        doom_loop_config: Any = None,
         failure_policy: Any = None,
         failure_suspend_ttl_seconds: int | None = None,
         failure_suspend_max_auto_retries: int | None = None,
@@ -178,6 +179,7 @@ class EnginePool:
         self._max_iterations = max_iterations
         # turn-resource-guards：denial 断路器配置，透传到每个 AgentEngine。
         self._denial_breaker_config = denial_breaker_config
+        self._doom_loop_config = doom_loop_config
         # failure-suspension-policy：失败处置裁决 policy,透传到每个 AgentEngine。
         self._failure_policy = failure_policy
         # 构造期校验(与 engine 同口径,报错点贴近配置点)
@@ -261,6 +263,7 @@ class EnginePool:
         hooks: Any = None,
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
+        doom_loop_config: Any = None,
         failure_policy: Any = None,
         failure_suspend_ttl_seconds: int | None = None,
         failure_suspend_max_auto_retries: int | None = None,
@@ -364,6 +367,7 @@ class EnginePool:
             hooks=hooks,
             max_iterations=max_iterations,
             denial_breaker_config=denial_breaker_config,
+            doom_loop_config=doom_loop_config,
             failure_policy=failure_policy,
             failure_suspend_ttl_seconds=failure_suspend_ttl_seconds,
             failure_suspend_max_auto_retries=failure_suspend_max_auto_retries,
@@ -504,6 +508,7 @@ class EnginePool:
                 hooks=self._hooks,
                 max_iterations=self._max_iterations,
                 denial_breaker_config=self._denial_breaker_config,
+                doom_loop_config=self._doom_loop_config,
                 failure_policy=self._failure_policy,
                 failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
                 failure_suspend_max_auto_retries=self._failure_suspend_max_auto_retries,

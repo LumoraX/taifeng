@@ -47,6 +47,7 @@ from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
+from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
 from taifeng.loop.failure_policy import (
     DEFAULT_FAILURE_POLICY,
     FailureContext,
@@ -72,6 +73,8 @@ from taifeng.loop.event import (
     ProviderRetry,
     ResourceLimitExceeded,
     DenialCircuitOpen,
+    DoomLoopWarned,
+    DoomLoopCircuitOpen,
     SkillDispatched,
     SkillReturned,
     RewindCheckpointRecorded,
@@ -224,6 +227,9 @@ class TurnRunner:
     # turn-resource-guards：denial 断路器配置（None=不启用，零行为变化）。
     # 实例为 turn 级生命周期（run() 新建、turn 结束即弃），见 denial_breaker.py。
     denial_breaker_config: DenialBreakerConfig | None = None
+    # turn-resource-guards：doom-loop 检测配置（None=不启用）。重复同 (tool,args)
+    # 成功调用空转的先警后断守卫，turn 级生命周期，见 doom_loop.py。
+    doom_loop_config: DoomLoopConfig | None = None
     # failure-suspension-policy：失败处置裁决 policy（挂起 vs 终态）。
     # None → 模块默认 ConservativeFailurePolicy（复刻历史判据，零行为变化）；
     # 子 runner（call_skill / spawn）继承父实例。业务侧经 EnginePool 注入。
@@ -334,6 +340,8 @@ class TurnRunner:
         self._current_iteration = 0
         # DenialBreaker 实例在 run() 起点按 config 新建（turn 级生命周期）
         self._denial_breaker: DenialBreaker | None = None
+        # DoomLoopDetector 实例同样在 run() 起点按 config 新建（turn 级生命周期）
+        self._doom_loop: DoomLoopDetector | None = None
 
     async def _emit(self, msg) -> None:
         try:
@@ -619,6 +627,8 @@ class TurnRunner:
         iter_budget = self.iteration_budget
         if self.denial_breaker_config is not None:
             self._denial_breaker = DenialBreaker(self.denial_breaker_config)
+        if self.doom_loop_config is not None:
+            self._doom_loop = DoomLoopDetector(self.doom_loop_config)
         iterations = 0
         rounds = 0  # 圈序号（单调，refund 不回退）—— 供挂起/rewind 节点定位
         final_text = ""
@@ -713,6 +723,15 @@ class TurnRunner:
                             "denial_circuit_open", self._denial_breaker.snapshot()
                         )
                         end_reason = "denial_circuit_open"
+                        break
+
+                    # turn-resource-guards：doom-loop 断路闩锁已置（警后仍重复到 2N）
+                    # → 迭代边界提前终止（与 denial 同语义，当轮 fc/output 已配对落史）。
+                    if self._doom_loop is not None and self._doom_loop.opened:
+                        self._maybe_suspend_on_guard_trip(
+                            "doom_loop_circuit_open", self._doom_loop.snapshot()
+                        )
+                        end_reason = "doom_loop_circuit_open"
                         break
 
                     # mid-turn 压缩判断
@@ -1191,20 +1210,25 @@ class TurnRunner:
             self.history_buffer.append(fco_item)
             await self.store.append(fco_item)
             # turn-resource-guards：单点观察 deny/success 记账 + refunds_iteration 退还
-            await self._note_tool_outcome(req.name, outcome.result)
+            await self._note_tool_outcome(req.name, outcome.result, req.arguments_raw)
 
         if suspended_pending:
             # 整批挂起 pending 上抛给 run()/run_turn 聚合落一条 SuspensionRecord。
             raise _BatchSuspend(tuple(suspended_pending))
         return assistant_text, True
 
-    async def _note_tool_outcome(self, name: str, result: Any) -> None:
+    async def _note_tool_outcome(
+        self, name: str, result: Any, arguments_raw: str = ""
+    ) -> None:
         """配对回填后的单点记账（turn-resource-guards）。
 
         - DenialBreaker：``ToolResult.data["reason"] ∈ {hook_denied,
           permission_denied}`` 计 deny（含 HITL ask 超时产生的 deny —— 它就是
           deny 结果）；成功结果重置 consecutive。其他 error 中性（不计任何一边）。
           恰好越阈值那次 emit ``denial_circuit_open``（单次闩锁）。
+        - DoomLoopDetector：仅在**成功**结果上记 (tool, arguments_raw)。连续 N 次
+          同签名 → ``warn``（注中性事实让模型自改 + emit）；警后到 2N → ``open``
+          （emit + 置闩锁，迭代边界终止）。deny/error 不计（交 DenialBreaker）。
         - refund：spec 静态声明 ``refunds_iteration`` 且本次**成功** → 外层迭代
           预算退还一步（失败轮照常计费；不暴露为 LLM 可触发语义）。
         """
@@ -1217,10 +1241,36 @@ class TurnRunner:
                     )
             elif not result.is_error:
                 self._denial_breaker.record_success()
+        # doom-loop：只观察成功调用的 (tool, args) 重复空转
+        if self._doom_loop is not None and not result.is_error:
+            action = self._doom_loop.record(name, arguments_raw)
+            if action == "warn":
+                await self._inject_doom_loop_notice(self._doom_loop.snapshot())
+                await self._emit(DoomLoopWarned(data=self._doom_loop.snapshot()))
+            elif action == "open":
+                await self._emit(
+                    DoomLoopCircuitOpen(data=self._doom_loop.snapshot())
+                )
         if not result.is_error and self.iteration_budget is not None:
             spec = self.tool_runtime.spec_for(name)
             if spec is not None and spec.refunds_iteration:
                 self.iteration_budget.refund(1)
+
+    async def _inject_doom_loop_notice(self, snap: dict[str, Any]) -> None:
+        """doom-loop 先警：往 history 尾追一条**中性事实**（不含产品意见，R1）。
+
+        只陈述「同工具同参数已连续 N 次、结果一致」的客观事实，是否换路交模型自判。
+        尾追加（cache anchor 之后，R2 无额外 break）+ 持久化（R5）。
+        """
+        from taifeng.conversation.models import system_injection
+
+        note = system_injection(
+            f"Notice: tool {snap.get('tool')!r} has been called "
+            f"{snap.get('consecutive')} times in a row with identical arguments, "
+            f"each returning an identical result.",
+            thread_id=self.thread_id, source="doom_loop")
+        self.history_buffer.append(note)
+        await self.store.append(note)
 
     def _build_tool_context(self, call_id: str, iteration: int) -> ToolContext:
         """为单条 tool call 构造 ToolContext（独立 cancel.child）。

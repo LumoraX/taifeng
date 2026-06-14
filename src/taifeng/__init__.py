@@ -94,6 +94,7 @@ from taifeng.loop import (
     UserMessage,
 )
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
+from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
 from taifeng.loop.engine import AgentEngine, DeliveredEvent
 from taifeng.loop.failure_policy import (
     ConservativeFailurePolicy,
@@ -174,6 +175,8 @@ __all__ = [
     "DeliveredEvent",
     "DenialBreaker",
     "DenialBreakerConfig",
+    "DoomLoopConfig",
+    "DoomLoopDetector",
     "FailureContext",
     "FailureDisposition",
     "FailureDispositionPolicy",

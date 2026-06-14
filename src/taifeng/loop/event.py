@@ -82,6 +82,8 @@ MsgKind = Literal[
     "peer_wait_started",
     "peer_wait_resolved",
     "denial_circuit_open",
+    "doom_loop_warned",
+    "doom_loop_circuit_open",
 ]
 
 
@@ -179,6 +181,25 @@ class DenialCircuitOpen(_Msg):
     """
 
     kind: Literal["denial_circuit_open"] = "denial_circuit_open"
+
+
+class DoomLoopWarned(_Msg):
+    """turn 内连续 N 次同 (tool,args) 成功调用空转 → 先警：注中性事实让模型自改。
+
+    data = {"tool": str, "consecutive": int, "threshold": int}
+    （仅工具名 + 计数，不带 args 正文 —— PII 约束）
+    """
+
+    kind: Literal["doom_loop_warned"] = "doom_loop_warned"
+
+
+class DoomLoopCircuitOpen(_Msg):
+    """警告后仍连续重复到 2N 次 → 断路器触发，turn 在迭代边界提前终止。
+
+    data = {"tool": str, "consecutive": int, "threshold": int}
+    """
+
+    kind: Literal["doom_loop_circuit_open"] = "doom_loop_circuit_open"
 
 
 class CompactionStarted(_Msg):
@@ -732,6 +753,8 @@ Msg = Union[
     SkillSpawnRejected,
     ResourceLimitExceeded,
     DenialCircuitOpen,
+    DoomLoopWarned,
+    DoomLoopCircuitOpen,
     CompactionStarted,
     CompactionCompleted,
     CompactionDegradationWarning,

@@ -164,6 +164,7 @@ class AgentEngine:
         hooks: Any = None,
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
+        doom_loop_config: Any = None,
         failure_policy: Any = None,
         failure_suspend_ttl_seconds: int | None = None,
         failure_suspend_max_auto_retries: int | None = None,
@@ -236,6 +237,7 @@ class AgentEngine:
         # turn-resource-guards：denial 断路器配置（DenialBreakerConfig | None；
         # None=不启用零变化）。实例由各 TurnRunner 每 turn 新建（turn 级生命周期）。
         self._denial_breaker_config = denial_breaker_config
+        self._doom_loop_config = doom_loop_config
         # failure-suspension-policy：失败处置裁决 policy
         # （FailureDispositionPolicy | None;None → turn 层保守默认,零行为变化）
         self._failure_policy = failure_policy
@@ -1424,6 +1426,7 @@ class AgentEngine:
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
+            doom_loop_config=self._doom_loop_config,
             failure_policy=self._failure_policy,
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
@@ -1633,6 +1636,7 @@ class AgentEngine:
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
+            doom_loop_config=self._doom_loop_config,
             failure_policy=self._failure_policy,
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
@@ -2362,6 +2366,7 @@ class AgentEngine:
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
+            doom_loop_config=self._doom_loop_config,
             failure_policy=self._failure_policy,
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
@@ -2720,6 +2725,7 @@ class AgentEngine:
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,
+            doom_loop_config=self._doom_loop_config,
             failure_policy=self._failure_policy,
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_on_expire=self._failure_suspend_on_expire,

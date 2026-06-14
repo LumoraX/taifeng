@@ -55,6 +55,8 @@ _KIND_TAG = {
     "skill_dispatch_permission_denied": ("perm", _Colors.RED, "✗"),
     # turn-resource-guards：连续拒绝断路器触发（红色 —— turn 提前终止）
     "denial_circuit_open": ("perm", _Colors.RED, "⊘"),
+    "doom_loop_warned": ("loop", _Colors.YELLOW, "↻"),
+    "doom_loop_circuit_open": ("loop", _Colors.RED, "⊘"),
     "peer_message_sent": ("peer", _Colors.CYAN, "✉"),
     "peer_agent_woken": ("peer", _Colors.CYAN, "⏰"),
     "peer_wait_started": ("peer", _Colors.GRAY, "⧖"),
@@ -170,6 +172,11 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         parts.append(
             f"used={data.get('used')} window={data.get('context_window')} "
             f"ratio={data.get('ratio')} rem_to_hard={data.get('remaining_to_hard')}"
+        )
+    elif ev.msg.kind in ("doom_loop_warned", "doom_loop_circuit_open"):
+        parts.append(
+            f"tool={data.get('tool')!r} consecutive={data.get('consecutive')} "
+            f"threshold={data.get('threshold')}"
         )
     elif ev.msg.kind == "cache_break_detected":
         u = "unexpected" if data.get("unexpected") else "expected"
