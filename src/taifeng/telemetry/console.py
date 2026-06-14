@@ -47,6 +47,7 @@ _KIND_TAG = {
     "compaction_started": ("comp", _Colors.GRAY, "→"),
     "compaction_completed": ("comp", _Colors.GRAY, "←"),
     "pinned_state_reinjected": ("comp", _Colors.GRAY, "📌"),
+    "budget_hint_injected": ("comp", _Colors.GRAY, "🪙"),
     "cache_break_detected": ("cach", _Colors.RED, "!"),
     # Permission gate 事件（红色 —— 表示拦截）
     "permission_prompt_timeout": ("perm", _Colors.RED, "⏱"),
@@ -164,6 +165,11 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
             f"phase={data.get('phase')} sources=[{names}] "
             f"total={data.get('total_chars')}ch"
             + (f" dropped={data.get('dropped')}" if data.get("dropped") else "")
+        )
+    elif ev.msg.kind == "budget_hint_injected":
+        parts.append(
+            f"used={data.get('used')} window={data.get('context_window')} "
+            f"ratio={data.get('ratio')} rem_to_hard={data.get('remaining_to_hard')}"
         )
     elif ev.msg.kind == "cache_break_detected":
         u = "unexpected" if data.get("unexpected") else "expected"
