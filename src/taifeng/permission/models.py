@@ -236,6 +236,65 @@ class PermissionRequest:
 
 
 @dataclass(frozen=True)
+class PermissionGrant:
+    """A reusable approval grant -- a "pre-answered ask".
+
+    A grant lets the kernel auto-allow a future ``ask``-mode request *without*
+    re-prompting the human. It generalises the one-shot ``_preapproved_call_ids``
+    (exact call_id, consumed once) into a scoped, lifecycle-bounded credential.
+
+    Crucial safety property (enforced in ``PermissionPolicy.check``): a grant only
+    ever bypasses the *prompt* -- it can never override an explicit ``deny`` rule.
+    Its semantics are strictly "the yes a human would have clicked on this ask,
+    cached", so it spares a repeated dialog and never raises the permission ceiling.
+
+    Matching dimensions (all reuse fields the PermissionRequest already carries, so
+    there is zero extra context to thread through -- R1 stays clean):
+        - ``scope`` + ``target_pattern`` (+ optional ``args_match``): matched by
+          reusing ``PermissionRule.matches`` (literal / ``re:`` / ``glob:`` tri-state).
+        - ``call_chain_prefix``: subtree narrowing. ``()`` (default) = tree-wide
+          (mirrors the shared engine-level policy reality); a non-empty tuple matches
+          only when it is a prefix of ``request.call_chain`` (the child subtree may
+          use it; the parent / sibling subtrees may not).
+        - ``thread_id``: ``""`` (default) = any thread; non-empty = only that thread.
+
+    Lifecycle is deterministic only (``src/`` forbids wall-clock ``Date.now`` for
+    resume determinism):
+        - ``max_uses``: ``None`` (default) = unbounded; otherwise decremented on each
+          hit and dropped from the store at zero. Wall-clock TTL stays in userspace
+          (the business injects a clock and calls ``revoke_grant``).
+
+    ``grant_id`` is the audit / revoke key. It may be supplied by the business; when
+    left empty the GrantStore assigns a deterministic counter id on ``add`` (no
+    randomness, so resume is reproducible).
+    """
+
+    scope: PermissionScope
+    target_pattern: str
+    """Matches ``request.target`` via literal / ``re:`` regex / ``glob:`` wildcard
+    (same grammar as PermissionRule.target_pattern)."""
+
+    args_match: dict[str, str] | None = None
+    """Optional args-level matching; same semantics as PermissionRule.args_match
+    (AND over keys inside request.metadata['args']). None = skip the args check."""
+
+    max_uses: int | None = None
+    """Deterministic use budget. None = unbounded; otherwise expires at zero."""
+
+    call_chain_prefix: tuple[str, ...] = ()
+    """Subtree narrowing. () = tree-wide; non-empty = only call_chains with this prefix."""
+
+    thread_id: str = ""
+    """Thread binding. "" = any thread; non-empty = only the matching thread."""
+
+    grant_id: str = ""
+    """Audit / revoke key. Empty -> assigned a deterministic id by GrantStore.add."""
+
+    reason: str = ""
+    """Why the grant was issued (rationale for the audit trail)."""
+
+
+@dataclass(frozen=True)
 class PermissionDecision:
     """The approval outcome."""
 
@@ -244,13 +303,32 @@ class PermissionDecision:
     reason: str = ""
     remember_until: Literal["once", "session", "always"] | None = None
     """Decision memory window -- ``once``=this call only; ``session``=this session;
-    ``always``=persisted into the policy permanently."""
+    ``always``=persisted into the policy permanently.
+
+    Note: this field stays userspace-owned (the kernel does not consume ``session`` /
+    ``always``; see PermissionPolicy.check and policy.py's R1 note). For
+    kernel-consumed reuse, set ``grant`` instead."""
+
+    grant: PermissionGrant | None = None
+    """Optional: a reusable grant the prompter mints alongside this decision. When set,
+    ``PermissionPolicy.check`` records it into its GrantStore so future matching
+    ``ask`` requests are auto-allowed (bypassing the prompt, never a ``deny`` rule)."""
 
     @classmethod
     def allow(
-        cls, *, reason: str = "", remember: Literal["once", "session", "always"] = "once"
+        cls,
+        *,
+        reason: str = "",
+        remember: Literal["once", "session", "always"] = "once",
+        grant: PermissionGrant | None = None,
     ) -> PermissionDecision:
-        return cls(granted=True, mode="allow", reason=reason, remember_until=remember)
+        return cls(
+            granted=True,
+            mode="allow",
+            reason=reason,
+            remember_until=remember,
+            grant=grant,
+        )
 
     @classmethod
     def deny(

@@ -109,7 +109,9 @@ from taifeng.loop.submission import Resume, SendToPeer
 from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.mcp import McpStdioClient, McpStdioServer, McpToolError
 from taifeng.permission import (
+    GrantStore,
     PermissionDecision,
+    PermissionGrant,
     PermissionPolicy,
     PermissionPrompter,
     PermissionRequest,
@@ -267,7 +269,9 @@ __all__ = [
     "PostToolUseHook",
     "PreSkillDispatchHook",
     "PreToolUseHook",
+    "GrantStore",
     "PermissionDecision",
+    "PermissionGrant",
     "PermissionPolicy",
     "PermissionPrompter",
     "PermissionRequest",

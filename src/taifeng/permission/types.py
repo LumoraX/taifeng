@@ -15,10 +15,12 @@ focused modules above or from the ``taifeng.permission`` package directly.
 
 from __future__ import annotations
 
+from taifeng.permission.grant import GrantStore
 from taifeng.permission.models import (
     CALL_CHAIN_MAX_DEPTH,
     CapabilityTier,
     PermissionDecision,
+    PermissionGrant,
     PermissionMode,
     PermissionRequest,
     PermissionScope,
@@ -38,7 +40,9 @@ __all__ = [
     "CallbackPrompter",
     "CapabilityTier",
     "CliPrompter",
+    "GrantStore",
     "PermissionDecision",
+    "PermissionGrant",
     "PermissionMode",
     "PermissionPolicy",
     "PermissionPrompter",

@@ -17,9 +17,11 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from taifeng.permission.grant import GrantStore
 from taifeng.permission.models import (
     CapabilityTier,
     PermissionDecision,
+    PermissionGrant,
     PermissionMode,
     PermissionRequest,
 )
@@ -38,7 +40,8 @@ PolicyTelemetryCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 """Callback the PermissionPolicy uses to emit telemetry events.
 
 Signature: ``async def cb(event_kind: str, payload: dict) -> None``.
-Event kind: ``permission_prompt_timeout``.
+Event kinds: ``permission_prompt_timeout`` / ``permission_grant_issued`` /
+``permission_grant_hit`` / ``permission_grant_expired``.
 """
 
 
@@ -73,6 +76,37 @@ class PermissionPolicy:
     # cls(rules=..., default_mode=..., prompter=...) without this field, so the
     # default_factory backs it with an empty set and behaviour is unchanged).
     _preapproved_call_ids: set[str] = field(default_factory=set)
+
+    # Reusable approval grants (permission-grants). Like _preapproved_call_ids this is
+    # kernel-held permission state that does not participate in from_dict /
+    # from_capability_tier construction (default_factory backs it with an empty store,
+    # so existing callers are unchanged). A grant is a "pre-answered ask": it bypasses
+    # the prompter on a matching ask, but never overrides a deny rule (see check()).
+    _grants: GrantStore = field(default_factory=GrantStore)
+
+    def issue_grant(self, grant: PermissionGrant) -> PermissionGrant:
+        """Register a reusable grant (also the resume re-seed entry point).
+
+        Future ``ask``-mode requests matching this grant are auto-allowed without
+        prompting (until exhausted via ``max_uses`` or revoked). It never overrides a
+        ``deny`` rule -- a grant only caches the "yes" a human would have clicked.
+
+        Args:
+            grant: the grant to register. If ``grant_id`` is empty, a deterministic id
+                is assigned.
+
+        Returns:
+            The effective stored grant (with its final ``grant_id``).
+        """
+        return self._grants.add(grant)
+
+    def revoke_grant(self, grant_id: str) -> bool:
+        """Revoke a previously issued grant by id (e.g. userspace wall-clock TTL).
+
+        Returns:
+            True if a grant was removed; False if no such id existed.
+        """
+        return self._grants.revoke(grant_id)
 
     def preapprove(self, call_id: str) -> None:
         """Register a one-shot pre-approval: the next check for this call_id grants
@@ -244,6 +278,13 @@ class PermissionPolicy:
             return PermissionDecision.deny(reason=rule_reason or "policy_deny")
 
         # ask
+        # 2.5 grant short-circuit: a reusable grant is a "pre-answered ask". It runs
+        #     only here -- AFTER deny/allow rules -- so a grant can bypass the prompt
+        #     but never override an explicit deny rule (the security invariant).
+        grant_decision = await self._try_grant(request)
+        if grant_decision is not None:
+            return grant_decision
+
         if self.prompter is None:
             return PermissionDecision.deny(
                 reason="ask_mode_no_prompter (conservative default deny)",
@@ -289,7 +330,57 @@ class PermissionPolicy:
         #         if d.remember_until == "always":
         #             business_store.persist(req, d)
         #         return d
+
+        # Record a grant the prompter minted alongside its decision, so future
+        # matching ask requests are auto-allowed (R5: re-seedable on resume).
+        await self._record_minted_grant(decision, request)
         return decision
+
+    async def _try_grant(
+        self, request: PermissionRequest
+    ) -> PermissionDecision | None:
+        """Match the request against the GrantStore; on a hit consume + emit and
+        return an allow decision, otherwise None (fall through to the prompter).
+        """
+        grant = self._grants.match(request)
+        if grant is None:
+            return None
+        expired = self._grants.consume(grant)
+        await self._emit_telemetry(
+            "permission_grant_hit", self._grant_payload(grant, request)
+        )
+        if expired:
+            # max_uses 用尽：grant 已移除，补一条失效事件供审计。
+            await self._emit_telemetry(
+                "permission_grant_expired", self._grant_payload(grant, request)
+            )
+        return PermissionDecision.allow(reason=f"grant:{grant.grant_id}")
+
+    async def _record_minted_grant(
+        self, decision: PermissionDecision, request: PermissionRequest
+    ) -> None:
+        """Register ``decision.grant`` (if any) into the store + emit an issued event."""
+        if decision.grant is None:
+            return
+        issued = self._grants.add(decision.grant)
+        await self._emit_telemetry(
+            "permission_grant_issued", self._grant_payload(issued, request)
+        )
+
+    @staticmethod
+    def _grant_payload(
+        grant: PermissionGrant, request: PermissionRequest
+    ) -> dict[str, Any]:
+        """Build the telemetry payload for a grant event (audit-traceable)."""
+        return {
+            "grant_id": grant.grant_id,
+            "scope": grant.scope,
+            "target_pattern": grant.target_pattern,
+            "reason": grant.reason,
+            "call_chain": list(request.call_chain),
+            "thread_id": request.thread_id,
+            "submission_id": request.submission_id,
+        }
 
     async def _invoke_prompter(self, request: PermissionRequest) -> PermissionDecision:
         """Call the prompter; whether to wrap with fail_after depends on
