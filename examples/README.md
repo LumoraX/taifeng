@@ -64,6 +64,8 @@
 | [real_llm/nested_spawn_hitl.py](real_llm/nested_spawn_hitl.py) | **嵌套 spawn 错峰 HITL 续跑** 真实 LLM 验证：专科 call_skill 子 skill → 子 skill request_user_input 嵌套挂起（CHILD_SKILL）→ Resume → `resume_spawn_nested` 续跑链跑到终态（补 capability_matrix 不覆盖的 spawn+挂起+续跑盲区） |
 | [real_llm/p1_guards_verify.py](real_llm/p1_guards_verify.py) | **P1 双能力真实验证**：surgical-trim（剪过的占位/截断历史喂回真实 LLM 后续 turn 正常）+ denial 断路器（真 tool call → 真 deny → 断路恰好一次）+ refund（cap=2 真实跑过 3 轮 echo） |
 | [real_llm/p1_round2_verify.py](real_llm/p1_round2_verify.py) | **第二批 P1 真实验证**：pinned 保活（压缩后模型据 pinned 注记复述出只存在于注入中的标记词）+ peer 投递（真实 send_message → 真唤醒 → 专家引用 peer 内容）+ wait_peer 终态 |
+| [real_llm/grants_verify.py](real_llm/grants_verify.py) | **可复用审批 grant 真实验证**（ADR 0022）：真 LLM 发起 call_skill → 命中预签发 grant → 绕过 prompter（prompter 0 次调用）；对照 `revoke_grant` 后回落 prompter（deny） |
+| [real_llm/doom_verify.py](real_llm/doom_verify.py) | **doom-loop 真实验证**（ADR 0021）：强指令逼真 LLM 连续同参调用 → 先警后断（warn → circuit_open → turn 以 doom_loop_circuit_open 终止） |
 
 运行前：`export LLM_BOOTSTRAP_PROVIDER=openai LLM_BOOTSTRAP_API_KEY=sk-...`
 运行：`PYTHONPATH=src uv run python examples/real_llm/<file>.py`
@@ -97,6 +99,8 @@
 | [research_assistant/](research_assistant/) | 三步串行 pipeline：采集 → 提炼 → 写作 |
 | [product_review/](product_review/) | fan-out 三个 reviewer + 评分聚合 + HITL |
 | [selective_approval/](selective_approval/) | 按 scope/target 模式选择性审批 |
+| [permission_grants/](permission_grants/) | **可复用审批 grant**（ADR 0022）：预签发 grant 绕过 prompter + revoke 回落（grant 绝不越 deny） |
+| [doom_loop/](doom_loop/) | **doom-loop 先警后断**（ADR 0021）：重复同调用空转 → warn → circuit-open 终止 |
 | [subagent_isolation/](subagent_isolation/) | 子 skill 隔离策略（mode-auto / mode-strict） |
 | [memory/](memory/) | 业务侧实现 `MemoryStore`（K3 长期记忆 backend）：4 个 swap 钩子 prefetch/writeback/on_pre_evict/on_session_end 端到端触发 + 跨 turn 召回 |
 | [memory/knowledge_demo.py](memory/knowledge_demo.py) | **知识库接入三件套**：继承 NullMemoryStore 三行只读源 + `CompositeMemoryStore` 双源组合 + `memory_query_builder` 近 N 轮检索语境（解多轮指代） | 否（Mock） |
