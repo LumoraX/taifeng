@@ -66,6 +66,7 @@
 | [real_llm/p1_round2_verify.py](real_llm/p1_round2_verify.py) | **第二批 P1 真实验证**：pinned 保活（压缩后模型据 pinned 注记复述出只存在于注入中的标记词）+ peer 投递（真实 send_message → 真唤醒 → 专家引用 peer 内容）+ wait_peer 终态 |
 | [real_llm/grants_verify.py](real_llm/grants_verify.py) | **可复用审批 grant 真实验证**（ADR 0022）：真 LLM 发起 call_skill → 命中预签发 grant → 绕过 prompter（prompter 0 次调用）；对照 `revoke_grant` 后回落 prompter（deny） |
 | [real_llm/doom_verify.py](real_llm/doom_verify.py) | **doom-loop 真实验证**（ADR 0021）：强指令逼真 LLM 连续同参调用 → 先警后断（warn → circuit_open → turn 以 doom_loop_circuit_open 终止） |
+| [real_llm/grant_subagent_verify.py](real_llm/grant_subagent_verify.py) | **grant 子 agent 硬墙真实验证**（ADR 0022 决策五）：同一 skill 树 + 同一组 grant，A/B 只翻 `subagent_approval_mode` —— inherit 子内 grant(leaf) 命中、auto_deny 子内 grant(leaf) 被硬墙挡住（leaf 被拒），root 锚点 grant(mid) 两次都命中 |
 
 运行前：`export LLM_BOOTSTRAP_PROVIDER=openai LLM_BOOTSTRAP_API_KEY=sk-...`
 运行：`PYTHONPATH=src uv run python examples/real_llm/<file>.py`
