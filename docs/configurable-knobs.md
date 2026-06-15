@@ -386,8 +386,8 @@ policy.issue_grant(PermissionGrant(
     scope="tool_use", target_pattern="shell_exec",
     args_match={"cmd": "glob:openspec *"},   # 复用 PermissionRule 匹配
     max_uses=10,                              # 确定性生命周期；None=不限次（禁挂钟 TTL）
-    call_chain_prefix=("root", "expert"),     # ()=全树；非空=收窄到该子树
-    thread_id="",                             # ""=任意 thread
+    call_chain_prefix=("root", "expert"),     # ()=全树；收窄【仅 call_skill 嵌套子树】
+    thread_id="",                             # ""=任意；收窄到【spawn/peer detached 子】用此键
 ))
 policy.revoke_grant(grant_id)                 # 主动撤销（业务做挂钟 TTL 用）
 
@@ -395,9 +395,12 @@ policy.revoke_grant(grant_id)                 # 主动撤销（业务做挂钟 T
 return PermissionDecision.allow(grant=PermissionGrant(scope="tool_use", target_pattern="shell_exec"))
 ```
 
+- **两个收窄键各管一种嵌套**：`call_chain_prefix` 仅对 call_skill 阻塞嵌套子树有效（detached spawn 的 chain 会重置，故对它永不命中）；`thread_id` 才是收窄 spawn/peer detached 子的键
+- **仅 inherit 模式生效**：`auto_deny`/`auto_allow` 子 turn 有意绕过交互式审批（含 grant），grant 在其中不生效（硬墙）
 - **挂钟 TTL** 不在内核（`src/` 禁 `Date.now` 保 resume 确定性）：业务注入 clock 后自行 `revoke_grant`
-- grant 随 engine 级单例 policy 天然全树共享（spawn/peer 通用）；`call_chain_prefix` 收窄到子树
-- 命中/签发/失效发 `permission_grant_*` telemetry（审计）；resume 经 `issue_grant` 重种（`snapshot()` 反映剩余次数）
+- **生命周期同 `rules`**：grant 是内存 policy 态，进程内跨 turn 存活；**内核不跨进程自动持久化**，业务用 `snapshot()`+`issue_grant()` 重种（与重建 rules 同理，**不**像 preapprove 由 engine 自动注入）
+- id 全局唯一（自动跳过占用、显式重复 raise）+ 按匹配签名 dedup（issue 幂等、mint 不堆积）
+- 命中/签发/失效发 `permission_grant_*` telemetry（审计）
 
 ### Hook lifecycle 完整集
 

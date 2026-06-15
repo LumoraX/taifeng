@@ -296,11 +296,13 @@ pattern 三态语义：
 - **AND** request 的 `args.cmd == "rm -rf /tmp"`
 - **THEN** 命中 deny → `policy.check` 返回 `deny`（不被 allow 覆盖，因为 deny 在 rules 列表前面）
 
-### Requirement: PermissionPolicy 内核不持久化决策
+### Requirement: PermissionPolicy 内核不持久化 remember_until 判断
+
+> 措辞收窄（ADR 0022）：本条仅约束 `remember_until` **不写回 rules**。可复用授权另有内核机制（grant，见下条 Requirement）；二者不矛盾——`remember_until` 不消费、grant 消费。
 
 `PermissionPolicy.check(request)` SHALL **不**因 `PermissionDecision.remember_until == "always"` 而修改 `self.rules`。
 
-业务侧若要 session / 持久层级记忆，SHALL 在自己的 prompter 包装层处理（读 `decision.remember_until` 后自己 append rule 或写存储）。
+业务侧若要 session / 持久层级记忆，SHALL 在自己的 prompter 包装层处理（读 `decision.remember_until` 后自己 append rule 或写存储），**或**用 `decision.grant` 走内核 grant 机制。
 
 `PermissionDecision.remember_until` 字段保留作信息字段，业务侧可读但 Taifeng 内核不消费。
 
@@ -325,19 +327,23 @@ pattern 三态语义：
 
 - `scope: PermissionScope` + `target_pattern: str`（+ 可选 `args_match: dict[str,str]`）
   —— 匹配**复用 `PermissionRule.matches`**（literal / `re:` / `glob:` 三态），不重写匹配逻辑
-- `call_chain_prefix: tuple[str,...] = ()` —— **子树收窄**：`()`=全树（贴合 engine 级单例 policy 全树共享的事实）；非空仅当它是 `request.call_chain` 的前缀时命中（子树可用、父/兄弟子树不可用）
-- `thread_id: str = ""` —— `""`=任意 thread；非空仅命中该 thread
+- `call_chain_prefix: tuple[str,...] = ()` —— **子树收窄（仅 call_skill 阻塞嵌套）**：`()`=全树；非空仅当它是 `request.call_chain` 前缀时命中。**作用域限制**：仅对 call_skill 子树有效（子继承父 call_stack、chain 含全路径）；**detached spawn / peer 子的 chain 会重置不含父路径，故对它们永不命中**——收窄 spawn/peer 子用 `thread_id`
+- `thread_id: str = ""` —— `""`=任意 thread；非空仅命中该 thread。这是收窄到 **spawn/peer detached 子 thread** 的正确键（与 `call_chain_prefix` 互补）
 - `max_uses: int | None = None` —— **确定性生命周期**：`None`=不限次；否则每次命中递减、到 0 移除。**禁挂钟 TTL**（`src/` 禁 `Date.now`，保 resume 确定性）；挂钟过期留 userspace 经 `revoke_grant` 处理
-- `grant_id: str = ""` —— 审计 / 撤销键；空则 `GrantStore.add` 分配确定性计数 id（无随机、resume 可复现）
+- `grant_id: str = ""` —— 审计 / 撤销键；空则 `GrantStore.add` 分配**确定性、跳过已占用**的计数 id（无随机、resume 可复现、不撞车）
 
-`PermissionPolicy` SHALL 提供 `issue_grant(grant) -> PermissionGrant`（亦为 resume 重种入口）与 `revoke_grant(grant_id) -> bool`。
+`PermissionPolicy` SHALL 提供 `issue_grant(grant) -> PermissionGrant`（亦为 resume 重种入口）与 `revoke_grant(grant_id) -> bool`。`GrantStore.add` SHALL 保证 grant_id 全局唯一：自动 id 跳过已占用、显式重复 id（且签名不同）`raise ValueError`；并按完整匹配签名（scope/target/args/prefix/thread）dedup（`issue_grant` 幂等、mint 不堆积）。
 
 **核心安全不变量**：grant 短路 SHALL 排在规则裁决**之后**——`deny`/`allow` 规则先决，grant 只在 `mode == "ask"` 时、prompter 之前介入。故 grant 只省去重复弹窗，**绝不越过 `deny` 规则、绝不提升权限上限**。
+
+**生效范围**：grant **仅在 inherit 模式子 turn 生效**（子复用同一 policy）。`auto_deny` / `auto_allow` 子 turn 走 `_SubagentAutoDecisionPolicy`，有意绕过交互式审批（含缓存的 grant），grant 在其中**不生效**（硬墙，保 auto_deny 隔离承诺）。
+
+**生命周期与 R5**：grant 是**内存 policy 态、同 `rules`**——进程内经 engine 级单例 policy 跨 turn 存活；**内核不跨进程自动持久化**（`rules` 亦然），业务用 `snapshot()` 序列化 + `issue_grant()` 重种。不像 `_preapproved_call_ids` 由 engine 在 resume 内部自动注入。
 
 grant 命中 / 签发 / 失效 SHALL 经 `PolicyTelemetryCallback` 发
 `permission_grant_hit` / `permission_grant_issued` / `permission_grant_expired` 事件（permission 包不依赖 `loop/event`，R1 干净）。
 
-grant 随 engine 级单例 `PermissionPolicy` 天然全树共享（root / call_skill / spawn_skill 子 runner 共用同一 policy），无需贯穿 pool/engine。
+grant 随 engine 级单例 `PermissionPolicy` 天然全树共享（root / inherit 子 runner 共用同一 policy），无需贯穿 pool/engine。
 
 #### Scenario: grant 命中绕过 prompter
 - **WHEN** `policy.issue_grant(PermissionGrant(scope="custom", target_pattern="x"))` 且默认 `ask`
@@ -363,8 +369,28 @@ grant 随 engine 级单例 `PermissionPolicy` 天然全树共享（root / call_s
 - **THEN** 第一次走 grant `allow`、第二次回落 prompter
 - **AND** 发 `permission_grant_expired` 事件
 
-#### Scenario: call_chain_prefix 子树收窄
+#### Scenario: call_chain_prefix 子树收窄（call_skill 嵌套）
 - **WHEN** grant `call_chain_prefix=("root","expert")`
 - **THEN** `request.call_chain=("root","expert","leaf")` 命中
 - **AND** `("root",)`（父）/ `("root","other")`（兄弟）均不命中
+
+#### Scenario: call_chain_prefix 对 detached spawn 不适用
+- **WHEN** grant `call_chain_prefix=("root",...)`
+- **AND** 请求来自 detached spawn 子（其 call_chain 重置为独立根、不含 `"root"`）
+- **THEN** grant 不命中（收窄 spawn/peer 子应改用 `thread_id`）
+
+#### Scenario: grant_id 全局唯一（resume 重种不撞车）
+- **WHEN** `GrantStore` 重种了显式 id `"grant-0"`，随后 `add` 一张空 id grant
+- **THEN** 自动分配的 id 跳过 `"grant-0"`，全部 id 唯一
+- **AND** 业务显式 `add` 两张同 id、签名不同的 grant SHALL `raise ValueError`
+
+#### Scenario: 签名等价 dedup（防无界堆积）
+- **WHEN** 同一匹配签名（scope/target/args/prefix/thread）的 grant 被 `add`/mint 两次
+- **THEN** store 只保留一张（复用既有，不堆积）
+- **AND** 不同签名（如不同 `thread_id`）的 grant 各自独立保留
+
+#### Scenario: grant 仅 inherit 模式生效
+- **WHEN** 子 turn 在 `auto_deny` 模式（走 `_SubagentAutoDecisionPolicy`）
+- **THEN** 即便 inner policy 有匹配 grant，子 turn 内也不生效（硬墙）
+- **AND** inherit 模式子 turn（复用同一 policy）内 grant 正常生效
 
