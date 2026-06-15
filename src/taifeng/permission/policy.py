@@ -359,8 +359,14 @@ class PermissionPolicy:
     async def _record_minted_grant(
         self, decision: PermissionDecision, request: PermissionRequest
     ) -> None:
-        """Register ``decision.grant`` (if any) into the store + emit an issued event."""
+        """Register ``decision.grant`` (if any) into the store + emit an issued event.
+
+        签名 dedup：若等价匹配条件的活跃 grant 已存在，则不新增、不重发 issued
+        （避免无界堆积与重复事件，#4）。
+        """
         if decision.grant is None:
+            return
+        if self._grants.find_equivalent(decision.grant) is not None:
             return
         issued = self._grants.add(decision.grant)
         await self._emit_telemetry(

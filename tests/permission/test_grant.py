@@ -214,3 +214,82 @@ def test_snapshot_reflects_remaining_uses() -> None:
     assert len(snap) == 1
     # snapshot 把剩余次数反映为 max_uses，便于 resume 原样重种
     assert snap[0].max_uses == 2
+
+
+# ==============================================================
+# 6. #3 id 全局唯一（修复 _counter 重种撞车 + 显式重复 id）
+# ==============================================================
+
+
+def test_add_rejects_duplicate_explicit_id_different_signature() -> None:
+    # 业务显式传两张同 id、不同签名 → 必须 raise（禁 silent dup，否则
+    # consume/revoke 按 id 找第一个会锚定漂移）
+    import pytest
+
+    store = GrantStore()
+    store.add(PermissionGrant(scope="custom", target_pattern="a", grant_id="dup"))
+    with pytest.raises(ValueError):
+        store.add(PermissionGrant(scope="custom", target_pattern="b", grant_id="dup"))
+
+
+def test_auto_id_skips_reseeded_id() -> None:
+    # 模拟 resume 重种：显式塞入 "grant-0"，随后签发空 id、不同签名的 grant
+    # → 自动 id 必须跳过已占用的 "grant-0"，不能撞车
+    store = GrantStore()
+    store.add(PermissionGrant(scope="custom", target_pattern="a", grant_id="grant-0"))
+    g = store.add(PermissionGrant(scope="custom", target_pattern="b"))
+    assert g.grant_id != "grant-0"
+
+
+def test_reseed_snapshot_then_mint_unique_and_consume_correct() -> None:
+    # 完整 resume 闭环：源 store → snapshot → 新 store 重种 → 再签发空 id
+    # → 全部 id 唯一、consume 命中正确（这是 #3 危害最大的路径）
+    src = GrantStore()
+    a = src.add(PermissionGrant(scope="custom", target_pattern="a", max_uses=2))
+    src.consume(a)  # remaining 1
+    snap = src.snapshot()
+
+    dst = GrantStore()
+    for g in snap:
+        dst.add(g)  # 重种（保留显式 id "grant-0"）
+    dst.add(PermissionGrant(scope="custom", target_pattern="z"))  # 再签发空 id
+
+    ids = [g.grant_id for g in dst.snapshot()]
+    assert len(ids) == len(set(ids))  # 无撞车
+    # 重种的 a（remaining 重种为 1）consume 一次即失效
+    reseeded_a = next(g for g in dst.snapshot() if g.target_pattern == "a")
+    assert dst.consume(reseeded_a) is True
+
+
+# ==============================================================
+# 7. #4 按完整匹配签名 dedup（防无界堆积）
+# ==============================================================
+
+
+def test_add_dedups_equivalent_signature() -> None:
+    # 同一匹配签名（scope/target/args/prefix/thread）重复 add → 复用同一张，不堆积
+    store = GrantStore()
+    g1 = store.add(PermissionGrant(scope="custom", target_pattern="a"))
+    g2 = store.add(PermissionGrant(scope="custom", target_pattern="a"))
+    assert len(store.snapshot()) == 1
+    assert g2.grant_id == g1.grant_id  # 复用既有
+
+
+def test_add_distinct_signatures_not_deduped() -> None:
+    # 不同 thread 绑定 = 不同签名 → 各自独立，不被误 dedup
+    store = GrantStore()
+    store.add(PermissionGrant(scope="custom", target_pattern="a"))
+    store.add(PermissionGrant(scope="custom", target_pattern="a", thread_id="t"))
+    assert len(store.snapshot()) == 2
+
+
+def test_find_equivalent_ignores_id_and_max_uses() -> None:
+    # dedup 签名只看「匹配什么」，不看 id/reason/max_uses（「用多久」不算同一张）
+    store = GrantStore()
+    store.add(
+        PermissionGrant(scope="custom", target_pattern="a", max_uses=5, reason="x")
+    )
+    eq = store.find_equivalent(
+        PermissionGrant(scope="custom", target_pattern="a", max_uses=1, grant_id="o")
+    )
+    assert eq is not None

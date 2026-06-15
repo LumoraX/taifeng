@@ -188,3 +188,24 @@ async def test_revoke_grant() -> None:
     assert policy.revoke_grant("g1") is True
     d = await policy.check(_req("x"))
     assert d.granted is False  # 已撤销 → 回落 prompter（deny）
+
+
+# ==============================================================
+# 8. #2 硬墙：grant 在 auto 模式子 turn 不生效
+# ==============================================================
+
+
+async def test_grant_hard_wall_under_auto_deny_subagent() -> None:
+    # _SubagentAutoDecisionPolicy（auto_deny）即便 inner 有匹配 grant 也不消费
+    # —— 保 auto_deny「子树一律拒绝」的硬隔离承诺（ADR 0022 决策五）。
+    from taifeng.skill.dispatch import _SubagentAutoDecisionPolicy
+
+    inner = PermissionPolicy(
+        default_mode="ask",
+        prompter=_CountingPrompter(decision=PermissionDecision.deny(reason="no")),
+    )
+    inner.issue_grant(PermissionGrant(scope="custom", target_pattern="x"))
+    wrapper = _SubagentAutoDecisionPolicy(inner=inner, fallback="deny")
+
+    d = await wrapper.check(_req("x"))
+    assert d.granted is False  # grant 不生效，走 auto_deny fallback

@@ -211,6 +211,12 @@ class _SubagentAutoDecisionPolicy:
     2. 命中 ``ask`` **或** ``inner.default_mode == 'ask'`` 时走 fallback
     3. 否则按 ``inner.default_mode`` 直接 allow / deny
     4. 永不调用 ``inner.prompter``
+
+    grant 硬墙（ADR 0022）：本包装**有意不消费 ``inner`` 的可复用 grant**——auto 模式
+    的语义就是「子树不走交互式审批、一律按 fallback 裁决」，而 grant 是「缓存的交互式
+    审批答复」，同属被绕过之列。故 ``PermissionGrant`` **仅在 inherit 模式生效**（子直接
+    复用同一 PermissionPolicy 实例、经其 ``check`` 走 ``_try_grant``）；auto_deny 因此保持
+    「子树一律拒绝」的硬隔离承诺不被 grant 削弱。
     """
 
     inner: PermissionPolicy

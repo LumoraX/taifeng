@@ -252,11 +252,11 @@ class PermissionGrant:
     there is zero extra context to thread through -- R1 stays clean):
         - ``scope`` + ``target_pattern`` (+ optional ``args_match``): matched by
           reusing ``PermissionRule.matches`` (literal / ``re:`` / ``glob:`` tri-state).
-        - ``call_chain_prefix``: subtree narrowing. ``()`` (default) = tree-wide
-          (mirrors the shared engine-level policy reality); a non-empty tuple matches
-          only when it is a prefix of ``request.call_chain`` (the child subtree may
-          use it; the parent / sibling subtrees may not).
-        - ``thread_id``: ``""`` (default) = any thread; non-empty = only that thread.
+        - ``call_chain_prefix``: subtree narrowing for **call_skill (blocking) nesting
+          only** -- detached spawn/peer children reset the chain, so use ``thread_id``
+          for those (see the field doc).
+        - ``thread_id``: thread binding -- the right key to narrow a grant to a
+          spawn/peer detached child thread.
 
     Lifecycle is deterministic only (``src/`` forbids wall-clock ``Date.now`` for
     resume determinism):
@@ -264,9 +264,22 @@ class PermissionGrant:
           hit and dropped from the store at zero. Wall-clock TTL stays in userspace
           (the business injects a clock and calls ``revoke_grant``).
 
+    Scope where a grant takes effect: only under **inherit**-mode subagents (the child
+    shares the same policy instance). ``auto_deny`` / ``auto_allow`` subagents run a
+    ``_SubagentAutoDecisionPolicy`` that deliberately bypasses interactive approval --
+    *including cached grants* -- so grants do NOT fire there (a hard wall by design).
+
+    Lifetime & R5: a grant is **in-memory policy state, exactly like ``rules``** -- it
+    lives as long as the ``PermissionPolicy`` object (within a process it survives
+    across turns via the engine-level singleton policy). The kernel does NOT auto-persist
+    grants across a process restart; the business persists them (``snapshot()``) and
+    re-issues (``issue_grant``) on resume, the same way it reconstructs ``rules``. This
+    is unlike ``_preapproved_call_ids``, whose resume re-injection the engine wires
+    internally for a specific suspended call.
+
     ``grant_id`` is the audit / revoke key. It may be supplied by the business; when
-    left empty the GrantStore assigns a deterministic counter id on ``add`` (no
-    randomness, so resume is reproducible).
+    left empty the GrantStore assigns a deterministic, collision-free counter id on
+    ``add`` (no randomness, so resume is reproducible).
     """
 
     scope: PermissionScope
@@ -282,10 +295,19 @@ class PermissionGrant:
     """Deterministic use budget. None = unbounded; otherwise expires at zero."""
 
     call_chain_prefix: tuple[str, ...] = ()
-    """Subtree narrowing. () = tree-wide; non-empty = only call_chains with this prefix."""
+    """Subtree narrowing for **call_skill (blocking) nesting only**. () = tree-wide;
+    non-empty = only call_chains with this prefix.
+
+    作用域限制：仅对 call_skill 阻塞嵌套子树有效——那条路径上子 runner 继承父
+    call_stack（call_chain 含 root→…→child 全路径）。**detached spawn / peer 子 thread
+    的 call_chain 会重置为独立根（不含父路径），故 call_chain_prefix 对它们永不命中**；
+    要收窄到某个 spawn/peer 子，用 ``thread_id``。"""
 
     thread_id: str = ""
-    """Thread binding. "" = any thread; non-empty = only the matching thread."""
+    """Thread binding. "" = any thread; non-empty = only the matching thread.
+
+    这是收窄到 **spawn / peer detached 子 thread** 的正确键（每个 detached 子有独立
+    thread_id）；与 ``call_chain_prefix``（管 call_skill 嵌套）互补。"""
 
     grant_id: str = ""
     """Audit / revoke key. Empty -> assigned a deterministic id by GrantStore.add."""

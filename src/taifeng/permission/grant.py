@@ -64,23 +64,90 @@ class GrantStore:
     reproducible (no randomness)."""
 
     def add(self, grant: PermissionGrant) -> PermissionGrant:
-        """Register a grant; assign a deterministic id when none was supplied.
+        """Register a grant; dedup by signature + guarantee a unique grant_id.
+
+        Two-step contract (修复 #3 id 撞车 + #4 无界堆积):
+            1. **签名 dedup**：若已有活跃 grant 的匹配签名等价（scope/target/args/
+               prefix/thread 全等，忽略 id/reason/max_uses）→ 直接复用既有那张、不新增
+               （issue_grant 因此幂等；mint 重复不堆积）。
+            2. **id 唯一**：空 id → 自动分配并**跳过已占用 id**（修复 resume 重种后
+               ``_counter`` 不前移导致的撞车）；显式 id 已被占用 → ``raise ValueError``
+               （禁 silent dup，否则 consume/revoke 按 id 找首个会锚定漂移）。
 
         Args:
-            grant: the grant to store. If ``grant.grant_id`` is empty, a new id is
-                assigned (via ``id_factory`` or the internal counter).
+            grant: the grant to store.
 
         Returns:
-            The effective stored grant (with its final ``grant_id`` populated) so the
-            caller knows the id it can later ``revoke`` / ``consume``.
+            The effective stored grant（dedup 时为既有那张；否则为带最终 ``grant_id``
+            的新 grant）。
+
+        Raises:
+            ValueError: 显式 ``grant_id`` 与既有不同签名 grant 撞车。
         """
-        effective = grant
-        if not grant.grant_id:
-            new_id = self.id_factory() if self.id_factory is not None else f"grant-{self._counter}"
-            self._counter += 1
+        # 1. 签名 dedup：等价匹配条件已存在 → 复用，避免堆积。
+        existing = self.find_equivalent(grant)
+        if existing is not None:
+            return existing
+
+        # 2. id 唯一性。
+        used = {entry.grant.grant_id for entry in self._entries}
+        if grant.grant_id:
+            if grant.grant_id in used:
+                # 同 id 但走到这里 = 签名不同（等价的已在上一步复用）→ 真撞车，拒绝。
+                raise ValueError(
+                    f"duplicate_grant_id: {grant.grant_id!r} already in use "
+                    "by a grant with a different matching signature"
+                )
+            effective = grant
+        else:
+            # 自动分配：跳过已占用（含 resume 重种进来的显式 id）。
+            new_id = self._next_auto_id(used)
             effective = dataclasses.replace(grant, grant_id=new_id)
+
         self._entries.append(_GrantEntry(grant=effective, remaining=effective.max_uses))
         return effective
+
+    def find_equivalent(self, grant: PermissionGrant) -> PermissionGrant | None:
+        """Return an active grant with the same *matching signature* as ``grant``.
+
+        签名 = 「这张 grant 匹配哪些请求」= (scope, target_pattern, args_match,
+        call_chain_prefix, thread_id)；**不含** grant_id / reason / max_uses（「用多久」
+        不改变它授权什么）。用于 dedup。
+        """
+        sig = self._signature(grant)
+        for entry in self._entries:
+            if self._signature(entry.grant) == sig:
+                return entry.grant
+        return None
+
+    def _next_auto_id(self, used: set[str]) -> str:
+        """分配下一个未占用的确定性 id（``grant-N``）；跳过 used 中已存在的。"""
+        if self.id_factory is not None:
+            # 注入工厂时由业务保证唯一性（测试用）。
+            return self.id_factory()
+        while True:
+            candidate = f"grant-{self._counter}"
+            self._counter += 1
+            if candidate not in used:
+                return candidate
+
+    @staticmethod
+    def _signature(
+        grant: PermissionGrant,
+    ) -> tuple[str, str, tuple[tuple[str, str], ...] | None, tuple[str, ...], str]:
+        """匹配签名（dict 转有序 tuple 以可哈希/可比较）。"""
+        args = (
+            tuple(sorted(grant.args_match.items()))
+            if grant.args_match is not None
+            else None
+        )
+        return (
+            grant.scope,
+            grant.target_pattern,
+            args,
+            grant.call_chain_prefix,
+            grant.thread_id,
+        )
 
     def match(self, request: PermissionRequest) -> PermissionGrant | None:
         """Return the first active grant matching ``request``, or None.
