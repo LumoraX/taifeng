@@ -84,6 +84,7 @@ MsgKind = Literal[
     "denial_circuit_open",
     "doom_loop_warned",
     "doom_loop_circuit_open",
+    "skill_outcome_recorded",
 ]
 
 
@@ -157,6 +158,17 @@ class SkillDispatched(_Msg):
 class SkillReturned(_Msg):
     kind: Literal["skill_returned"] = "skill_returned"
     """data = {"skill_id": str, "call_id": str, "success": bool, "summary": str}"""
+
+
+class SkillOutcomeRecorded(_Msg):
+    """K-沉淀：一次 skill 执行落了战绩记录（认知回路 ⑦ 地基）。
+
+    data = SkillExecutionRecord.as_payload()（含 skill_id / call_id / outcome /
+    outcome_signal_source / selection_origin / cost_* / end_reason 等）。
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["skill_outcome_recorded"] = "skill_outcome_recorded"
 
 
 class SkillSpawnRejected(_Msg):
@@ -750,6 +762,7 @@ Msg = Union[
     OrchestrationConditionMissing,
     SkillDispatched,
     SkillReturned,
+    SkillOutcomeRecorded,
     SkillSpawnRejected,
     ResourceLimitExceeded,
     DenialCircuitOpen,
