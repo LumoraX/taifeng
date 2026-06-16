@@ -24,6 +24,7 @@ ItemKind = Literal[
     "spawn",             # 新增:分离 spawn 句柄锚(冷恢复重建 registry 用)
     "join_barrier",      # 新增:join-barrier 登记锚(记录等待的 handle_ids + 续接 skill)
     "join_barrier_fired",  # 新增:barrier 已触发的幂等标记(重载时不重复触发)
+    "skill_outcome",     # 新增:单次 skill 执行的战绩记账(认知回路 ⑦ 地基);旁路,不进 LLM 视图
 ]
 
 
@@ -63,6 +64,20 @@ def user_message(text: str, *, thread_id: str, attachments: list[dict[str, Any]]
         kind="user_message",
         thread_id=thread_id,
         payload={"text": text, "attachments": attachments or []},
+    )
+
+
+def skill_outcome_item(payload: dict[str, Any], *, thread_id: str) -> ResponseItem:
+    """构造 skill 战绩记账 item（旁路落 JSONL，不进 LLM 消息序列）。
+
+    Args:
+        payload: SkillExecutionRecord.as_payload() 产出的 JSON-safe dict。
+        thread_id: 该次执行所属（子）thread。
+    """
+    return ResponseItem(
+        kind="skill_outcome",
+        thread_id=thread_id,
+        payload=payload,
     )
 
 
