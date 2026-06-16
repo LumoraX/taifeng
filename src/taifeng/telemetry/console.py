@@ -40,6 +40,9 @@ _KIND_TAG = {
     "tool_call_completed": ("tool", _Colors.YELLOW, "←"),
     "skill_dispatched": ("skil", _Colors.MAGENTA, "⇣"),
     "skill_returned": ("skil", _Colors.MAGENTA, "⇡"),
+    # 认知回路 ⑦ 沉淀：子 skill 终态战绩记账（R3 审计补：此前落 `?` 兜底）。
+    # 灰色 ▦ —— 旁路记账（不进 LLM 视图），与 skill 派发/回流的流程事件区分
+    "skill_outcome_recorded": ("skil", _Colors.GRAY, "▦"),
     "orchestration_plan_resolved": ("plan", _Colors.MAGENTA, "≡"),
     "orchestration_condition_missing": ("plan", _Colors.RED, "✗"),
     "tool_batch_dispatched": ("tool", _Colors.YELLOW, "⇉"),
@@ -138,6 +141,13 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
     elif ev.msg.kind == "skill_returned":
         status = "✓" if data.get("success") else "✗"
         parts.append(f"{data.get('skill_id')} {status} summary={_short(data.get('summary', ''), 60)}")
+    elif ev.msg.kind == "skill_outcome_recorded":
+        # 战绩记账：skill_id / 战绩 / 信号来源 / 选择来源 / 成本（token + 迭代）
+        parts.append(
+            f"{data.get('skill_id')} outcome={data.get('outcome')}"
+            f" via={data.get('outcome_signal_source')} origin={data.get('selection_origin')}"
+            f" cost(tok={data.get('cost_tokens')},it={data.get('cost_iterations')})"
+        )
     elif ev.msg.kind == "compaction_started":
         parts.append(f"phase={data.get('phase')} strategy={data.get('strategy')} tokens={data.get('token_estimate')}")
     elif ev.msg.kind == "compaction_completed":

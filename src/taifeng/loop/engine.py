@@ -160,6 +160,7 @@ class AgentEngine:
         session_id: str | None = None,
         compressors: CompressionOrchestrator | None = None,
         dispatch_policy: DispatchPolicy | None = None,
+        outcome_judge: Any = None,
         budget: ContextBudget | None = None,
         hooks: Any = None,
         max_iterations: int | None = None,
@@ -216,6 +217,8 @@ class AgentEngine:
         self._session_id = session_id or thread_id
         self._compressors = compressors
         self._dispatch_policy = dispatch_policy or DispatchPolicy()
+        # R1 业务注入点：战绩判官（None → TurnRunner.__post_init__ 兜底 StructuralOutcomeJudge）
+        self._outcome_judge = outcome_judge
         self._budget = budget or ContextBudget()
         self._hooks = hooks
         # T5: ScriptLanguage → ScriptExecutor 映射；为空时 run_script 工具失败
@@ -1417,6 +1420,7 @@ class AgentEngine:
             store=self._store,
             compressors=self._compressors,
             dispatch_policy=self._dispatch_policy,
+            outcome_judge=self._outcome_judge,
             budget=self._budget,
             thread_id=self._thread_id,
             submission_id=submission_id,
@@ -1624,6 +1628,7 @@ class AgentEngine:
             store=self._store,
             compressors=self._compressors,
             dispatch_policy=self._dispatch_policy,
+            outcome_judge=self._outcome_judge,
             budget=self._budget,
             thread_id=child_thread_id,
             submission_id=child_thread_id,
@@ -2357,6 +2362,7 @@ class AgentEngine:
             store=self._store,
             compressors=self._compressors,
             dispatch_policy=self._dispatch_policy,
+            outcome_judge=self._outcome_judge,
             budget=self._budget,
             thread_id=thread_id,
             submission_id=submission_id or sub.id,
@@ -2423,6 +2429,7 @@ class AgentEngine:
                 "skill_snapshot": self._snapshot,
                 "visible_skills": self._snapshot.reachable_from(entry.id),
                 "dispatch_policy": self._dispatch_policy,
+                "outcome_judge": self._outcome_judge,
                 "current_skill": entry,
                 "entry_skill_id": entry.id,
                 "permission_policy": self._permission_policy,
@@ -2649,6 +2656,7 @@ class AgentEngine:
                 "skill_snapshot": self._snapshot,
                 "visible_skills": self._snapshot.reachable_from(self._entry_skill.id),
                 "dispatch_policy": self._dispatch_policy,
+                "outcome_judge": self._outcome_judge,
                 "current_skill": self._entry_skill,
                 "entry_skill_id": self._entry_skill.id,
                 "permission_policy": self._permission_policy,
@@ -2716,6 +2724,7 @@ class AgentEngine:
             store=self._store,
             compressors=self._compressors,
             dispatch_policy=self._dispatch_policy,
+            outcome_judge=self._outcome_judge,
             budget=budget,
             thread_id=self._thread_id,
             submission_id=submission_id,

@@ -125,6 +125,13 @@ from taifeng.skill import (
     SkillRegistry,
     SkillSnapshot,
 )
+from taifeng.skill.outcome import (
+    OutcomeJudge,
+    OutcomeVerdict,
+    SkillExecutionContext,
+    SkillExecutionRecord,
+    StructuralOutcomeJudge,
+)
 from taifeng.skill.scripts import (
     PythonScriptExecutor,
     ScriptDescriptor,
@@ -233,6 +240,11 @@ __all__ = [
     "SkillDefinition",
     "SkillRegistry",
     "SkillSnapshot",
+    "OutcomeJudge",
+    "OutcomeVerdict",
+    "SkillExecutionContext",
+    "SkillExecutionRecord",
+    "StructuralOutcomeJudge",
     "SlidingWindowStrategy",
     "PinnedStateRegistry",
     "PinnedStateSource",

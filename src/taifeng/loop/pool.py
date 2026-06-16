@@ -135,6 +135,7 @@ class EnginePool:
         compressors: list[CompressionStrategy] | None = None,
         budget: ContextBudget | None = None,
         dispatch_policy: DispatchPolicy | None = None,
+        outcome_judge: Any = None,
         hooks: Any = None,
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
@@ -175,6 +176,8 @@ class EnginePool:
         )
         self._budget = budget or ContextBudget()
         self._dispatch_policy = dispatch_policy or DispatchPolicy()
+        # R1 业务注入点：战绩判官（None → AgentEngine/TurnRunner 各自兜底默认）
+        self._outcome_judge = outcome_judge
         self._hooks = hooks
         self._max_iterations = max_iterations
         # turn-resource-guards：denial 断路器配置，透传到每个 AgentEngine。
@@ -260,6 +263,7 @@ class EnginePool:
         compressors: list[CompressionStrategy] | None = None,
         budget: ContextBudget | None = None,
         dispatch_policy: DispatchPolicy | None = None,
+        outcome_judge: Any = None,
         hooks: Any = None,
         max_iterations: int | None = None,
         denial_breaker_config: Any = None,
@@ -364,6 +368,7 @@ class EnginePool:
             compressors=compressors,
             budget=budget,
             dispatch_policy=dispatch_policy,
+            outcome_judge=outcome_judge,
             hooks=hooks,
             max_iterations=max_iterations,
             denial_breaker_config=denial_breaker_config,
@@ -504,6 +509,7 @@ class EnginePool:
                 session_id=session_id,
                 compressors=self._compressors,
                 dispatch_policy=self._dispatch_policy,
+                outcome_judge=self._outcome_judge,
                 budget=self._budget,
                 hooks=self._hooks,
                 max_iterations=self._max_iterations,

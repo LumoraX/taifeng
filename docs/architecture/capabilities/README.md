@@ -16,6 +16,7 @@ Aligned with [skill-system.md](../skill-system.md).
 | --- | --- |
 | [skill-dispatch](skill-dispatch.md) | `call_skill` lifecycle, Permission + Hook gates, `subagent_approval_mode`, `_SubagentAutoDecisionPolicy`, `reason` propagation, CallStack, and DispatchVerdict contracts |
 | [skill-orchestration](skill-orchestration.md) | Declarative orchestration (`parallel` / `serial` / `when`), load-time validation, deterministic execution without LLM sampling, and `orchestration_plan_resolved` events |
+| [skill-outcome-record](skill-outcome-record.md) | `SkillExecutionRecord` 数据契约（全字段含义）、`OutcomeJudge` 协议 + `StructuralOutcomeJudge` 默认映射、长相/战绩分离不变量、旁路 `skill_outcome` ItemKind、`skill_outcome_recorded` 事件、终态触发规则（suspended 不记）与 v1 显式边界 |
 
 ### Agent Loop, Tools, and Infrastructure
 
