@@ -85,6 +85,9 @@ MsgKind = Literal[
     "doom_loop_warned",
     "doom_loop_circuit_open",
     "skill_outcome_recorded",
+    # 相位 2：skill 发现/召回（search_skills 工具打点，R3 可观测）
+    "skill_search_invoked",
+    "skill_candidates_returned",
 ]
 
 
@@ -169,6 +172,31 @@ class SkillOutcomeRecorded(_Msg):
     """
 
     kind: Literal["skill_outcome_recorded"] = "skill_outcome_recorded"
+
+
+class SkillSearchInvoked(_Msg):
+    """相位 2 召回：search_skills 工具发起一次 skill 候选检索时打点（认知回路：发现）。
+
+    data = {"query": str, "top_k": int, "pool_size": int}
+    - query: 本次检索的查询文本
+    - top_k: 请求返回的候选上限
+    - pool_size: 被检索的 skill 池规模（可见候选总数）
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["skill_search_invoked"] = "skill_search_invoked"
+
+
+class SkillCandidatesReturned(_Msg):
+    """相位 2 召回：search_skills 返回候选 skill 列表时打点（认知回路：召回结果）。
+
+    data = {"count": int, "top_ids": list[str]}
+    - count: 实际返回的候选数量
+    - top_ids: 候选 skill_id 列表（按相关度排序）
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["skill_candidates_returned"] = "skill_candidates_returned"
 
 
 class SkillSpawnRejected(_Msg):
@@ -763,6 +791,8 @@ Msg = Union[
     SkillDispatched,
     SkillReturned,
     SkillOutcomeRecorded,
+    SkillSearchInvoked,
+    SkillCandidatesReturned,
     SkillSpawnRejected,
     ResourceLimitExceeded,
     DenialCircuitOpen,
