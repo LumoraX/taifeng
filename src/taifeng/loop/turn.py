@@ -1814,11 +1814,14 @@ class TurnRunner:
                 error=outcome.error,
             )
         )
-        _parent_frame = parent_stack.current  # 调用栈上游帧（caller）
+        # parent_stack.current 是【目标自身】的栈帧（call_skill 已 push target）；
+        # 其 .call_id == ctx.call_id（本次执行），其 .parent_call_id 才是【调用方】的
+        # call_id（root 派发时为 None）——这正是记录要的 parent_call_id。
+        _self_frame = parent_stack.current
         _record = SkillExecutionRecord(
             skill_id=target.id,
             call_id=ctx.call_id,
-            parent_call_id=_parent_frame.call_id if _parent_frame else None,
+            parent_call_id=_self_frame.parent_call_id if _self_frame else None,
             depth=parent_stack.depth,
             source=target.source,
             trust_tier=None,  # v1 留空；来源信任分层在后续相位填

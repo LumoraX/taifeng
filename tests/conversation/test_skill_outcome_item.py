@@ -7,7 +7,7 @@ from taifeng.loop.prompt import history_to_api_messages
 
 def test_skill_outcome_item_builder():
     """builder 产出 kind=skill_outcome 的 ResponseItem，payload 即记录 payload。"""
-    item = skill_outcome_item({"skill_id": "metabolic", "outcome": "success"}, thread_id="th_1")
+    item = skill_outcome_item({"skill_id": "analyzer", "outcome": "success"}, thread_id="th_1")
     assert item.kind == "skill_outcome"
     assert item.thread_id == "th_1"
     assert item.payload["outcome"] == "success"

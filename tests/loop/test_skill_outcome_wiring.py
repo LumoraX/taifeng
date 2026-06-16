@@ -189,6 +189,17 @@ async def test_sub_skill_dispatch_records_outcome(tmp_path: Path) -> None:
     assert data["selection_confidence"] is None, data
     assert data["skill_id"] == "leaf", data
     assert data["cost_iterations"] >= 1, data
+    # leaf 的 parent_call_id 必须是 entry（调用方）的 call_id，不得自指（leaf 自身的 call_id）
+    leaf_call_id = data["call_id"]
+    assert data["parent_call_id"] != leaf_call_id, (
+        f"parent_call_id 不得自指：leaf.call_id={leaf_call_id!r}，"
+        f"parent_call_id={data['parent_call_id']!r}"
+    )
+    # entry 是 root 调用方，parent_call_id 应以 "entry_" 开头（entry skill 的栈帧命名规则）
+    assert data["parent_call_id"] is not None and data["parent_call_id"].startswith("entry_"), (
+        f"entry→leaf 派发：parent_call_id 应为 entry 栈帧的 call_id（entry_*），"
+        f"实际 {data['parent_call_id']!r}"
+    )
 
     # —— 断言落盘：恰一条 skill_outcome item，outcome==success ——
     outcome_items = await _collect_outcome_items(pool)
@@ -196,6 +207,12 @@ async def test_sub_skill_dispatch_records_outcome(tmp_path: Path) -> None:
     assert len(outcome_items) == 1, [it.payload for it in outcome_items]
     assert outcome_items[0].payload["outcome"] == "success", (
         outcome_items[0].payload
+    )
+    # 落盘记录同样校验 parent_call_id 不自指
+    stored_leaf_call_id = outcome_items[0].payload["call_id"]
+    assert outcome_items[0].payload["parent_call_id"] != stored_leaf_call_id, (
+        f"落盘 parent_call_id 不得自指，call_id={stored_leaf_call_id!r}，"
+        f"parent_call_id={outcome_items[0].payload['parent_call_id']!r}"
     )
 
 
@@ -559,4 +576,72 @@ async def test_failed_sub_skill_records_failure(tmp_path: Path) -> None:
     assert len(outcome_items) == 1, [it.payload for it in outcome_items]
     assert outcome_items[0].payload["outcome"] == "failure", (
         outcome_items[0].payload
+    )
+
+
+# ====================================================================
+# 5. resume 安全性：skill_outcome 落盘 item 不进 LLM 消息序列
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_skill_outcome_item_invisible_in_resume_rebuild(
+    tmp_path: Path,
+) -> None:
+    """skill_outcome 落盘后，history_to_api_messages 重建时必须排除它。
+
+    走真实 dispatch 场景（entry→leaf 成功），从 store 加载已落盘的 thread item 列表，
+    调用 history_to_api_messages 验证：skill_outcome item 不被转换为任何 LLM 消息。
+    """
+    from taifeng.loop.prompt import history_to_api_messages
+
+    skills = _build_skills(tmp_path)
+    threads = tmp_path / "threads_resume"
+    threads.mkdir()
+
+    u = TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15)
+    client = SimClient(turns=[
+        SimTurn(
+            text="派发到 leaf",
+            tool_calls=[{
+                "id": "tc_resume",
+                "name": "call_skill",
+                "arguments": '{"skill_id": "leaf", "args": {}}',
+            }],
+            usage=u,
+        ),
+        SimTurn(text="leaf 完成", usage=u),
+        SimTurn(text="entry 总结", usage=u),
+    ])
+
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills, threads_dir=threads, model_client=client,
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="s-resume", entry_skill_id="entry",
+    )
+    await _run_until_outer_done(engine, taifeng.UserMessage(text="开始"))
+
+    # —— 从 store 加载所有落盘 item（含 skill_outcome），验证重建排除之 ——
+    all_items: list = []
+    for info in await pool.store.list_threads():
+        async for it in await pool.store.load_thread(info.thread_id):
+            all_items.append(it)
+    await pool.close()
+
+    # 确保确实有 skill_outcome item 在加载结果里
+    outcome_items = [it for it in all_items if it.kind == "skill_outcome"]
+    assert len(outcome_items) >= 1, "必须有 skill_outcome 落盘才能验证 resume 安全"
+
+    # 核心断言：history_to_api_messages 把含 skill_outcome 的完整 item 列表重建，
+    # 产出的 LLM 消息序列里不得包含任何来源于 skill_outcome item 的条目。
+    api_msgs = history_to_api_messages(all_items)
+    outcome_roles = [m.role for m in api_msgs]
+    # skill_outcome item 不对应任何 LLM role，重建后消息数应与去掉 skill_outcome 后相同
+    items_without_outcome = [it for it in all_items if it.kind != "skill_outcome"]
+    api_msgs_without = history_to_api_messages(items_without_outcome)
+    assert len(api_msgs) == len(api_msgs_without), (
+        f"skill_outcome 不应影响 LLM 消息数：含={len(api_msgs)} vs 不含={len(api_msgs_without)}；"
+        f"roles={outcome_roles}"
     )
