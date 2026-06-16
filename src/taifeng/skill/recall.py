@@ -113,21 +113,34 @@ class SkillRecall(Protocol):
 # 取 20 是「看一眼能判断命中上下文」与「不把整段塞进去」之间的平衡。
 _SNIPPET_HALF_WINDOW = 20
 
-# CJK 统一表意文字判定：用 unicodedata 取字符名前缀，避免硬编码码点区间易漏。
-# 这些前缀覆盖中日韩统一表意文字（基本区 + 扩展区）。
+# BM25 词频饱和参数 k1：控制 term frequency 的饱和速度。tf 越大，边际增益越小，
+# 命中 1→2 次涨分明显、10→11 次几乎不涨，避免「同一词刷满全篇」碾压多样命中。
+# 1.5 是 BM25 社区经验默认值（典型区间 1.2–2.0）。
+_BM25_K1 = 1.5
+
+# BM25 长度归一强度 b ∈ [0,1]：0 表示完全不按文档长度归一，1 表示完全归一。
+# 长文天然命中词更多，b 把长度惩罚放进**分母**做饱和（而非线性乘子），既压住长文
+# 虚高、又不会无界惩罚长相关文档。0.75 是 BM25 社区经验默认值。
+_BM25_B = 0.75
+
+# CJK 表意文字判定：用 unicodedata 取字符名前缀，避免硬编码码点区间易漏。
+# 注意：这里**只覆盖 CJK 统一表意文字（汉字，含中文及日文汉字）**，
+# **不含**日文假名（Hiragana/Katakana）与韩文谚文（Hangul）——本相位语料以中文为主，
+# 假名/谚文按 YAGNI 不纳入（如需支持，应补对应前缀并加测试，见评审 Important-1 选项 B）。
 _CJK_NAME_PREFIXES = ("CJK UNIFIED", "CJK COMPATIBILITY")
 
 
 def _is_cjk_char(ch: str) -> bool:
-    """判定单个字符是否属于 CJK 统一表意文字（中日韩汉字）。
+    """判定单个字符是否属于 CJK 统一表意文字（汉字，含中文及日文汉字）。
 
     用 ``unicodedata.name`` 的官方字符名前缀判定，比硬编码码点区间更稳健、可读。
+    **不含**日文假名与韩文谚文（见模块常量 ``_CJK_NAME_PREFIXES`` 注释的范围说明）。
 
     Args:
         ch: 单字符字符串。
 
     Returns:
-        True 表示该字符是 CJK 汉字。
+        True 表示该字符是 CJK 统一表意文字（汉字）。
     """
     # 无名字符（如部分控制符）直接判否；name 不存在时给空串而非抛异常
     name = unicodedata.name(ch, "")
@@ -224,15 +237,23 @@ def _make_snippet(description: str, query_tokens: list[str]) -> str | None:
 
 
 class KeywordSkillRecall:
-    """内核默认召回后端：零依赖、确定性的关键词召回（BM25-lite）。
+    """内核默认召回后端：零依赖、确定性的关键词召回（BM25 风格饱和打分）。
 
-    实现 ``SkillRecall`` 协议。打分采用「**idf 加权 term overlap + 长度归一**」：
+    实现 ``SkillRecall`` 协议。打分采用**标准 BM25 公式**（idf 加权 + tf 饱和 + 长度
+    饱和归一），对每个 query 词累加：
+
+        score(d) = Σ_t  idf(t) · ( tf(t,d) · (k1+1) )
+                                  / ( tf(t,d) + k1·(1 − b + b·|d|/avgdl) )
+
+    三个核心要素（为何这样设计）：
         - **idf 权重**：对 pool 内全部 description 建文档频，稀有词（只在少数候选里
           出现）权重高、常见词权重低，避免「数据」「能力」这类高频词主导排名。
-        - **长度归一**：长 description 命中词更多是「天然占便宜」，故按其词数做归一
-          （类似 BM25 的 ``|d| / avgdl`` 思路），避免长文虚高。
-
-    不追求严格 BM25 公式，但保留 idf + 长度归一两个核心要素（见 ``_score_pool``）。
+          采用 BM25 标准 idf ``log((N − df + 0.5)/(df + 0.5) + 1)``，``+1`` 保证恒正。
+        - **tf 饱和**：真正用上候选内 term frequency ``tf(t,d)``（命中次数）——命中
+          越多/越频繁单调加分，但经 ``k1`` 饱和后边际递减，单词刷满全篇不会无限涨分。
+        - **长度饱和归一**：长度项 ``b·|d|/avgdl`` 放在**分母**（而非旧版线性乘子），
+          长文天然命中多被适度折减、却**不被无界惩罚**——修正旧版「短垃圾排在长相关
+          文档前」的相关性排反（评审 Critical-1）。
 
     确定性：分词、打分、排序全程不触系统时钟 / 随机源；同分按 ``skill_id`` 升序定序，
     不依赖 dict 迭代序（满足约束 C8）。
@@ -246,7 +267,7 @@ class KeywordSkillRecall:
         query_tokens: list[str],
         pool: Sequence[RecallEntry],
     ) -> list[float]:
-        """对 pool 内每个候选算 idf 加权 + 长度归一的相关度分。
+        """对 pool 内每个候选算 BM25 风格饱和相关度分（idf + tf 饱和 + 长度归一）。
 
         Args:
             query_tokens: query 分词后的词单元列表。
@@ -263,32 +284,38 @@ class KeywordSkillRecall:
             for tok in set(toks):
                 df[tok] = df.get(tok, 0) + 1
 
-        # 2) 计算平均文档长度（用于长度归一），空池在调用前已拦截，此处 len(pool)≥1
+        # 2) 计算平均文档长度 avgdl（BM25 长度归一基准），空池在调用前已拦截，len≥1
         total_len = sum(len(toks) for toks in doc_tokens)
         avg_len = total_len / len(pool) if total_len > 0 else 1.0
 
         n_docs = len(pool)
-        # query 去重词集（每个 query 词只贡献一次命中权重，避免 query 内重复刷分）
+        # query 去重词集：同一 query 词只累加一次该词的 BM25 贡献（query 内重复不刷分），
+        # 但**文档内**该词的 tf 仍按真实命中次数参与饱和。
         query_set = set(query_tokens)
 
         scores: list[float] = []
         for toks in doc_tokens:
-            # 候选内词频表，用于判断 query 词是否命中
+            # 候选内词频表 tf(t,d)：真正用上 term frequency 喂给 BM25 饱和（Minor-1）
             term_freq: dict[str, int] = {}
             for tok in toks:
                 term_freq[tok] = term_freq.get(tok, 0) + 1
 
-            raw = 0.0
-            for q in query_set:
-                if q in term_freq:
-                    # idf：稀有词权重高。+1 平滑避免 df==n_docs 时 idf<0
-                    idf = math.log((n_docs + 1) / (df.get(q, 0) + 1)) + 1.0
-                    raw += idf
-
-            # 长度归一：候选越长，命中越「廉价」，按 avg_len/|d| 折减长文优势
+            # 文档长度 |d|；空文档兜底为 1 避免 avgdl 比例异常（理论上不会空）
             doc_len = len(toks) if toks else 1
-            length_norm = avg_len / doc_len
-            scores.append(raw * length_norm)
+            score = 0.0
+            for q in query_set:
+                tf = term_freq.get(q, 0)
+                if tf == 0:
+                    # 未命中的 query 词不贡献分（含池中不存在词）
+                    continue
+                # BM25 标准 idf：稀有词权重高，``+1`` 保证恒正（df==N 时也不为负）
+                idf = math.log((n_docs - df.get(q, 0) + 0.5) / (df.get(q, 0) + 0.5) + 1.0)
+                # 长度饱和因子：长文 → 分母增大 → 单词命中收益被适度折减（不无界）
+                length_factor = 1.0 - _BM25_B + _BM25_B * doc_len / avg_len
+                # BM25 tf 饱和项：tf 越大边际增益越小
+                saturated_tf = tf * (_BM25_K1 + 1.0) / (tf + _BM25_K1 * length_factor)
+                score += idf * saturated_tf
+            scores.append(score)
         return scores
 
     async def recall(

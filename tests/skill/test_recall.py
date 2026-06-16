@@ -279,3 +279,92 @@ async def test_keyword_recall_cancel_raises() -> None:
     cancel.cancel()
     with pytest.raises(asyncio.CancelledError):
         await recall.recall("报销纠纷", pool, top_k=4, cancel=cancel)
+
+
+# ----------------------------------------------------------------------------
+# 评审 Critical-1 对抗边界：BM25 饱和必须修正「短垃圾排在长相关文档前」的排反，
+# 并保证命中更多 query 词单调加分。
+# ----------------------------------------------------------------------------
+
+
+async def test_keyword_recall_long_relevant_beats_short_junk() -> None:
+    """长短文档对抗：长相关文档（多命中）confidence 必须 > 短垃圾（仅 1 命中）。
+
+    旧版线性长度乘子会过度惩罚长文，导致只命中 1 个词的短垃圾排到命中 3 个词的长相关
+    文档前面——BM25 饱和归一修正此排反（评审 Critical-1）。
+    """
+    recall = KeywordSkillRecall()
+    pool = [
+        # 短垃圾：只命中 query 里的「报销」一个词
+        RecallEntry(skill_id="short", description="报销"),
+        # 长相关：命中「报销」「纠纷」「审计」多个词（且「报销」出现两次）
+        RecallEntry(
+            skill_id="long", description="报销纠纷与财务审计专家处理各类报销流程"
+        ),
+    ]
+    result = await recall.recall(
+        "报销 纠纷 审计", pool, top_k=4, cancel=CancellationToken(name="t")
+    )
+    assert len(result) == 2
+    # 长相关文档排第一、confidence 归一到 1.0；短垃圾在后且 confidence 严格更低
+    assert result[0].skill_id == "long"
+    assert result[0].confidence == pytest.approx(1.0)
+    long_conf = next(c.confidence for c in result if c.skill_id == "long")
+    short_conf = next(c.confidence for c in result if c.skill_id == "short")
+    assert long_conf > short_conf
+
+
+async def test_keyword_recall_more_hits_scores_higher() -> None:
+    """多命中 vs 少命中单调性：命中更多 query 词的文档分更高（同等条件下）。
+
+    两条 description 长度相近，仅命中的 query 词数不同——BM25 饱和必须让多命中者分更高。
+    """
+    recall = KeywordSkillRecall()
+    pool = [
+        # few：仅命中「报销」一词，其余为无关填充词凑长度
+        RecallEntry(skill_id="few", description="报销天气旅行代码"),
+        # many：命中「报销」「纠纷」「审计」三词
+        RecallEntry(skill_id="many", description="报销纠纷审计天气"),
+    ]
+    result = await recall.recall(
+        "报销 纠纷 审计", pool, top_k=4, cancel=CancellationToken(name="t")
+    )
+    by_id = {c.skill_id: c for c in result}
+    # 命中更多 query 词的 many 原始 score 必须严格高于只命中一个的 few
+    assert by_id["many"].score > by_id["few"].score
+    assert result[0].skill_id == "many"
+
+
+async def test_keyword_recall_missing_terms_no_contribution() -> None:
+    """query 含池中不存在词 + 高频词混合：不命中的词不贡献分、不报错。
+
+    query 同时含「报销」（命中 finance）、「天气」（命中 weather）与「火星殖民地」
+    （池中完全不存在）——不存在词既不应抬分也不应抛异常。
+    """
+    recall = KeywordSkillRecall()
+    pool = _cn_pool()
+    # 先单独用命中词跑一遍，作为「不存在词不该改变命中词贡献」的基准
+    base = await recall.recall(
+        "报销", pool, top_k=4, cancel=CancellationToken(name="t")
+    )
+    # 再混入池中不存在的词；finance 仍应被召回，且不会因不存在词报错
+    mixed = await recall.recall(
+        "报销 火星殖民地", pool, top_k=4, cancel=CancellationToken(name="t")
+    )
+    base_ids = {c.skill_id for c in base}
+    mixed_ids = {c.skill_id for c in mixed}
+    # 不存在词不贡献任何额外命中：召回的 skill 集合不变
+    assert "finance" in mixed_ids
+    assert base_ids == mixed_ids
+
+
+def test_keyword_tokenize_mixed_cjk_ascii() -> None:
+    """分词单测：单字 CJK 段补单字、中英混排 `a中b` 在 CJK/ASCII 边界正确切分。"""
+    from taifeng.skill.recall import _tokenize  # noqa: PLC0415
+
+    # 中英混排：a / 中 / b 在三段边界处各自成段；「中」是单字 CJK 段 → 补单字
+    assert _tokenize("a中b") == ["a", "中", "b"]
+    # 连续 CJK 段切 bigram；单字英文段小写落词
+    assert _tokenize("报销X") == ["报销", "x"]
+    # 纯标点视为边界、产出空 token 列表
+    assert _tokenize("，。！") == []
