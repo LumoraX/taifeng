@@ -323,6 +323,9 @@ class TurnRunner:
     suspend_id_factory: Any = None
     now_factory: Any = None
 
+    # 认知回路 ⑦ 沉淀：单次 skill 执行的战绩判定器（业务可注入覆盖默认结构性判定）
+    outcome_judge: Any = None  # OutcomeJudge | None；None → 用 StructuralOutcomeJudge
+
     def __post_init__(self) -> None:
         """兜底注入挂起 id / 时间戳工厂，并初始化当前迭代序号。
 
@@ -337,6 +340,10 @@ class TurnRunner:
             lambda: f"sr_{_secrets.token_hex(6)}"
         )
         self._now_factory = self.now_factory or (lambda: int(_time.time()))
+        # 战绩判定器默认用内核结构性实现（"系统自带一套自己的"）
+        from taifeng.skill.outcome import StructuralOutcomeJudge
+
+        self._outcome_judge = self.outcome_judge or StructuralOutcomeJudge()
         self._current_iteration = 0
         # DenialBreaker 实例在 run() 起点按 config 新建（turn 级生命周期）
         self._denial_breaker: DenialBreaker | None = None
@@ -1743,6 +1750,8 @@ class TurnRunner:
             max_session_tokens=self.max_session_tokens,
             # K3: 子 turn 共享同一 memory store
             memory_store=self.memory_store,
+            # 认知回路 ⑦：子 turn 继承同一战绩判定器（嵌套派发也按统一判据沉淀）
+            outcome_judge=self.outcome_judge,
             call_stack=parent_stack,
             history_buffer=[seed],
         )
@@ -1788,6 +1797,48 @@ class TurnRunner:
                 }
             )
         )
+
+        # —— 认知回路 ⑦ 沉淀：判战绩 → 落旁路记录 → emit 事件 ——
+        # 注：suspended 已在上方提前 raise SuspendSignal 返回，到此 outcome 必为终态。
+        from taifeng.conversation.models import skill_outcome_item
+        from taifeng.loop.event import SkillOutcomeRecorded
+        from taifeng.skill.outcome import (
+            SkillExecutionContext,
+            SkillExecutionRecord,
+        )
+
+        _verdict = self._outcome_judge.judge(
+            SkillExecutionContext(
+                success=outcome.success,
+                end_reason=outcome.end_reason,
+                error=outcome.error,
+            )
+        )
+        _parent_frame = parent_stack.current  # 调用栈上游帧（caller）
+        _record = SkillExecutionRecord(
+            skill_id=target.id,
+            call_id=ctx.call_id,
+            parent_call_id=_parent_frame.call_id if _parent_frame else None,
+            depth=parent_stack.depth,
+            source=target.source,
+            trust_tier=None,  # v1 留空；来源信任分层在后续相位填
+            # v1 全部经 call_skill 白名单派发 → 恒 whitelist/None；发现相位再填 discovered/分数
+            selection_origin="whitelist",
+            selection_confidence=None,
+            outcome=_verdict.status,
+            outcome_signal_source=_verdict.signal_source,
+            end_reason=outcome.end_reason,
+            error_detail=(outcome.error[:200] if outcome.error else None),
+            cost_tokens=outcome.usage.total_tokens,
+            cost_duration_ms=outcome.duration_ms,
+            cost_iterations=outcome.iterations,
+            ts_unix=self._now_factory(),
+        )
+        await self.store.append(
+            skill_outcome_item(_record.as_payload(), thread_id=sub_thread_id)
+        )
+        await self._emit(SkillOutcomeRecorded(data=_record.as_payload()))
+
         if outcome.success:
             return ToolResult.ok(outcome.final_text, sub_thread_id=sub_thread_id)
         return ToolResult.error(
