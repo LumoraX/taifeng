@@ -3,7 +3,7 @@
 > **本文件由 `examples/real_llm/capability_matrix.py` 自动生成（数据源 `real-llm-ledger.json`），勿手编辑。**
 > 回归红线：基础层（`src/taifeng/{llm,loop,context,conversation}/`）变更必须全量重跑并提交本台账；详见 CLAUDE.md §测试约束。
 
-- **最近一次回归**：2026-06-15 05:56:44 UTC @ `9881a20`
+- **最近一次回归**：2026-06-16 09:11:29 UTC @ `c4bc684`
 - **Provider / Model**：deepseek / deepseek-v4-flash
 - **本次跑测场景**：composite_dispatch, read_skill_lazy, orchestration, concurrent_fanout, research_pipeline, product_review, numeric_loop, compression, selective_approval, travel_planner, suspend_resume, turn_rewind, thread_rewind, spawn_join, peer_messaging, kernel_knobs, post_turn_review, budget_awareness
 
@@ -11,29 +11,29 @@
 
 | 场景 | 能力 | 结果 | 日期 @ commit | 耗时 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `budget_awareness` | 预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020） | ✅PASS | 2026-06-15 @ `9881a20` | 19s |  |
-| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-06-15 @ `9881a20` | 13s |  |
-| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-06-15 @ `9881a20` | 36s |  |
-| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-06-15 @ `9881a20` | 17s |  |
-| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-06-15 @ `9881a20` | 2s |  |
-| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-06-15 @ `9881a20` | 22s |  |
-| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-06-15 @ `9881a20` | 17s |  |
-| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-06-15 @ `9881a20` | 8s |  |
-| `post_turn_review` | post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序） | ✅PASS | 2026-06-15 @ `9881a20` | 51s |  |
-| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-06-15 @ `9881a20` | 14s |  |
-| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-06-15 @ `9881a20` | 9s |  |
-| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-06-15 @ `9881a20` | 9s |  |
-| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-06-15 @ `9881a20` | 15s |  |
-| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-06-15 @ `9881a20` | 21s |  |
-| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-06-15 @ `9881a20` | 5s |  |
-| `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-06-15 @ `9881a20` | 9s |  |
-| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-06-15 @ `9881a20` | 15s |  |
-| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-06-15 @ `9881a20` | 31s |  |
+| `budget_awareness` | 预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020） | ✅PASS | 2026-06-16 @ `c4bc684` | 33s |  |
+| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-06-16 @ `c4bc684` | 19s |  |
+| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-06-16 @ `c4bc684` | 34s |  |
+| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-06-16 @ `c4bc684` | 18s |  |
+| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-06-16 @ `c4bc684` | 1s |  |
+| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-06-16 @ `c4bc684` | 24s |  |
+| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-06-16 @ `c4bc684` | 16s |  |
+| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-06-16 @ `c4bc684` | 13s |  |
+| `post_turn_review` | post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序） | ✅PASS | 2026-06-16 @ `c4bc684` | 34s |  |
+| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-06-16 @ `c4bc684` | 15s |  |
+| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-06-16 @ `c4bc684` | 10s |  |
+| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-06-16 @ `c4bc684` | 11s |  |
+| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-06-16 @ `c4bc684` | 12s |  |
+| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ❌FAIL | 2026-06-16 @ `c4bc684` | 314s | driver 超时/等待失败: 等待join_barrier_fired超时（300.0s） 缺事件: ['join_barrier_fired'] |
+| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-06-16 @ `c4bc684` | 6s |  |
+| `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-06-16 @ `c4bc684` | 9s |  |
+| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-06-16 @ `c4bc684` | 12s |  |
+| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-06-16 @ `c4bc684` | 50s |  |
 
 ## R3 可观测完整性审计（最近一次全量）
 
-- 发出的事件 kind：26 种
-- ✅ 所有发出的事件 kind 都有专用 console 渲染
+- 发出的事件 kind：27 种
+- ⚠️ 无专用 console 渲染（落 `?` 兜底）：['skill_outcome_recorded']
 - ✅ R3 经典事件全部触发
 
 ## 判定口径
