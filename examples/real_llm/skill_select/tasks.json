@@ -1,0 +1,842 @@
+[
+  {
+    "task": "我们1月到6月每个月拉新了一批用户，想看看不同月份进来的人，第1周、第2周、第4周还剩多少人还在用，帮我做一张留存热力表。",
+    "expected": "analytics-cohort-retention"
+  },
+  {
+    "task": "我们的注册流程有5个步骤，老板说最终完成率太低，你帮我找出哪一步掉人最多，用数据说话。",
+    "expected": "analytics-funnel-dropout"
+  },
+  {
+    "task": "上周我们对按钮颜色做了实验，对照组3000人、实验组3000人，转化率分别是4.2%和4.8%，这个差异算不算真实有效？",
+    "expected": "analytics-ab-test-eval"
+  },
+  {
+    "task": "昨晚系统日志里订单量在23:15突然掉了70%，持续了40分钟，帮我判断这是真实业务异常还是数据采集问题。",
+    "expected": "analytics-anomaly-detect"
+  },
+  {
+    "task": "我有过去两年每天的GMV数据，双11快来了，老板要我预测一下接下来3个月的收入走势，给个有置信区间的预测图。",
+    "expected": "analytics-forecast-trend"
+  },
+  {
+    "task": "我有用户活跃度、客服投诉量、退款率、NPS等十几个指标，想知道这些指标之间互相有没有关联，哪些会一起涨一起跌。",
+    "expected": "analytics-correlation-matrix"
+  },
+  {
+    "task": "我们有50万用户，消费行为差异很大，想把他们自动分成几个有代表性的群体，每个群体有什么典型特征，方便运营做差异化策略。",
+    "expected": "analytics-user-segmentation"
+  },
+  {
+    "task": "我们订阅制产品续费率在下降，能不能用过去的行为数据预判哪些用户下个月可能不续费，给运营团队提前干预用。",
+    "expected": "analytics-churn-predict"
+  },
+  {
+    "task": "投放团队问我们愿意为一个新用户花多少钱获客，我得先算出来一个普通用户从注册到流失平均能给我们带来多少收入。",
+    "expected": "analytics-ltv-estimate"
+  },
+  {
+    "task": "一个用户在转化前可能先看了信息流广告、又搜索了品牌词、最后点了EDM里的链接，我想知道每个渠道应该分多少功劳。",
+    "expected": "analytics-attribution-model"
+  },
+  {
+    "task": "我们的销售额每年都有明显的淡旺季，但我想把季节性的影响剥离出去，看看业务本身是在增长还是在下滑。",
+    "expected": "analytics-seasonality-decompose"
+  },
+  {
+    "task": "上周整体转化率比前周低了15%，但我不知道是哪个地区、哪个渠道、哪个设备类型出了问题，帮我自动找出来。",
+    "expected": "analytics-outlier-explain"
+  },
+  {
+    "task": "老板要一个能每天看的增长看板，你帮我想清楚应该放哪些指标、怎么定义、按什么维度拆分，出一份需求文档给BI同学去做。",
+    "expected": "analytics-kpi-dashboard-spec"
+  },
+  {
+    "task": "我有一张几十万行的销售明细表，想按省份和产品类别两个维度看每个组合的销售额、订单数和客单价，做成一张汇总表。",
+    "expected": "analytics-pivot-summary"
+  },
+  {
+    "task": "我想知道广告投入、促销力度、季节因素这几个变量对我们销售额的影响分别有多大，能建个模型量化一下吗？",
+    "expected": "analytics-regression-fit"
+  },
+  {
+    "task": "我们在北京和上海同时做了促销活动，北京客单价提升了8元，上海提升了3元，这个差距是真实存在还是只是随机波动？",
+    "expected": "analytics-significance-test"
+  },
+  {
+    "task": "付费用户和免费用户在每日使用时长上的分布有什么不同？不只是均值，我想看整体的分布形状有没有差异。",
+    "expected": "analytics-distribution-compare"
+  },
+  {
+    "task": "我的传感器数据每隔几秒采一次，频率不固定，我想把它统一整理成每分钟一个数据点，缺失的地方用合适的方式填补。",
+    "expected": "analytics-timeseries-resample"
+  },
+  {
+    "task": "如果我们把定价上调10%，同时把广告预算削减20%，根据历史数据大概能估算出来收入和利润会怎么变化吗？",
+    "expected": "analytics-whatif-scenario"
+  },
+  {
+    "task": "本月DAU整体下滑了12%，帮我一步一步拆解是哪个环节、哪个用户群体、哪个功能模块导致的，给出最关键的2-3个原因。",
+    "expected": "analytics-rootcause-drilldown"
+  },
+  {
+    "task": "我想把现有客户分成高价值、沉睡、流失等几类，用消费记录帮我算出每个人的价值分数，告诉我哪些人值得重点维护。",
+    "expected": "analytics-rfm-scoring"
+  },
+  {
+    "task": "我们有不同时期的定价和对应销量数据，想知道价格每涨1%销量大概会掉多少，这样才能算出最优定价区间。",
+    "expected": "analytics-price-elasticity"
+  },
+  {
+    "task": "我想知道买了A产品的人通常还会买什么，找出最常见的商品搭配组合，给商品推荐和套餐设计提供依据。",
+    "expected": "analytics-basket-affinity"
+  },
+  {
+    "task": "我们全国都有订单，想看看哪些城市或地区是我们的核心市场，哪些地方渗透率明显不足，用地图展示出来。",
+    "expected": "analytics-geographic-heatmap"
+  },
+  {
+    "task": "我想知道一个新用户从注册起，平均多久会发生第一次流失，不同渠道来的用户生命周期有没有显著差异？",
+    "expected": "analytics-survival-analysis"
+  },
+  {
+    "task": "今年整体客单价比去年低，但每个品类的客单价其实都涨了，这个矛盾是怎么回事，帮我解释清楚背后的逻辑。",
+    "expected": "analytics-variance-decompose"
+  },
+  {
+    "task": "我们想同时测试标题文案、图片风格和按钮颜色三个变量对点击率的影响，但流量有限，怎么设计实验才能在最少用户量下得出结论？",
+    "expected": "analytics-multivariate-ab"
+  },
+  {
+    "task": "我从业务系统导出了一份用户行为数据，准备用来建模，但担心数据有问题，帮我检查一下有没有缺失、重复或者逻辑上说不通的地方。",
+    "expected": "analytics-data-quality-audit"
+  },
+  {
+    "task": "我想知道一个月GMV排在前10%的门店和后10%的门店在各项运营指标上分别长什么样，找出拉开差距的关键因素。",
+    "expected": "analytics-percentile-benchmark"
+  },
+  {
+    "task": "销售团队每天有几百条新线索，但人力有限，帮我用历史成单数据建个模型，自动判断哪些线索最值得优先跟进。",
+    "expected": "analytics-lead-scoring"
+  },
+  {
+    "task": "我写了一篇关于职场压力管理的文章，帮我想几个让人忍不住点进去的标题",
+    "expected": "content-headline-write"
+  },
+  {
+    "task": "我想写一篇介绍可持续生活方式的长文，先帮我把框架和各部分要点列出来",
+    "expected": "content-outline-draft"
+  },
+  {
+    "task": "这是我整理的提纲，帮我把每一部分扩展成完整的文字，整体在2000字左右",
+    "expected": "content-longform-draft"
+  },
+  {
+    "task": "这段话是从别处参考过来的，帮我换一种说法，意思不变但读起来完全不一样",
+    "expected": "content-rewrite-para"
+  },
+  {
+    "task": "这封客户通知写得太生硬了，帮我改得友好亲切一些，别像公告",
+    "expected": "content-tone-shift"
+  },
+  {
+    "task": "我自己写的稿子总感觉磕磕绊绊，帮我通读一遍把病句和别扭的地方都改掉",
+    "expected": "content-grammar-polish"
+  },
+  {
+    "task": "这份20页的调研报告太长了，帮我提炼出核心结论，控制在300字以内",
+    "expected": "content-summarize"
+  },
+  {
+    "task": "我只写了几句话，感觉太单薄，帮我把这个想法充分展开，加些具体例子",
+    "expected": "content-expand-detail"
+  },
+  {
+    "task": "我的产品页面在搜索引擎上排名很低，帮我把这段描述改得对搜索更友好，主词是有机护肤品",
+    "expected": "content-seo-keyword"
+  },
+  {
+    "task": "帮我给这个页面写一段搜索结果下面显示的那行简介，要让用户想点进来",
+    "expected": "content-meta-desc"
+  },
+  {
+    "task": "我们新品今天上线了，帮我写一条发微博用的推广帖，语气要接地气",
+    "expected": "content-weibo-post"
+  },
+  {
+    "task": "帮我用小红书的风格写一篇关于这款咖啡机的真实体验帖，要有画面感",
+    "expected": "content-xiaohongshu-note"
+  },
+  {
+    "task": "帮我写一篇适合在公众号发的文章，主题是年轻人为什么越来越喜欢露营",
+    "expected": "content-wechat-article"
+  },
+  {
+    "task": "我刚完成了一个跨国项目，想在领英上分享一下经验和感悟，帮我写一条",
+    "expected": "content-linkedin-post"
+  },
+  {
+    "task": "我们要给老用户发一封促销邮件，帮我把主题行和邮件内容都写好，目标是让他们回来下单",
+    "expected": "content-email-copy"
+  },
+  {
+    "task": "我们的跑步鞋要投信息流广告了，帮我写几版不同角度的广告文案，字数控制在50字内",
+    "expected": "content-ad-copy"
+  },
+  {
+    "task": "我们是做儿童编程教育的，帮我想几个简洁有记忆点的品牌口号",
+    "expected": "content-slogan-create"
+  },
+  {
+    "task": "我的落地页底部那个按钮写着提交，感觉没什么吸引力，帮我换几个更有冲动感的说法",
+    "expected": "content-cta-optimize"
+  },
+  {
+    "task": "这是英文版的产品介绍，翻译成中文后很生硬，帮我彻底本土化一下，让中国用户读起来自然",
+    "expected": "content-localize-cn"
+  },
+  {
+    "task": "这份医疗说明书写给患者看太难懂了，帮我用大白话重新解释一遍",
+    "expected": "content-simplify-audience"
+  },
+  {
+    "task": "帮我通读这篇稿子，看看里面有没有数字或者说法前后矛盾的地方",
+    "expected": "content-fact-check-text"
+  },
+  {
+    "task": "我论文里的参考文献乱七八糟，帮我按APA格式统一整理好",
+    "expected": "content-citation-format"
+  },
+  {
+    "task": "我这篇健身打卡内容要发ins，帮我推荐一些能带来流量的标签",
+    "expected": "content-hashtag-suggest"
+  },
+  {
+    "task": "帮我写一段这款空气炸锅的淘宝商品详情，要把几个核心卖点说清楚",
+    "expected": "content-product-desc"
+  },
+  {
+    "task": "我们公司完成了B轮融资，帮我写一份可以直接发给媒体的新闻通稿",
+    "expected": "content-press-release"
+  },
+  {
+    "task": "我要拍一个介绍城市骑行的60秒短视频，帮我把每个镜头要说什么都写出来",
+    "expected": "content-video-script"
+  },
+  {
+    "task": "我刚注册了小红书账号，专门分享家居改造，帮我写一个吸引人关注的个人简介",
+    "expected": "content-bio-write"
+  },
+  {
+    "task": "帮我写一篇比较这三款笔记本电脑的文章，要让读者清楚知道各自适合哪类人",
+    "expected": "content-compare-article"
+  },
+  {
+    "task": "我们的在线课程经常被问到很多重复问题，帮我根据课程介绍整理一份FAQ",
+    "expected": "content-faq-generate"
+  },
+  {
+    "task": "我需要写一篇倡导推行四天工作制的文章，帮我把论点组织得有说服力",
+    "expected": "content-persuasive-essay"
+  },
+  {
+    "task": "我有一批逗号分隔的文本文件，第一行是列名，有些字段里还有引号包裹的内容，怎么把它们正确读成表格？",
+    "expected": "data-csv-parse"
+  },
+  {
+    "task": "接口返回的数据里每条记录都有好几层嵌套对象和数组，我需要把这些层级全部铺平成一个宽表，方便后续分析。",
+    "expected": "data-json-flatten"
+  },
+  {
+    "task": "上游传过来的数据有时候字段缺失、有时候日期格式乱写，我想在入库前自动检查每一行是否符合我定好的结构要求，并把不合格的记录单独列出来。",
+    "expected": "data-schema-validate"
+  },
+  {
+    "task": "从Excel导出的表里，金额列全是文字字符串，日期列格式也不统一，我需要把这些列自动变成正确的数值和时间类型。",
+    "expected": "data-type-coerce"
+  },
+  {
+    "task": "我的事件日志里因为重试机制产生了大量一模一样的重复记录，需要把完全相同的条目只保留一条。",
+    "expected": "data-dedup-exact"
+  },
+  {
+    "task": "客户名称字段里有的写全称、有的带分公司后缀，其实是同一家，我需要找出这类拼写略有差异的重复客户并做合并。",
+    "expected": "data-fuzzy-dedup"
+  },
+  {
+    "task": "我有订单表和用户信息表，主键是用户ID，我想把用户的城市、年龄等属性拼到每条订单记录上去。",
+    "expected": "data-join-merge"
+  },
+  {
+    "task": "我有每笔销售的明细流水，想按照地区和产品类别分别统计每个月的总销售额和平均客单价。",
+    "expected": "data-agg-rollup"
+  },
+  {
+    "task": "我有几亿行的日志数据都混在一个大文件里，想按照日志时间戳把它们分别存到不同的日期文件夹下，方便按天查询。",
+    "expected": "data-partition-time"
+  },
+  {
+    "task": "我需要把MySQL里每次发生的行级变更（新增、修改、删除）实时同步到下游数仓，不想做全量扫描，怎么只抓增量变化？",
+    "expected": "data-cdc-capture"
+  },
+  {
+    "task": "上游给的是一堆JSON Lines文件，但我们的查询引擎读Parquet列式格式效率更高，能帮我批量转换一下吗？",
+    "expected": "data-format-convert"
+  },
+  {
+    "task": "每天凌晨我要从业务库同步数据，但全量导出太慢了，我只想拉取昨天到今天之间有过更新的记录。",
+    "expected": "data-incremental-load"
+  },
+  {
+    "task": "上个月的计算逻辑有个Bug已经修好了，但历史数据还是错的，我需要把三月份到五月份的数据重新跑一遍覆盖掉。",
+    "expected": "data-backfill-repair"
+  },
+  {
+    "task": "我们要把生产数据库的数据开放给数据分析团队使用，但里面有大量用户的真实手机号和证件号，必须先做隐私处理。",
+    "expected": "data-pii-mask"
+  },
+  {
+    "task": "我们的报表数字出了问题，但不知道这个指标是从哪几张源表经过哪些转换算出来的，能帮我梳理一下数据的来源链路吗？",
+    "expected": "data-lineage-track"
+  },
+  {
+    "task": "新接入了一批第三方数据，我想先快速摸一下底，看看每个字段有多少空值、数值范围是不是合理、有没有明显的异常值。",
+    "expected": "data-quality-profile"
+  },
+  {
+    "task": "地址字段里有的写全角逗号、有的前后有空格、有的用繁体字，同一个地方却有好几种写法，能帮我统一格式吗？",
+    "expected": "data-normalize-text"
+  },
+  {
+    "task": "我们对接了一家医院系统，它返回的数据全是XML格式的病历报文，我需要从里面把诊断编码、费用项目这些字段单独抠出来。",
+    "expected": "data-xml-extract"
+  },
+  {
+    "task": "财务部门发来的Excel有好几个标签页，每个Sheet代表一个月，表头还有两行合并的，我需要把这些数据合并成一个干净的宽表。",
+    "expected": "data-excel-ingest"
+  },
+  {
+    "task": "我有一亿条交易记录，想抽一个小样本做模型训练，但要保证各省份和各用户等级的比例跟原始数据一致，不能随机乱抽。",
+    "expected": "data-sampling-stratify"
+  },
+  {
+    "task": "现在每个用户的多个指标分别占一列，形成了一张很宽的表，我想把它变成每个指标占一行的长格式，方便做可视化。",
+    "expected": "data-pivot-reshape"
+  },
+  {
+    "task": "客户的地址和等级会随时间变化，我需要在维度表里记录每次变更的历史版本，同时也能知道当前最新状态是什么。",
+    "expected": "data-scd-upsert"
+  },
+  {
+    "task": "我有一条实时的用户点击事件流，想每隔5分钟统计一次过去1小时内的UV和PV，窗口要能自动滑动。",
+    "expected": "data-stream-window"
+  },
+  {
+    "task": "上游数据源悄悄加了几个新字段、删了一个旧字段，导致我的管道挂了，我想自动检测这类结构变化并决定是否能安全向前兼容。",
+    "expected": "data-schema-evolve"
+  },
+  {
+    "task": "移动端上报的事件有时候会延迟几分钟才到达，导致窗口关闭后还有数据来，我需要设置一个容忍延迟的机制，决定等多久再关窗口。",
+    "expected": "data-watermark-late"
+  },
+  {
+    "task": "我有十几个数据处理脚本，有些必须等前一个跑完才能启动，我想把这些先后依赖关系定义好，让系统自动按顺序调用，某个步骤失败时也能单独重跑。",
+    "expected": "data-dependency-dag"
+  },
+  {
+    "task": "从不同系统收集来的文本文件有的是GBK、有的是UTF-8，混在一起读总是乱码，能自动识别每个文件的编码然后统一转成UTF-8吗？",
+    "expected": "data-encoding-detect"
+  },
+  {
+    "task": "传感器采集的温度数据偶尔会出现离谱的超大值或负值，肯定是采集故障，我需要把这些统计上明显偏离正常范围的数据点剔除掉。",
+    "expected": "data-outlier-filter"
+  },
+  {
+    "task": "我们数仓里现在有好几百张表，大家都不知道每张表是干什么的，我想自动把这些表的结构信息、数据量统计整理成一个可查询的目录。",
+    "expected": "data-catalog-meta"
+  },
+  {
+    "task": "有个200GB的日志文件需要归档到对象存储，直接上传太慢而且断了没法续传，我想把它切成每块1GB的小文件分别压缩上传。",
+    "expected": "data-compress-chunk"
+  },
+  {
+    "task": "这段 Rust 的生命周期标注我完全看不懂，帮我捋一下它到底在做什么",
+    "expected": "dev-code-explain"
+  },
+  {
+    "task": "用户反馈提交表单后偶尔会提示网络超时但后端日志没有任何报错，帮我找找问题出在哪",
+    "expected": "dev-bug-localize"
+  },
+  {
+    "task": "同一套测试在本地跑全绿，但流水线上每隔几次就有两三条随机挂掉，想搞清楚是哪里出了问题",
+    "expected": "dev-flaky-test-find"
+  },
+  {
+    "task": "新写了一个订单金额计算函数，各种边界情况比较多，帮我把测试用例补全",
+    "expected": "dev-unit-test-gen"
+  },
+  {
+    "task": "这个 service 文件越来越长，逻辑都混在一起，有没有什么拆分或者改写的思路",
+    "expected": "dev-refactor-suggest"
+  },
+  {
+    "task": "这个 PR 改动了认证模块，上线前帮我把把关，看看有没有遗漏或者写得不妥的地方",
+    "expected": "dev-code-review"
+  },
+  {
+    "task": "想知道整个项目里哪几个函数最难维护、最容易引入 bug，帮我列出来",
+    "expected": "dev-complexity-hotspot"
+  },
+  {
+    "task": "上次大重构之后怀疑留了不少没人用的函数和常量，帮我清一下",
+    "expected": "dev-dead-code-find"
+  },
+  {
+    "task": "package.json 里好多包都好久没更新了，想知道该先升哪些、升级有没有风险",
+    "expected": "dev-dep-upgrade-plan"
+  },
+  {
+    "task": "产品要商业化了，帮我查一下有没有哪个三方库的协议不允许闭源分发",
+    "expected": "dev-license-scan"
+  },
+  {
+    "task": "v2 改了不少接口，上线前想确认哪些改动会让老客户端直接挂掉",
+    "expected": "dev-api-diff-breaking"
+  },
+  {
+    "task": "压测时 QPS 上不去，火焰图我不太会看，帮我找找主要耗时在哪个环节",
+    "expected": "dev-perf-profile"
+  },
+  {
+    "task": "服务跑几个小时内存就涨到告警阈值，重启才恢复，帮我判断一下泄漏在哪里",
+    "expected": "dev-memory-leak-hunt"
+  },
+  {
+    "task": "并发量一上来偶尔会出现数据覆盖的情况，怀疑是多个协程同时写了共享状态",
+    "expected": "dev-race-condition-spot"
+  },
+  {
+    "task": "这条 SQL 在数据量大的时候要跑好几秒，帮我看看怎么改能快一些",
+    "expected": "dev-sql-optimize"
+  },
+  {
+    "task": "需要从日志行里把 IP 地址和时间戳分别提取出来，帮我写个正则",
+    "expected": "dev-regex-build"
+  },
+  {
+    "task": "生产上突然出现一个 NullPointerException，日志里一大串调用栈，帮我看看是哪步出问题了",
+    "expected": "dev-stacktrace-analyze"
+  },
+  {
+    "task": "改了好几个文件，懒得自己想措辞，帮我根据 diff 写一条规范的 commit message",
+    "expected": "dev-commit-msg-draft"
+  },
+  {
+    "task": "要发 1.4.0 了，帮我把最近三个月的 commit 整理成一份面向用户的发布说明",
+    "expected": "dev-changelog-gen"
+  },
+  {
+    "task": "用户表新加了几个字段、改了一个字段类型，帮我写迁移脚本，要能回滚",
+    "expected": "dev-migration-script"
+  },
+  {
+    "task": "团队想统一代码风格，帮我配一套适合 TypeScript 项目的 ESLint 规则",
+    "expected": "dev-lint-rule-config"
+  },
+  {
+    "task": "跑 mypy 出来一堆红，看不懂那些 Incompatible return type 的报错，帮我修一下",
+    "expected": "dev-type-error-fix"
+  },
+  {
+    "task": "覆盖率报告出来了，但我不知道该先补哪块，帮我找最危险的空白区域",
+    "expected": "dev-test-coverage-gap"
+  },
+  {
+    "task": "npm install 报了一堆 peer dependency 冲突，装不上去，帮我理清楚怎么解",
+    "expected": "dev-dep-conflict-resolve"
+  },
+  {
+    "task": "上线前想确认一下有没有把 API key 或者密码之类的东西不小心提进仓库了",
+    "expected": "dev-secret-scan"
+  },
+  {
+    "task": "项目越来越大，模块之间互相引用搞不清楚，能不能生成一张依赖关系图",
+    "expected": "dev-arch-dep-map"
+  },
+  {
+    "task": "出了线上问题排查半天才发现是某个地方把异常给吃掉了，帮我全面查一下",
+    "expected": "dev-error-handling-audit"
+  },
+  {
+    "task": "单元测试里要隔离掉第三方支付接口和 Redis，帮我想想用什么方式 mock 比较合适",
+    "expected": "dev-mock-design"
+  },
+  {
+    "task": "想给仓库加 CODEOWNERS 文件，但不知道每个目录该写谁，帮我根据历史记录推一下",
+    "expected": "dev-codeowner-suggest"
+  },
+  {
+    "task": "测试环境和生产环境的配置文件越来越不同步，帮我整理出哪些地方有出入",
+    "expected": "dev-env-config-audit"
+  },
+  {
+    "task": "我这里有一堆扫描的增值税发票，能帮我把每张上面的开票日期、含税总额和销售方名称都整理成表格吗？",
+    "expected": "doc-invoice-extract"
+  },
+  {
+    "task": "我们签了一份采购合同，老板问违约金怎么算的，你能帮我把相关的赔偿约定部分找出来吗？",
+    "expected": "doc-contract-clause-find"
+  },
+  {
+    "task": "收到乙方发来的合作协议草稿，签之前想知道有没有什么对我们不利的坑，帮我看看吧",
+    "expected": "doc-contract-risk-flag"
+  },
+  {
+    "task": "HR发来一百多份Word格式的应聘者材料，我需要把每个人的学校、毕业年份和上一份工作整理进系统，怎么批量搞定？",
+    "expected": "doc-resume-parse"
+  },
+  {
+    "task": "我招一个Python后端工程师，收到50份简历，帮我按照岗位需求给每份打个分，把最合适的几个排出来",
+    "expected": "doc-resume-score"
+  },
+  {
+    "task": "这份PDF里有个价格对比表，复制出来全是乱的，能帮我把行和列的对应关系完整提取出来吗？",
+    "expected": "doc-table-extract"
+  },
+  {
+    "task": "用户上传了身份证正反面照片做实名认证，帮我把证件号码和姓名读出来写入数据库",
+    "expected": "doc-id-ocr"
+  },
+  {
+    "task": "董事会要开会，这份80页的年度经营分析太长了，能给我出一个两页纸的精华版让领导快速看吗？",
+    "expected": "doc-report-summarize"
+  },
+  {
+    "task": "我有一个录用通知书的Word模板和一张新员工信息表，能帮我给每个人自动生成他们各自的offer文件吗？",
+    "expected": "doc-template-fill"
+  },
+  {
+    "task": "这批合同要对外共享给审计方，但里面有客户的私人联系方式，帮我把这些信息全部打码处理一下",
+    "expected": "doc-redact-pii"
+  },
+  {
+    "task": "收件箱里混着各种各样的附件，能帮我先自动判断每个文件是什么类型，分别放到对应的文件夹吗？",
+    "expected": "doc-classify-type"
+  },
+  {
+    "task": "扫描仪把十几份不同的申请表扫成一个大PDF了，能帮我按每份表单自动拆开存成单独的文件吗？",
+    "expected": "doc-multi-page-split"
+  },
+  {
+    "task": "财务说这批采购的发票金额和合同里约定的对不上，你帮我把两边的数字都拿出来比一比，看哪里有出入",
+    "expected": "doc-cross-reconcile"
+  },
+  {
+    "task": "合同归档前需要确认双方都已经签字盖章了，能帮我批量检查这一批PDF哪些还缺签名或者印章吗？",
+    "expected": "doc-signature-detect"
+  },
+  {
+    "task": "出差回来要报销，手机里拍了三十多张小票，帮我把所有的金额加起来，顺便按餐饮、交通、住宿分分类",
+    "expected": "doc-receipt-amount"
+  },
+  {
+    "task": "用户提交的入职申请表经常有填错或者漏填的情况，能帮我自动检查一遍，把有问题的地方列出来让他们补正吗？",
+    "expected": "doc-form-validate"
+  },
+  {
+    "task": "老师批改的试卷是手写的，我需要把评语和分数都录入系统，能帮我从照片里把这些手写内容读出来吗？",
+    "expected": "doc-ocr-handwriting"
+  },
+  {
+    "task": "对方回来的合同改了一些地方，但没有说改了哪里，能帮我和我们发出去的版本对比一下，看看他们动了什么吗？",
+    "expected": "doc-contract-compare"
+  },
+  {
+    "task": "财务部门怀疑有几张费用报销票据可能是假的或者重复提交的，帮我从这批发票里查出有问题的那几张",
+    "expected": "doc-invoice-verify"
+  },
+  {
+    "task": "供应商资质审核需要登记他们的工商信息，能帮我从上传的执照照片里把关键内容读出来填到我们的系统里吗？",
+    "expected": "doc-license-extract"
+  },
+  {
+    "task": "贷款审核要提供近半年的资金流水，银行给的是PDF格式，能帮我把每笔交易的时间、金额、用途整理成Excel吗？",
+    "expected": "doc-bank-statement-parse"
+  },
+  {
+    "task": "需要对这批供应商合同建立条款数据库，帮我把每份合同里的付款方式、交货时间和质保期都摘出来汇总",
+    "expected": "doc-clause-extract"
+  },
+  {
+    "task": "竞品分析报告里有好几张市场份额的饼图，我需要把里面的具体数字拿出来做二次分析，能帮我读出来吗？",
+    "expected": "doc-report-chart-extract"
+  },
+  {
+    "task": "外部合作方发来一份NDA，签之前想确认这份协议的保护力度够不够，有没有缺什么重要的条款",
+    "expected": "doc-nda-check"
+  },
+  {
+    "task": "仓库反映收到的货和订单有出入，帮我把这批采购单和收货记录逐项核对一下，看看哪些品目对不上",
+    "expected": "doc-purchase-order-match"
+  },
+  {
+    "task": "我把今天开会的录音转成文字了，但太乱了，能帮我整理成有决议事项和后续跟进任务的正式纪要格式吗？",
+    "expected": "doc-minutes-generate"
+  },
+  {
+    "task": "审阅过的合同PDF里有很多黄色高亮和评论气泡，能帮我把所有标注的意见和对应的原文段落汇总成一个列表吗？",
+    "expected": "doc-annotation-extract"
+  },
+  {
+    "task": "出差的各项花费和票据我都整理好了，能帮我按公司报销单的格式自动生成一份可以直接提交审批的文件吗？",
+    "expected": "doc-expense-report-gen"
+  },
+  {
+    "task": "公司员工手册更新了，HR需要告知员工哪些规定有变化，能帮我把新旧两版对照一下，列出所有调整的地方吗？",
+    "expected": "doc-policy-diff"
+  },
+  {
+    "task": "患者带来一叠手写和打印混合的就诊记录，我需要快速了解他的主要诊断和目前在吃什么药，能帮我整理出来吗？",
+    "expected": "doc-medical-record-struct"
+  },
+  {
+    "task": "今天下午三点的产品评审开完了，我把录音文字粘进来了，帮我捋一下今天都聊了什么、最后拍板定了哪些事情。",
+    "expected": "office-meeting-minutes"
+  },
+  {
+    "task": "会议聊了一大堆，我想知道到底谁负责做什么、什么时候要交，帮我把这些任务单独列出来。",
+    "expected": "office-action-extract"
+  },
+  {
+    "task": "我感觉这周的会排得有点乱，帮我看看有没有哪几场时间打架了，我需要重新协调一下。",
+    "expected": "office-calendar-conflict"
+  },
+  {
+    "task": "我需要和市场部三个人还有技术负责人一起开个一小时的对齐会，帮我找一个大家都有空的时间定下来。",
+    "expected": "office-schedule-meeting"
+  },
+  {
+    "task": "我要给客户写封邮件说我们项目延期了两周，但不能让他们觉得我们不靠谱，帮我想想怎么写比较好。",
+    "expected": "office-email-draft"
+  },
+  {
+    "task": "供应商发来一封催付款的邮件，但我们账期还没到，帮我回一封既委婉又说清楚情况的邮件。",
+    "expected": "office-email-reply"
+  },
+  {
+    "task": "我出差三天回来，收件箱里积了80多封邮件，帮我判断一下哪些是今天必须处理的，哪些可以先放着。",
+    "expected": "office-email-triage"
+  },
+  {
+    "task": "上周发给合作方的合同确认邮件还没消息，我怕忘了，帮我在合适的时间提醒我再追一下。",
+    "expected": "office-followup-reminder"
+  },
+  {
+    "task": "合作方给了一份十页的英文技术规格书，我需要让团队里不懂英文的同事也能看懂，帮我翻成中文。",
+    "expected": "office-doc-translate"
+  },
+  {
+    "task": "合同里出现了 SLA 和 RTO 这两个词，我不确定在我们公司语境里具体指什么，帮我查一下。",
+    "expected": "office-glossary-lookup"
+  },
+  {
+    "task": "我需要联系负责华南区渠道的销售经理，但我不知道他叫什么，帮我找找是谁、怎么联系他。",
+    "expected": "office-contact-find"
+  },
+  {
+    "task": "我上个月出差的餐票、打车票、住宿发票都攒着呢，帮我按公司模板整理成可以提交的报销单。",
+    "expected": "office-expense-report"
+  },
+  {
+    "task": "下周三我要去北京开两场会，一场上午十点一场下午三点，帮我把出发时间、住哪、怎么来回都安排好。",
+    "expected": "office-travel-itinerary"
+  },
+  {
+    "task": "我要和纽约、伦敦、新加坡的同事开电话会，我在上海，帮我找一个大家工作时间都能接受的时间点。",
+    "expected": "office-timezone-convert"
+  },
+  {
+    "task": "在群里发起了下次团建地点的投票，大家都回复了，帮我数一下哪个选项最多人支持然后给出结论。",
+    "expected": "office-poll-summarize"
+  },
+  {
+    "task": "下个季度我们团队要重点做用户增长，领导让我先出个OKR初稿，帮我把目标和关键结果写清楚。",
+    "expected": "office-okr-draft"
+  },
+  {
+    "task": "每周五要发周报给老板，我这周干了好几件事，帮我把这些散的进展整合成一份看起来条理清晰的汇报。",
+    "expected": "office-status-report"
+  },
+  {
+    "task": "下周要给董事会汇报Q3的市场策略，我大概知道要讲什么但不知道怎么组织，帮我先把目录结构搭出来。",
+    "expected": "office-slide-outline"
+  },
+  {
+    "task": "我手机备忘录里记了一堆东西，有会议上的想法也有要跟进的事项，乱成一锅粥了，帮我理一理。",
+    "expected": "office-note-organize"
+  },
+  {
+    "task": "我手头有七八件事同时要做，感觉每件都很急，帮我判断一下应该先做哪个、后做哪个。",
+    "expected": "office-task-prioritize"
+  },
+  {
+    "task": "今天我们最终拍板了技术选型方案，我想把这个决定连同当初考虑的几个方案都记下来备案，帮我整理成规范的格式。",
+    "expected": "office-decision-log"
+  },
+  {
+    "task": "明天有个一小时的需求评审会，参与者有产品、研发和测试，帮我把这一小时怎么分配议题安排好。",
+    "expected": "office-meeting-agenda"
+  },
+  {
+    "task": "律师发来一份四十页的采购框架协议，领导让我明天汇报重要内容，帮我把里面最需要注意的条款提炼出来。",
+    "expected": "office-contract-summary"
+  },
+  {
+    "task": "下周来了一个新的后端工程师，我作为负责人需要帮他安排好入职第一周要做的所有事情，帮我列个清单。",
+    "expected": "office-onboarding-checklist"
+  },
+  {
+    "task": "我约了五个人开会但大家的时间怎么都凑不上，帮我想想有没有办法在这周内把这个会开成。",
+    "expected": "office-meeting-conflict-resolve"
+  },
+  {
+    "task": "公司下个月起调整了弹性工作制度，HR让我帮忙写一条通知发给全体员工，语气要正式但别太生硬。",
+    "expected": "office-announcement-draft"
+  },
+  {
+    "task": "周四下午我要用大会议室做客户演示，还需要一台备用投影仪，帮我确认一下有没有空的然后预定好。",
+    "expected": "office-resource-booking"
+  },
+  {
+    "task": "产品发布后收到了用户群、内部测试群和邮件里各种反馈，七零八落的，帮我把大家的意见归归类看看主要集中在哪里。",
+    "expected": "office-feedback-collect"
+  },
+  {
+    "task": "上个月我把好几件事分给不同的人去做，现在不记得哪些有回音哪些没有了，帮我整理一下哪些还没有结果需要去催。",
+    "expected": "office-delegation-track"
+  },
+  {
+    "task": "老板批了一个新项目让我牵头，我需要在下周的启动会前准备一份让所有人都清楚这个项目要干什么的文件，帮我把框架写出来。",
+    "expected": "office-project-kickoff"
+  },
+  {
+    "task": "线上应用最近半小时一直在刷日志，帮我看看有没有什么不对劲的地方，是不是有报错在集中爆发。",
+    "expected": "ops-log-anomaly-scan"
+  },
+  {
+    "task": "我们的 Prometheus 告警每天能收到几百条，但真正需要人处理的没几个，能不能帮我想想怎么把这些噪音压下去。",
+    "expected": "ops-metric-alert-tune"
+  },
+  {
+    "task": "部署完新版本之后我想确认每个微服务的存活检查都能正常返回，能不能帮我批量跑一遍。",
+    "expected": "ops-health-probe-check"
+  },
+  {
+    "task": "上个月有个域名证书悄悄过期了导致用户无法访问，帮我把所有在用的 HTTPS 证书都过一遍，看哪些快要到期了。",
+    "expected": "ops-cert-expiry-check"
+  },
+  {
+    "task": "我们的磁盘和内存用量感觉增长得挺快的，帮我算算照这个速度下去大概多久会撑不住，需不需要提前扩容。",
+    "expected": "ops-capacity-forecast"
+  },
+  {
+    "task": "明天要上线新版本，我希望在真正发布之前先跑一遍检查，确认镜像、配置和依赖都没问题，不要等到上线了才发现有坑。",
+    "expected": "ops-deploy-preflight"
+  },
+  {
+    "task": "这次上线出了问题，产品让我赶快回到上一个稳定版本，但我不太确定具体要改哪些东西，能不能给我一个完整的操作步骤。",
+    "expected": "ops-rollback-plan"
+  },
+  {
+    "task": "昨晚的故障复盘会要求我说清楚到底什么时候开始出问题、中间发生了什么、什么时候恢复的，帮我把这个脉络整理出来。",
+    "expected": "ops-incident-timeline"
+  },
+  {
+    "task": "Redis 集群刚才触发了主从切换，我不是很熟悉这块，有没有对应的处理文档或者操作指引可以给我参考一下。",
+    "expected": "ops-runbook-lookup"
+  },
+  {
+    "task": "生产环境最近行为有点怪，怀疑有人改了什么配置但没走审批流程，帮我跟标准基准对比一下，看看哪里不一样了。",
+    "expected": "ops-config-drift-detect"
+  },
+  {
+    "task": "我想搞清楚如果支付服务挂了，会影响到哪些其他服务，能不能帮我把上下游的依赖关系梳理出来。",
+    "expected": "ops-dependency-graph"
+  },
+  {
+    "task": "有用户反映访问我们的 API 域名时有时候会解析到奇怪的 IP，帮我把整个 DNS 解析链路诊断一遍。",
+    "expected": "ops-dns-check"
+  },
+  {
+    "task": "有台服务器写入开始报磁盘满了，但我用 df 看空间还有剩余，搞不清楚到底是哪里出了问题，帮我排查一下。",
+    "expected": "ops-disk-inode-pressure"
+  },
+  {
+    "task": "昨晚有个容器突然消失了，我在系统日志里看到一些 kill 相关的信息，帮我分析一下到底是不是内存不够用把它干掉了。",
+    "expected": "ops-oom-analysis"
+  },
+  {
+    "task": "接口的 P99 响应时间突然从 200ms 涨到了快 2 秒，但我不知道时间都花在哪个环节了，帮我拆开来看看。",
+    "expected": "ops-latency-breakdown"
+  },
+  {
+    "task": "最近流量高峰的时候下游数据库老是被打挂，我想在网关层加限流，但不知道阈值设多少合适，能不能帮我算一下。",
+    "expected": "ops-rate-limit-tune"
+  },
+  {
+    "task": "我们每天都在做数据库备份，但从来没真正验证过能不能恢复成功，帮我设计一个验证方案或者直接跑一遍。",
+    "expected": "ops-backup-verify"
+  },
+  {
+    "task": "领导要求我们证明数据库的高可用方案是真的能用的，能不能帮我安排一次主节点宕机的演练，看看自动切换能不能跑通。",
+    "expected": "ops-failover-test"
+  },
+  {
+    "task": "安全团队要求我们提供一份所有 API Key 和数据库密码的轮换情况说明，帮我把哪些超期了、哪些最近刚换过的梳理出来。",
+    "expected": "ops-secret-rotation-audit"
+  },
+  {
+    "task": "k8s 上有几个 Pod 一直在重启，状态显示 CrashLoopBackOff，我看了日志也没看出来问题在哪，能不能帮我诊断一下。",
+    "expected": "ops-k8s-pod-triage"
+  },
+  {
+    "task": "安全扫描说我们集群里有些服务暴露的端口范围太宽了，能不能帮我把现有的网络访问规则梳理一遍，看哪里不合规。",
+    "expected": "ops-network-policy-audit"
+  },
+  {
+    "task": "这个月云费用比上个月高了将近一倍，但我们没上什么新业务，帮我查查是哪里突然多花了这么多钱。",
+    "expected": "ops-cost-anomaly-detect"
+  },
+  {
+    "task": "我们和业务方签了 99.9% 可用性的 SLA，想在真正违约之前就收到预警，能不能帮我配置一个基于错误预算消耗速度的告警。",
+    "expected": "ops-slo-burn-rate"
+  },
+  {
+    "task": "下周五要上一个改动比较大的版本，老板让我评估一下风险，能不能帮我给这次发布打个分，看看风险有多高。",
+    "expected": "ops-change-risk-score"
+  },
+  {
+    "task": "我们接了 Jaeger 但感觉有些服务的调用在追踪上就断掉了，帮我看看哪些地方的链路数据是缺失的。",
+    "expected": "ops-tracing-gap-detect"
+  },
+  {
+    "task": "流量高峰的时候服务一直在频繁扩缩，Pod 数量抖来抖去，请求还是有超时，帮我看看自动扩缩的策略是不是配错了。",
+    "expected": "ops-autoscale-policy-review"
+  },
+  {
+    "task": "数据库最近 CPU 老是跑高，DBA 说有慢查询，但具体是哪些语句有问题我不清楚，帮我从慢日志里找出来分析一下。",
+    "expected": "ops-db-slow-query-triage"
+  },
+  {
+    "task": "安全合规要求我们提交一份镜像安全报告，帮我把线上在用的镜像都扫一遍，重点看有没有高危漏洞需要马上处理的。",
+    "expected": "ops-image-vuln-scan"
+  },
+  {
+    "task": "我们在三个机房做了数据同步，最近担心各地数据有没有出现不一致，能不能帮我检查一下各地的同步状态和延迟情况。",
+    "expected": "ops-multi-region-sync-check"
+  },
+  {
+    "task": "我今晚的班快结束了，需要给下一个同事写交接，但今晚事情比较多，能不能帮我把今晚发生的事情整理成一份交接摘要。",
+    "expected": "ops-on-call-handoff-gen"
+  }
+]
