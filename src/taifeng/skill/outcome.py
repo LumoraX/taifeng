@@ -4,14 +4,16 @@
 （fitness 计算 / 提拔 / 逐出 / 隔离）消费。**严禁**把 selection_confidence（长相分）
 喂入任何提拔逻辑——长相骗④评估、战绩防⑦沉淀，二者在数据层即分开存。
 
-参照设计：docs/superpowers/specs/2026-06-16-skill-capability-acquisition-loop-design.md §5
+参照设计：
+docs/superpowers/specs/2026-06-16-skill-capability-acquisition-loop-design.md §5
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from taifeng.skill.definition import SkillSource
+if TYPE_CHECKING:
+    from taifeng.skill.definition import SkillSource
 
 OutcomeStatus = Literal["success", "failure", "abandoned"]
 OutcomeSignalSource = Literal["structural", "business"]
