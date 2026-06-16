@@ -392,3 +392,171 @@ async def test_suspended_sub_skill_emits_no_record(
     outcome_items = await _collect_outcome_items(pool)
     await pool.close()
     assert outcome_items == [], "子 skill 挂起不应落盘 skill_outcome item"
+
+
+# ====================================================================
+# 3. 业务注入 outcome_judge → signal_source==business（R1 注入点验证）
+# ====================================================================
+
+
+class _AlwaysAbandonJudge:
+    """测试用：无论实际结果，一律判 abandoned（验证业务注入覆盖默认结构性判定）。"""
+
+    def judge(self, ctx: object) -> object:
+        """忽略 ctx，硬返回 abandoned/business。"""
+        from taifeng.skill.outcome import OutcomeVerdict
+        return OutcomeVerdict(
+            status="abandoned", reason="biz", signal_source="business"
+        )
+
+
+@pytest.mark.asyncio
+async def test_business_judge_override(tmp_path: Path) -> None:
+    """EnginePool.create 注入 outcome_judge → 覆盖默认结构性判定，signal_source=business。
+
+    使用与 test_sub_skill_dispatch_records_outcome 相同的 entry→leaf 成功场景，
+    但注入 _AlwaysAbandonJudge。若 judge 透传到 TurnRunner._spawn_sub_runner，
+    则 SkillOutcomeRecorded 的 outcome==abandoned、
+    outcome_signal_source==business。
+    """
+    skills = _build_skills(tmp_path)
+    threads = tmp_path / "threads_biz"
+    threads.mkdir()
+
+    # 复用「成功」场景的 SimClient（3 turn）
+    u = TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15)
+    client = SimClient(turns=[
+        SimTurn(
+            text="派发到 leaf",
+            tool_calls=[{
+                "id": "tc_leaf_biz",
+                "name": "call_skill",
+                "arguments": '{"skill_id": "leaf", "args": {"q": "biz"}}',
+            }],
+            usage=u,
+        ),
+        SimTurn(text="leaf 输出：完成", usage=u),
+        SimTurn(text="entry 总结：子任务完成", usage=u),
+    ])
+
+    # 关键：注入业务自定义 judge
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills, threads_dir=threads, model_client=client,
+        compressors=[],
+        outcome_judge=_AlwaysAbandonJudge(),
+    )
+    engine = await pool.get_or_create(
+        session_id="s-biz-judge", entry_skill_id="entry",
+    )
+
+    _sub_id, events = await _run_until_outer_done(
+        engine, taifeng.UserMessage(text="请派发 leaf（业务 judge）"),
+    )
+
+    # —— 断言事件：业务 judge 覆盖 → abandoned + business ——
+    recorded = [ev for ev in events if ev.msg.kind == "skill_outcome_recorded"]
+    assert len(recorded) == 1, [ev.msg.kind for ev in events]
+    data = recorded[0].msg.data
+    assert data["outcome"] == "abandoned", (
+        f"期望 abandoned（业务 judge 覆盖），实际 {data['outcome']!r}"
+    )
+    assert data["outcome_signal_source"] == "business", (
+        f"期望 business，实际 {data['outcome_signal_source']!r}"
+    )
+
+    # —— 断言落盘：同上 ——
+    outcome_items = await _collect_outcome_items(pool)
+    await pool.close()
+    assert len(outcome_items) == 1, [it.payload for it in outcome_items]
+    assert outcome_items[0].payload["outcome"] == "abandoned", (
+        outcome_items[0].payload
+    )
+    assert outcome_items[0].payload["outcome_signal_source"] == "business", (
+        outcome_items[0].payload
+    )
+
+
+# ====================================================================
+# 4. 子 skill 失败（end_reason==error）→ outcome==failure
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_failed_sub_skill_records_failure(tmp_path: Path) -> None:
+    """子 skill LLM 调用抛非 LLMError 异常 → end_reason=error → outcome=failure。
+
+    入射方式：RoutingSimClient 仅提供 entry body 路由，leaf body 无匹配路由，
+    → 子 TurnRunner _sample_once 收到 KeyError（非 LLMError）
+    → except Exception: end_reason="error"（failure_policy 不介入）。
+    父 entry turn 2 收到 call_skill 返回 error output → 仍正常回复总结（entry 不崩）。
+    断言：
+      - SkillOutcomeRecorded.outcome == "failure"
+      - SkillOutcomeRecorded.end_reason == "error"
+      - error_detail 非空
+      - 落盘 skill_outcome.outcome == "failure"
+    """
+    from taifeng.llm.providers.sim.client import RoutingSimClient
+
+    skills = _build_skills(tmp_path)
+    threads = tmp_path / "threads_fail"
+    threads.mkdir()
+
+    # leaf body 不在 routes 中 → RoutingSimClient 抛 KeyError（非 LLMError）
+    # → 子 TurnRunner except Exception → end_reason="error"
+    # → StructuralOutcomeJudge → outcome="failure"
+    client = RoutingSimClient(routes={
+        "entry body": [
+            SimTurn(
+                text="派发到 leaf",
+                tool_calls=[{
+                    "id": "tc_leaf_fail",
+                    "name": "call_skill",
+                    "arguments": '{"skill_id": "leaf", "args": {}}',
+                }],
+                usage=TokenUsage(
+                    input_tokens=10, output_tokens=5, total_tokens=15
+                ),
+            ),
+            SimTurn(
+                text="子 skill 失败，entry 继续总结。",
+                usage=TokenUsage(
+                    input_tokens=10, output_tokens=5, total_tokens=15
+                ),
+            ),
+        ],
+        # 故意不提供 "leaf body" 路由 → 子 turn 首次采样触发 KeyError
+    })
+
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills, threads_dir=threads, model_client=client,
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="s-fail", entry_skill_id="entry",
+    )
+
+    _sub_id, events = await _run_until_outer_done(
+        engine, taifeng.UserMessage(text="请派发 leaf（失败场景）"),
+    )
+
+    # —— 断言事件：failure 记录 ——
+    recorded = [ev for ev in events if ev.msg.kind == "skill_outcome_recorded"]
+    assert len(recorded) == 1, [ev.msg.kind for ev in events]
+    data = recorded[0].msg.data
+    assert data["outcome"] == "failure", (
+        f"期望 failure，实际 {data['outcome']!r}"
+    )
+    assert data["end_reason"] == "error", (
+        f"期望 end_reason=error，实际 {data['end_reason']!r}"
+    )
+    assert data["error_detail"] is not None and data["error_detail"] != "", (
+        f"error_detail 应非空，实际 {data['error_detail']!r}"
+    )
+
+    # —— 断言落盘 ——
+    outcome_items = await _collect_outcome_items(pool)
+    await pool.close()
+    assert len(outcome_items) == 1, [it.payload for it in outcome_items]
+    assert outcome_items[0].payload["outcome"] == "failure", (
+        outcome_items[0].payload
+    )
