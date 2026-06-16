@@ -152,6 +152,7 @@ report = await rebuild_index(writer, directory, *, dry_run=False, sink=None)
 | `system_injection`，`source == memory_pre_evict`（压缩 salvage digest） | 暂存，等下一个 `compacted` 时挪到 placeholder 之后（复现热内存 `insert_at = summary_index + 1` 行为） |
 | `compacted`（带 `replaced_range=(s, e)`） | 把 `logical[s:e]` 折叠掉：`logical = logical[:s] + [placeholder] + ([salvage] if salvage else []) + logical[e:]` |
 | `system_injection`，`source ∈ {rewind, rollback}` | 截断信号：`logical = logical[:cut_index]`（`cut_index` 从 payload 读），**marker 本身不进 logical** |
+| `skill_outcome`（战绩旁路记账） | `logical.append(item)`（正常追加，保留在 logical history 供后续相位读取）；但 `build_api_request` 在构建 LLM 消息序列时**跳过**此 kind——旁路语义，不进 LLM 视图 |
 | 其余所有 item | `logical.append(item)` |
 
 **副作用：修正既存 resume 隐患**。冷加载（`initial_history`）和 `pool.py` resume 路径均改为先 `reconstruct_logical_history`，使压缩过的 thread resume 后**不再把废弃项重发给 LLM**（原先 resume 不崩故未被发现，但会在下次 pre-turn 重压前多发一轮废弃上下文）。
