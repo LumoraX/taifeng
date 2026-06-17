@@ -153,3 +153,93 @@ async def test_inline_override_large_entry_omits_search(tmp_path: Path) -> None:
         skills, tmp_path / "threads", recall_threshold=2
     )
     assert "search_skills" not in tools
+
+
+# ── M1 去重：作者显式声明 search_skills + deferred → 清单里只出现一次 ──────────
+
+
+def _write_deferred_entry_declaring_search(root: Path) -> Path:
+    """写一个 deferred composite entry，并在 tool_names 显式声明 search_skills。
+
+    这构造 M1 评审的撕裂场景：deferred 分支会想 append search_skills，而作者已在
+    tool_names 里声明它——若不去重，per-turn 清单里 search_skills 会出现两次。
+
+    Args:
+        root: 临时根目录。
+
+    Returns:
+        skills 目录路径。
+    """
+    skills = root / "skills"
+    entry_md = (
+        "---\n"
+        "name: orchestrator\n"
+        "description: 编排\n"
+        "version: 1.0.0\n"
+        "type: composite\n"
+        "entry: true\n"
+        "model: mock-model\n"
+        "child_skills: [child-00, child-01]\n"
+        # 作者显式声明 search_skills（合法：composite 可声明任意已注册工具名）
+        "tool_names: [search_skills]\n"
+        "exposure:\n  child_recall: deferred\n"
+        "---\n# 编排\n"
+    )
+    d = skills / "orchestrator"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(entry_md, encoding="utf-8")
+    for cid in ("child-00", "child-01"):
+        cd = skills / cid
+        cd.mkdir(parents=True)
+        (cd / "SKILL.md").write_text(
+            f"---\nname: {cid}\ndescription: 子技能 {cid}\n"
+            "version: 1.0.0\ntype: atomic\n---\n# {cid}\n",
+            encoding="utf-8",
+        )
+    return skills
+
+
+async def _offered_tool_list(
+    skills_dir: Path, threads_dir: Path, *, recall_threshold: int
+) -> list[str]:
+    """跑一个 turn，返回本轮请求 tools 的**原始名列表**（保留重复，供去重断言）。
+
+    注意：必须读 ``last_request().request.tools`` 的原始序列——``ledger.tool_names()``
+    返回 set 会先把重复折叠掉，无法捕获「同名工具被 append 两次」的 M1 撕裂。
+    """
+    client = SimClient(turns=[SimTurn(text="完成")])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        recall_threshold=recall_threshold,
+    )
+    try:
+        engine = await pool.get_or_create(
+            session_id="s", entry_skill_id="orchestrator"
+        )
+        sub = await engine.submit(taifeng.UserMessage(text="开始"))
+        async for ev in engine.subscribe(sub):
+            if ev.msg.kind in ("turn_completed", "turn_failed"):
+                assert ev.msg.kind == "turn_completed"
+                break
+        last = client.ledger.last_request()
+        assert last is not None
+        # 读原始 tools 序列（保留重复），而非去重后的 tool_names() 集合
+        return [t.name for t in last.request.tools]
+    finally:
+        await pool.close()
+
+
+async def test_deferred_entry_declaring_search_skills_lists_it_once(
+    tmp_path: Path,
+) -> None:
+    """deferred entry 在 tool_names 显式声明 search_skills → per-turn 清单里只出现一次。"""
+    skills = _write_deferred_entry_declaring_search(tmp_path)
+    names = await _offered_tool_list(
+        skills, tmp_path / "threads", recall_threshold=50
+    )
+    # 仍然暴露（deferred 模式必须有），但不能重复
+    assert "search_skills" in names
+    assert names.count("search_skills") == 1

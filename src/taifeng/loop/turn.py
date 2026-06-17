@@ -957,7 +957,11 @@ class TurnRunner:
             search_spec = self.tool_runtime._registry.get(  # noqa: SLF001
                 "search_skills"
             )
-            if search_spec is not None:
+            # M1 去重：若作者在 SKILL.md tool_names 已显式声明 search_skills，
+            # 上面的可见工具循环已把它加进来，这里不能再无条件 append（否则同名
+            # 工具在 per-turn 清单里出现两次）。按已加入的工具名集合去重。
+            already_added = {ref.name for ref in tools}
+            if search_spec is not None and "search_skills" not in already_added:
                 tools.append(search_spec.to_ref())
 
         # G-CACHE：算本轮 prompt 结构指纹 + 归因结构性 cache 失效原因，再更新指纹
