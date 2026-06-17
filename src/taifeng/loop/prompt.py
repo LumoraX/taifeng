@@ -84,6 +84,7 @@ def render_system_prompt(
     capabilities: RuntimeCapabilities | None = None,
     *,
     recall_threshold: int = DEFAULT_RECALL_THRESHOLD,
+    has_recall_backend: bool = False,
 ) -> str:
     """生成入口 system prompt（只管文本，不碰 per-turn tools 列表）。
 
@@ -103,9 +104,17 @@ def render_system_prompt(
     形状差异**（每 skill 属性），**不是 mid-turn cache 失效**，故本函数不返回
     ``CompressionResult``。同一 entry 跨 turn 走同一分支 → 缓存前缀稳定。
 
+    **默认语义（设计稿 §3.1）**：``has_recall_backend=False``（默认）时召回后端是
+    「工作记忆 / LLM 注意力」= inline——即便 child 很多也内联全列（LLM 自己找），
+    **不**走 deferred、**不**提示 search_skills。只有业务注入 SkillRecall 后端
+    （``has_recall_backend=True``）才可能 deferred（见 ``effective_child_recall``）。
+
     Args:
         recall_threshold: ``auto`` 模式下切到 deferred 的可见 child 数阈值
             （业务可配，turn 层用 pool 注入值覆盖默认）。
+        has_recall_backend: 是否注入了 SkillRecall 召回后端。``False`` → 默认 inline
+            （LLM 自己找）；显式 ``child_recall=deferred`` 但无后端会抛
+            ``SkillValidationError``（见 ``effective_child_recall``）。
 
     spec Requirement: 装配顺序 = system_instructions → entry_skill →
     available_child_skills → dispatch_policy。``instructions=None`` 或空时
@@ -119,7 +128,10 @@ def render_system_prompt(
     # 单一真相：inline / deferred 两条路径同源同过滤，得到可见 child 列表
     visible = visible_child_skills(entry, snapshot, capabilities)
     mode = effective_child_recall(
-        entry, child_count=len(visible), threshold=recall_threshold
+        entry,
+        child_count=len(visible),
+        threshold=recall_threshold,
+        has_recall_backend=has_recall_backend,
     )
     if mode == "deferred":
         # deferred：不列 child，提示用 search_skills 召回（N=可见 child 数）
@@ -292,6 +304,7 @@ def build_api_request(
     prefetched_memory: str | None = None,
     reasoning_passback: bool = True,
     recall_threshold: int = DEFAULT_RECALL_THRESHOLD,
+    has_recall_backend: bool = False,
 ) -> ApiRequest:
     system_prompt = render_system_prompt(
         entry,
@@ -299,6 +312,7 @@ def build_api_request(
         instructions=instructions,
         capabilities=capabilities,
         recall_threshold=recall_threshold,
+        has_recall_backend=has_recall_backend,
     )
     messages, source_indexes = _convert_history(
         history, include_reasoning=reasoning_passback

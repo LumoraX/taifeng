@@ -194,6 +194,7 @@ class AgentEngine:
         pinned_state_sources: list[Any] | None = None,
         pinned_total_max_chars: int = 8000,
         recall_threshold: int = 50,
+        has_recall_backend: bool = False,
     ) -> None:
         """
         Args:
@@ -301,6 +302,9 @@ class AgentEngine:
         # T6 deferred 暴露：auto 模式下「可见 child 数 > 此值」切 deferred 召回。
         # 透传到每个 TurnRunner，驱动 system prompt 文本 + search_skills 工具裁剪。
         self._recall_threshold = recall_threshold
+        # 是否注入了 SkillRecall 召回后端（pool 据 skill_recall 是否为 None 透传）。
+        # 默认 False = 无后端 = inline（LLM 自己找）；与 recall_threshold 同走透传链。
+        self._has_recall_backend = has_recall_backend
         # K1：spawn 配额 registry —— engine 持有一份，贯穿整棵 turn 树（含跨 turn）。
         from taifeng.loop.spawn import SpawnSlotRegistry
 
@@ -1458,6 +1462,8 @@ class AgentEngine:
             capabilities=self._capabilities,
             # T6: deferred 暴露阈值（驱动 child 列表 inline/deferred + 工具裁剪）
             recall_threshold=self._recall_threshold,
+            # 召回后端存在性：无后端恒 inline（与阈值同口径透传）
+            has_recall_backend=self._has_recall_backend,
             spawn_registry=self._spawn_registry,
             # G-CACHE：注入持久 cache 统计 + 上一轮 prompt 指纹（跨 turn 归因）
             cache_stats=self._cache_stats,
@@ -1658,6 +1664,8 @@ class AgentEngine:
             capabilities=self._capabilities,
             # T6: deferred 暴露阈值（驱动 child 列表 inline/deferred + 工具裁剪）
             recall_threshold=self._recall_threshold,
+            # 召回后端存在性：无后端恒 inline（与阈值同口径透传）
+            has_recall_backend=self._has_recall_backend,
             spawn_registry=self._spawn_registry,
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
@@ -2399,6 +2407,8 @@ class AgentEngine:
             capabilities=self._capabilities,
             # T6: deferred 暴露阈值（驱动 child 列表 inline/deferred + 工具裁剪）
             recall_threshold=self._recall_threshold,
+            # 召回后端存在性：无后端恒 inline（与阈值同口径透传）
+            has_recall_backend=self._has_recall_backend,
             spawn_registry=self._spawn_registry,
             memory_store=self._memory_store,
             memory_query_builder=self._memory_query_builder,
@@ -2756,6 +2766,7 @@ class AgentEngine:
             pinned_states=self._pinned_states,
             # T6: 一致性透传（CompactNow runner 不采样，阈值无实效但保字段齐整）
             recall_threshold=self._recall_threshold,
+            has_recall_backend=self._has_recall_backend,
         )
         await runner._maybe_compress(phase="manual", force=op.force)  # noqa: SLF001
         async with self._lock:

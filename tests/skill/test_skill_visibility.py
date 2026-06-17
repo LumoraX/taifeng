@@ -266,28 +266,75 @@ def _make_entry(child_recall: str, child_skills: frozenset[str]) -> SkillDefinit
 
 
 def test_effective_child_recall_inline_forced() -> None:
-    # 显式 inline：无论 child 数多少都 inline（child_count 远超 threshold 也不切）
+    # 显式 inline：无论 child 数多少、有无后端都 inline
     entry = _make_entry("inline", frozenset(f"c{i}" for i in range(100)))
-    assert effective_child_recall(entry, child_count=100, threshold=5) == "inline"
+    assert (
+        effective_child_recall(
+            entry, child_count=100, threshold=5, has_recall_backend=True
+        )
+        == "inline"
+    )
 
 
 def test_effective_child_recall_deferred_forced() -> None:
-    # 显式 deferred：即便 child 数远低于 threshold 也走 deferred
+    # 显式 deferred + 有后端：即便 child 数远低于 threshold 也走 deferred
     entry = _make_entry("deferred", frozenset({"c0"}))
-    assert effective_child_recall(entry, child_count=1, threshold=50) == "deferred"
+    assert (
+        effective_child_recall(
+            entry, child_count=1, threshold=50, has_recall_backend=True
+        )
+        == "deferred"
+    )
+
+
+def test_effective_child_recall_deferred_without_backend_raises() -> None:
+    # 显式 deferred 但无召回后端：禁止静默降级 inline，必须抛 SkillValidationError
+    from taifeng.skill.definition import SkillValidationError
+
+    entry = _make_entry("deferred", frozenset({"c0"}))
+    with pytest.raises(SkillValidationError, match="child_recall=deferred"):
+        effective_child_recall(
+            entry, child_count=1, threshold=50, has_recall_backend=False
+        )
 
 
 def test_effective_child_recall_auto_below_threshold_is_inline() -> None:
     # auto + child_count <= threshold → inline（边界等于阈值也 inline，> 才切）
     entry = _make_entry("auto", frozenset({"c0"}))
-    assert effective_child_recall(entry, child_count=5, threshold=5) == "inline"
-    assert effective_child_recall(entry, child_count=3, threshold=5) == "inline"
+    assert (
+        effective_child_recall(
+            entry, child_count=5, threshold=5, has_recall_backend=True
+        )
+        == "inline"
+    )
+    assert (
+        effective_child_recall(
+            entry, child_count=3, threshold=5, has_recall_backend=True
+        )
+        == "inline"
+    )
 
 
 def test_effective_child_recall_auto_above_threshold_is_deferred() -> None:
-    # auto + child_count > threshold → deferred
+    # auto + 有后端 + child_count > threshold → deferred
     entry = _make_entry("auto", frozenset({"c0"}))
-    assert effective_child_recall(entry, child_count=6, threshold=5) == "deferred"
+    assert (
+        effective_child_recall(
+            entry, child_count=6, threshold=5, has_recall_backend=True
+        )
+        == "deferred"
+    )
+
+
+def test_effective_child_recall_auto_no_backend_is_inline() -> None:
+    # auto + 无后端：即便 child 远超 threshold 也恒 inline（默认 LLM 自己找）
+    entry = _make_entry("auto", frozenset({"c0"}))
+    assert (
+        effective_child_recall(
+            entry, child_count=100, threshold=5, has_recall_backend=False
+        )
+        == "inline"
+    )
 
 
 # ============================================================================
@@ -341,7 +388,10 @@ def test_render_prompt_deferred_hides_children_with_search_hint(
     assert entry is not None
 
     # 把 threshold 压到 1：可见 child（needs-jq / plain，hidden 被 G4b 过滤）= 2 > 1
-    prompt = render_system_prompt(entry, snap, recall_threshold=1)
+    # 须注入召回后端（has_recall_backend=True）才允许走 deferred（默认无后端恒 inline）
+    prompt = render_system_prompt(
+        entry, snap, recall_threshold=1, has_recall_backend=True
+    )
     # 不逐条列 child
     assert "- `needs-jq`" not in prompt
     assert "- `plain`" not in prompt
@@ -385,8 +435,14 @@ exposure:
     entry = reg.get("deferred-entry")
     assert entry is not None
 
-    # 仅 1 个 child，远低于默认 threshold=50，但显式 deferred → 仍走 deferred
-    prompt = render_system_prompt(entry, snap)
+    # 仅 1 个 child，远低于默认 threshold=50，但显式 deferred + 有后端 → 仍走 deferred
+    prompt = render_system_prompt(entry, snap, has_recall_backend=True)
     assert "- `plain`" not in prompt
     assert "search_skills" in prompt
     assert "共 1 个" in prompt
+
+    # 同一 deferred entry 但**无后端**（默认）：禁止静默降级，render 也抛错（同源）
+    from taifeng.skill.definition import SkillValidationError
+
+    with pytest.raises(SkillValidationError, match="child_recall=deferred"):
+        render_system_prompt(entry, snap)

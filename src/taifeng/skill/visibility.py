@@ -31,7 +31,11 @@ if TYPE_CHECKING:
 
 
 def effective_child_recall(
-    entry: SkillDefinition, *, child_count: int, threshold: int
+    entry: SkillDefinition,
+    *,
+    child_count: int,
+    threshold: int,
+    has_recall_backend: bool,
 ) -> Literal["inline", "deferred"]:
     """裁定 entry 的 child skill 生效召回模式（``inline`` 还是 ``deferred``）。
 
@@ -39,11 +43,21 @@ def effective_child_recall(
     都调本函数，保证「prompt 是否 inline 列 child」与「是否暴露 ``search_skills``
     工具」严格一致（否则会出现「prompt 说没列、工具却不给搜」或反之的撕裂）。
 
-    判定规则（基于 ``entry.exposure.child_recall`` 三值声明）：
-    - ``"inline"`` → 强制 ``"inline"``（无论 child 多少，全部内联列出）。
-    - ``"deferred"`` → 强制 ``"deferred"``（无论 child 多少，都走 search_skills 召回）。
-    - ``"auto"`` → 据 ``child_count`` 与 ``threshold`` 比较：``> threshold`` 时
-      ``"deferred"``（child 太多、装不进一次 prompt），否则 ``"inline"``。
+    **默认语义（设计稿 §3.1 阶梯召回）**：召回后端的「默认」是「工作记忆 / LLM
+    注意力」= inline（LLM 从 prompt 全列 child 里自己选）。关键词 BM25 / 向量 RAG /
+    LlmSkillRecall 是「离工作记忆更远的**可选**后端」，**只有业务显式注入** SkillRecall
+    后端（``has_recall_backend=True``）才可能走 deferred 召回。无后端时**恒 inline**，
+    即便 child 很多也不切 deferred——这是「默认 LLM 自己找」的应有之义。
+
+    判定规则（基于 ``entry.exposure.child_recall`` 三值声明 + 是否有召回后端）：
+    - ``"inline"`` → 强制 ``"inline"``（无论 child 多少、有无后端，全部内联列出）。
+    - ``"deferred"`` → 作者显式要召回：
+        * ``has_recall_backend`` 为真 → ``"deferred"``（走 search_skills 召回）；
+        * **否则抛 ``SkillValidationError``**——作者显式声明 deferred 却没注入召回
+          后端，**禁止静默降级成 inline**（silent fallback 红线）；让作者在构造期
+          就发现「要么注入后端、要么别声明 deferred」。
+    - ``"auto"`` → 仅当 ``has_recall_backend and child_count > threshold`` 时
+      ``"deferred"``（有后端 + child 太多装不进一次 prompt），否则 ``"inline"``。
 
     ``child_count`` 应传 **G4 过滤后的可见 child 数**（见 ``visible_child_skills``），
     与实际会内联 / 召回的池规模一致，而非声明的原始 ``child_skills`` 总数。
@@ -57,18 +71,35 @@ def effective_child_recall(
         entry: 当前 caller composite skill（提供 ``exposure.child_recall`` 声明）。
         child_count: G4 过滤后的可见 child 数（``auto`` 模式下与 threshold 比较）。
         threshold: ``auto`` 模式下切到 deferred 的 child 数阈值（业务可配，DI 注入）。
+        has_recall_backend: 是否注入了 SkillRecall 召回后端（pool 据 ``skill_recall``
+            是否为 None 透传）。``False`` → 默认 inline（LLM 自己找），不暴露 search。
 
     Returns:
         ``"inline"`` 或 ``"deferred"``——生效的召回模式。
+
+    Raises:
+        SkillValidationError: ``child_recall == "deferred"`` 但 ``has_recall_backend``
+            为 ``False``（作者显式要召回却无后端，禁止静默降级）。
     """
+    from taifeng.skill.definition import SkillValidationError
+
     mode = entry.exposure.child_recall
-    # 显式声明优先：inline / deferred 直接锁定，不看 child 数
+    # 显式 inline：直接锁定，不看 child 数 / 后端
     if mode == "inline":
         return "inline"
+    # 显式 deferred：作者显式要召回——必须有后端，否则抛错（禁 silent fallback）
     if mode == "deferred":
+        if not has_recall_backend:
+            raise SkillValidationError(
+                f"skill {entry.id!r} 声明 child_recall=deferred 但未注入 "
+                f"SkillRecall 后端，无法走召回；请向 EnginePool 注入 skill_recall "
+                f"（KeywordSkillRecall / 业务 RAG / LlmSkillRecall），或改用 inline。"
+            )
         return "deferred"
-    # auto：child 数超阈值 → deferred（装不进一次 prompt），否则 inline
-    return "deferred" if child_count > threshold else "inline"
+    # auto：仅当有召回后端且 child 数超阈值才 deferred，否则 inline（含无后端恒 inline）
+    if has_recall_backend and child_count > threshold:
+        return "deferred"
+    return "inline"
 
 
 class VisibleChild(NamedTuple):
