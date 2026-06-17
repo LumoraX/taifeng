@@ -377,12 +377,12 @@ class CallSkillTool:
 
 ## deferred 暴露与 search_skills 发现流（skill-recall）
 
-当 caller composite skill 的可见 child 数膨胀到「装不进一次 prompt 的 inline 列表」时，内核不再把全部子 skill 内联进 `<available_child_skills>`，而是改为 **deferred 暴露**：只给 LLM 一个 `search_skills(query)` 工具，让它据当前子任务意图**按需召回** top_k 个最相关候选，再据返回 `call_skill` 派发。
+**召回默认 = inline（工作记忆 / LLM 注意力，`skill_recall=None`）**：默认不注入任何召回后端，全部可见 child 内联进 `<available_child_skills>` 由 LLM 自己找，**不**注册 `search_skills`、**不**启用 deferred。只有业务**显式注入**召回后端（`KeywordSkillRecall` / `LlmSkillRecall` / 业务 RAG）时，当 caller 的可见 child 数膨胀到「装不进一次 prompt」才改为 **deferred 暴露**：给 LLM 一个 `search_skills(query)` 工具按需召回 top_k 候选，再据返回 `call_skill` 派发。海量 child 但未注入后端时仍走 inline（prompt 会变大——这是「默认 LLM 自己找」的应有之义，超大规模由业务注入后端）。
 
-- **inline / deferred 单一真相**：`skill.visibility.effective_child_recall(entry, child_count, threshold)` 是 system prompt 文本构建与 per-turn 工具裁剪的**唯一判定**。`child_recall: inline/deferred` 显式声明优先；`auto`（默认）时按「G4 过滤后可见 child 数 `> recall_threshold`（构造参数，默认 50）」切 deferred。两侧同判定，保证「prompt 是否列 child」与「是否暴露 search_skills」严格一致。
+- **inline / deferred 单一真相**：`skill.visibility.effective_child_recall(entry, child_count, threshold, has_recall_backend)` 是 system prompt 文本构建与 per-turn 工具裁剪的**唯一判定**。`child_recall: inline` 强制内联；`child_recall: deferred` 显式要召回——有后端则 deferred，**无后端抛 `SkillValidationError`**（禁 silent 降级 inline）；`auto`（默认）时**有后端**且「G4 过滤后可见 child 数 `> recall_threshold`（构造参数，默认 50）」才切 deferred，**无后端恒 inline**。两侧同判定，保证「prompt 是否列 child」与「是否暴露 search_skills」严格一致。
 - **召回作用域 = 白名单内 G4 过滤**：召回语料池由 `skill.visibility.visible_child_skills` 构建——它是 inline 列表那套 G4 过滤（G4b `model_invocable=False` 隐藏 / G4a `requires` 不满足剔除）的**唯一实现**，故 deferred 召回拿不到本应隐藏的 child（非 G4 旁路）。池**仅含 caller 的 `child_skills`**（白名单封闭由内核钉死，召回后端只在 pool 内排名）。
 - **confidence 仅透数据**：`search_skills` 透给 LLM 的候选含 `skill_id` / `description` / `confidence`（同次召回内归一到 [0,1]）/ `matched_snippet`，**不外露 score**。confidence 仅供 LLM 二次决策，内核**不据其分流**（不自动放行 / 拦截 / 降级）。
-- **召回后端可插拔**：`SkillRecall` 协议（默认零依赖 `KeywordSkillRecall`，BM25-lite）；业务可注入向量 / 外部检索替换。`recall_default_top_k`(5) / `recall_max_top_k`(20) 是 `search_skills` 的 top_k 默认与上界（构造参数）。
+- **召回后端阶梯（默认 inline，可选注入）**：`SkillRecall` 协议把后端按「离工作记忆远近 = 成本」排成阶梯——① inline（默认，零调用）；② `KeywordSkillRecall`（可选注入，零依赖 BM25-lite，确定性）；③ `LlmSkillRecall`（可选注入，一次性子 LLM 调用语义挑选，**非确定性**，pool 须能放进一次 prompt）；④ 向量 / RAG（业务注入，ADR 0017③）。`recall_default_top_k`(5) / `recall_max_top_k`(20) 是 `search_skills` 的 top_k 默认与上界（构造参数，仅注入后端时生效）。
 - **选择溯源连回战绩**：经 `search_skills` 召回选中再 `call_skill` 派发的 skill，其 `SkillExecutionRecord.selection_origin="discovered"` + `selection_confidence`（复用 v1 [skill-outcome-record](capabilities/skill-outcome-record.md) 的 `SelectionOrigin` Literal）；未经召回的派发仍为 `whitelist` / `None`。
 - **可观测**：`skill_search_invoked`（query / top_k / pool_size）+ `skill_candidates_returned`（count / top_ids）两事件覆盖发现链，不进 LLM 视图。
 

@@ -8,6 +8,8 @@ skill 发现 / 召回 —— 认知回路⑥「发现相位」的地基。
 
 设计原则：**只召回、不准入、不分流**。相位 2 产出「据 query 在白名单内排出最相关候选」的结构化结果，把 `confidence` 作为数据透给 LLM 二次决策。相位 2 **不做**：据 confidence 自动放行 / 拦截 / 降级（分流是后续相位策略）；扩大召回作用域到白名单外（发现 ≠ 准入，授权边界不动）。
 
+> **召回后端默认 = inline（工作记忆 / LLM 注意力）**：召回后端是一道「离工作记忆远近 = 成本」的阶梯——① **inline（默认，`skill_recall=None`）**：不注入任何后端时，全部可见 child 内联进 system prompt 由 LLM 自己选，**不**注册 `search_skills`、**不**启用 deferred；② **关键词 / BM25（`KeywordSkillRecall`）**：可选注入，零依赖；③ **LLM-as-recall（`LlmSkillRecall`）**：可选注入，一次性子 LLM 调用语义挑选；④ **向量 / RAG**：业务注入（ADR 0017③）。`search_skills` / deferred **仅在注入了召回后端时启用**——无后端**绝不**静默兜底关键词或暗启 search。详见下方「召回后端协议」与「行为契约」。
+
 关联设计文档：`docs/superpowers/specs/2026-06-17-skill-recall-discovery-design.md`。
 上游：`docs/superpowers/specs/2026-06-16-skill-capability-acquisition-loop-design.md`（§6 发现相位）。
 
@@ -15,28 +17,38 @@ skill 发现 / 召回 —— 认知回路⑥「发现相位」的地基。
 
 ### Requirement: deferred 暴露判定（inline / deferred 单一真相）
 
-系统 SHALL 据 caller entry 的 `exposure.child_recall` 三值声明与 **G4 过滤后可见 child 数**，对「system prompt 是否内联列 child」与「per-turn 是否暴露 `search_skills` 工具」做**同一裁定**（`effective_child_recall`），两侧严格一致。
+系统 SHALL 据 caller entry 的 `exposure.child_recall` 三值声明、**G4 过滤后可见 child 数**与**是否注入了召回后端**（`has_recall_backend`），对「system prompt 是否内联列 child」与「per-turn 是否暴露 `search_skills` 工具」做**同一裁定**（`effective_child_recall`），两侧严格一致。
 
 - `child_recall == "inline"` → 强制 `inline`（无论 child 多少全内联，**不**暴露 `search_skills`）。
-- `child_recall == "deferred"` → 强制 `deferred`（无论 child 多少都走召回，暴露 `search_skills`）。
-- `child_recall == "auto"`（默认）→ 可见 child 数 `> recall_threshold` 时 `deferred`，否则 `inline`。
+- `child_recall == "deferred"` → 显式要召回：**有后端**则强制 `deferred`（暴露 `search_skills`）；**无后端**抛 `SkillValidationError`（启动期 fail-fast，禁 silent 降级回 inline——作者既然显式要召回就必须配后端）。
+- `child_recall == "auto"`（默认）→ **有后端**且可见 child 数 `> recall_threshold` 时 `deferred`，否则 `inline`；**无后端恒 `inline`**（即便 child 很多，因为默认就是「LLM 自己找」）。
 
-`child_count` SHALL 传 **G4 过滤后的可见 child 数**（`visible_child_skills` 的结果），而非声明的原始 `child_skills` 总数。
+`child_count` SHALL 传 **G4 过滤后的可见 child 数**（`visible_child_skills` 的结果），而非声明的原始 `child_skills` 总数。`has_recall_backend` SHALL 反映 `skill_recall is not None`（默认 `None` = inline，无 `search_skills`）。
+
+#### Scenario: 默认无后端恒 inline（即便 child 很多）
+- **GIVEN** 未注入召回后端（`skill_recall=None`，默认），entry 为 `auto`
+- **WHEN** 可见 child 数远超 `recall_threshold`
+- **THEN** 仍走 `inline`，per-turn 工具清单**不含** `search_skills`（默认 = LLM 从全列里自己找；海量场景由业务注入后端）
 
 #### Scenario: auto 小 entry 走 inline
-- **GIVEN** auto entry 的可见 child 数 ≤ `recall_threshold`
+- **GIVEN** 注入了召回后端的 auto entry 的可见 child 数 ≤ `recall_threshold`
 - **THEN** per-turn 工具清单**不含** `search_skills`（向后兼容：原本就没有此工具）
 - **AND** 内核恒备的 `read_skill` / `call_skill` 仍在
 
-#### Scenario: auto 大 entry 走 deferred
-- **GIVEN** auto entry 的可见 child 数 > `recall_threshold`
+#### Scenario: auto 大 entry 走 deferred（须有后端）
+- **GIVEN** 注入了召回后端的 auto entry 的可见 child 数 > `recall_threshold`
 - **THEN** per-turn 工具清单**含** `search_skills`
 
 #### Scenario: 显式声明优先于阈值
-- **GIVEN** `child_recall: deferred` 的小 entry（child 远低于 threshold）
+- **GIVEN** 注入了后端、`child_recall: deferred` 的小 entry（child 远低于 threshold）
 - **THEN** 仍暴露 `search_skills`
 - **GIVEN** `child_recall: inline` 的大 entry（child 远超 threshold）
 - **THEN** 仍不暴露 `search_skills`
+
+#### Scenario: 显式 deferred 但无后端 → 启动期抛错
+- **GIVEN** `child_recall: deferred` 的 entry，但未注入任何召回后端
+- **WHEN** 裁定 `effective_child_recall`
+- **THEN** 抛 `SkillValidationError`（fail-fast，**不**静默降级回 inline）
 
 #### Scenario: 作者显式声明 search_skills 不重复
 - **GIVEN** deferred entry 在 SKILL.md `tool_names` 显式声明了 `search_skills`
@@ -81,11 +93,20 @@ skill 发现 / 召回 —— 认知回路⑥「发现相位」的地基。
 - **GIVEN** LLM 直接 `call_skill(Y)`，本 turn 未曾召回出 `Y`
 - **THEN** `Y` 的 `selection_origin == "whitelist"`，`selection_confidence == None`
 
-### Requirement: 召回后端协议（SkillRecall）与默认实现
+### Requirement: 召回后端协议（SkillRecall）+ 阶梯实现（默认 inline、后端可选注入）
 
-系统 SHALL 提供 `SkillRecall`（`typing.Protocol`，`runtime_checkable`）供业务侧注入自定义召回后端（关键词 / 向量 / 外部检索均可），并内置零依赖默认实现 `KeywordSkillRecall`。
+系统 SHALL 提供 `SkillRecall`（`typing.Protocol`，`runtime_checkable`）供业务侧注入召回后端（关键词 / LLM / 向量 / 外部检索均可）。
 
-实现方 SHALL 满足：
+**内核默认 `skill_recall=None` = inline（工作记忆 / LLM 注意力）**，不注入任何后端、不注册 `search_skills`、不启用 deferred。内核提供两个可选注入实现：
+
+| 阶梯 | 实现 | 确定性 | 依赖 | 适用 |
+| --- | --- | --- | --- | --- |
+| ① 工作记忆 / LLM 注意力（**默认**） | inline（`skill_recall=None`） | — | 零 | child 装得进一次 prompt，LLM 自己找 |
+| ② 关键词 / BM25 | `KeywordSkillRecall`（可选注入） | 确定性 | 零依赖 | child 多到装不进 prompt，关键词区分度够 |
+| ③ LLM-as-recall | `LlmSkillRecall`（可选注入，本次新增） | **非确定性** | 一次性子 LLM 调用 | 描述语义复杂、关键词不足且 pool 仍能放进一次 prompt |
+| ④ 向量 / RAG | 业务注入（ADR 0017③） | 视实现 | 外部检索服务 | 万级 skill / 高密度语义近邻 |
+
+纯算法后端（如 `KeywordSkillRecall`）SHALL 满足：
 - **白名单封闭**：返回的每个 `skill_id` ⊆ `pool` 内 id 集。
 - **数量上界**：`len(返回) ≤ top_k`。
 - **置信合法**：每个候选 `confidence ∈ [0, 1]`。
@@ -94,9 +115,15 @@ skill 发现 / 召回 —— 认知回路⑥「发现相位」的地基。
 
 `KeywordSkillRecall` 用标准 BM25 公式（idf 加权 + tf 饱和 + 长度饱和归一）；零依赖分词（拉丁段按非字母数字边界、CJK 段字符 bigram）；同分按 `skill_id` 升序定序。
 
+`LlmSkillRecall`（**非确定性后端**，不满足上面「纯函数 / 确定性」那条——这是 LLM 召回的固有性质，replay / 测试靠固定 `model_client`（如 SimClient）脚本化回放）SHALL 满足前三条（白名单封闭 / 数量上界 / 置信合法）+ 可取消，详见下方「LlmSkillRecall」数据契约。
+
 #### Scenario: isinstance 检测
-- **WHEN** `isinstance(KeywordSkillRecall(), SkillRecall)`
+- **WHEN** `isinstance(KeywordSkillRecall(), SkillRecall)` 或 `isinstance(LlmSkillRecall(client), SkillRecall)`
 - **THEN** SHALL 返回 `True`
+
+#### Scenario: 默认无后端 = inline
+- **GIVEN** `EnginePool.create(..., skill_recall=None)`（默认）
+- **THEN** 不注册 `search_skills`、所有 entry 恒走 inline；无任何召回调用发生
 
 ## Data Contract
 
@@ -141,6 +168,31 @@ class SkillRecall(Protocol):
         ...
 ```
 
+### LlmSkillRecall（可选注入的 LLM-as-recall 后端，`src/taifeng/skill/recall.py`）
+
+构造取依赖注入的 `ModelClient`（业务侧提供，决定 provider / 鉴权；R1 不读环境变量、不绑定 provider）；`recall` 起一次性子 LLM 调用，把**整个 pool** 的 `skill_id + description` 拼成召回 prompt，要求模型据 query 语义按相关度降序输出 JSON 数组，再解析回 `SkillCandidate` 列表。
+
+```python
+class LlmSkillRecall:
+    def __init__(self, model_client: ModelClient, *, model: str | None = None) -> None: ...
+    async def recall(
+        self, query: str, pool: Sequence[RecallEntry], *, top_k: int, cancel: CancellationToken,
+    ) -> list[SkillCandidate]: ...
+```
+
+约束与解析策略：
+
+- **非确定性**：底层是 LLM，相同 `(query, pool)` 不保证相同结果——故**不满足** `SkillRecall` 协议对纯算法后端的「纯函数 / 确定性」要求；replay / 测试靠固定 `model_client`（SimClient）脚本化回放。
+- **pool 须能放进一次 prompt**：本后端把整个 pool 列进 prompt，**不做**分片 / 召回的召回；万级 skill 撑爆 context 的场景应交给向量检索 / 外部 RAG（业务实现同协议注入）。
+- **整体失败抛 `SkillRecallParseError`**：模型回答非合法 JSON、或顶层不是数组、或 provider 在流中 emit error → 抛 `SkillRecallParseError`（显式失败，**禁** silent fallback 伪造默认候选）。
+- **单项脏数据丢弃（不伪造）**：单项 `skill_id` ∉ pool / 缺 `skill_id` / 缺 `score` / `score` 非数值或越界 `[0,1]` → **丢弃该项**（整批可解析、个别项不合法属正常，不抛错、不越权召回池外 skill）。
+- `description` 一律取自 pool（不信模型复述）；`matched_snippet` 恒为 `None`（LLM 召回无确定命中片段，禁用空串伪装）；结果按模型给出的 `score` 降序、截断到 `top_k`。
+- **可取消**：`recall` 接收 `CancellationToken` 并透传给 LLM session。
+
+### SkillRecallParseError（`src/taifeng/skill/recall.py`）
+
+`LlmSkillRecall` 无法把模型回答整体解析为合法召回结果（坏 JSON / 顶层非数组 / provider 调用失败）时抛出。单项级脏数据**不**抛本异常（按上「丢弃该项」处理）。
+
 ### search_skills 工具 payload（透给 LLM）
 
 `search_skills` 成功返回 `json.dumps(list[dict])`，每项**不含 score**（仅审计 / 内部）：
@@ -180,11 +232,13 @@ class SkillCandidatesReturned(_Msg):
 ### deferred 暴露判定（`src/taifeng/skill/visibility.py::effective_child_recall`）
 
 ```
-prompt 构建 + per-turn 工具裁剪 两侧都调 effective_child_recall(entry, child_count, threshold)
+prompt 构建 + per-turn 工具裁剪 两侧都调 effective_child_recall(entry, child_count, threshold, has_recall_backend)
   ├─ child_recall == "inline"    → "inline"   （强制内联，无 search_skills）
-  ├─ child_recall == "deferred"  → "deferred" （强制召回，暴露 search_skills）
-  └─ child_recall == "auto"      → child_count > threshold ? "deferred" : "inline"
+  ├─ child_recall == "deferred"  → has_recall_backend ? "deferred" : raise SkillValidationError
+  │                                 （显式要召回但无后端 → fail-fast，禁 silent 降级 inline）
+  └─ child_recall == "auto"      → (has_recall_backend and child_count > threshold) ? "deferred" : "inline"
        child_count = len(visible_child_skills(entry, snapshot, capabilities))   # G4 过滤后可见数
+       has_recall_backend = (skill_recall is not None)                          # 默认 None=inline，无 search_skills
 ```
 
 ### 召回链（`src/taifeng/tool/builtins/search_skills.py`）
@@ -219,7 +273,7 @@ call_skill(target) 派发 → 查 turn 内溯源映射
 
 | 红线 | 影响 |
 | --- | --- |
-| **R1 业务零侵入** | `SkillRecall` Protocol 是业务注入缝（向量 / 外部检索替换默认）；`src/` 内无 tenant / 领域名词；`KeywordSkillRecall` 零依赖开箱可用，不注入也能跑 ✅ |
+| **R1 业务零侵入** | `SkillRecall` Protocol 是业务注入缝（关键词 / LLM / 向量 / 外部检索按规模选注）；`src/` 内无 tenant / 领域名词；默认 inline 零依赖开箱可用，不注入也能跑；`LlmSkillRecall` 构造取业务提供的 `ModelClient`（不读环境变量、不绑定 provider）✅ |
 | **R2 Cache 友好** | inline / deferred 判定决定 entry **静态 system prompt 形状**（pre-turn 决定、整 turn 稳定），不是 mid-turn cache 失效，不返回 `CompressionResult`；同一 entry 跨 turn 走同一分支 → prefix 稳定 ✅ |
 | **R3 可观测** | `skill_search_invoked` / `skill_candidates_returned` 两事件覆盖发现链关键路径，供 TelemetrySink 订阅 ✅ |
 | **R4 可取消** | `SkillRecall.recall` 接收 `CancellationToken`，入口与打分后各 check 一次，尽早中断、不阻塞主 actor ✅ |
@@ -231,6 +285,6 @@ call_skill(target) 派发 → 查 turn 内溯源映射
 | --- | --- |
 | 据 confidence 自动放行 / 拦截 / 降级 | 分流是后续相位策略；相位 2 只透数据给 LLM |
 | 召回到白名单外 skill | 发现 ≠ 准入；授权边界（白名单 / DispatchPolicy）相位 2 不动 |
-| 向量 / 外部检索后端 | 内核只定 `SkillRecall` 协议 + 零依赖关键词默认；向量 / RAG 是 userspace，业务自接 |
+| 向量 / 外部检索后端 | 内核只定 `SkillRecall` 协议，默认 inline + 提供可选注入的 `KeywordSkillRecall` / `LlmSkillRecall`；向量 / RAG 是 userspace，业务自接 |
 | 跨 session 召回统计 / 提拔 / 逐出 | 认知回路上层相位（fitness / 提拔），不在本契约范围 |
 | score 持久化做阈值 | score 仅同次召回内可比，跨次无可比性 |

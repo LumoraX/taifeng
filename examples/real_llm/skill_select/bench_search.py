@@ -49,6 +49,7 @@ load_dotenv_files()
 import taifeng  # noqa: E402
 from taifeng.context.budget import ContextBudget  # noqa: E402
 from taifeng.permission.policy import PermissionPolicy  # noqa: E402
+from taifeng.skill.recall import KeywordSkillRecall  # noqa: E402
 
 # 与 bench.py 一致的领域归类 + 叶子渲染（复用同目录 build_skills，避免重复实现）
 from build_skills import _leaf_md, _load_entries  # noqa: E402
@@ -227,6 +228,9 @@ async def main() -> None:
             budget=ContextBudget(context_window=128_000),
             compressors=[],
             permission_policy=policy,
+            # 召回后端须显式注入（内核默认 None = inline「LLM 自己找」，不启用 search）。
+            # 本基准测的就是关键词召回，故注入 KeywordSkillRecall；业务可换 LlmSkillRecall / RAG。
+            skill_recall=KeywordSkillRecall(),
             # 关键：recall_threshold=0 → auto 模式下可见 child >0 即 deferred，强制走召回
             recall_threshold=0,
             # ReAct 召回循环：留出重搜空间（最多 3 次 search + 1 次 call），故 5 轮

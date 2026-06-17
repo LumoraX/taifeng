@@ -33,9 +33,10 @@
 | **`event_low_water_ratio`** | `0.5` | 有界事件队列低水位比例。回落到此以下才重新武装下次告警（迟滞，防阈值附近刷屏） | — |
 | **`event_warn_cooldown_sec`** | `5` | 高水位告警限频秒数（即便持续高位，至多每 N 秒一条） | — |
 | **`enable_request_capture`** | `False` | **审计可观测 层1**：LLM request 全文留痕开关。开启后 `turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（`data = ApiRequest.model_dump()`，retry/重建各一条）；含敏感正文，OtelSink 按 kind 跳过不外发，可靠落盘/脱敏归业务 sink。默认关 = 零泄漏面 + 零行为变化 | codex request 留痕 |
-| **`recall_threshold`** | `50` | **skill 召回（发现）**：composite entry 的 `child_recall: auto` 模式下，**G4 过滤后可见 child 数 > 本阈值** → 自动切 deferred（child 装不进一次 prompt，改 `search_skills` 按需召回），否则 inline 全量内联。`child_recall: inline/deferred` 显式声明优先于本阈值。`0` = child 数 >0 即 deferred。在 `EnginePool.create`。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
-| **`recall_default_top_k`** | `5` | **skill 召回（发现）**：`search_skills` 工具未显式传 `top_k` 时的默认召回候选数。必须 ≥1（否则构造期 `ValueError`）。在 `EnginePool.create` | — |
-| **`recall_max_top_k`** | `20` | **skill 召回（发现）**：`search_skills` 工具 `top_k` 的上界（LLM 传更大值被夹到此）。必须 ≥ `recall_default_top_k`（否则构造期 `ValueError`）。在 `EnginePool.create` | — |
+| **`skill_recall`** | `None`（= inline） | **skill 召回（发现）后端**：决定召回阶梯走哪一层。`None`（默认）= **inline / 工作记忆 / LLM 注意力**——全部可见 child 内联进 prompt 让 LLM 自己找，**不**注册 `search_skills`、**不**启用 deferred、**绝不**静默兜底关键词。可注入可选后端：`KeywordSkillRecall`（零依赖 BM25-lite，确定性）/ `LlmSkillRecall(model_client)`（LLM-as-recall，**非确定性**，pool 须能放进一次 prompt）/ 业务 RAG（实现 `SkillRecall` 协议，ADR 0017③）。注入后端后才启用 `search_skills` + deferred。在 `EnginePool.create`。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
+| **`recall_threshold`** | `50` | **skill 召回（发现）**：**仅在注入了召回后端时生效**。composite entry 的 `child_recall: auto` 模式下，**有后端**且 G4 过滤后可见 child 数 > 本阈值 → 自动切 deferred（child 装不进一次 prompt，改 `search_skills` 按需召回），否则 inline；**无后端恒 inline**。`child_recall: inline` 强制内联、`child_recall: deferred` 显式要召回（无后端则启动期抛 `SkillValidationError`），均优先于本阈值。`0` = 有后端且 child 数 >0 即 deferred。在 `EnginePool.create`。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
+| **`recall_default_top_k`** | `5` | **skill 召回（发现）**：**仅在注入了召回后端时生效**。`search_skills` 工具未显式传 `top_k` 时的默认召回候选数。必须 ≥1（否则构造期 `ValueError`）。在 `EnginePool.create` | — |
+| **`recall_max_top_k`** | `20` | **skill 召回（发现）**：**仅在注入了召回后端时生效**。`search_skills` 工具 `top_k` 的上界（LLM 传更大值被夹到此）。必须 ≥ `recall_default_top_k`（否则构造期 `ValueError`）。在 `EnginePool.create` | — |
 
 #### §1.0 内核资源/内存旋钮（K1–K4，业务可注入）
 

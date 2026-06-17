@@ -134,9 +134,11 @@ from taifeng.skill.outcome import (
 )
 from taifeng.skill.recall import (
     KeywordSkillRecall,
+    LlmSkillRecall,
     RecallEntry,
     SkillCandidate,
     SkillRecall,
+    SkillRecallParseError,
 )
 from taifeng.skill.scripts import (
     PythonScriptExecutor,
@@ -252,9 +254,11 @@ __all__ = [
     "SkillExecutionRecord",
     "StructuralOutcomeJudge",
     "SkillRecall",
+    "SkillRecallParseError",
     "SkillCandidate",
     "RecallEntry",
     "KeywordSkillRecall",
+    "LlmSkillRecall",
     "SlidingWindowStrategy",
     "PinnedStateRegistry",
     "PinnedStateSource",

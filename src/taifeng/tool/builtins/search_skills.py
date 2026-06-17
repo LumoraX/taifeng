@@ -201,7 +201,8 @@ def make_search_skills_tool(
     """构造 search_skills 工具规范（相位 2 deferred 召回入口）。
 
     Args:
-        recall: 可插拔召回后端（默认 KeywordSkillRecall，业务可替换为向量 / 外部检索）。
+        recall: 业务注入的可插拔召回后端（KeywordSkillRecall / LlmSkillRecall / 业务 RAG）；
+            无默认、须显式注入。
         default_top_k: LLM 未指定 top_k 时的默认返回候选数。
         max_top_k: top_k 钳制上界（防一次召回过多撑爆 context）。
 

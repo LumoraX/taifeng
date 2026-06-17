@@ -16,6 +16,7 @@ from pathlib import Path
 
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
+from taifeng.skill.recall import KeywordSkillRecall, SkillRecall
 
 
 def _write_entry_with_children(
@@ -65,9 +66,17 @@ def _write_entry_with_children(
 
 
 async def _offered_tools(
-    skills_dir: Path, threads_dir: Path, *, recall_threshold: int
+    skills_dir: Path,
+    threads_dir: Path,
+    *,
+    recall_threshold: int,
+    skill_recall: SkillRecall | None = None,
 ) -> set[str]:
-    """跑一个 turn，返回本轮请求真实暴露的 tool 名集（SimClient ledger）。"""
+    """跑一个 turn，返回本轮请求真实暴露的 tool 名集（SimClient ledger）。
+
+    ``skill_recall`` 默认 None = 无召回后端 = inline（设计稿默认，不暴露 search）；
+    需要 deferred / search_skills 生效的用例须显式注入后端。
+    """
     client = SimClient(turns=[SimTurn(text="完成")])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -75,6 +84,7 @@ async def _offered_tools(
         model_client=client,
         compressors=[],
         recall_threshold=recall_threshold,
+        skill_recall=skill_recall,
     )
     try:
         engine = await pool.get_or_create(
@@ -106,25 +116,52 @@ async def test_inline_entry_omits_search_skills(tmp_path: Path) -> None:
 
 
 async def test_deferred_entry_offers_search_skills(tmp_path: Path) -> None:
-    """auto entry + child 数 > threshold → deferred → 暴露 search_skills。"""
+    """auto entry + child 数 > threshold + 注入召回后端 → deferred → 暴露 search_skills。"""
     skills = _write_entry_with_children(tmp_path, child_recall=None, n_children=4)
     tools = await _offered_tools(
-        skills, tmp_path / "threads", recall_threshold=2
+        skills,
+        tmp_path / "threads",
+        recall_threshold=2,
+        skill_recall=KeywordSkillRecall(),
     )
     assert "search_skills" in tools
+
+
+async def test_default_no_backend_always_inline(tmp_path: Path) -> None:
+    """默认 skill_recall=None：即便 auto entry child 数远超 threshold 也恒 inline。
+
+    设计稿 §3.1 默认语义——无召回后端 = 工作记忆/LLM 注意力 = inline（LLM 自己找）：
+    prompt 逐条列 child、per-turn 工具**不含** search_skills（根本未注册）。
+    """
+    skills = _write_entry_with_children(tmp_path, child_recall=None, n_children=10)
+    # threshold=1，child=10 远超——若有后端会 deferred；无后端（默认）恒 inline
+    tools = await _offered_tools(
+        skills, tmp_path / "threads", recall_threshold=1
+    )
+    assert "search_skills" not in tools
+    # 内核恒备二件套仍在（inline 路径，child 列在 prompt 文本里）
+    assert "read_skill" in tools
+    assert "call_skill" in tools
 
 
 # ── 阈值业务可配：同一 skills 目录，threshold 不同 → 行为不同 ────────────────
 
 
 async def test_recall_threshold_is_configurable(tmp_path: Path) -> None:
-    """同一 3-child auto entry：threshold=50 → inline 无 search；threshold=1 → deferred 有。"""
+    """同一 3-child auto entry（均注入后端）：threshold=50 → inline 无 search；
+    threshold=1 → deferred 有。阈值业务可配（前提是注入了召回后端）。"""
     skills = _write_entry_with_children(tmp_path, child_recall=None, n_children=3)
     high = await _offered_tools(
-        skills, tmp_path / "threads-high", recall_threshold=50
+        skills,
+        tmp_path / "threads-high",
+        recall_threshold=50,
+        skill_recall=KeywordSkillRecall(),
     )
     low = await _offered_tools(
-        skills, tmp_path / "threads-low", recall_threshold=1
+        skills,
+        tmp_path / "threads-low",
+        recall_threshold=1,
+        skill_recall=KeywordSkillRecall(),
     )
     assert "search_skills" not in high
     assert "search_skills" in low
@@ -139,7 +176,10 @@ async def test_deferred_override_small_entry_offers_search(tmp_path: Path) -> No
         tmp_path, child_recall="deferred", n_children=2
     )
     tools = await _offered_tools(
-        skills, tmp_path / "threads", recall_threshold=50
+        skills,
+        tmp_path / "threads",
+        recall_threshold=50,
+        skill_recall=KeywordSkillRecall(),
     )
     assert "search_skills" in tools
 
@@ -200,12 +240,18 @@ def _write_deferred_entry_declaring_search(root: Path) -> Path:
 
 
 async def _offered_tool_list(
-    skills_dir: Path, threads_dir: Path, *, recall_threshold: int
+    skills_dir: Path,
+    threads_dir: Path,
+    *,
+    recall_threshold: int,
+    skill_recall: SkillRecall | None = None,
 ) -> list[str]:
     """跑一个 turn，返回本轮请求 tools 的**原始名列表**（保留重复，供去重断言）。
 
     注意：必须读 ``last_request().request.tools`` 的原始序列——``ledger.tool_names()``
     返回 set 会先把重复折叠掉，无法捕获「同名工具被 append 两次」的 M1 撕裂。
+
+    ``skill_recall`` 默认 None；deferred 用例须注入后端才会暴露 search_skills。
     """
     client = SimClient(turns=[SimTurn(text="完成")])
     pool = await taifeng.EnginePool.create(
@@ -214,6 +260,7 @@ async def _offered_tool_list(
         model_client=client,
         compressors=[],
         recall_threshold=recall_threshold,
+        skill_recall=skill_recall,
     )
     try:
         engine = await pool.get_or_create(
@@ -238,8 +285,48 @@ async def test_deferred_entry_declaring_search_skills_lists_it_once(
     """deferred entry 在 tool_names 显式声明 search_skills → per-turn 清单里只出现一次。"""
     skills = _write_deferred_entry_declaring_search(tmp_path)
     names = await _offered_tool_list(
-        skills, tmp_path / "threads", recall_threshold=50
+        skills,
+        tmp_path / "threads",
+        recall_threshold=50,
+        skill_recall=KeywordSkillRecall(),
     )
     # 仍然暴露（deferred 模式必须有），但不能重复
     assert "search_skills" in names
     assert names.count("search_skills") == 1
+
+
+# ── 禁 silent fallback：显式 deferred 但无召回后端 → turn 失败（抛错，不静默降级）──
+
+
+async def test_deferred_without_backend_fails_turn(tmp_path: Path) -> None:
+    """显式 child_recall: deferred 但 pool 无召回后端（默认）→ turn 失败。
+
+    effective_child_recall 抛 SkillValidationError（禁止静默降级 inline），被
+    turn 主循环捕获为 turn_failed——验证「作者显式要召回却没后端」不被吞掉。
+    """
+    skills = _write_entry_with_children(
+        tmp_path, child_recall="deferred", n_children=2
+    )
+    client = SimClient(turns=[SimTurn(text="完成")])
+    # 不注入 skill_recall（默认 None = 无后端）
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills,
+        threads_dir=tmp_path / "threads",
+        model_client=client,
+        compressors=[],
+        recall_threshold=50,
+    )
+    try:
+        engine = await pool.get_or_create(
+            session_id="s", entry_skill_id="orchestrator"
+        )
+        sub = await engine.submit(taifeng.UserMessage(text="开始"))
+        kinds: list[str] = []
+        async for ev in engine.subscribe(sub):
+            kinds.append(ev.msg.kind)
+            if ev.msg.kind in ("turn_completed", "turn_failed"):
+                break
+        # 显式 deferred 无后端：禁静默降级 → turn 失败而非 inline 完成
+        assert kinds[-1] == "turn_failed"
+    finally:
+        await pool.close()

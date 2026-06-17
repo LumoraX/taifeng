@@ -28,9 +28,11 @@ from taifeng.skill.loader import (
 )
 from taifeng.skill.recall import (
     KeywordSkillRecall,
+    LlmSkillRecall,
     RecallEntry,
     SkillCandidate,
     SkillRecall,
+    SkillRecallParseError,
 )
 from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry, SkillSnapshot
 from taifeng.skill.visibility import VisibleChild, visible_child_skills
@@ -44,12 +46,14 @@ __all__ = [
     "DispatchVerdict",
     "FilesystemSkillRegistry",
     "KeywordSkillRecall",
+    "LlmSkillRecall",
     "RecallEntry",
     "SkillCandidate",
     "SkillFileWatcher",
     "SkillDefinition",
     "SkillLoadError",
     "SkillRecall",
+    "SkillRecallParseError",
     "SkillRegistry",
     "SkillSnapshot",
     "SkillType",

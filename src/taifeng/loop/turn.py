@@ -330,6 +330,10 @@ class TurnRunner:
     # 业务可配）。同时驱动 system prompt 文本形状 + per-turn search_skills 工具裁剪
     # （二者经 effective_child_recall 同一判定，保证一致）。默认 50。
     recall_threshold: int = 50
+    # 是否注入了 SkillRecall 召回后端（pool 据 skill_recall 是否为 None 透传）。
+    # 默认 False = 无后端 = inline（LLM 自己找）：不暴露 search_skills、不走 deferred。
+    # 与 recall_threshold 同走 pool→engine→TurnRunner 透传路径。
+    has_recall_backend: bool = False
 
     def __post_init__(self) -> None:
         """兜底注入挂起 id / 时间戳工厂，并初始化当前迭代序号。
@@ -391,6 +395,7 @@ class TurnRunner:
             self.entry_skill,
             child_count=len(visible),
             threshold=self.recall_threshold,
+            has_recall_backend=self.has_recall_backend,
         )
         return mode == "deferred"
 
@@ -989,6 +994,8 @@ class TurnRunner:
             reasoning_passback=self.reasoning_passback,
             # T6: deferred 暴露阈值（驱动 child 列表 inline / deferred 文本）
             recall_threshold=self.recall_threshold,
+            # 是否有召回后端：无后端恒 inline（与工具裁剪同口径）
+            has_recall_backend=self.has_recall_backend,
         )
 
         # 审计可观测 层1:request 全文留痕。注入点选在「build 之后、发送 provider
@@ -1856,6 +1863,8 @@ class TurnRunner:
             outcome_judge=self.outcome_judge,
             # T6: 子 turn 继承同一 deferred 暴露阈值（整棵 turn 树一致）
             recall_threshold=self.recall_threshold,
+            # 子 turn 继承同一召回后端存在性（整棵 turn 树一致）
+            has_recall_backend=self.has_recall_backend,
             call_stack=parent_stack,
             history_buffer=[seed],
         )
