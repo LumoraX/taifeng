@@ -1293,6 +1293,8 @@ class TurnRunner:
             extras={
                 "skill_snapshot": self.snapshot,
                 "visible_skills": self.snapshot.reachable_from(self.entry_skill.id),
+                # search_skills 据此施加 G4a requires 过滤（与 inline 列表同源同过滤）
+                "capabilities": self.capabilities,
                 "dispatch_policy": self.dispatch_policy,
                 "call_stack": self.call_stack,
                 "current_skill": self.entry_skill,

@@ -33,6 +33,7 @@ from taifeng.skill.recall import (
     SkillRecall,
 )
 from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry, SkillSnapshot
+from taifeng.skill.visibility import VisibleChild, visible_child_skills
 from taifeng.skill.watcher import SkillFileWatcher
 
 __all__ = [
@@ -54,6 +55,8 @@ __all__ = [
     "SkillType",
     "SkillValidationError",
     "UnknownChildSkill",
+    "VisibleChild",
+    "visible_child_skills",
     "compute_reachable_graph",
     "detect_cycles",
     "load_skills_from_dir",

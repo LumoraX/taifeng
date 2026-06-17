@@ -26,6 +26,7 @@ from taifeng.tool.builtins.http_request import make_http_request_tool
 from taifeng.tool.builtins.read_skill import make_read_skill_tool
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 from taifeng.tool.builtins.run_script import make_run_script_tool
+from taifeng.tool.builtins.search_skills import make_search_skills_tool
 from taifeng.tool.builtins.send_message import make_send_message_tool
 from taifeng.tool.builtins.shell import make_shell_exec_tool
 from taifeng.tool.builtins.spawn_skill import (
@@ -53,6 +54,7 @@ __all__ = [
     "make_request_user_input_tool",
     "make_run_in_background_tool",
     "make_run_script_tool",
+    "make_search_skills_tool",
     "make_send_message_tool",
     "make_todo_write_tool",
     "make_shell_exec_tool",
