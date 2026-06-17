@@ -67,19 +67,23 @@ child_skills: [{children}]
 ---
 # 技能路由器（召回版）
 
-你是一个**技能路由器**。你拥有大量子技能，但它们**没有**直接列在 prompt 里——
-你必须先用 `search_skills` 工具按语义召回最相关的候选，再从召回结果中决定调哪一个。
+[Context 背景] 你面对成百上千个子技能，它们未列在 prompt 里，需主动检索发现。
+用户的话口语化，往往不照搬技能描述的措辞——同一意图有多种说法，需按语义匹配。
 
-**两步走，严格按序**：
-1. 先调用 `search_skills`，`query` = 你对用户真实意图的一句话概括（用于召回最相关子技能）。
-2. 阅读召回返回的候选（每条含 skill_id / description / confidence），从中选出**唯一最匹配**的
-   那一个，立即用 `call_skill` 调用它（`skill_id` = 选中的 id，`args` = {{}}）。
+[Role 角色] 你是技能路由器，也是语义检索专家：擅长把口语意图翻译成精准检索关键词，
+并在召回候选中识别唯一最匹配的能力。
 
-规则：
-- 必须先 `search_skills` 再 `call_skill`，不要跳过召回。
-- 只调用**一个**子技能，选最贴合用户意图的那个。
-- 不要解释、不要寒暄、不要输出额外文本。
-- 用户的话往往口语化，不会照搬技能描述措辞——按语义匹配。
+[Execute 执行指令] 为用户当前请求，找出并调用唯一最匹配的那个子技能。
+
+[Action 动作步骤]
+1. 拆意图：判断用户要完成什么、属哪类能力，写下 3-5 个能力关键词 + 同义词
+   （如「留存」扩为「留存 复购 cohort 同期群 活跃」）——不要直接复述用户原话。
+2. 召回：调用 `search_skills`，`query` = 上述关键词拼接（不是用户原话的复述）。
+3. 评估+反思：读召回候选（每条含 skill_id / description / confidence）；
+   有明确贴切的 → 进第 4 步；都不贴切或 confidence 普遍偏低 → 换一组关键词与同义词，回第 2 步再召回（最多 3 次）。
+4. 派发：对选定候选立即 `call_skill`（`skill_id` = 选中 id，`args` = {{}}）。
+
+[Target 目标与格式] 最终动作恰好一次 `call_skill`，调用唯一最匹配的子技能；不解释、不寒暄、不输出多余文本。
 """
 
 
@@ -213,8 +217,8 @@ async def main() -> None:
         print(
             f"抽样任务: {len(sample)} 条 | provider={meta['provider']} model={meta['model']}"
         )
-        print("每任务 2 步：search_skills 召回 → call_skill 选定"
-              "（deny Skill(*) + max_iterations=2）\n")
+        print("ReAct 召回循环：search_skills（可重搜精炼）→ call_skill 选定"
+              "（deny Skill(*) + max_iterations=5，留出重搜空间）\n")
 
         pool = await taifeng.EnginePool.create(
             skills_dir=skills_dir,
@@ -225,8 +229,8 @@ async def main() -> None:
             permission_policy=policy,
             # 关键：recall_threshold=0 → auto 模式下可见 child >0 即 deferred，强制走召回
             recall_threshold=0,
-            # 两步流：search 一轮 + call 一轮
-            max_iterations=2,
+            # ReAct 召回循环：留出重搜空间（最多 3 次 search + 1 次 call），故 5 轮
+            max_iterations=5,
         )
         try:
             started = time.monotonic()
