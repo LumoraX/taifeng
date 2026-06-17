@@ -46,8 +46,14 @@ _INLINE_CHILD_BLOCK = """You can invoke these child skills via `call_skill(skill
 
 # deferred 模式：child 太多、不在此逐一列出，改提示用 search_skills 按需召回。
 # N=G4 过滤后的可见 child 数（让 LLM 知道池子有多大）。
-_DEFERRED_CHILD_BLOCK = """子 skill 较多（共 {child_count} 个），不在此逐一列出。
-用 `search_skills(query, top_k)` 按当前子任务检索最相关的候选，再据返回的 skill_id 调 `call_skill(skill_id, args)`。"""
+# 提示词写法经真实 A/B 验证（docs 台账 + examples/real_llm/skill_select）：内核默认召回是
+# 关键词匹配，故须显式引导 LLM 把口语意图转译成「关键词 query」并在没命中时改词重搜——
+# 否则口语直喂会召不中。这是通用 prompt engineering（ReAct 循环），不含任何业务概念（R1）。
+_DEFERRED_CHILD_BLOCK = """子 skill 较多（共 {child_count} 个），未逐一列出，需用 search_skills 主动发现。按以下循环：
+1. 思考：当前子任务需要"什么能力"？列出能力关键词 + 同义词（多词覆盖近义说法）。
+2. 行动：search_skills(query=这些关键词，不要照抄用户原话的口语复述)。
+3. 观察+反思：读候选 description / confidence；若无贴切候选或 confidence 普遍偏低，换一组关键词再 search。
+4. 选定后立即用 call_skill(skill_id, args) 派发，不要停在检索。"""
 
 
 def _render_instructions_block(instructions: list[ResolvedInstruction]) -> str:

@@ -178,8 +178,9 @@ SEARCH_SKILLS_SCHEMA = {
         "query": {
             "type": "string",
             "description": (
-                "描述你当前要解决的子任务 / 意图，用于召回最相关的子 skill 候选。"
-                "例：'审查这段处理用户输入的 SQL 拼接代码的安全性'。"
+                "检索词：用「能力关键词 + 同义词」（多词覆盖近义说法）以提高召回，"
+                "例 'SQL注入 参数化 安全审查 注入风险'。**避免照抄用户口语原句**——"
+                "口语与技能描述措辞常不重叠会召不中。没命中可换一组关键词再调一次。"
             ),
         },
         "top_k": {
@@ -213,6 +214,7 @@ def make_search_skills_tool(
             "据 query 召回当前 skill 的子 skill 候选（当可选子 skill 太多、未全部"
             "列在 available_child_skills 时用它发现目标）。返回候选含 skill_id / "
             "description / confidence / matched_snippet；据此再 call_skill 派发。"
+            "可用不同关键词多次调用以精炼召回。"
         ),
         input_schema=SEARCH_SKILLS_SCHEMA,
         handler=_make_search_skills_handler(
