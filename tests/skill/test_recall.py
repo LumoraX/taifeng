@@ -368,3 +368,147 @@ def test_keyword_tokenize_mixed_cjk_ascii() -> None:
     assert _tokenize("报销X") == ["报销", "x"]
     # 纯标点视为边界、产出空 token 列表
     assert _tokenize("，。！") == []
+
+
+# ----------------------------------------------------------------------------
+# LlmSkillRecall：内核可选注入召回后端（LLM 语义挑选，deferred 实现，非确定性）
+# ----------------------------------------------------------------------------
+
+import json as _json  # noqa: E402, PLC0415
+
+from taifeng.llm.providers.sim.client import SimClient  # noqa: E402
+from taifeng.llm.providers.sim.script import SimTurn  # noqa: E402
+from taifeng.skill.recall import LlmSkillRecall  # noqa: E402
+
+
+def _sim_with_text(text: str) -> SimClient:
+    """构造一个固定返回 text 的 SimClient（单 turn，无 tool_call）。"""
+    return SimClient(turns=[SimTurn(text=text)])
+
+
+def test_llm_recall_is_skillrecall() -> None:
+    """LlmSkillRecall 是 SkillRecall 协议的合法实现（structural + runtime_checkable）。"""
+    recall = LlmSkillRecall(model_client=_sim_with_text("[]"))
+    assert isinstance(recall, SkillRecall)
+
+
+async def test_llm_recall_parses_valid_json() -> None:
+    """模型返回合法 JSON（top_k 个池内 id + score）→ 解析出对应 SkillCandidate。"""
+    pool = _cn_pool()
+    # 模型按相关度降序返回 finance / code 两条，全在池内
+    answer = _json.dumps(
+        [
+            {"skill_id": "finance", "score": 0.9},
+            {"skill_id": "code", "score": 0.4},
+        ]
+    )
+    recall = LlmSkillRecall(model_client=_sim_with_text(answer))
+    result = await recall.recall(
+        "报销纠纷与代码审查", pool, top_k=4, cancel=CancellationToken(name="t")
+    )
+    assert [c.skill_id for c in result] == ["finance", "code"]
+    # confidence ∈ [0,1]，且 description 取自 pool（不信模型复述）
+    pool_desc = {e.skill_id: e.description for e in pool}
+    for c in result:
+        assert 0.0 <= c.confidence <= 1.0
+        assert c.description == pool_desc[c.skill_id]
+    # score 直接采用模型给的相关度
+    assert result[0].score == pytest.approx(0.9)
+
+
+async def test_llm_recall_respects_top_k() -> None:
+    """模型返回超过 top_k 个候选 → 截断到 top_k。"""
+    pool = _cn_pool()
+    answer = _json.dumps(
+        [
+            {"skill_id": "finance", "score": 0.9},
+            {"skill_id": "code", "score": 0.8},
+            {"skill_id": "weather", "score": 0.7},
+            {"skill_id": "travel", "score": 0.6},
+        ]
+    )
+    recall = LlmSkillRecall(model_client=_sim_with_text(answer))
+    result = await recall.recall(
+        "全都要", pool, top_k=2, cancel=CancellationToken(name="t")
+    )
+    assert len(result) == 2
+    assert [c.skill_id for c in result] == ["finance", "code"]
+
+
+async def test_llm_recall_drops_out_of_pool_id() -> None:
+    """模型编了池外 id → 该项被丢弃，不进结果、不伪造。"""
+    pool = _cn_pool()
+    answer = _json.dumps(
+        [
+            {"skill_id": "finance", "score": 0.9},
+            {"skill_id": "hallucinated", "score": 0.8},  # 池中不存在
+        ]
+    )
+    recall = LlmSkillRecall(model_client=_sim_with_text(answer))
+    result = await recall.recall(
+        "报销", pool, top_k=4, cancel=CancellationToken(name="t")
+    )
+    ids = [c.skill_id for c in result]
+    assert ids == ["finance"]
+    assert "hallucinated" not in ids
+
+
+async def test_llm_recall_drops_item_missing_score() -> None:
+    """模型某项缺 score 字段 → 丢弃该项（缺字段不伪造默认分）。"""
+    pool = _cn_pool()
+    answer = _json.dumps(
+        [
+            {"skill_id": "finance", "score": 0.9},
+            {"skill_id": "code"},  # 缺 score
+        ]
+    )
+    recall = LlmSkillRecall(model_client=_sim_with_text(answer))
+    result = await recall.recall(
+        "报销代码", pool, top_k=4, cancel=CancellationToken(name="t")
+    )
+    assert [c.skill_id for c in result] == ["finance"]
+
+
+async def test_llm_recall_invalid_json_raises() -> None:
+    """模型返回非法 JSON → 抛 SkillRecallParseError（禁 silent 伪造默认候选）。"""
+    from taifeng.skill.recall import SkillRecallParseError  # noqa: PLC0415
+
+    pool = _cn_pool()
+    recall = LlmSkillRecall(model_client=_sim_with_text("这不是 JSON 而是一段解释"))
+    with pytest.raises(SkillRecallParseError):
+        await recall.recall(
+            "报销", pool, top_k=4, cancel=CancellationToken(name="t")
+        )
+
+
+async def test_llm_recall_json_not_array_raises() -> None:
+    """模型返回合法 JSON 但顶层不是数组 → 抛 SkillRecallParseError。"""
+    from taifeng.skill.recall import SkillRecallParseError  # noqa: PLC0415
+
+    pool = _cn_pool()
+    recall = LlmSkillRecall(model_client=_sim_with_text('{"skill_id": "finance"}'))
+    with pytest.raises(SkillRecallParseError):
+        await recall.recall(
+            "报销", pool, top_k=4, cancel=CancellationToken(name="t")
+        )
+
+
+async def test_llm_recall_empty_pool_returns_empty() -> None:
+    """空池 → 直接返回空列表（不发起 LLM 调用）。"""
+    recall = LlmSkillRecall(model_client=_sim_with_text("[]"))
+    result = await recall.recall(
+        "任意 query", [], top_k=4, cancel=CancellationToken(name="t")
+    )
+    assert result == []
+
+
+async def test_llm_recall_cancel_raises() -> None:
+    """cancel：传入已取消 token → 抛 asyncio.CancelledError（R4 长调用可中断）。"""
+    import asyncio  # noqa: PLC0415
+
+    pool = _cn_pool()
+    recall = LlmSkillRecall(model_client=_sim_with_text("[]"))
+    cancel = CancellationToken(name="t")
+    cancel.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await recall.recall("报销", pool, top_k=4, cancel=cancel)

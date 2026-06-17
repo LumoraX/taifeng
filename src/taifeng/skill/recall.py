@@ -14,16 +14,20 @@ R1 业务零侵入：本模块不含任何业务概念，纯通用 skill 发现�
 """
 from __future__ import annotations
 
+import json
 import math
 import unicodedata
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import anyio.lowlevel
+
+from taifeng.llm.types import ApiMessage, ApiRequest
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from taifeng.llm.client import ModelClient
     from taifeng.loop.cancellation import CancellationToken
 
 
@@ -388,3 +392,239 @@ class KeywordSkillRecall:
 
         # top_k 截断（top_k 可能 ≥ 候选数，切片天然安全）
         return candidates[:top_k]
+
+
+# ----------------------------------------------------------------------------
+# LlmSkillRecall：内核可选注入召回后端（LLM 语义挑选，deferred 实现）
+# ----------------------------------------------------------------------------
+
+# 召回 prompt 要求模型返回 JSON 数组时，每项 score 的合法区间下/上界。
+# 模型给出超界分（如负数或 >1）时按「数据脏」处理——丢弃该项而非裁剪伪造。
+_LLM_SCORE_MIN = 0.0
+_LLM_SCORE_MAX = 1.0
+
+# LlmSkillRecall 的系统指令（中文、要求只输出可解析 JSON、不带任何解释）。
+# 为何这样写：模型一旦夹带散文，json.loads 会失败 → 走显式 SkillRecallParseError，
+# 不静默伪造默认候选（遵循「禁 silent fallback、数据脏走显式错误」原则）。
+_LLM_RECALL_SYSTEM_PROMPT_ZH = (
+    "你是一个 skill 召回器。给定一个查询和一组候选 skill（每个含 skill_id 与"
+    "描述），请据查询语义挑出最相关的若干个 skill，按相关度从高到低排序。\n"
+    "输出要求（必须严格遵守）：\n"
+    "1. 只输出一个 JSON 数组，不要任何解释、前后缀或代码块围栏；\n"
+    '2. 数组每项形如 {"skill_id": "<候选的 skill_id>", "score": <0到1之间的小数>}；\n'
+    "3. skill_id 必须是给定候选里真实存在的 id，不得编造；\n"
+    "4. score 表示相关度，1 最相关、0 最不相关；\n"
+    "5. 最多返回 top_k 个；与查询都不相关时返回空数组 []。"
+)
+
+
+class SkillRecallParseError(Exception):
+    """LlmSkillRecall 无法把模型回答解析为合法召回结果时抛出。
+
+    触发场景：模型返回的文本不是合法 JSON、或顶层不是数组。**禁止**在这些情况下
+    静默伪造默认候选——脏数据一律走显式错误，由调用方决定降级策略（遵循项目
+    「禁 silent fallback」红线）。
+
+    注意：单项级别的脏数据（池外 id、缺/越界 score）按「丢弃该项」处理（见
+    ``LlmSkillRecall._parse_answer`` 注释），不抛本异常——整批可解析、个别项不合法
+    属正常，不应让整次召回失败。
+    """
+
+
+class LlmSkillRecall:
+    """内核可选注入召回后端：起一次性子 LLM 调用，让模型语义挑出 top-K 候选。
+
+    实现 ``SkillRecall`` 协议。这是「LLM 自己找」在 **deferred**（候选装不进入口
+    prompt 的 inline 选择）时的实现——把候选的 ``skill_id + description`` 拼成召回
+    prompt，要求模型据 query 语义选出最相关的若干个并按相关度降序输出 JSON，再解析回
+    ``SkillCandidate`` 列表。
+
+    定位（与 KeywordSkillRecall 平级、可选注入，非默认）：
+        - **非确定性**：底层是 LLM，相同 (query, pool) 不保证相同结果——故**不满足**
+          ``SkillRecall`` 协议 docstring 里「纯函数 / 确定性」那条对纯算法后端的描述。
+          这是 LLM 召回的固有性质，replay / 测试需通过固定 model_client（如 SimClient）
+          脚本化回放来获得确定性。
+        - **pool 须能放进一次 prompt**：本后端把**整个 pool** 列进 prompt。超大 pool
+          （万级 skill）会撑爆 context —— 那种规模应交给向量检索 / 外部 RAG 后端（业务侧
+          实现同协议注入），本后端不做分片 / 召回的召回。
+
+    解析策略（禁 silent fallback）：
+        - 整体非合法 JSON / 顶层非数组 → 抛 ``SkillRecallParseError``（显式失败）。
+        - 单项 ``skill_id`` ∉ pool → 丢弃该项（不伪造、不越权召回池外 skill）。
+        - 单项缺 ``skill_id`` / 缺 ``score`` / ``score`` 非数值或越界 [0,1] → 丢弃该项。
+        - ``description`` 一律取自 pool（不信模型复述），``matched_snippet`` 为 None
+          （LLM 召回无确定的命中片段）。
+        - 结果按模型给出的相关度（score）降序，截断到 top_k。
+
+    参照 codex/claw-code「内核只定协议、实现可选注入」范式；差异：本类用一次性 LLM
+    调用做语义召回，依赖注入的 ``ModelClient`` 由业务侧提供（R1 业务零侵入：不读环境
+    变量、不绑定 provider）。
+    """
+
+    def __init__(self, model_client: ModelClient, *, model: str | None = None) -> None:
+        """构造 LLM 召回后端。
+
+        Args:
+            model_client: 依赖注入的 ModelClient（业务侧构造，决定 provider / 鉴权）。
+            model: 可选模型名覆盖；None 时传给 session 的也是 None，由 client 用其
+                构造时配置的默认模型（对齐 handoff 压缩路径的传参约定）。
+        """
+        self._client = model_client
+        self._model = model
+
+    def _build_request(self, query: str, pool: Sequence[RecallEntry], top_k: int) -> ApiRequest:
+        """把 query + 整个 pool 拼成召回 prompt，构造一次性 ApiRequest。
+
+        Args:
+            query: 召回查询。
+            pool: 召回语料池（已由内核按白名单封闭）。
+            top_k: 返回候选数上界（写进 prompt 提示模型自我约束）。
+
+        Returns:
+            单轮 user 消息的 ApiRequest（无工具、不并行工具调用）。
+        """
+        # 逐条列出候选的 skill_id 与描述，编号便于模型对照（不要求模型回编号、只回 id）
+        lines = [
+            f"{i + 1}. skill_id={e.skill_id} 描述：{e.description}"
+            for i, e in enumerate(pool)
+        ]
+        candidates_block = "\n".join(lines)
+        content = (
+            f"查询：{query}\n\n"
+            f"候选 skill（共 {len(pool)} 个，最多选 top_k={top_k} 个）：\n"
+            f"{candidates_block}"
+        )
+        return ApiRequest(
+            # 空字符串让 provider 用其构造时配置的默认 model（对齐 handoff 压缩路径）
+            model=self._model or "",
+            system_prompt=[_LLM_RECALL_SYSTEM_PROMPT_ZH],
+            messages=[ApiMessage(role="user", content=content)],
+            tools=[],
+            parallel_tool_calls=False,
+        )
+
+    async def _call_llm(self, request: ApiRequest, cancel: CancellationToken) -> str:
+        """发起一次性 LLM 调用，累积并返回完整文本（参照 handoff 压缩的最简范式）。
+
+        Args:
+            request: 召回请求体。
+            cancel: 级联取消 token（R4：长调用可中断，传给 session）。
+
+        Returns:
+            模型回答的完整文本（已 strip）。
+
+        Raises:
+            SkillRecallParseError: provider 在流中 emit error 事件时（召回调用失败）。
+            asyncio.CancelledError: cancel 期间由底层 session 抛出。
+        """
+        text = ""
+        async with self._client.session(cancel=cancel, model=self._model) as session:
+            async for ev in session.stream(request):
+                if ev.kind == "text_delta":
+                    text += str(ev.data.get("text", ""))
+                elif ev.kind == "error":
+                    # provider 侧失败：显式抛错，不静默返回空候选
+                    raise SkillRecallParseError(
+                        f"LLM 召回调用失败：{ev.data.get('message')}"
+                    )
+        return text.strip()
+
+    def _parse_answer(
+        self,
+        answer: str,
+        pool: Sequence[RecallEntry],
+        top_k: int,
+    ) -> list[SkillCandidate]:
+        """把模型回答的 JSON 解析为 SkillCandidate 列表（脏项丢弃、整体失败抛错）。
+
+        Args:
+            answer: 模型回答文本（期望是 JSON 数组）。
+            pool: 召回语料池（用于校验 id ⊆ pool 并取回可信 description）。
+            top_k: 返回候选数上界。
+
+        Returns:
+            按模型给出相关度降序、长度 ≤ top_k 的候选列表。
+
+        Raises:
+            SkillRecallParseError: answer 非合法 JSON、或顶层不是数组。
+        """
+        # 1) 整体解析：非合法 JSON → 显式失败（禁伪造默认候选）
+        try:
+            parsed: Any = json.loads(answer)
+        except json.JSONDecodeError as exc:
+            raise SkillRecallParseError(f"模型回答非合法 JSON：{exc}") from exc
+        if not isinstance(parsed, list):
+            raise SkillRecallParseError(f"模型回答顶层应为 JSON 数组，实得 {type(parsed).__name__}")
+
+        # 2) pool 索引：id → 可信 description（不信模型复述的描述）
+        pool_desc = {e.skill_id: e.description for e in pool}
+
+        # 3) 逐项校验：单项脏数据丢弃，不让整批失败
+        candidates: list[SkillCandidate] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                # 项不是对象 → 丢弃
+                continue
+            skill_id = item.get("skill_id")
+            score = item.get("score")
+            # id 必须是字符串且 ∈ pool（模型编造的池外 id 直接丢弃）
+            if not isinstance(skill_id, str) or skill_id not in pool_desc:
+                continue
+            # score 必须是数值且 ∈ [0,1]（缺字段 / 非数值 / 越界一律丢弃，不伪造默认分）
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                continue
+            score_f = float(score)
+            if not (_LLM_SCORE_MIN <= score_f <= _LLM_SCORE_MAX):
+                continue
+            candidates.append(
+                SkillCandidate(
+                    skill_id=skill_id,
+                    description=pool_desc[skill_id],
+                    score=score_f,
+                    # score 已在 [0,1]，直接作 confidence（语义即「相对置信」）
+                    confidence=score_f,
+                    matched_snippet=None,
+                )
+            )
+
+        # 4) 按模型给出的相关度降序（稳定排序：保留模型原始顺序作同分次序）
+        candidates.sort(key=lambda c: c.score, reverse=True)
+        return candidates[:top_k]
+
+    async def recall(
+        self,
+        query: str,
+        pool: Sequence[RecallEntry],
+        *,
+        top_k: int,
+        cancel: CancellationToken,
+    ) -> list[SkillCandidate]:
+        """据 query 起一次性 LLM 调用，语义挑出 top_k 候选（实现 SkillRecall 协议）。
+
+        流程：空池短路 → 入口 check 取消 → 构造召回 prompt → 一次性 LLM 调用 → 解析
+        JSON → SkillCandidate 列表（脏项丢弃、整体失败抛错）。
+
+        Args:
+            query: 召回查询。
+            pool: 召回语料池（内核已按白名单封闭，模型只能在此池内挑）。
+            top_k: 返回候选数上界。
+            cancel: 级联取消 token；入口与 LLM 调用均传递，长调用可中断（R4）。
+
+        Returns:
+            按相关度降序、长度 ≤ top_k 的候选列表；模型判定全不相关时返回空列表。
+
+        Raises:
+            SkillRecallParseError: 模型回答非合法 JSON / 顶层非数组 / provider 调用失败。
+            asyncio.CancelledError: cancel 已取消时抛出。
+        """
+        # 入口先让出调度点并检查取消，避免已取消仍发起 LLM 调用
+        await anyio.lowlevel.checkpoint()
+        cancel.raise_if_cancelled()
+
+        # 空池短路：无候选可挑，不浪费一次 LLM 调用
+        if not pool:
+            return []
+
+        request = self._build_request(query, pool, top_k)
+        answer = await self._call_llm(request, cancel)
+        return self._parse_answer(answer, pool, top_k)
