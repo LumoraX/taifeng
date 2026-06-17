@@ -86,6 +86,89 @@ def test_loader_parses_requires_and_exposure(tmp_path: Path) -> None:
     assert plain.exposure.model_invocable is True
 
 
+_RECALL_DEFERRED = """---
+name: recall-deferred
+description: 显式声明 deferred 召回
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [plain]
+exposure:
+  child_recall: deferred
+---
+# deferred
+"""
+
+_RECALL_INLINE = """---
+name: recall-inline
+description: 显式声明 inline 召回
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [plain]
+exposure:
+  child_recall: inline
+---
+# inline
+"""
+
+_RECALL_BAD = """---
+name: recall-bad
+description: 非法 child_recall
+version: 1.0.0
+type: atomic
+exposure:
+  child_recall: lazy
+---
+# bad
+"""
+
+
+def test_child_recall_default_is_auto(tmp_path: Path) -> None:
+    """缺 child_recall（甚至缺整个 exposure）→ 默认 ``auto``。"""
+    skills = load_skills_from_dir(_write_skills(tmp_path))
+    # plain 无 exposure 段
+    assert skills["plain"].exposure.child_recall == "auto"
+    # hidden-skill 有 exposure 但无 child_recall 字段
+    assert skills["hidden-skill"].exposure.child_recall == "auto"
+
+
+def test_child_recall_parses_explicit_values(tmp_path: Path) -> None:
+    """显式 inline / deferred / auto 原样解析。"""
+    skills = root = tmp_path / "skills"
+    for name, content in (
+        ("recall-deferred", _RECALL_DEFERRED),
+        ("recall-inline", _RECALL_INLINE),
+        ("plain", _PLAIN),
+    ):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(content, encoding="utf-8")
+    skills = load_skills_from_dir(root)
+    assert skills["recall-deferred"].exposure.child_recall == "deferred"
+    assert skills["recall-inline"].exposure.child_recall == "inline"
+
+
+def test_child_recall_illegal_value_raises(tmp_path: Path) -> None:
+    """非法 child_recall（``lazy``）→ 加载抛 SkillValidationError，禁 silent fallback。"""
+    from taifeng.skill.definition import SkillValidationError
+
+    root = tmp_path / "skills"
+    d = root / "recall-bad"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(_RECALL_BAD, encoding="utf-8")
+
+    with pytest.raises(SkillValidationError) as exc_info:
+        load_skills_from_dir(root)
+    msg = str(exc_info.value)
+    # 异常信息必须含字段名 + 非法值，便于定位
+    assert "child_recall" in msg
+    assert "lazy" in msg
+    assert "recall-bad" in msg
+
+
 def test_is_skill_eligible(tmp_path: Path) -> None:
     skills = load_skills_from_dir(_write_skills(tmp_path))
     jq = skills["needs-jq"]

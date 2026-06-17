@@ -10,11 +10,12 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import yaml
 
 from taifeng.skill.definition import (
+    ChildRecall,
     SkillDefinition,
     SkillExposure,
     SkillRequirements,
@@ -38,6 +39,9 @@ TRUNCATE_SUFFIX = "\n\n[内容已截断，完整文档请参考 references/]"
 
 # Frontmatter 分隔符
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
+
+# child_recall 合法值集合（直接从 ChildRecall Literal 派生，避免魔法值重复）
+_CHILD_RECALL_VALUES: frozenset[str] = frozenset(get_args(ChildRecall))
 
 
 class SkillLoadError(Exception):
@@ -166,9 +170,17 @@ def _build_visibility(
         raise SkillValidationError(
             f"skill {skill_id!r} frontmatter exposure 必须是 mapping"
         )
+    # child_recall 三值枚举校验：缺省回退 auto；非法值必须抛错（禁 silent fallback）
+    raw_recall = raw_exp.get("child_recall", "auto")
+    if raw_recall not in _CHILD_RECALL_VALUES:
+        raise SkillValidationError(
+            f"skill {skill_id!r} frontmatter exposure.child_recall 非法值 "
+            f"{raw_recall!r}，合法值：{sorted(_CHILD_RECALL_VALUES)}"
+        )
     exposure = SkillExposure(
         model_invocable=bool(raw_exp.get("model_invocable", True)),
         user_invocable=bool(raw_exp.get("user_invocable", True)),
+        child_recall=raw_recall,
     )
     return requires, exposure
 

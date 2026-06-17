@@ -17,6 +17,14 @@ if TYPE_CHECKING:
 
 SkillType = Literal["atomic", "composite"]
 SkillSource = Literal["system", "user", "marketplace"]
+ChildRecall = Literal["inline", "deferred", "auto"]
+"""child skill 召回模式（相位 2 deferred 暴露）：
+
+- ``inline``：把 child 列表全塞进 prompt（今天的默认行为）。
+- ``deferred``：child 不塞进 prompt，改走 ``search_skills`` 检索后按需召回。
+- ``auto``：按 child 数量阈值自动在 inline / deferred 间决定（阈值逻辑由
+  prompt 构建侧消费，本层只承载声明）。
+"""
 
 
 class SkillValidationError(ValueError):
@@ -57,6 +65,12 @@ class SkillExposure:
     """是否出现在 ``available_child_skills`` 列表（供 LLM ``call_skill``）。"""
     user_invocable: bool = True
     """是否允许业务侧/用户显式触发（taifeng 不解析，仅原样携带供业务判断）。"""
+    child_recall: ChildRecall = "auto"
+    """该 entry 的 child skill 召回模式（``inline`` / ``deferred`` / ``auto``）。
+
+    默认 ``auto``：由 prompt 构建侧按 child 数量阈值决定是否 deferred 暴露。
+    本层只承载声明，不实现阈值判定（见 ``ChildRecall`` 三值语义）。
+    """
 
 
 @dataclass(frozen=True)
