@@ -22,12 +22,53 @@ R1 业务零侵入：纯通用 skill 可见性原语，不含任何业务概念�
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.eligibility import RuntimeCapabilities
     from taifeng.skill.registry import SkillSnapshot
+
+
+def effective_child_recall(
+    entry: SkillDefinition, *, child_count: int, threshold: int
+) -> Literal["inline", "deferred"]:
+    """裁定 entry 的 child skill 生效召回模式（``inline`` 还是 ``deferred``）。
+
+    这是 **prompt 文本构建** 与 **per-turn 工具裁剪** 共用的**唯一判定**——两侧
+    都调本函数，保证「prompt 是否 inline 列 child」与「是否暴露 ``search_skills``
+    工具」严格一致（否则会出现「prompt 说没列、工具却不给搜」或反之的撕裂）。
+
+    判定规则（基于 ``entry.exposure.child_recall`` 三值声明）：
+    - ``"inline"`` → 强制 ``"inline"``（无论 child 多少，全部内联列出）。
+    - ``"deferred"`` → 强制 ``"deferred"``（无论 child 多少，都走 search_skills 召回）。
+    - ``"auto"`` → 据 ``child_count`` 与 ``threshold`` 比较：``> threshold`` 时
+      ``"deferred"``（child 太多、装不进一次 prompt），否则 ``"inline"``。
+
+    ``child_count`` 应传 **G4 过滤后的可见 child 数**（见 ``visible_child_skills``），
+    与实际会内联 / 召回的池规模一致，而非声明的原始 ``child_skills`` 总数。
+
+    R2 cache 声明：本判定决定 entry **静态 system prompt 形状**（pre-turn 决定、
+    整 turn 稳定），**不是 mid-turn cache 失效**；不返回 ``CompressionResult``。
+    inline / deferred 导致的 cache key 差异是每 skill 的静态属性（同一 entry 跨 turn
+    走同一分支 → prefix 稳定）。
+
+    Args:
+        entry: 当前 caller composite skill（提供 ``exposure.child_recall`` 声明）。
+        child_count: G4 过滤后的可见 child 数（``auto`` 模式下与 threshold 比较）。
+        threshold: ``auto`` 模式下切到 deferred 的 child 数阈值（业务可配，DI 注入）。
+
+    Returns:
+        ``"inline"`` 或 ``"deferred"``——生效的召回模式。
+    """
+    mode = entry.exposure.child_recall
+    # 显式声明优先：inline / deferred 直接锁定，不看 child 数
+    if mode == "inline":
+        return "inline"
+    if mode == "deferred":
+        return "deferred"
+    # auto：child 数超阈值 → deferred（装不进一次 prompt），否则 inline
+    return "deferred" if child_count > threshold else "inline"
 
 
 class VisibleChild(NamedTuple):

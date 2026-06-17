@@ -326,6 +326,11 @@ class TurnRunner:
     # 认知回路 ⑦ 沉淀：单次 skill 执行的战绩判定器（业务可注入覆盖默认结构性判定）
     outcome_judge: Any = None  # OutcomeJudge | None；None → 用 StructuralOutcomeJudge
 
+    # T6 deferred 暴露：auto 模式下「可见 child 数 > 此值」切 deferred 召回（pool 注入，
+    # 业务可配）。同时驱动 system prompt 文本形状 + per-turn search_skills 工具裁剪
+    # （二者经 effective_child_recall 同一判定，保证一致）。默认 50。
+    recall_threshold: int = 50
+
     def __post_init__(self) -> None:
         """兜底注入挂起 id / 时间戳工厂，并初始化当前迭代序号。
 
@@ -355,6 +360,31 @@ class TurnRunner:
             await self.emit(EventMsg(submission_id=self.submission_id, msg=msg))
         except Exception:
             logger.exception("emit failed")
+
+    def _deferred_exposure_active(self) -> bool:
+        """本 entry 是否处于 deferred 召回模式（决定是否暴露 search_skills 工具）。
+
+        与 ``render_system_prompt`` 共用 ``effective_child_recall`` 同一判定（同源），
+        保证「prompt 文本是否列 child」与「per-turn 是否给 search_skills」严格一致。
+        可见 child 数经 ``visible_child_skills`` G4 过滤后统计（与 prompt 同口径）。
+
+        Returns:
+            True → deferred（保留 search_skills 工具）；False → inline（剔除）。
+        """
+        from taifeng.skill.visibility import (
+            effective_child_recall,
+            visible_child_skills,
+        )
+
+        visible = visible_child_skills(
+            self.entry_skill, self.snapshot, self.capabilities
+        )
+        mode = effective_child_recall(
+            self.entry_skill,
+            child_count=len(visible),
+            threshold=self.recall_threshold,
+        )
+        return mode == "deferred"
 
     def _system_retry_pending(self, e: Exception) -> Any:
         """构造 LLM 失败挂起的 SYSTEM_RETRY PendingRequest(policy 裁决 SUSPEND 后用)。
@@ -911,6 +941,17 @@ class TurnRunner:
             if spec is not None:
                 tools.append(spec.to_ref())
 
+        # T6 C3 per-turn 工具裁剪：search_skills 是全局注册的（pool.create），
+        # 但只在 deferred 模式下对本 entry 暴露——inline entry（小白名单 / 显式
+        # inline）不暴露搜索工具（向后兼容：原本就没有 search_skills）。判定走
+        # effective_child_recall（与 system prompt 文本同一真相，保证一致）。
+        if self._deferred_exposure_active():
+            search_spec = self.tool_runtime._registry.get(  # noqa: SLF001
+                "search_skills"
+            )
+            if search_spec is not None:
+                tools.append(search_spec.to_ref())
+
         # G-CACHE：算本轮 prompt 结构指纹 + 归因结构性 cache 失效原因，再更新指纹
         prompt_fingerprint = self._compute_prompt_fingerprint(tools)
         structural_break_reason = self._detect_structural_break_reason(
@@ -934,6 +975,8 @@ class TurnRunner:
             prefetched_memory=self._prefetched_memory or None,
             # reasoning-content-passback:thinking 模型 reasoning 回传开关
             reasoning_passback=self.reasoning_passback,
+            # T6: deferred 暴露阈值（驱动 child 列表 inline / deferred 文本）
+            recall_threshold=self.recall_threshold,
         )
 
         # 审计可观测 层1:request 全文留痕。注入点选在「build 之后、发送 provider
@@ -1754,6 +1797,8 @@ class TurnRunner:
             memory_store=self.memory_store,
             # 认知回路 ⑦：子 turn 继承同一战绩判定器（嵌套派发也按统一判据沉淀）
             outcome_judge=self.outcome_judge,
+            # T6: 子 turn 继承同一 deferred 暴露阈值（整棵 turn 树一致）
+            recall_threshold=self.recall_threshold,
             call_stack=parent_stack,
             history_buffer=[seed],
         )

@@ -170,6 +170,7 @@ class EnginePool:
         skill_recall: SkillRecall | None = None,
         recall_default_top_k: int = 5,
         recall_max_top_k: int = 20,
+        recall_threshold: int = 50,
     ) -> None:
         self._registry = skill_registry
         self._model_client = model_client
@@ -256,9 +257,16 @@ class EnginePool:
                 f"recall_max_top_k ({recall_max_top_k}) must be >= "
                 f"recall_default_top_k ({recall_default_top_k})"
             )
+        if recall_threshold < 0:
+            raise ValueError(
+                f"recall_threshold must be >= 0, got {recall_threshold}"
+            )
         self._skill_recall: SkillRecall = skill_recall or KeywordSkillRecall()
         self._recall_default_top_k = recall_default_top_k
         self._recall_max_top_k = recall_max_top_k
+        # T6 deferred 暴露：auto 模式下「可见 child 数 > 此值」切 deferred 召回，
+        # 透传到每个 AgentEngine → TurnRunner（驱动 prompt 文本 + 工具裁剪）。
+        self._recall_threshold = recall_threshold
 
         self._engines: dict[str, AgentEngine] = {}
         self._engine_tasks: dict[str, asyncio.Task[None]] = {}
@@ -325,6 +333,7 @@ class EnginePool:
         skill_recall: SkillRecall | None = None,
         recall_default_top_k: int = 5,
         recall_max_top_k: int = 20,
+        recall_threshold: int = 50,
     ) -> EnginePool:
         """便捷构造。
 
@@ -435,6 +444,7 @@ class EnginePool:
             skill_recall=resolved_recall,
             recall_default_top_k=recall_default_top_k,
             recall_max_top_k=recall_max_top_k,
+            recall_threshold=recall_threshold,
         )
 
         if auto_watch_skills:
@@ -577,6 +587,7 @@ class EnginePool:
                 memory_query_builder=self._memory_query_builder,
                 pinned_state_sources=self._pinned_state_sources,
                 pinned_total_max_chars=self._pinned_total_max_chars,
+                recall_threshold=self._recall_threshold,
             )
             # 让 engine 能在收到 RefreshSnapshot 时拉最新快照
             engine._registry_ref = self._registry  # type: ignore[attr-defined]
