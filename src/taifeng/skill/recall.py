@@ -241,7 +241,10 @@ def _make_snippet(description: str, query_tokens: list[str]) -> str | None:
 
 
 class KeywordSkillRecall:
-    """内核默认召回后端：零依赖、确定性的关键词召回（BM25 风格饱和打分）。
+    """内核自带的**可选**召回后端：零依赖、确定性的关键词召回（BM25 风格饱和打分）。
+
+    注：内核**默认**召回是 inline（``skill_recall=None`` → LLM 从上下文全列自己选）；
+    本类与 ``LlmSkillRecall`` / 业务 RAG 同为**业务显式注入**的可换后端，非默认。
 
     实现 ``SkillRecall`` 协议。打分采用**标准 BM25 公式**（idf 加权 + tf 饱和 + 长度
     饱和归一），对每个 query 词累加：
