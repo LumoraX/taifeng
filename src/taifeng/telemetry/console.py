@@ -43,6 +43,9 @@ _KIND_TAG = {
     # 认知回路 ⑦ 沉淀：子 skill 终态战绩记账（R3 审计补：此前落 `?` 兜底）。
     # 灰色 ▦ —— 旁路记账（不进 LLM 视图），与 skill 派发/回流的流程事件区分
     "skill_outcome_recorded": ("skil", _Colors.GRAY, "▦"),
+    # 相位 2 skill 发现/召回：检索发起 ⌕ / 候选返回 ▤（蓝色 —— 信息流，非拦截）
+    "skill_search_invoked": ("srch", _Colors.BLUE, "⌕"),
+    "skill_candidates_returned": ("cand", _Colors.BLUE, "▤"),
     "orchestration_plan_resolved": ("plan", _Colors.MAGENTA, "≡"),
     "orchestration_condition_missing": ("plan", _Colors.RED, "✗"),
     "tool_batch_dispatched": ("tool", _Colors.YELLOW, "⇉"),
@@ -148,6 +151,15 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
             f" via={data.get('outcome_signal_source')} origin={data.get('selection_origin')}"
             f" cost(tok={data.get('cost_tokens')},it={data.get('cost_iterations')})"
         )
+    elif ev.msg.kind == "skill_search_invoked":
+        # 召回检索发起：查询文本 + 请求候选上限 + 被检索池规模
+        parts.append(
+            f"query={_short(data.get('query', ''), 40)!r} "
+            f"top_k={data.get('top_k')} pool={data.get('pool_size')}"
+        )
+    elif ev.msg.kind == "skill_candidates_returned":
+        # 召回结果：返回候选数 + 候选 skill_id 列表（按相关度排序）
+        parts.append(f"count={data.get('count')} top_ids={data.get('top_ids')}")
     elif ev.msg.kind == "compaction_started":
         parts.append(f"phase={data.get('phase')} strategy={data.get('strategy')} tokens={data.get('token_estimate')}")
     elif ev.msg.kind == "compaction_completed":

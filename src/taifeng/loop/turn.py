@@ -326,6 +326,11 @@ class TurnRunner:
     # 认知回路 ⑦ 沉淀：单次 skill 执行的战绩判定器（业务可注入覆盖默认结构性判定）
     outcome_judge: Any = None  # OutcomeJudge | None；None → 用 StructuralOutcomeJudge
 
+    # T6 deferred 暴露：auto 模式下「可见 child 数 > 此值」切 deferred 召回（pool 注入，
+    # 业务可配）。同时驱动 system prompt 文本形状 + per-turn search_skills 工具裁剪
+    # （二者经 effective_child_recall 同一判定，保证一致）。默认 50。
+    recall_threshold: int = 50
+
     def __post_init__(self) -> None:
         """兜底注入挂起 id / 时间戳工厂，并初始化当前迭代序号。
 
@@ -345,6 +350,14 @@ class TurnRunner:
 
         self._outcome_judge = self.outcome_judge or StructuralOutcomeJudge()
         self._current_iteration = 0
+        # 召回溯源映射（T7 相位 2 连回 v1 战绩沉淀）：skill_id → (origin, confidence)。
+        # 本 turn 内每次 search_skills 工具完成时按返回候选登记，供 _spawn_sub_runner
+        # 构造 SkillExecutionRecord 时判定 selection_origin/selection_confidence。
+        # **C5 语义**：这是 TurnRunner turn 内态、**不持久化**——跨 turn / 冷 resume
+        # （新 TurnRunner 实例）后该映射为空，相应 call 退化为 v1 的 whitelist/None
+        # （明确语义、非 bug）。origin 恒为 "discovered"（C1：发现来源用既有 Literal
+        # 的 "discovered"，严禁写入 "search"，会撞 SelectionOrigin 校验）。
+        self._selection_trace: dict[str, tuple[Literal["discovered"], float]] = {}
         # DenialBreaker 实例在 run() 起点按 config 新建（turn 级生命周期）
         self._denial_breaker: DenialBreaker | None = None
         # DoomLoopDetector 实例同样在 run() 起点按 config 新建（turn 级生命周期）
@@ -355,6 +368,31 @@ class TurnRunner:
             await self.emit(EventMsg(submission_id=self.submission_id, msg=msg))
         except Exception:
             logger.exception("emit failed")
+
+    def _deferred_exposure_active(self) -> bool:
+        """本 entry 是否处于 deferred 召回模式（决定是否暴露 search_skills 工具）。
+
+        与 ``render_system_prompt`` 共用 ``effective_child_recall`` 同一判定（同源），
+        保证「prompt 文本是否列 child」与「per-turn 是否给 search_skills」严格一致。
+        可见 child 数经 ``visible_child_skills`` G4 过滤后统计（与 prompt 同口径）。
+
+        Returns:
+            True → deferred（保留 search_skills 工具）；False → inline（剔除）。
+        """
+        from taifeng.skill.visibility import (
+            effective_child_recall,
+            visible_child_skills,
+        )
+
+        visible = visible_child_skills(
+            self.entry_skill, self.snapshot, self.capabilities
+        )
+        mode = effective_child_recall(
+            self.entry_skill,
+            child_count=len(visible),
+            threshold=self.recall_threshold,
+        )
+        return mode == "deferred"
 
     def _system_retry_pending(self, e: Exception) -> Any:
         """构造 LLM 失败挂起的 SYSTEM_RETRY PendingRequest(policy 裁决 SUSPEND 后用)。
@@ -911,6 +949,21 @@ class TurnRunner:
             if spec is not None:
                 tools.append(spec.to_ref())
 
+        # T6 C3 per-turn 工具裁剪：search_skills 是全局注册的（pool.create），
+        # 但只在 deferred 模式下对本 entry 暴露——inline entry（小白名单 / 显式
+        # inline）不暴露搜索工具（向后兼容：原本就没有 search_skills）。判定走
+        # effective_child_recall（与 system prompt 文本同一真相，保证一致）。
+        if self._deferred_exposure_active():
+            search_spec = self.tool_runtime._registry.get(  # noqa: SLF001
+                "search_skills"
+            )
+            # M1 去重：若作者在 SKILL.md tool_names 已显式声明 search_skills，
+            # 上面的可见工具循环已把它加进来，这里不能再无条件 append（否则同名
+            # 工具在 per-turn 清单里出现两次）。按已加入的工具名集合去重。
+            already_added = {ref.name for ref in tools}
+            if search_spec is not None and "search_skills" not in already_added:
+                tools.append(search_spec.to_ref())
+
         # G-CACHE：算本轮 prompt 结构指纹 + 归因结构性 cache 失效原因，再更新指纹
         prompt_fingerprint = self._compute_prompt_fingerprint(tools)
         structural_break_reason = self._detect_structural_break_reason(
@@ -934,6 +987,8 @@ class TurnRunner:
             prefetched_memory=self._prefetched_memory or None,
             # reasoning-content-passback:thinking 模型 reasoning 回传开关
             reasoning_passback=self.reasoning_passback,
+            # T6: deferred 暴露阈值（驱动 child 列表 inline / deferred 文本）
+            recall_threshold=self.recall_threshold,
         )
 
         # 审计可观测 层1:request 全文留痕。注入点选在「build 之后、发送 provider
@@ -1239,6 +1294,10 @@ class TurnRunner:
         - refund：spec 静态声明 ``refunds_iteration`` 且本次**成功** → 外层迭代
           预算退还一步（失败轮照常计费；不暴露为 LLM 可触发语义）。
         """
+        # T7 召回溯源：search_skills 成功完成 → 把返回候选登记进 turn 内溯源映射，
+        # 供后续 call_skill 派发时判定 discovered。只对 search_skills 做，别误伤其他工具。
+        if name == "search_skills" and not result.is_error:
+            self._register_selection_trace(result.output)
         deny_reason = result.data.get("reason") if result.is_error else None
         if self._denial_breaker is not None:
             if deny_reason in ("hook_denied", "permission_denied"):
@@ -1262,6 +1321,47 @@ class TurnRunner:
             spec = self.tool_runtime.spec_for(name)
             if spec is not None and spec.refunds_iteration:
                 self.iteration_budget.refund(1)
+
+    def _register_selection_trace(self, search_output: str) -> None:
+        """解析 search_skills 返回的候选 JSON，登记进 turn 内召回溯源映射（T7）。
+
+        把每个候选 ``(skill_id → ("discovered", confidence))`` 写入
+        ``self._selection_trace``，供 ``_spawn_sub_runner`` 据派发目标 id 判定
+        ``selection_origin``/``selection_confidence``。
+
+        覆盖语义：同一 skill_id 后到的召回**覆盖**先到的——最近一次召回的 confidence
+        与「LLM 当前据以决定 call_skill」最相关，故取最新。
+
+        容错：search_skills handler 产出的是 ``json.dumps(payload)``（list[dict]，每项
+        含 ``skill_id``/``confidence``）。这里只在结构符合预期时登记；结构异常（坏 JSON /
+        非 list / 缺字段）跳过该项即可——溯源是 best-effort 增益，缺失只是退化为
+        whitelist/None，不影响派发主流程（非 silent fallback：不伪造默认 confidence，
+        缺字段就不登记，让其走 v1 行为）。
+
+        Args:
+            search_output: search_skills 工具的成功 ``ToolResult.output``（候选 JSON 串）。
+        """
+        try:
+            candidates = json.loads(search_output)
+        except json.JSONDecodeError:
+            # 坏 JSON：search_skills 正常路径不会产生，但工具被业务替换 / mock 时可能；
+            # 溯源跳过即可（退化 whitelist），不阻断派发
+            logger.warning("search_skills output not valid JSON, skip trace")
+            return
+        if not isinstance(candidates, list):
+            return
+        for cand in candidates:
+            # 候选项必须是含 skill_id(str) + confidence(数值) 的 dict，否则跳过该项
+            if not isinstance(cand, dict):
+                continue
+            skill_id = cand.get("skill_id")
+            confidence = cand.get("confidence")
+            if not isinstance(skill_id, str) or not isinstance(
+                confidence, (int, float)
+            ):
+                continue
+            # 同 skill_id 覆盖：最近一次召回的 confidence 更贴合 LLM 当前决策
+            self._selection_trace[skill_id] = ("discovered", float(confidence))
 
     async def _inject_doom_loop_notice(self, snap: dict[str, Any]) -> None:
         """doom-loop 先警：往 history 尾追一条**中性事实**（不含产品意见，R1）。
@@ -1293,6 +1393,8 @@ class TurnRunner:
             extras={
                 "skill_snapshot": self.snapshot,
                 "visible_skills": self.snapshot.reachable_from(self.entry_skill.id),
+                # search_skills 据此施加 G4a requires 过滤（与 inline 列表同源同过滤）
+                "capabilities": self.capabilities,
                 "dispatch_policy": self.dispatch_policy,
                 "call_stack": self.call_stack,
                 "current_skill": self.entry_skill,
@@ -1752,6 +1854,8 @@ class TurnRunner:
             memory_store=self.memory_store,
             # 认知回路 ⑦：子 turn 继承同一战绩判定器（嵌套派发也按统一判据沉淀）
             outcome_judge=self.outcome_judge,
+            # T6: 子 turn 继承同一 deferred 暴露阈值（整棵 turn 树一致）
+            recall_threshold=self.recall_threshold,
             call_stack=parent_stack,
             history_buffer=[seed],
         )
@@ -1803,6 +1907,7 @@ class TurnRunner:
         from taifeng.conversation.models import skill_outcome_item
         from taifeng.loop.event import SkillOutcomeRecorded
         from taifeng.skill.outcome import (
+            SelectionOrigin,
             SkillExecutionContext,
             SkillExecutionRecord,
         )
@@ -1818,6 +1923,14 @@ class TurnRunner:
         # 其 .call_id == ctx.call_id（本次执行），其 .parent_call_id 才是【调用方】的
         # call_id（root 派发时为 None）——这正是记录要的 parent_call_id。
         _self_frame = parent_stack.current
+        # T7 召回溯源：若本 turn 内 target 曾被 search_skills 召回选中（命中 turn 内
+        # 溯源映射）→ 记 discovered + 该候选 confidence；否则保持 v1 行为 whitelist/None。
+        # C5：映射是 turn 内态、不持久化，跨 turn / 冷 resume 后退化为 whitelist/None。
+        _traced = self._selection_trace.get(target.id)
+        _selection_origin: SelectionOrigin = (
+            _traced[0] if _traced is not None else "whitelist"
+        )
+        _selection_confidence = _traced[1] if _traced is not None else None
         _record = SkillExecutionRecord(
             skill_id=target.id,
             call_id=ctx.call_id,
@@ -1825,9 +1938,9 @@ class TurnRunner:
             depth=parent_stack.depth,
             source=target.source,
             trust_tier=None,  # v1 留空；来源信任分层在后续相位填
-            # v1 全部经 call_skill 白名单派发 → 恒 whitelist/None；发现相位再填 discovered/分数
-            selection_origin="whitelist",
-            selection_confidence=None,
+            # 经 search_skills 召回派发 → discovered + confidence；否则 v1 的 whitelist/None
+            selection_origin=_selection_origin,
+            selection_confidence=_selection_confidence,
             outcome=_verdict.status,
             outcome_signal_source=_verdict.signal_source,
             end_reason=outcome.end_reason,

@@ -45,6 +45,8 @@ Later ADRs:
 19. [ADR 0016: Cold rewind rebuild](decisions/0016-cold-rewind-rebuild.md).
 20. [ADR 0017: Kernel positioning criteria](decisions/0017-kernel-positioning-criteria.md).
 21. [ADR 0018: Thread-addressable rewind](decisions/0018-thread-addressable-rewind.md).
+22. [ADRs 0019-0022](decisions/): post-turn hook, budget-awareness hint, doom-loop detection, and reusable approval grants.
+23. [ADR 0023: Skill discovery via search](decisions/0023-skill-discovery-via-search.md): deferred exposure, whitelist-scoped recall, and confidence-as-data.
 
 ### Fourth Pass: Gap Tracking
 

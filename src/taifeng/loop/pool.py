@@ -24,11 +24,13 @@ from taifeng.llm.client import ModelClient
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
 from taifeng.skill.dispatch import DispatchPolicy
+from taifeng.skill.recall import KeywordSkillRecall, SkillRecall
 from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry
 from taifeng.tool.builtins import (
     make_call_skill_tool,
     make_read_skill_tool,
     make_run_script_tool,
+    make_search_skills_tool,
 )
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
@@ -165,6 +167,10 @@ class EnginePool:
         memory_query_builder: Any = None,
         pinned_state_sources: list[Any] | None = None,
         pinned_total_max_chars: int = 8000,
+        skill_recall: SkillRecall | None = None,
+        recall_default_top_k: int = 5,
+        recall_max_top_k: int = 20,
+        recall_threshold: int = 50,
     ) -> None:
         self._registry = skill_registry
         self._model_client = model_client
@@ -240,6 +246,27 @@ class EnginePool:
         # postcompact-state-reinjection：pinned 源列表 + 总预算，透传到 AgentEngine
         self._pinned_state_sources: list[Any] = list(pinned_state_sources or [])
         self._pinned_total_max_chars = pinned_total_max_chars
+        # 相位 2 skill 召回：可插拔后端（None → 内核默认 KeywordSkillRecall）+ top_k 边界。
+        # 默认值在此一处兜底，search_skills 工具全局无条件注册（每 entry 暴露裁剪是 T6）。
+        if recall_default_top_k < 1:
+            raise ValueError(
+                f"recall_default_top_k must be positive, got {recall_default_top_k}"
+            )
+        if recall_max_top_k < recall_default_top_k:
+            raise ValueError(
+                f"recall_max_top_k ({recall_max_top_k}) must be >= "
+                f"recall_default_top_k ({recall_default_top_k})"
+            )
+        if recall_threshold < 0:
+            raise ValueError(
+                f"recall_threshold must be >= 0, got {recall_threshold}"
+            )
+        self._skill_recall: SkillRecall = skill_recall or KeywordSkillRecall()
+        self._recall_default_top_k = recall_default_top_k
+        self._recall_max_top_k = recall_max_top_k
+        # T6 deferred 暴露：auto 模式下「可见 child 数 > 此值」切 deferred 召回，
+        # 透传到每个 AgentEngine → TurnRunner（驱动 prompt 文本 + 工具裁剪）。
+        self._recall_threshold = recall_threshold
 
         self._engines: dict[str, AgentEngine] = {}
         self._engine_tasks: dict[str, asyncio.Task[None]] = {}
@@ -303,6 +330,10 @@ class EnginePool:
         memory_query_builder: Any = None,
         pinned_state_sources: list[Any] | None = None,
         pinned_total_max_chars: int = 8000,
+        skill_recall: SkillRecall | None = None,
+        recall_default_top_k: int = 5,
+        recall_max_top_k: int = 20,
+        recall_threshold: int = 50,
     ) -> EnginePool:
         """便捷构造。
 
@@ -347,10 +378,22 @@ class EnginePool:
             inner=store, runner=hook_runner, directory=directory
         )
 
+        # 相位 2 召回后端：在此一处解析默认值，工具注册与构造函数复用同一实例，
+        # 避免构造函数再 new 一个不同实例（工具持的 recall 必须与 pool 记录的一致）。
+        resolved_recall: SkillRecall = skill_recall or KeywordSkillRecall()
+
         tools = ToolRegistry()
         tools.register(make_read_skill_tool())
         tools.register(make_call_skill_tool())
         tools.register(make_run_script_tool())
+        # search_skills：相位 2 deferred 召回入口，全局无条件注册（每 entry 暴露裁剪是 T6）
+        tools.register(
+            make_search_skills_tool(
+                resolved_recall,
+                default_top_k=recall_default_top_k,
+                max_top_k=recall_max_top_k,
+            )
+        )
         for t in extra_tools or []:
             tools.register(t)
 
@@ -398,6 +441,10 @@ class EnginePool:
             memory_query_builder=memory_query_builder,
             pinned_state_sources=pinned_state_sources,
             pinned_total_max_chars=pinned_total_max_chars,
+            skill_recall=resolved_recall,
+            recall_default_top_k=recall_default_top_k,
+            recall_max_top_k=recall_max_top_k,
+            recall_threshold=recall_threshold,
         )
 
         if auto_watch_skills:
@@ -540,6 +587,7 @@ class EnginePool:
                 memory_query_builder=self._memory_query_builder,
                 pinned_state_sources=self._pinned_state_sources,
                 pinned_total_max_chars=self._pinned_total_max_chars,
+                recall_threshold=self._recall_threshold,
             )
             # 让 engine 能在收到 RefreshSnapshot 时拉最新快照
             engine._registry_ref = self._registry  # type: ignore[attr-defined]

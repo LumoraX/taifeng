@@ -19,14 +19,17 @@ if TYPE_CHECKING:
     from taifeng.skill.eligibility import RuntimeCapabilities
     from taifeng.skill.registry import SkillSnapshot
 
+# default 召回阈值（child 数 > 此值时 auto 模式切 deferred）。turn 层会用 pool
+# 注入的 recall_threshold 覆盖；这里仅作 render_system_prompt 缺省参数兜底，保证
+# 直接调用（如单测 / 老调用方）行为稳定（小白名单恒走 inline，向后兼容）。
+DEFAULT_RECALL_THRESHOLD = 50
+
 SKILLS_INSTRUCTIONS_HEADER = """<entry_skill id="{id}" name="{name}">
 {body}
 </entry_skill>
 
 <available_child_skills>
-You can invoke these child skills via `call_skill(skill_id, args)`:
-
-{child_lines}
+{child_block}
 </available_child_skills>
 
 <dispatch_policy>
@@ -35,6 +38,22 @@ You can invoke these child skills via `call_skill(skill_id, args)`:
 - 禁止循环调用（环检测会自动拒绝）
 - 不可调用其他 entry skill
 </dispatch_policy>"""
+
+# inline 模式：逐一列出 child（id + description）供 LLM 直接 call_skill。
+_INLINE_CHILD_BLOCK = """You can invoke these child skills via `call_skill(skill_id, args)`:
+
+{child_lines}"""
+
+# deferred 模式：child 太多、不在此逐一列出，改提示用 search_skills 按需召回。
+# N=G4 过滤后的可见 child 数（让 LLM 知道池子有多大）。
+# 提示词写法经真实 A/B 验证（docs 台账 + examples/real_llm/skill_select）：内核默认召回是
+# 关键词匹配，故须显式引导 LLM 把口语意图转译成「关键词 query」并在没命中时改词重搜——
+# 否则口语直喂会召不中。这是通用 prompt engineering（ReAct 循环），不含任何业务概念（R1）。
+_DEFERRED_CHILD_BLOCK = """子 skill 较多（共 {child_count} 个），未逐一列出，需用 search_skills 主动发现。按以下循环：
+1. 思考：当前子任务需要"什么能力"？列出能力关键词 + 同义词（多词覆盖近义说法）。
+2. 行动：search_skills(query=这些关键词，不要照抄用户原话的口语复述)。
+3. 观察+反思：读候选 description / confidence；若无贴切候选或 confidence 普遍偏低，换一组关键词再 search。
+4. 选定后立即用 call_skill(skill_id, args) 派发，不要停在检索。"""
 
 
 def _render_instructions_block(instructions: list[ResolvedInstruction]) -> str:
@@ -63,38 +82,59 @@ def render_system_prompt(
     snapshot: SkillSnapshot,
     instructions: list[ResolvedInstruction] | None = None,
     capabilities: RuntimeCapabilities | None = None,
+    *,
+    recall_threshold: int = DEFAULT_RECALL_THRESHOLD,
 ) -> str:
-    """生成入口 system prompt。
+    """生成入口 system prompt（只管文本，不碰 per-turn tools 列表）。
 
     - 若 ``instructions`` 非空，先按 priority 升序输出多个 ``<system_instructions>`` 块
     - 之后是 entry skill body 完整注入
-    - 子 skill 列表（仅 id + description）注入；G4 过滤：``model_invocable=False``
-      或（提供 ``capabilities`` 时）``requires`` 不满足的子 skill 不进列表
-    - 不注入子 skill body（由 LLM 通过 ``read_skill`` 按需取）
+    - ``available_child_skills`` 块按生效召回模式（见
+      ``skill.visibility.effective_child_recall``）二选一：
+        * **inline**：逐一列子 skill（仅 id + description）供 LLM 直接 call_skill；
+        * **deferred**：不列 child，改提示用 ``search_skills`` 按需召回后再 call_skill。
+    - 两条分支共用 ``visible_child_skills`` 做 G4 过滤（``model_invocable=False`` 或
+      ``requires`` 不满足的子 skill 不进列表 / 不计入召回池规模），与 deferred 召回池
+      **同源同过滤**（消除双实现漂移）。
+    - 不注入子 skill body（由 LLM 通过 ``read_skill`` / 召回后 call_skill 按需取）
+
+    R2 cache 声明：inline / deferred 由 ``effective_child_recall`` 在 **pre-turn**
+    据 entry 静态声明 + 可见 child 数裁定，整 turn 稳定——这是 system prompt 的**静态
+    形状差异**（每 skill 属性），**不是 mid-turn cache 失效**，故本函数不返回
+    ``CompressionResult``。同一 entry 跨 turn 走同一分支 → 缓存前缀稳定。
+
+    Args:
+        recall_threshold: ``auto`` 模式下切到 deferred 的可见 child 数阈值
+            （业务可配，turn 层用 pool 注入值覆盖默认）。
 
     spec Requirement: 装配顺序 = system_instructions → entry_skill →
     available_child_skills → dispatch_policy。``instructions=None`` 或空时
     SHALL 不出现 ``<system_instructions>`` 子串（向后兼容）。
     """
-    from taifeng.skill.eligibility import is_skill_eligible
+    from taifeng.skill.visibility import (
+        effective_child_recall,
+        visible_child_skills,
+    )
 
-    child_lines: list[str] = []
-    for child_id in sorted(entry.child_skills):
-        child = snapshot.get(child_id)
-        if child is None:
-            continue
-        # G4b：对模型隐藏的 skill 不进列表
-        if not child.exposure.model_invocable:
-            continue
-        # G4a：提供运行时能力快照时，过滤不满足 requires 的 skill
-        if capabilities is not None and not is_skill_eligible(child, capabilities):
-            continue
-        child_lines.append(f"- `{child.id}`: {child.description}")
+    # 单一真相：inline / deferred 两条路径同源同过滤，得到可见 child 列表
+    visible = visible_child_skills(entry, snapshot, capabilities)
+    mode = effective_child_recall(
+        entry, child_count=len(visible), threshold=recall_threshold
+    )
+    if mode == "deferred":
+        # deferred：不列 child，提示用 search_skills 召回（N=可见 child 数）
+        child_block = _DEFERRED_CHILD_BLOCK.format(child_count=len(visible))
+    else:
+        # inline：逐字保持「- `id`: desc」格式（向后兼容，现有 prompt 测试不变）
+        child_lines = [f"- `{v.skill_id}`: {v.description}" for v in visible]
+        child_block = _INLINE_CHILD_BLOCK.format(
+            child_lines="\n".join(child_lines) if child_lines else "  (none)"
+        )
     body = SKILLS_INSTRUCTIONS_HEADER.format(
         id=entry.id,
         name=entry.name,
         body=entry.body,
-        child_lines="\n".join(child_lines) if child_lines else "  (none)",
+        child_block=child_block,
         max_depth=entry.max_call_depth,
     )
     if instructions:
@@ -251,9 +291,14 @@ def build_api_request(
     capabilities: RuntimeCapabilities | None = None,
     prefetched_memory: str | None = None,
     reasoning_passback: bool = True,
+    recall_threshold: int = DEFAULT_RECALL_THRESHOLD,
 ) -> ApiRequest:
     system_prompt = render_system_prompt(
-        entry, snapshot, instructions=instructions, capabilities=capabilities
+        entry,
+        snapshot,
+        instructions=instructions,
+        capabilities=capabilities,
+        recall_threshold=recall_threshold,
     )
     messages, source_indexes = _convert_history(
         history, include_reasoning=reasoning_passback
