@@ -413,6 +413,12 @@ class EnginePool:
         if resolved_recall is None and enable_auto_discovery:
             resolved_recall = LlmSkillRecall(model_client)
 
+        # verifier 同口径解析（与 __init__ 一致）：显式注入优先；没注入且开总闸 →
+        # 自动兜底 LlmSkillVerifier。把同一实例透给 search_skills 工具，让召回后接精验。
+        resolved_verifier: SkillVerifier | None = skill_verifier
+        if resolved_verifier is None and enable_auto_discovery:
+            resolved_verifier = LlmSkillVerifier(model_client)
+
         tools = ToolRegistry()
         tools.register(make_read_skill_tool())
         tools.register(make_call_skill_tool())
@@ -426,6 +432,7 @@ class EnginePool:
                     resolved_recall,
                     default_top_k=recall_default_top_k,
                     max_top_k=recall_max_top_k,
+                    verifier=resolved_verifier,
                 )
             )
         for t in extra_tools or []:

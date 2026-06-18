@@ -88,6 +88,7 @@ MsgKind = Literal[
     # 相位 2：skill 发现/召回（search_skills 工具打点，R3 可观测）
     "skill_search_invoked",
     "skill_candidates_returned",
+    "skill_candidates_verified",
 ]
 
 
@@ -197,6 +198,18 @@ class SkillCandidatesReturned(_Msg):
     """
 
     kind: Literal["skill_candidates_returned"] = "skill_candidates_returned"
+
+
+class SkillCandidatesVerified(_Msg):
+    """相位 2 验证：search_skills 召回后做完输入要求适配精验时打点（认知回路：精验）。
+
+    data = {"verified_count": int, "dropped_count": int}
+    - verified_count: 验证通过（applicable=True）保留的候选数
+    - dropped_count: 被验证滤掉的候选数（= 召回数 - 验证通过数；含「描述像但输入要求不满足」与无 body 的误召）
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["skill_candidates_verified"] = "skill_candidates_verified"
 
 
 class SkillSpawnRejected(_Msg):
@@ -793,6 +806,7 @@ Msg = Union[
     SkillOutcomeRecorded,
     SkillSearchInvoked,
     SkillCandidatesReturned,
+    SkillCandidatesVerified,
     SkillSpawnRejected,
     ResourceLimitExceeded,
     DenialCircuitOpen,

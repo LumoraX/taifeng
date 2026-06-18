@@ -46,6 +46,8 @@ _KIND_TAG = {
     # 相位 2 skill 发现/召回：检索发起 ⌕ / 候选返回 ▤（蓝色 —— 信息流，非拦截）
     "skill_search_invoked": ("srch", _Colors.BLUE, "⌕"),
     "skill_candidates_returned": ("cand", _Colors.BLUE, "▤"),
+    # 召回后精验：保留/滤掉计数（蓝色 ▣ —— 信息流，区分召回 ▤）
+    "skill_candidates_verified": ("vrfy", _Colors.BLUE, "▣"),
     "orchestration_plan_resolved": ("plan", _Colors.MAGENTA, "≡"),
     "orchestration_condition_missing": ("plan", _Colors.RED, "✗"),
     "tool_batch_dispatched": ("tool", _Colors.YELLOW, "⇉"),
@@ -160,6 +162,11 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
     elif ev.msg.kind == "skill_candidates_returned":
         # 召回结果：返回候选数 + 候选 skill_id 列表（按相关度排序）
         parts.append(f"count={data.get('count')} top_ids={data.get('top_ids')}")
+    elif ev.msg.kind == "skill_candidates_verified":
+        # 精验结果：验证通过保留数 + 被滤掉数（描述像但输入要求不满足 / 无 body 的误召）
+        parts.append(
+            f"verified={data.get('verified_count')} dropped={data.get('dropped_count')}"
+        )
     elif ev.msg.kind == "compaction_started":
         parts.append(f"phase={data.get('phase')} strategy={data.get('strategy')} tokens={data.get('token_estimate')}")
     elif ev.msg.kind == "compaction_completed":

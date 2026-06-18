@@ -44,14 +44,19 @@ def _mk_skill(
     entry: bool = False,
     exposure: SkillExposure | None = None,
     requires: SkillRequirements | None = None,
+    body: str = "",
 ) -> SkillDefinition:
-    """造一个 SkillDefinition stub（test minimal）。"""
+    """造一个 SkillDefinition stub（test minimal）。
+
+    Args:
+        body: 完整 SKILL.md 正文，验证阶段经 get_body 取用，默认空串。
+    """
     return SkillDefinition(
         id=sid,
         name=sid,
         description=description or f"skill {sid}",
         version="1",
-        body="",
+        body=body,
         body_path=Path("/tmp") / sid,
         type="composite" if (child or entry) else "atomic",
         entry=entry,
@@ -347,3 +352,302 @@ async def test_pool_from_child_skills_not_reachable() -> None:
     assert rec.seen_pool is not None
     pool_ids = {e.skill_id for e in rec.seen_pool}
     assert pool_ids == {"direct"}  # 仅 child_skills，不含 grandchild / entry 自身
+
+
+# ====================================================================
+# 验证段测试 fixtures（假 recall + 假 verifier，脱离真实 LLM）
+# ====================================================================
+
+
+class _StubRecall:
+    """返回固定候选列表的召回 stub —— 把验证段输入钉死，便于断言路由。"""
+
+    def __init__(self, candidates: list[SkillCandidate]) -> None:
+        self._candidates = candidates
+
+    async def recall(
+        self,
+        query: str,
+        pool: Any,
+        *,
+        top_k: int,
+        cancel: CancellationToken,
+    ) -> list[SkillCandidate]:
+        return list(self._candidates)
+
+
+class _StubVerifier:
+    """把指定 skill_id 标 applicable 的验证 stub；记录收到的 body 供断言。"""
+
+    def __init__(self, applicable_ids: set[str]) -> None:
+        self._applicable_ids = applicable_ids
+        # 记录 verify 实际收到的 (skill_id -> body)，供 get_body 取道断言
+        self.seen_bodies: dict[str, str | None] = {}
+
+    async def verify(
+        self,
+        task: str,
+        candidates: Any,
+        *,
+        get_body: Any,
+        cancel: CancellationToken,
+    ) -> list[Any]:
+        from taifeng.skill.verify import VerifiedCandidate
+
+        results: list[VerifiedCandidate] = []
+        for c in candidates:
+            self.seen_bodies[c.skill_id] = get_body(c.skill_id)
+            if c.skill_id in self._applicable_ids:
+                results.append(
+                    VerifiedCandidate(
+                        skill_id=c.skill_id,
+                        description=c.description,
+                        recall_confidence=c.confidence,
+                        applicable=True,
+                        # 验证置信故意与召回置信不同，便于断言键名取的是 verify 值
+                        verify_confidence=0.91,
+                        reason=f"{c.skill_id} 输入要求满足",
+                    )
+                )
+        return results
+
+
+def _mk_candidate(sid: str, *, confidence: float = 0.5) -> SkillCandidate:
+    """造一条召回候选 stub（recall 阶段置信，与 verify 置信区分）。"""
+    return SkillCandidate(
+        skill_id=sid,
+        description=f"skill {sid} 描述",
+        score=confidence * 10,
+        confidence=confidence,
+        matched_snippet="片段",
+    )
+
+
+# ====================================================================
+# 7. 启用验证：只返回 applicable 的、键名 confidence=verify_confidence、含 reason
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_verify_returns_only_applicable_with_verify_confidence() -> None:
+    """注入假 recall（2 候选）+ 假 verifier（标 1 个 applicable）→ 只返回该候选，
+    confidence 键值=verify_confidence、带 reason、不带 matched_snippet。"""
+    children = {
+        "good": _mk_skill("good", description="可用技能", body="正文 good"),
+        "bad": _mk_skill("bad", description="不适用技能", body="正文 bad"),
+    }
+    caller = _mk_skill("entry", child=frozenset(children), entry=True)
+    snap = _make_snapshot([caller, *children.values()])
+    recall = _StubRecall([_mk_candidate("good"), _mk_candidate("bad")])
+    verifier = _StubVerifier(applicable_ids={"good"})
+    tool = make_search_skills_tool(
+        recall, default_top_k=5, max_top_k=20, verifier=verifier
+    )
+
+    r = await tool.handler(
+        {"query": "找可用技能"}, _make_ctx(snapshot=snap, caller=caller)
+    )
+    assert not r.is_error
+    payload = json.loads(r.output)
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    item = payload[0]
+    assert item["skill_id"] == "good"
+    # 键名仍是 confidence，但值是 verify_confidence（0.91），不是召回的 0.5
+    assert item["confidence"] == pytest.approx(0.91)
+    assert item["reason"] == "good 输入要求满足"
+    # 启用验证后不再外露 matched_snippet
+    assert "matched_snippet" not in item
+
+
+# ====================================================================
+# 8. 全不 applicable / 召回空 → 显式 no_match 信号
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_verify_all_inapplicable_returns_no_match() -> None:
+    """召回有候选但验证全不适用 → 返回 {"no_match": true, "hint": ...} 显式信号。"""
+    child = _mk_skill("c1", description="技能", body="正文 c1")
+    caller = _mk_skill("entry", child=frozenset({"c1"}), entry=True)
+    snap = _make_snapshot([caller, child])
+    recall = _StubRecall([_mk_candidate("c1")])
+    verifier = _StubVerifier(applicable_ids=set())  # 全不适用
+    tool = make_search_skills_tool(
+        recall, default_top_k=5, max_top_k=20, verifier=verifier
+    )
+
+    r = await tool.handler(
+        {"query": "找技能"}, _make_ctx(snapshot=snap, caller=caller)
+    )
+    payload = json.loads(r.output)
+    assert isinstance(payload, dict)
+    assert payload["no_match"] is True
+    assert isinstance(payload["hint"], str) and payload["hint"]
+
+
+@pytest.mark.asyncio
+async def test_verify_empty_recall_returns_no_match() -> None:
+    """召回本就空 → 同样返回显式 no_match 信号（不返回空数组伪装）。"""
+    child = _mk_skill("c1", description="技能", body="正文 c1")
+    caller = _mk_skill("entry", child=frozenset({"c1"}), entry=True)
+    snap = _make_snapshot([caller, child])
+    recall = _StubRecall([])  # 召回空
+    verifier = _StubVerifier(applicable_ids=set())
+    tool = make_search_skills_tool(
+        recall, default_top_k=5, max_top_k=20, verifier=verifier
+    )
+
+    r = await tool.handler(
+        {"query": "找技能"}, _make_ctx(snapshot=snap, caller=caller)
+    )
+    payload = json.loads(r.output)
+    assert payload["no_match"] is True
+
+
+# ====================================================================
+# 9. emit skill_candidates_verified（verified_count / dropped_count）
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_emits_verified_event() -> None:
+    """启用验证时发射 skill_candidates_verified，带 verified/dropped 计数。"""
+    children = {
+        "good": _mk_skill("good", description="可用", body="正文 good"),
+        "bad": _mk_skill("bad", description="不适用", body="正文 bad"),
+    }
+    caller = _mk_skill("entry", child=frozenset(children), entry=True)
+    snap = _make_snapshot([caller, *children.values()])
+    recall = _StubRecall([_mk_candidate("good"), _mk_candidate("bad")])
+    verifier = _StubVerifier(applicable_ids={"good"})
+    disp = _FakeDispatcher()
+    tool = make_search_skills_tool(
+        recall, default_top_k=5, max_top_k=20, verifier=verifier
+    )
+
+    await tool.handler(
+        {"query": "找可用"},
+        _make_ctx(snapshot=snap, caller=caller, dispatcher=disp),
+    )
+    kinds = disp.kinds()
+    assert "skill_candidates_verified" in kinds
+    verified_ev = next(
+        e.msg for e in disp.emitted if e.msg.kind == "skill_candidates_verified"
+    )
+    # 召回 2、验证通过 1 → dropped=1
+    assert verified_ev.data["verified_count"] == 1
+    assert verified_ev.data["dropped_count"] == 1
+
+
+# ====================================================================
+# 10. verifier is None → 保持现状（返回召回候选，不验证）
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_verifier_none_keeps_recall_shape() -> None:
+    """不注入 verifier → 返回召回候选（含 matched_snippet，confidence=召回置信）。"""
+    child = _mk_skill("c1", description="技能", body="正文 c1")
+    caller = _mk_skill("entry", child=frozenset({"c1"}), entry=True)
+    snap = _make_snapshot([caller, child])
+    recall = _StubRecall([_mk_candidate("c1", confidence=0.5)])
+    tool = make_search_skills_tool(recall, default_top_k=5, max_top_k=20)
+
+    r = await tool.handler(
+        {"query": "找技能"}, _make_ctx(snapshot=snap, caller=caller)
+    )
+    payload = json.loads(r.output)
+    assert len(payload) == 1
+    item = payload[0]
+    # 未验证：保留召回置信 + matched_snippet，不带 reason
+    assert item["confidence"] == pytest.approx(0.5)
+    assert "matched_snippet" in item
+    assert "reason" not in item
+
+
+# ====================================================================
+# 11. get_body 经 snapshot 取到完整 body
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_body_from_snapshot() -> None:
+    """verifier 经 get_body 收到的 body 是 snapshot 里定义的完整 body。"""
+    child = _mk_skill("c1", description="技能", body="完整 SKILL.md 正文 c1")
+    caller = _mk_skill("entry", child=frozenset({"c1"}), entry=True)
+    snap = _make_snapshot([caller, child])
+    recall = _StubRecall([_mk_candidate("c1")])
+    verifier = _StubVerifier(applicable_ids={"c1"})
+    tool = make_search_skills_tool(
+        recall, default_top_k=5, max_top_k=20, verifier=verifier
+    )
+
+    await tool.handler(
+        {"query": "找技能"}, _make_ctx(snapshot=snap, caller=caller)
+    )
+    # verifier 应通过 get_body 取到 snapshot 里 c1 的完整 body
+    assert verifier.seen_bodies["c1"] == "完整 SKILL.md 正文 c1"
+
+
+# ====================================================================
+# 12. cancel 在 recall 与 verify 之间传播
+# ====================================================================
+
+
+class _CancelBetweenRecall:
+    """recall 返回候选前先取消 token —— 让 recall 与 verify 之间的 check 命中。"""
+
+    def __init__(self, candidates: list[SkillCandidate], cancel: CancellationToken) -> None:
+        self._candidates = candidates
+        self._cancel = cancel
+
+    async def recall(
+        self,
+        query: str,
+        pool: Any,
+        *,
+        top_k: int,
+        cancel: CancellationToken,
+    ) -> list[SkillCandidate]:
+        # 模拟 recall 成功返回，但随后链路被取消（如用户中断）
+        self._cancel.cancel()
+        return list(self._candidates)
+
+
+class _NeverCalledVerifier:
+    """若被调用即断言失败 —— 验证 cancel 在 recall 与 verify 间已拦住。"""
+
+    async def verify(
+        self,
+        task: str,
+        candidates: Any,
+        *,
+        get_body: Any,
+        cancel: CancellationToken,
+    ) -> list[Any]:
+        raise AssertionError("cancel 后不应进入 verify")
+
+
+@pytest.mark.asyncio
+async def test_cancel_between_recall_and_verify() -> None:
+    """recall 后 token 已取消 → 在 verify 前抛 CancelledError，verifier 不被调用。"""
+    import asyncio
+
+    child = _mk_skill("c1", description="技能", body="正文 c1")
+    caller = _mk_skill("entry", child=frozenset({"c1"}), entry=True)
+    snap = _make_snapshot([caller, child])
+    cancel = CancellationToken()
+    recall = _CancelBetweenRecall([_mk_candidate("c1")], cancel)
+    tool = make_search_skills_tool(
+        recall,
+        default_top_k=5,
+        max_top_k=20,
+        verifier=_NeverCalledVerifier(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await tool.handler(
+            {"query": "找技能"},
+            _make_ctx(snapshot=snap, caller=caller, cancel=cancel),
+        )
