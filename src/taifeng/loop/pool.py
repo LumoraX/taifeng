@@ -487,7 +487,9 @@ class EnginePool:
             recall_max_top_k=recall_max_top_k,
             recall_threshold=recall_threshold,
             enable_auto_discovery=enable_auto_discovery,
-            skill_verifier=skill_verifier,
+            # 传已解析的 verifier（与上方 skill_recall=resolved_recall 对称，
+            # 避免 __init__ 二次兜底/字段口径漂移；M1 修复）
+            skill_verifier=resolved_verifier,
         )
 
         if auto_watch_skills:
