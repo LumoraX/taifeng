@@ -24,7 +24,8 @@ from taifeng.llm.client import ModelClient
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
 from taifeng.skill.dispatch import DispatchPolicy
-from taifeng.skill.recall import SkillRecall
+from taifeng.skill.recall import LlmSkillRecall, SkillRecall
+from taifeng.skill.verify import LlmSkillVerifier, SkillVerifier
 from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry
 from taifeng.tool.builtins import (
     make_call_skill_tool,
@@ -171,6 +172,8 @@ class EnginePool:
         recall_default_top_k: int = 5,
         recall_max_top_k: int = 20,
         recall_threshold: int = 50,
+        enable_auto_discovery: bool = False,
+        skill_verifier: SkillVerifier | None = None,
     ) -> None:
         self._registry = skill_registry
         self._model_client = model_client
@@ -265,8 +268,25 @@ class EnginePool:
             raise ValueError(
                 f"recall_threshold must be >= 0, got {recall_threshold}"
             )
-        # None 允许：无后端即 inline（不兜底关键词，见上）
-        self._skill_recall: SkillRecall | None = skill_recall
+        # 自动发现 opt-in 总闸：默认 False = 现状不变（None=inline 零 LLM 成本）。
+        # 开 = 业务没显式注入 recall / verifier 时，自动兜底 LLM 实现，让 deferred
+        # 自动发现回路开箱即用。**不改 None 语义本身**——None 仍是「无显式后端」，
+        # 只是「无显式后端 + 开了总闸」时自动补 LlmSkillRecall（见下方解析）。
+        self._enable_auto_discovery = enable_auto_discovery
+        # 后端解析（总闸语义）：
+        #   ① 显式注入 skill_recall → 用它（业务注入优先，不被总闸覆盖）；
+        #   ② 没注入但开了总闸 → 自动兜底 LlmSkillRecall（LLM 语义召回）；
+        #   ③ 没注入也没开 → None=inline（现状，LLM 从 prompt 全列自己找）。
+        resolved_recall: SkillRecall | None = skill_recall
+        if resolved_recall is None and enable_auto_discovery:
+            resolved_recall = LlmSkillRecall(self._model_client)
+        self._skill_recall: SkillRecall | None = resolved_recall
+        # verifier 同口径解析：显式注入优先；没注入且开总闸 → 自动 LlmSkillVerifier。
+        # 本任务只解析并存字段供 TC（接进 search handler 是 TC，不在此任务范围）。
+        resolved_verifier: SkillVerifier | None = skill_verifier
+        if resolved_verifier is None and enable_auto_discovery:
+            resolved_verifier = LlmSkillVerifier(self._model_client)
+        self._skill_verifier_resolved: SkillVerifier | None = resolved_verifier
         self._recall_default_top_k = recall_default_top_k
         self._recall_max_top_k = recall_max_top_k
         # T6 deferred 暴露：auto 模式下「可见 child 数 > 此值」切 deferred 召回，
@@ -339,6 +359,8 @@ class EnginePool:
         recall_default_top_k: int = 5,
         recall_max_top_k: int = 20,
         recall_threshold: int = 50,
+        enable_auto_discovery: bool = False,
+        skill_verifier: SkillVerifier | None = None,
     ) -> EnginePool:
         """便捷构造。
 
@@ -383,9 +405,19 @@ class EnginePool:
             inner=store, runner=hook_runner, directory=directory
         )
 
-        # 相位 2 召回后端：**不兜底**——None 即 inline（LLM 自己找，见 __init__ 注释）。
-        # 工具注册与构造函数复用同一实例，避免两处持不同 recall 实例。
+        # 相位 2 召回后端解析（与 __init__ 同口径，见 enable_auto_discovery 总闸注释）：
+        # 显式注入优先；没注入且开了总闸 → 自动兜底 LlmSkillRecall；都没有 → None=inline。
+        # 在此解析是因为 search_skills 工具注册条件依赖 resolved_recall，且要把同一实例
+        # 透给构造函数，避免「工具持一个实例、构造函数另一个」漂移。
         resolved_recall: SkillRecall | None = skill_recall
+        if resolved_recall is None and enable_auto_discovery:
+            resolved_recall = LlmSkillRecall(model_client)
+
+        # verifier 同口径解析（与 __init__ 一致）：显式注入优先；没注入且开总闸 →
+        # 自动兜底 LlmSkillVerifier。把同一实例透给 search_skills 工具，让召回后接精验。
+        resolved_verifier: SkillVerifier | None = skill_verifier
+        if resolved_verifier is None and enable_auto_discovery:
+            resolved_verifier = LlmSkillVerifier(model_client)
 
         tools = ToolRegistry()
         tools.register(make_read_skill_tool())
@@ -400,6 +432,7 @@ class EnginePool:
                     resolved_recall,
                     default_top_k=recall_default_top_k,
                     max_top_k=recall_max_top_k,
+                    verifier=resolved_verifier,
                 )
             )
         for t in extra_tools or []:
@@ -453,6 +486,10 @@ class EnginePool:
             recall_default_top_k=recall_default_top_k,
             recall_max_top_k=recall_max_top_k,
             recall_threshold=recall_threshold,
+            enable_auto_discovery=enable_auto_discovery,
+            # 传已解析的 verifier（与上方 skill_recall=resolved_recall 对称，
+            # 避免 __init__ 二次兜底/字段口径漂移；M1 修复）
+            skill_verifier=resolved_verifier,
         )
 
         if auto_watch_skills:
@@ -598,7 +635,14 @@ class EnginePool:
                 recall_threshold=self._recall_threshold,
                 # 召回后端是否注入：驱动 effective_child_recall 的 inline/deferred 门控
                 # （无后端 → 恒 inline，即便 child 很多也不走 deferred）。
-                has_recall_backend=self._skill_recall is not None,
+                # 总闸语义扩展：开 enable_auto_discovery 后 _skill_recall 已被自动兜底
+                # 为 LlmSkillRecall（非 None），故 `_skill_recall is not None` 即为真；
+                # 显式 `or self._enable_auto_discovery` 把意图写明（即便未来兜底实现变动
+                # 也保证开总闸 → has_recall_backend=True → auto 超阈值自动 deferred、
+                # 且显式 deferred 不再因「无后端」抛错）。
+                has_recall_backend=(
+                    self._skill_recall is not None or self._enable_auto_discovery
+                ),
             )
             # 让 engine 能在收到 RefreshSnapshot 时拉最新快照
             engine._registry_ref = self._registry  # type: ignore[attr-defined]

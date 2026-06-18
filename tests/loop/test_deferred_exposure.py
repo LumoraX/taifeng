@@ -71,11 +71,13 @@ async def _offered_tools(
     *,
     recall_threshold: int,
     skill_recall: SkillRecall | None = None,
+    enable_auto_discovery: bool = False,
 ) -> set[str]:
     """跑一个 turn，返回本轮请求真实暴露的 tool 名集（SimClient ledger）。
 
     ``skill_recall`` 默认 None = 无召回后端 = inline（设计稿默认，不暴露 search）；
-    需要 deferred / search_skills 生效的用例须显式注入后端。
+    需要 deferred / search_skills 生效的用例须显式注入后端，或开 ``enable_auto_discovery``
+    总闸让 None 自动兜底 LlmSkillRecall。
     """
     client = SimClient(turns=[SimTurn(text="完成")])
     pool = await taifeng.EnginePool.create(
@@ -85,6 +87,7 @@ async def _offered_tools(
         compressors=[],
         recall_threshold=recall_threshold,
         skill_recall=skill_recall,
+        enable_auto_discovery=enable_auto_discovery,
     )
     try:
         engine = await pool.get_or_create(
@@ -328,5 +331,126 @@ async def test_deferred_without_backend_fails_turn(tmp_path: Path) -> None:
                 break
         # 显式 deferred 无后端：禁静默降级 → turn 失败而非 inline 完成
         assert kinds[-1] == "turn_failed"
+    finally:
+        await pool.close()
+
+
+# ── enable_auto_discovery 总闸：None + 开总闸 → 自动兜底 LlmSkillRecall ──────────
+
+
+async def test_auto_discovery_above_threshold_offers_search(tmp_path: Path) -> None:
+    """开 enable_auto_discovery + 无显式注入 + auto entry child > threshold → deferred。
+
+    总闸开后 has_recall_backend=True（None 自动兜底 LlmSkillRecall），auto 模式超阈值
+    自动切 deferred，per-turn 工具含 search_skills（无需业务显式注入任何后端）。
+    """
+    skills = _write_entry_with_children(tmp_path, child_recall=None, n_children=4)
+    tools = await _offered_tools(
+        skills,
+        tmp_path / "threads",
+        recall_threshold=2,
+        enable_auto_discovery=True,
+    )
+    assert "search_skills" in tools
+
+
+async def test_auto_discovery_below_threshold_still_inline(tmp_path: Path) -> None:
+    """开 enable_auto_discovery + auto entry child <= threshold → 仍 inline。
+
+    总闸只是放开「允许走 deferred」，不强制——auto 模式仍按阈值裁定，child 数不超阈值
+    时保持 inline，不暴露 search_skills。
+    """
+    skills = _write_entry_with_children(tmp_path, child_recall=None, n_children=3)
+    tools = await _offered_tools(
+        skills,
+        tmp_path / "threads",
+        recall_threshold=50,
+        enable_auto_discovery=True,
+    )
+    assert "search_skills" not in tools
+    assert "read_skill" in tools
+    assert "call_skill" in tools
+
+
+async def test_auto_discovery_deferred_small_entry_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    """开 enable_auto_discovery + 显式 child_recall: deferred 小 entry → deferred，不抛错。
+
+    总闸提供自动兜底后端 → has_recall_backend=True → 显式 deferred 不再因「无后端」抛
+    SkillValidationError，turn 正常完成并暴露 search_skills。
+    """
+    skills = _write_entry_with_children(
+        tmp_path, child_recall="deferred", n_children=2
+    )
+    tools = await _offered_tools(
+        skills,
+        tmp_path / "threads",
+        recall_threshold=50,
+        enable_auto_discovery=True,
+    )
+    assert "search_skills" in tools
+
+
+async def test_auto_discovery_off_explicit_deferred_no_backend_still_raises(
+    tmp_path: Path,
+) -> None:
+    """关 enable_auto_discovery（默认）+ 显式 deferred 无注入 → 仍抛 → turn 失败。
+
+    现状不变：总闸默认关时，显式 deferred 且无显式注入 → effective_child_recall 抛
+    SkillValidationError（禁静默降级），被 turn 主循环捕获为 turn_failed。
+    """
+    skills = _write_entry_with_children(
+        tmp_path, child_recall="deferred", n_children=2
+    )
+    client = SimClient(turns=[SimTurn(text="完成")])
+    # enable_auto_discovery 默认 False，且不注入 skill_recall
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills,
+        threads_dir=tmp_path / "threads",
+        model_client=client,
+        compressors=[],
+        recall_threshold=50,
+    )
+    try:
+        engine = await pool.get_or_create(
+            session_id="s", entry_skill_id="orchestrator"
+        )
+        sub = await engine.submit(taifeng.UserMessage(text="开始"))
+        kinds: list[str] = []
+        async for ev in engine.subscribe(sub):
+            kinds.append(ev.msg.kind)
+            if ev.msg.kind in ("turn_completed", "turn_failed"):
+                break
+        assert kinds[-1] == "turn_failed"
+    finally:
+        await pool.close()
+
+
+async def test_auto_discovery_resolves_llm_recall_and_verifier(
+    tmp_path: Path,
+) -> None:
+    """pool 解析：enable_auto_discovery=True + skill_recall=None →
+    resolved_recall 是 LlmSkillRecall 实例、resolved_verifier 是 LlmSkillVerifier 实例。
+
+    断言两个自动兜底实例的类型，验证总闸真把 None 解析成 LLM 默认后端 / 验证器，
+    且存到 pool 实例字段（_skill_recall / _skill_verifier_resolved）供 TC 接进 search。
+    """
+    from taifeng.skill.recall import LlmSkillRecall
+    from taifeng.skill.verify import LlmSkillVerifier
+
+    skills = _write_entry_with_children(tmp_path, child_recall=None, n_children=3)
+    client = SimClient(turns=[SimTurn(text="完成")])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills,
+        threads_dir=tmp_path / "threads",
+        model_client=client,
+        compressors=[],
+        enable_auto_discovery=True,
+    )
+    try:
+        # 总闸开 + 无显式注入 → 两个字段都被自动兜底为对应 LLM 实现
+        assert isinstance(pool._skill_recall, LlmSkillRecall)  # noqa: SLF001
+        assert isinstance(pool._skill_verifier_resolved, LlmSkillVerifier)  # noqa: SLF001
     finally:
         await pool.close()

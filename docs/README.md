@@ -47,6 +47,7 @@ Later ADRs:
 21. [ADR 0018: Thread-addressable rewind](decisions/0018-thread-addressable-rewind.md).
 22. [ADRs 0019-0022](decisions/): post-turn hook, budget-awareness hint, doom-loop detection, and reusable approval grants.
 23. [ADR 0023: Skill discovery via search](decisions/0023-skill-discovery-via-search.md): deferred exposure, whitelist-scoped recall, and confidence-as-data.
+24. [ADR 0024: Skill recall/verify pipeline](decisions/0024-skill-recall-verify-pipeline.md) (Amends #0023): opt-in auto-discovery toggle, plus a post-recall verification gate judging input-requirement fit.
 
 ### Fourth Pass: Gap Tracking
 

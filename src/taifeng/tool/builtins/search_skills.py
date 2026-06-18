@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from taifeng.skill.eligibility import RuntimeCapabilities
     from taifeng.skill.recall import SkillRecall
     from taifeng.skill.registry import SkillSnapshot
+    from taifeng.skill.verify import SkillVerifier
 
 
 async def _emit_event(ctx: ToolContext, kind: str, data: dict[str, Any]) -> None:
@@ -44,7 +45,8 @@ async def _emit_event(ctx: ToolContext, kind: str, data: dict[str, Any]) -> None
 
     Args:
         ctx: 工具上下文（从 extras 取 dispatcher）。
-        kind: 事件 kind（``skill_search_invoked`` / ``skill_candidates_returned``）。
+        kind: 事件 kind（``skill_search_invoked`` / ``skill_candidates_returned`` /
+            ``skill_candidates_verified``）。
         data: 事件 data 负载。
     """
     dispatcher = ctx.extras.get("dispatcher")
@@ -52,11 +54,16 @@ async def _emit_event(ctx: ToolContext, kind: str, data: dict[str, Any]) -> None
         # 无 dispatcher（如单测直接调 handler）：可观测打点降级为 noop，不影响召回
         return
     # 延迟 import 防止 tool → loop 的 import 期循环依赖
-    from taifeng.loop.event import SkillCandidatesReturned, SkillSearchInvoked
+    from taifeng.loop.event import (
+        SkillCandidatesReturned,
+        SkillCandidatesVerified,
+        SkillSearchInvoked,
+    )
 
     msg_cls_map: dict[str, type] = {
         "skill_search_invoked": SkillSearchInvoked,
         "skill_candidates_returned": SkillCandidatesReturned,
+        "skill_candidates_verified": SkillCandidatesVerified,
     }
     cls = msg_cls_map.get(kind)
     if cls is None:
@@ -98,9 +105,22 @@ def _clamp_top_k(raw: Any, *, default_top_k: int, max_top_k: int) -> int:
 
 
 def _make_search_skills_handler(
-    recall: SkillRecall, *, default_top_k: int, max_top_k: int
+    recall: SkillRecall,
+    *,
+    default_top_k: int,
+    max_top_k: int,
+    verifier: SkillVerifier | None = None,
 ) -> Any:
-    """闭包出 search_skills handler，捕获注入的召回后端与 top_k 边界。"""
+    """闭包出 search_skills handler，捕获注入的召回后端、top_k 边界与（可选）验证后端。
+
+    Args:
+        recall: 召回后端，据 query 在白名单池内排名出候选。
+        default_top_k: LLM 未指定 top_k 时的默认返回候选数。
+        max_top_k: top_k 钳制上界。
+        verifier: 可选验证后端；非 None 时在召回后追加一道「输入要求适配」精验，
+            并据验证结果做置信路由（仅返回 applicable 候选 / 全空则显式 no_match）。
+            None 时退化为旧行为（直接透召回候选，不验证）。
+    """
 
     async def _handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         """search_skills handler —— 构召回池 → 召回 → 透候选给 LLM。"""
@@ -147,26 +167,85 @@ def _make_search_skills_handler(
         # ---- 调召回后端（白名单封闭由内核钉死：pool 即可召回的全集）----
         candidates = await recall.recall(query, pool, top_k=top_k, cancel=ctx.cancel)
 
-        # ---- 可观测：返回候选打点 ----
+        # ---- 可观测：返回候选打点（召回数，无论是否启用验证都打）----
         await _emit_event(
             ctx,
             "skill_candidates_returned",
             {"count": len(candidates), "top_ids": [c.skill_id for c in candidates]},
         )
 
-        # ---- 透候选给 LLM：不外露 score（仅审计/内部），保留 confidence ----
+        # ---- 未启用验证：保持现状，直接透召回候选（含 matched_snippet）----
+        if verifier is None:
+            # 不外露 score（仅审计/内部），保留 confidence=召回置信
+            payload = [
+                {
+                    "skill_id": c.skill_id,
+                    "description": c.description,
+                    "confidence": c.confidence,
+                    "matched_snippet": c.matched_snippet,
+                }
+                for c in candidates
+            ]
+            return ToolResult.ok(
+                json.dumps(payload, ensure_ascii=False),
+                candidate_count=len(candidates),
+            )
+
+        # ---- 启用验证：召回与 verify 之间再 check 取消（R4：长链路尽早中断）----
+        ctx.cancel.raise_if_cancelled()
+
+        # body 取道唯一经 get_body：按 skill_id 从 snapshot 取完整 SKILL.md body；
+        # snapshot 取不到该 id（或定义无 body）返回 None，由 verifier 按不适用处理。
+        def _get_body(sid: str) -> str | None:
+            definition = snapshot.get(sid)
+            if definition is None:
+                return None
+            return definition.body
+
+        # 据完整 body 做输入要求适配精验，返回**仅 applicable=True** 的候选
+        verified = await verifier.verify(
+            query, candidates, get_body=_get_body, cancel=ctx.cancel
+        )
+
+        # ---- 可观测：验证结果打点（保留数 + 滤掉数 = 召回数 - 验证通过数）----
+        dropped_count = len(candidates) - len(verified)
+        await _emit_event(
+            ctx,
+            "skill_candidates_verified",
+            {"verified_count": len(verified), "dropped_count": dropped_count},
+        )
+
+        # ---- 置信路由（禁 silent fallback）----
+        if not verified:
+            # 召回了但全不适用（或召回本就空）→ 显式 no_match 信号，不返回空数组伪装
+            return ToolResult.ok(
+                json.dumps(
+                    {
+                        "no_match": True,
+                        "hint": (
+                            "未找到输入要求匹配的 skill，请换关键词重试或细化任务描述"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                candidate_count=0,
+            )
+
+        # 有 applicable 候选 → 透给 LLM。键名沿用 confidence（值=verify_confidence），
+        # 保 confidence 键名不变以免打断 turn 溯源的自然读取；不再带 matched_snippet
+        # （验证启用时以验证结果为准）。
         payload = [
             {
-                "skill_id": c.skill_id,
-                "description": c.description,
-                "confidence": c.confidence,
-                "matched_snippet": c.matched_snippet,
+                "skill_id": v.skill_id,
+                "description": v.description,
+                "confidence": v.verify_confidence,
+                "reason": v.reason,
             }
-            for c in candidates
+            for v in verified
         ]
         return ToolResult.ok(
             json.dumps(payload, ensure_ascii=False),
-            candidate_count=len(candidates),
+            candidate_count=len(verified),
         )
 
     return _handler
@@ -196,7 +275,11 @@ SEARCH_SKILLS_SCHEMA = {
 
 
 def make_search_skills_tool(
-    recall: SkillRecall, *, default_top_k: int, max_top_k: int
+    recall: SkillRecall,
+    *,
+    default_top_k: int,
+    max_top_k: int,
+    verifier: SkillVerifier | None = None,
 ) -> ToolSpec:
     """构造 search_skills 工具规范（相位 2 deferred 召回入口）。
 
@@ -205,6 +288,9 @@ def make_search_skills_tool(
             无默认、须显式注入。
         default_top_k: LLM 未指定 top_k 时的默认返回候选数。
         max_top_k: top_k 钳制上界（防一次召回过多撑爆 context）。
+        verifier: 可选验证后端；非 None 时在召回后追加一道输入要求适配精验并据结果
+            做置信路由（仅返回 applicable 候选 / 全空显式 no_match）。None 时退化为
+            直接透召回候选。
 
     Returns:
         ``search_skills`` ToolSpec：``parallel_safe=True``（只读 snapshot + 召回）。
@@ -219,7 +305,10 @@ def make_search_skills_tool(
         ),
         input_schema=SEARCH_SKILLS_SCHEMA,
         handler=_make_search_skills_handler(
-            recall, default_top_k=default_top_k, max_top_k=max_top_k
+            recall,
+            default_top_k=default_top_k,
+            max_top_k=max_top_k,
+            verifier=verifier,
         ),
         parallel_safe=True,  # 只读 snapshot + 召回，安全并行
         timeout_seconds=10.0,
