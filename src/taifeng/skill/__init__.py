@@ -35,6 +35,12 @@ from taifeng.skill.recall import (
     SkillRecallParseError,
 )
 from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry, SkillSnapshot
+from taifeng.skill.verify import (
+    LlmSkillVerifier,
+    SkillVerifier,
+    SkillVerifyParseError,
+    VerifiedCandidate,
+)
 from taifeng.skill.visibility import VisibleChild, visible_child_skills
 from taifeng.skill.watcher import SkillFileWatcher
 
@@ -47,6 +53,7 @@ __all__ = [
     "FilesystemSkillRegistry",
     "KeywordSkillRecall",
     "LlmSkillRecall",
+    "LlmSkillVerifier",
     "RecallEntry",
     "SkillCandidate",
     "SkillFileWatcher",
@@ -58,7 +65,10 @@ __all__ = [
     "SkillSnapshot",
     "SkillType",
     "SkillValidationError",
+    "SkillVerifier",
+    "SkillVerifyParseError",
     "UnknownChildSkill",
+    "VerifiedCandidate",
     "VisibleChild",
     "visible_child_skills",
     "compute_reachable_graph",

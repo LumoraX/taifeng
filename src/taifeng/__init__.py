@@ -150,6 +150,12 @@ from taifeng.skill.scripts import (
     ScriptResult,
     ShellScriptExecutor,
 )
+from taifeng.skill.verify import (
+    LlmSkillVerifier,
+    SkillVerifier,
+    SkillVerifyParseError,
+    VerifiedCandidate,
+)
 from taifeng.suspend import (
     PendingRequest,
     ResolveError,
@@ -259,6 +265,10 @@ __all__ = [
     "RecallEntry",
     "KeywordSkillRecall",
     "LlmSkillRecall",
+    "SkillVerifier",
+    "SkillVerifyParseError",
+    "VerifiedCandidate",
+    "LlmSkillVerifier",
     "SlidingWindowStrategy",
     "PinnedStateRegistry",
     "PinnedStateSource",
