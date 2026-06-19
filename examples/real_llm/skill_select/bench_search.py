@@ -50,6 +50,7 @@ import taifeng  # noqa: E402
 from taifeng.context.budget import ContextBudget  # noqa: E402
 from taifeng.permission.policy import PermissionPolicy  # noqa: E402
 from taifeng.skill.recall import KeywordSkillRecall  # noqa: E402
+from taifeng.skill.verify import LlmSkillVerifier  # noqa: E402
 
 # 与 bench.py 一致的领域归类 + 叶子渲染（复用同目录 build_skills，避免重复实现）
 from build_skills import _leaf_md, _load_entries  # noqa: E402
@@ -125,11 +126,12 @@ def _build_search_skills_tree(dest: Path) -> tuple[int, list[dict]]:
 
 async def _select_one(
     pool: object, idx: int, task: str, timeout: float
-) -> tuple[str | None, bool]:
-    """提交一条 task 给召回 router，捕获最终 call_skill 的 skill_id + 是否调过 search_skills。
+) -> tuple[str | None, bool, int, bool]:
+    """提交一条 task 给召回 router，捕获最终 call_skill 的 skill_id + 召回/验证统计。
 
     与 bench.py 的 ``_select_one`` 区别：deferred 流是两步（search → call），故这里要
-    等到 ``call_skill`` 的 tool_call_started 才算选定，并顺带记录是否先发生过 search_skills。
+    等到 ``call_skill`` 的 tool_call_started 才算选定，并顺带记录是否先发生过 search_skills；
+    开了验证（--verify）时还从 ``skill_candidates_verified`` 事件累计「验证滤除数」与是否出现「全不适用(no_match)」。
 
     Args:
         pool: EnginePool 实例。
@@ -138,7 +140,7 @@ async def _select_one(
         timeout: 单任务超时秒。
 
     Returns:
-        (选中的 skill_id 或 None, 是否调用过 search_skills)。
+        (选中的 skill_id 或 None, 是否调用过 search_skills, 验证滤除候选总数, 是否出现过 no_match)。
         None 表示模型最终没发出 call_skill（拒答 / 只搜不调 / 只输出文本）。
     """
     engine = await pool.get_or_create(  # type: ignore[attr-defined]
@@ -146,13 +148,20 @@ async def _select_one(
     )
     selected: str | None = None
     searched = False
+    dropped = 0          # 验证阶段滤除的候选累计（dropped_count 之和）
+    had_no_match = False  # 是否至少一次验证后全不适用（verified_count==0）
     done = asyncio.Event()
 
     async def watch() -> None:
-        nonlocal selected, searched
+        nonlocal selected, searched, dropped, had_no_match
         async for ev in engine.subscribe_all():  # type: ignore[attr-defined]
             kind = ev.msg.kind
-            if kind == "tool_call_started":
+            if kind == "skill_candidates_verified":
+                # 验证门统计：累计滤除数；verified_count==0 记一次 no_match
+                dropped += int(ev.msg.data.get("dropped_count", 0))
+                if int(ev.msg.data.get("verified_count", 0)) == 0:
+                    had_no_match = True
+            elif kind == "tool_call_started":
                 name = ev.msg.data.get("name")
                 if name == "search_skills":
                     # 记录确实先走了召回（deferred 流的前置步）
@@ -181,7 +190,7 @@ async def _select_one(
         pass
     finally:
         watcher.cancel()
-    return selected, searched
+    return selected, searched, dropped, had_no_match
 
 
 async def main() -> None:
@@ -190,6 +199,10 @@ async def main() -> None:
     ap.add_argument("--sample", type=int, default=40, help="抽样任务数（默认 40）")
     ap.add_argument("--seed", type=int, default=0, help="抽样随机种子")
     ap.add_argument("--timeout", type=float, default=120.0, help="单任务超时秒（两步流更长）")
+    ap.add_argument(
+        "--verify", action="store_true",
+        help="开启召回后验证门（注入 LlmSkillVerifier：拉完整 body 判输入要求适配，滤误召）",
+    )
     args = ap.parse_args()
 
     try:
@@ -200,7 +213,10 @@ async def main() -> None:
     # 权限：deny Skill(*) 拦最终 call_skill（叶子不执行）；search_skills 不在 Skill() 域，放行
     policy = PermissionPolicy.from_dict({"default_mode": "allow", "deny": ["Skill(*)"]})
 
-    results: list[tuple[str, str, str | None, bool]] = []  # (task, expected, got, searched)
+    # (task, expected, got, searched, dropped, no_match)
+    results: list[tuple[str, str, str | None, bool, int, bool]] = []
+    # 验证后端：开 --verify 才注入（LLM-as-verify，读完整 body 判输入适配）
+    verifier = LlmSkillVerifier(client) if args.verify else None
     with tempfile.TemporaryDirectory() as td:
         skills_dir = Path(td) / "skills"
         total_pool, entries = _build_search_skills_tree(skills_dir)
@@ -218,8 +234,9 @@ async def main() -> None:
         print(
             f"抽样任务: {len(sample)} 条 | provider={meta['provider']} model={meta['model']}"
         )
-        print("ReAct 召回循环：search_skills（可重搜精炼）→ call_skill 选定"
-              "（deny Skill(*) + max_iterations=5，留出重搜空间）\n")
+        mode = "召回+验证" if args.verify else "仅召回"
+        print(f"模式: {mode}（ReAct 召回循环：search_skills→call_skill，"
+              "deny Skill(*) + max_iterations=5）\n")
 
         pool = await taifeng.EnginePool.create(
             skills_dir=skills_dir,
@@ -231,6 +248,8 @@ async def main() -> None:
             # 召回后端须显式注入（内核默认 None = inline「LLM 自己找」，不启用 search）。
             # 本基准测的就是关键词召回，故注入 KeywordSkillRecall；业务可换 LlmSkillRecall / RAG。
             skill_recall=KeywordSkillRecall(),
+            # --verify 时注入验证门：召回后拉完整 body 用 LLM 判输入要求适配、滤误召
+            skill_verifier=verifier,
             # 关键：recall_threshold=0 → auto 模式下可见 child >0 即 deferred，强制走召回
             recall_threshold=0,
             # ReAct 召回循环：留出重搜空间（最多 3 次 search + 1 次 call），故 5 轮
@@ -239,30 +258,33 @@ async def main() -> None:
         try:
             started = time.monotonic()
             for i, t in enumerate(sample):
-                got, searched = await _select_one(
+                got, searched, dropped, no_match = await _select_one(
                     pool, i, t["task"], args.timeout
                 )
                 ok = got == t["expected"]
-                results.append((t["task"], t["expected"], got, searched))
+                results.append(
+                    (t["task"], t["expected"], got, searched, dropped, no_match)
+                )
                 mark = "✓" if ok else "✗"
                 srch = "🔍" if searched else "··"
+                vtag = f" 滤{dropped}{'·无匹配' if no_match else ''}" if args.verify else ""
                 print(
                     f"  [{i + 1:>3}/{len(sample)}] {mark}{srch} "
-                    f"期望={t['expected']:<26} 实选={got}"
+                    f"期望={t['expected']:<26} 实选={got}{vtag}"
                 )
             elapsed = time.monotonic() - started
         finally:
             await pool.close()
 
     # ── 汇总 ──
-    correct = sum(1 for _, exp, got, _ in results if exp == got)
-    none_cnt = sum(1 for _, _, got, _ in results if got is None)
-    searched_cnt = sum(1 for _, _, _, s in results if s)
+    correct = sum(1 for _, exp, got, *_ in results if exp == got)
+    none_cnt = sum(1 for _, _, got, *_ in results if got is None)
+    searched_cnt = sum(1 for _, _, _, s, *_ in results if s)
     acc = correct / len(results) if results else 0.0
 
     dom_total: dict[str, int] = defaultdict(int)
     dom_ok: dict[str, int] = defaultdict(int)
-    for _, exp, got, _ in results:
+    for _, exp, got, *_ in results:
         d = _domain_of(exp)
         dom_total[d] += 1
         if exp == got:
@@ -278,6 +300,14 @@ async def main() -> None:
         f"{(searched_cnt / len(results) if results else 0.0):.1%}"
         "  （先调 search_skills 再选的比例）"
     )
+    if args.verify:
+        # 验证门统计：累计滤除候选数 + 出现 no_match（验证后全不适用）的任务数
+        dropped_total = sum(d for *_, d, _ in results)
+        no_match_cnt = sum(1 for *_, nm in results if nm)
+        print(
+            f"验证门: 累计滤除候选 {dropped_total} 个；"
+            f"验证后全不适用(no_match) 的任务 {no_match_cnt}/{len(results)}"
+        )
     print("\n按领域准确率")
     print(f"  {'domain':<12}{'acc':>10}")
     print("  " + "-" * 22)
@@ -285,7 +315,7 @@ async def main() -> None:
         a = dom_ok[d] / dom_total[d]
         print(f"  {d:<12}{dom_ok[d]}/{dom_total[d]} = {a:>5.0%}")
 
-    errs = [(exp, got, task) for task, exp, got, _ in results if exp != got]
+    errs = [(exp, got, task) for task, exp, got, *_ in results if exp != got]
     if errs:
         print(f"\n错选明细（{len(errs)} 条）—— 期望 vs 实选 / 任务")
         for exp, got, task in errs:
