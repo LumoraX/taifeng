@@ -15,6 +15,9 @@ ToolContext.extras 必须含（由 TurnRunner._build_tool_context 注入）：
 可选：
     - ``capabilities``: RuntimeCapabilities | None —— 提供时施加 G4a requires 过滤。
     - ``dispatcher``: 持 ``_emit`` 的 TurnRunner —— 打两个可观测事件；缺失则静默 noop。
+    - ``current_task``: str —— 当前 turn 的原始用户任务，启用验证时作 ``verify`` 的
+      ``task``（而非召回的关键词 query，详见 capabilities/skill-recall.md「验证用原始任务」
+      契约）；缺失则回退 query。TurnRunner 注入；裸调用单测可不给。
 
 R1 业务零侵入：纯通用 skill 发现原语，不含任何业务概念。
 """
@@ -202,9 +205,15 @@ def _make_search_skills_handler(
                 return None
             return definition.body
 
+        # 验证用「原始任务」而非召回的关键词 query：召回要的是为词面匹配优化的关键词串
+        # （按 schema 指引刻意剥离口语输入上下文），但验证要判「当前任务给的输入是否满足
+        # 该 skill 的输入要求」——必须看到「附件是发票照片」这类输入信号，否则会把有效候选
+        # 误拒（详情五根因）。current_task 由 TurnRunner 注入；裸调用 / 老上下文缺它时回退
+        # query，保证旧路径不崩。
+        verify_task = ctx.extras.get("current_task") or query
         # 据完整 body 做输入要求适配精验，返回**仅 applicable=True** 的候选
         verified = await verifier.verify(
-            query, candidates, get_body=_get_body, cancel=ctx.cancel
+            verify_task, candidates, get_body=_get_body, cancel=ctx.cancel
         )
 
         # ---- 可观测：验证结果打点（保留数 + 滤掉数 = 召回数 - 验证通过数）----

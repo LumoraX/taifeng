@@ -95,6 +95,7 @@ def _make_ctx(
     dispatcher: _FakeDispatcher | None = None,
     capabilities: RuntimeCapabilities | None = None,
     cancel: CancellationToken | None = None,
+    current_task: str | None = None,
 ) -> ToolContext:
     extras: dict[str, Any] = {
         "skill_snapshot": snapshot,
@@ -104,6 +105,10 @@ def _make_ctx(
         extras["dispatcher"] = dispatcher
     if capabilities is not None:
         extras["capabilities"] = capabilities
+    # 验证门需「原始任务」判输入适配；TurnRunner 实际会注入 current_task。
+    # None 时不注入，模拟缺失场景（handler 应回退到 query）。
+    if current_task is not None:
+        extras["current_task"] = current_task
     return ToolContext(
         call_id="tc-search",
         cancel=cancel or CancellationToken(),
@@ -383,6 +388,8 @@ class _StubVerifier:
         self._applicable_ids = applicable_ids
         # 记录 verify 实际收到的 (skill_id -> body)，供 get_body 取道断言
         self.seen_bodies: dict[str, str | None] = {}
+        # 记录 verify 实际收到的 task（断言喂的是 current_task 而非关键词 query）
+        self.seen_task: str | None = None
 
     async def verify(
         self,
@@ -394,6 +401,7 @@ class _StubVerifier:
     ) -> list[Any]:
         from taifeng.skill.verify import VerifiedCandidate
 
+        self.seen_task = task
         results: list[VerifiedCandidate] = []
         for c in candidates:
             self.seen_bodies[c.skill_id] = get_body(c.skill_id)
@@ -458,6 +466,61 @@ async def test_verify_returns_only_applicable_with_verify_confidence() -> None:
     assert item["reason"] == "good 输入要求满足"
     # 启用验证后不再外露 matched_snippet
     assert "matched_snippet" not in item
+
+
+# ====================================================================
+# 7b. 验证器拿到的 task = ctx.extras['current_task']（原始任务），不是关键词 query
+#     （召回要为匹配优化的关键词 query，验证要含输入上下文的原始任务——不能共用）
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_verify_receives_current_task_not_query() -> None:
+    """注入 current_task 时，verifier.verify 的 task 实参 = current_task（非 query）。
+
+    根因回归（详情五）：search_skills 曾把关键词 query 喂给验证器，剥离了「附件是
+    照片」等输入上下文导致验证误拒。此用例钉死：验证拿的是原始任务。
+    """
+    child = _mk_skill("good", description="可用技能", body="正文 good")
+    caller = _mk_skill("entry", child=frozenset({"good"}), entry=True)
+    snap = _make_snapshot([caller, child])
+    recall = _StubRecall([_mk_candidate("good")])
+    verifier = _StubVerifier(applicable_ids={"good"})
+    tool = make_search_skills_tool(
+        recall, default_top_k=5, max_top_k=20, verifier=verifier
+    )
+
+    original_task = "附件是一张发票照片，帮我把上面的金额提取出来"
+    r = await tool.handler(
+        {"query": "图片 OCR 文字识别"},  # 关键词 query（剥离了输入上下文）
+        _make_ctx(snapshot=snap, caller=caller, current_task=original_task),
+    )
+    assert not r.is_error
+    # 验证器必须拿到原始任务（含「附件是照片」），不是被剥离的关键词 query
+    assert verifier.seen_task == original_task
+
+
+@pytest.mark.asyncio
+async def test_verify_falls_back_to_query_when_no_current_task() -> None:
+    """缺 current_task（ctx 未注入）时，verifier.verify 的 task 回退为 query。
+
+    保证旧路径（无 current_task 注入的裸调用 / 老上下文）不崩，回退到 query。
+    """
+    child = _mk_skill("good", description="可用技能", body="正文 good")
+    caller = _mk_skill("entry", child=frozenset({"good"}), entry=True)
+    snap = _make_snapshot([caller, child])
+    recall = _StubRecall([_mk_candidate("good")])
+    verifier = _StubVerifier(applicable_ids={"good"})
+    tool = make_search_skills_tool(
+        recall, default_top_k=5, max_top_k=20, verifier=verifier
+    )
+
+    r = await tool.handler(
+        {"query": "图片 OCR 文字识别"},
+        _make_ctx(snapshot=snap, caller=caller),  # 不注入 current_task
+    )
+    assert not r.is_error
+    assert verifier.seen_task == "图片 OCR 文字识别"
 
 
 # ====================================================================

@@ -129,6 +129,26 @@ def _history_orphan_call_ids(history: list[ResponseItem]) -> set[str]:
     return {cid for cid in (fc ^ fco) if cid is not None}
 
 
+def _latest_user_text(history: list[ResponseItem]) -> str:
+    """取 history 中最近一条 user_message 的文本（无则空串）。
+
+    用途：① 长期记忆 prefetch 的默认检索 query；② 注入 ToolContext 的 ``current_task``，
+    供 ``search_skills`` 把「原始任务」（含输入上下文）喂给验证门——验证要判「当前任务给
+    的输入是否满足该 skill 的输入要求」，必须看到用户原话，不能用为词面匹配优化、剥离了
+    输入上下文的关键词 query（详情五根因）。
+
+    Args:
+        history: 当前 in-memory 历史视图。
+
+    Returns:
+        最近一条用户消息的文本；history 中无 user_message 时返回空串。
+    """
+    for it in reversed(history):
+        if it.kind == "user_message":
+            return str(it.payload.get("text", ""))
+    return ""
+
+
 def _llm_failure_context(
     err: Exception, *, is_root: bool, iteration: int
 ) -> FailureContext:
@@ -494,11 +514,8 @@ class TurnRunner:
         """
         if self.memory_store is None:
             return
-        query = ""
-        for it in reversed(self.history_buffer):
-            if it.kind == "user_message":
-                query = str(it.payload.get("text", ""))
-                break
+        # 默认检索 query = 最近一条用户消息文本（与 current_task 注入同源）
+        query = _latest_user_text(self.history_buffer)
         # 业务侧 query 构造器：拿 history 拷贝自由组装检索语境（如近 N 轮拼接）。
         # 崩溃回退默认构造——prefetch 全链 best-effort，builder 故障不应使
         # 长期记忆整体失效（有日志，非静默）。
@@ -1402,6 +1419,9 @@ class TurnRunner:
                 "visible_skills": self.snapshot.reachable_from(self.entry_skill.id),
                 # search_skills 据此施加 G4a requires 过滤（与 inline 列表同源同过滤）
                 "capabilities": self.capabilities,
+                # 当前 turn 的原始用户任务：供 search_skills 验证门判输入适配（详情五）。
+                # 召回用关键词 query（词面匹配），验证用原始任务（含输入上下文），两者不共用。
+                "current_task": _latest_user_text(self.history_buffer),
                 "dispatch_policy": self.dispatch_policy,
                 "call_stack": self.call_stack,
                 "current_skill": self.entry_skill,

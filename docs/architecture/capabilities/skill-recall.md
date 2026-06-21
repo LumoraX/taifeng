@@ -185,6 +185,8 @@ skill 发现 / 召回 —— 认知回路⑥「发现相位」的地基。
 - **召回与验证之间** SHALL 再 check 一次取消（R4：长链路尽早中断）。
 - 未启用验证时退化为 0023 行为（召回直接路由，payload 含 `matched_snippet`）。
 
+- **验证用「原始任务」而非召回 query（关键契约）**：`search_skills` SHALL 把**当前 turn 的原始用户任务**（`ToolContext.extras["current_task"]`，由 `TurnRunner` 注入最近一条 `user_message` 文本）作为 `verifier.verify(task=...)` 的 `task`，**而非** LLM 写的关键词 `query`；裸调用 / 老上下文缺 `current_task` 时回退 `query`（保旧路径不崩）。**理由**：召回需要为词面匹配优化、按 schema 指引刻意剥离口语输入上下文的关键词 `query`；但验证要判「当前任务给的输入是否满足要求」，必须看到「附件是发票照片」这类**输入信号**——若复用关键词 query，输入上下文被剥离，验证会把有效候选误判 `applicable=False`。即**召回与验证输入语义不同，不可共用一个 query**。`recall.recall(query, ...)` 仍用 `query`（关键词匹配不变）。
+
 #### Scenario: 验证溯源用 verify_confidence
 - **GIVEN** 验证启用，候选 `X` 经验证（`verify_confidence=v`）后被 `call_skill(X)` 派发
 - **THEN** `X` 的 `SkillExecutionRecord.selection_origin == "discovered"`，`selection_confidence == v`（适配置信，非召回长相）
