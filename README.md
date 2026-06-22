@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/brand/taifeng-favicon-source.png" alt="Taifeng logo" width="120">
+
 # 泰逢 · Taifeng
 
 **A Python microkernel for LLM agents: skills are markdown, the LLM is the scheduler.**
@@ -175,6 +177,7 @@ See [docs/architecture/hermes-gap-roadmap.md](docs/architecture/hermes-gap-roadm
 | [docs/architecture/capabilities/](docs/architecture/capabilities/) | Stable capability contracts |
 | [docs/decisions/](docs/decisions/) | ADR decision records |
 | [examples/](examples/) | End-to-end examples, mostly simulator-backed |
+| [docs/assets/brand/](docs/assets/brand/) | Logo, avatar, and favicon source assets |
 | [CLAUDE.md](CLAUDE.md) / [AGENTS.md](AGENTS.md) | Engineering collaboration rules |
 
 ## Development Notes

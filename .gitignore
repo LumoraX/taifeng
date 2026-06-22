@@ -5,6 +5,7 @@
 docs/superpowers/
 .taifeng-*
 .ruff_cache/
+.superpowers/
 
 .playwright-mcp/*
 openspec/
