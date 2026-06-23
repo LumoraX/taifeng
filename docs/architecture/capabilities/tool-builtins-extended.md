@@ -217,3 +217,27 @@ handler SHALL 执行如下顺序：
 - **WHEN** 工厂 `allowed_methods=("GET",)`，LLM 调 `{"url": "https://x/", "method": "DELETE"}`
 - **THEN** SHALL 返回 ToolResult.error，`data["reason"] == "bad_args"`
 
+### Requirement: file_read 按行分页（offset/limit）
+
+`make_file_read_tool` 产出的 `file_read` 工具 SHALL 支持可选 `offset` / `limit` 参数（**按行**，0 基），用于分页回读大文件（典型场景：`OffloadStrategy` 落盘的超大 tool 结果，见 [compaction-offload-strategy.md](compaction-offload-strategy.md)）。
+
+- 二者均省略时，行为 SHALL 与历史版本**逐字节一致**（整文件读 + 超 `max_bytes` 截断）。
+- 给定时按 `splitlines()` 切片后再对结果限幅，**绕过整文件 byte-cap**——否则大文件后段行不可达。
+- `offset` / `limit` 给定时必须为非负整数，否则 `reason == "bad_args"`。
+
+#### Scenario: offset/limit 读指定行区间
+- **WHEN** 文件含 5 行，LLM 调 `{"path": "log.txt", "offset": 1, "limit": 2}`
+- **THEN** SHALL 返回第 1–2 行（`"L1\nL2"`），不报错
+
+#### Scenario: offset 越界返回空
+- **WHEN** `offset` 超过文件行数
+- **THEN** SHALL 返回空内容（`output == ""`），不报错（便于 LLM 探测分页边界）
+
+#### Scenario: 省略分页参数等价旧行为
+- **WHEN** 调 `{"path": "log.txt"}` 不带 offset/limit
+- **THEN** 行为 SHALL 与本能力前一致（整文件读 + 超 `max_bytes` 截断）
+
+#### Scenario: 非法分页参数归类 bad_args
+- **WHEN** LLM 调 `{"path": "x", "offset": -1}` 或 `offset` 非整数
+- **THEN** SHALL 返回 ToolResult.error，`data["reason"] == "bad_args"`
+
