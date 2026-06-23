@@ -31,6 +31,7 @@ from taifeng.context.pinned_state import (
 )
 from taifeng.context.strategies import (
     HandoffCompactionStrategy,
+    OffloadStrategy,
     SlidingWindowStrategy,
     SurgicalTrimStrategy,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "ContextBudget",
     "HandoffCompactionStrategy",
     "InitialContextInjection",
+    "OffloadStrategy",
     "PinnedStateRegistry",
     "PinnedStateSource",
     "PromptCacheStats",
