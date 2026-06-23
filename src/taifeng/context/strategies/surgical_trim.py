@@ -31,21 +31,21 @@ from taifeng.context.compressor import (
     CompressionTrigger,
 )
 from taifeng.context.injection import InitialContextInjection
+from taifeng.context.placeholders import (
+    DEDUP_PREFIX as _DEDUP_PREFIX,
+)
+from taifeng.context.placeholders import (
+    PRUNED_PREFIX as _PRUNED_PREFIX,
+)
+from taifeng.context.placeholders import (
+    is_placeholder as _is_placeholder,
+)
 from taifeng.context.truncate import truncate_middle
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from taifeng.conversation.models import ResponseItem
-
-# 占位符前缀 —— 幂等守卫：已被本策略改写过的 output 不再参与任何 pass
-_DEDUP_PREFIX = "[duplicate"
-_PRUNED_PREFIX = "[pruned:"
-
-
-def _is_placeholder(text: str) -> bool:
-    """是否本策略产物（duplicate / pruned 占位符）—— 防二次剪枝。"""
-    return text.startswith((_DEDUP_PREFIX, _PRUNED_PREFIX))
 
 
 def _build_name_index(history: list[ResponseItem]) -> dict[str, str]:
