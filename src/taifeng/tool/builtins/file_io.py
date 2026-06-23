@@ -30,6 +30,23 @@ def _resolve_safe(root: Path, requested: str) -> Path | None:
         return None
 
 
+def _is_nonneg_int(value: Any) -> bool:
+    """是否为非负整数（排除 bool，bool 是 int 子类需显式剔除）。"""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _paginate_lines(raw: str, offset: int | None, limit: int | None) -> str:
+    """按行分页:从 ``offset`` 行起取 ``limit`` 行(limit 省略则到末尾)。
+
+    用 ``splitlines()`` 切行(不产生尾随空行,且与 stub 预览行号语义一致)。
+    offset 越界时切片自然返回空串,不报错——便于 LLM 探测分页边界。
+    """
+    lines = raw.splitlines()
+    start = offset or 0
+    end = len(lines) if limit is None else start + limit
+    return "\n".join(lines[start:end])
+
+
 def make_file_read_tool(
     *,
     root_dir: str | Path,
@@ -73,26 +90,53 @@ def make_file_read_tool(
                 )
         if not resolved.is_file():
             return ToolResult.error(f"not_a_file: {resolved}", reason="not_found")
+        # 分页参数校验：offset/limit 可选，给定则必须为非负整数
+        offset = args.get("offset")
+        limit = args.get("limit")
+        if offset is not None and not _is_nonneg_int(offset):
+            return ToolResult.error("bad_args: offset must be int >= 0", reason="bad_args")
+        if limit is not None and not _is_nonneg_int(limit):
+            return ToolResult.error("bad_args: limit must be int >= 0", reason="bad_args")
+        paging = offset is not None or limit is not None
         try:
-            size = resolved.stat().st_size
-            if size > max_bytes:
-                content = resolved.read_text(encoding="utf-8")[:max_bytes]
-                truncated = True
-            else:
-                content = resolved.read_text(encoding="utf-8")
-                truncated = False
+            raw = resolved.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             return ToolResult.error(f"read_error: {e}", reason="read_error")
+        if paging:
+            # 分页读：先按行切片再对结果限幅——绕过整文件 byte-cap，
+            # 否则大文件(如 offload 落盘结果)会被先截断到 max_bytes，后段行不可达。
+            content = _paginate_lines(raw, offset, limit)
+            truncated = len(content.encode("utf-8")) > max_bytes
+            if truncated:
+                content = content[:max_bytes]
+        else:
+            # 整文件读：保持旧行为(按字节阈值判定 + 字符切片截断)
+            truncated = len(raw.encode("utf-8")) > max_bytes
+            content = raw[:max_bytes] if truncated else raw
         suffix = f"\n\n[truncated to {max_bytes} bytes]" if truncated else ""
         return ToolResult.ok(content + suffix, path=str(resolved), bytes=len(content))
 
     return ToolSpec(
         name="file_read",
-        description=f"读取沙盒（root={root}）内的文本文件。最大 {max_bytes} 字节。",
+        description=(
+            f"读取沙盒（root={root}）内的文本文件。单页最大 {max_bytes} 字节。"
+            "可选 offset/limit 按行分页读大文件（如被 offload 落盘的工具结果），"
+            "避免整文件截断。"
+        ),
         input_schema={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "相对于沙盒根的路径"},
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "起始行号（0 基，省略=从头读）",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "读取行数（省略=读到文件末尾）",
+                },
             },
             "required": ["path"],
             "additionalProperties": False,
