@@ -26,6 +26,7 @@ R1-R5(见 design):
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -197,6 +198,19 @@ class OffloadStrategy:
             removed_item_count=offloaded,
             detail=detail,
         )
+
+    # ---- 生命周期(thread 级联清理)----
+
+    async def cleanup_thread(self, thread_id: str) -> None:
+        """删除某 thread 的全部 offload 文件(thread/conversation 删除时调用)。
+
+        v1 仅做 thread 级联清理,不做 TTL / 容量上限。目标目录不存在时为 noop(幂等)。
+        业务侧在销毁 thread 的钩子里调用本方法,与 history 删除对齐。
+        """
+        tdir = anyio.Path(self._root) / _OFFLOAD_SUBDIR / thread_id
+        if await tdir.exists():
+            # 递归删除该 thread 目录下全部 offload 文件(阻塞 IO 下沉线程池)
+            await anyio.to_thread.run_sync(shutil.rmtree, Path(tdir))
 
     # ---- 落盘单条 ----
 
