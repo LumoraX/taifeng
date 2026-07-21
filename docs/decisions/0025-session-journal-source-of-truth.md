@@ -195,7 +195,7 @@ class SessionJournal(Protocol):
         expected_seq: int,
         durability: Durability = Durability.COMMITTED,
         cancel: CancellationToken | None = None,
-    ) -> JournalAck: ...
+    ) -> SessionRecoveryResult: ...
     async def close_session(self, lease: SessionLease) -> None: ...
 ```
 
@@ -209,7 +209,9 @@ Session 进入 `RECOVERY_REQUIRED`，不能假定未写。
 未闭合 intent 或 frozen marker 时只返回 `RECOVERY_REQUIRED`，不发执行 lease。恢复方先 verify，再用
 `acquire_recovery_lease` 获取更高 fencing epoch；旧 lease 立即失效。`repair_tail`、`reconcile`、
 `unfreeze` 都是 COMMITTED Journal 追加，必须携带 recovery lease 和 expected seq。只有全部 UNKNOWN
-完成显式裁决、tail 校验通过并 durable 写入 `session_recovered` 后，`unfreeze` 才返回普通执行 lease。
+完成显式裁决、tail 校验通过并 durable 写入 `session_recovered` 后，`unfreeze` 才返回
+`SessionRecoveryResult {ack, execution_lease}`；其中 ack 证明恢复记录已提交，execution lease 使用更高
+fencing epoch。调用方拿到完整结果前 effect gate 保持关闭，RecoveryLease 随成功返回原子失效。
 
 ## 默认 JSONL 实现
 
