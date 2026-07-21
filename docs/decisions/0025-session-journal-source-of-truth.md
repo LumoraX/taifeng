@@ -61,7 +61,7 @@ class JournalEnvelope:
     causation_id: str | None
     correlation_id: str | None
     actor: ActorRef
-    previous_hash: str | None
+    previous_hash: str
     payload_hash: str
     record_hash: str
     payload: Mapping[str, JsonValue]
@@ -160,7 +160,7 @@ class SessionJournal(Protocol):
         expected_seq: int,
         durability: Durability = Durability.COMMITTED,
         cancel: CancellationToken | None = None,
-    ) -> Sequence[JournalAck]: ...
+    ) -> JournalAck: ...
 
     async def load(
         self, session_id: str, *, after_seq: int = 0
@@ -199,8 +199,28 @@ class SessionJournal(Protocol):
     async def close_session(self, lease: SessionLease) -> None: ...
 ```
 
+`SessionDescriptor` 必须包含创建 Session 所需的稳定配置和
+`root_thread: RootThreadDescriptor`；后者至少含预分配的 `thread_id`、entry skill、source、tags
+与 canonical extra。`create_session` 在一个原子批次中提交
+`session_started + thread_created + thread_bound`，成功后才返回执行 lease，因此调用方不需要在
+“尚无 lease”和“必须先初始化”之间循环依赖。`SessionDescriptor` 还必须携带稳定且唯一的
+`creation_operation_id` 和 `writer_id`。只有同一进程内仍持有 live lease 的同一 creation operation
+重试，才允许从 writer cache 返回同一个 lease；其他 writer、其他 operation 或进程重启后的
+`create_session` 即使 descriptor 相同也返回 busy/already-exists，绝不复制或复活旧 lease。崩溃后的
+接管统一走 `open_existing` 获取更高 fencing epoch；descriptor 任一差异始终冲突。
+
+`close_session` **只释放 lease 和 writer 资源，不写业务事实**。正常终结必须由调用方先用
+`append(session_ended, durability=COMMITTED)` 获得 durable ack，再调用 `close_session`；紧急关闭
+允许仅释放资源，但 health report 必须标记 `audit_complete=False`。是否存在 `session_ended` 是
+Timeline 的终态事实，不由资源清理动作暗中推断。
+
+每个 record type 在接入执行路径前必须有独立的版本化 payload DTO 契约，定义必填/可选字段、状态转移、
+关联键和 canonical vectors；仅在本 ADR 的表格中登记名称不构成可实施契约。Phase 1 只提供通用
+envelope、`JsonValue` 校验与存储机制，不宣称已实现 LLM/Tool/HITL 等领域 record serializer。
+
 `append_batch` 对一个逻辑边界原子提交，例如“审批决定 + tool intent”或“tool outcome +
-conversation_item”。`JournalAck` 必含 committed seq 范围、record ids、尾 hash、writer epoch 和实际
+conversation_item”，并为整个批次返回一个 `JournalAck`。`JournalAck` 必含 committed seq 范围、
+record ids、尾 hash、writer epoch 和实际
 durability。取消只允许发生在提交开始前；一旦写入开始，短暂 shield 直至明确成功或失败，避免
 调用方取消后不知道记录是否落盘。shield 和 fsync 都有有界 deadline；超时视为 ack 不确定，
 Session 进入 `RECOVERY_REQUIRED`，不能假定未写。
@@ -213,6 +233,15 @@ Session 进入 `RECOVERY_REQUIRED`，不能假定未写。
 `SessionRecoveryResult {ack, execution_lease}`；其中 ack 证明恢复记录已提交，execution lease 使用更高
 fencing epoch。调用方拿到完整结果前 effect gate 保持关闭，RecoveryLease 随成功返回原子失效。
 
+append/append_batch 在持有单 Session writer 锁后按固定顺序处理幂等与 CAS：
+
+1. 先按 `record_id` 查询已提交记录；单条记录完全相同则返回原始 ack，即使调用方携带的是 ack 丢失前的
+   旧 `expected_seq`；内容不同则 `JournalConflictError`；
+2. 批次重试只有在全部 record id 均存在、内容完全相同、属于同一个已提交批次且顺序连续时返回原始
+   batch ack；部分重叠、跨批次重组或内容差异一律冲突；
+3. 没有命中已提交幂等记录时才校验 `expected_seq == committed_tail_seq`，不等则 CAS 冲突；
+4. 未提交的 torn batch 中出现相同 record id 不算幂等成功，Session 保持 `RECOVERY_REQUIRED`。
+
 ## 默认 JSONL 实现
 
 默认 `JsonlSessionJournal` 每 Session 单文件、单异步 writer worker：
@@ -220,12 +249,26 @@ fencing epoch。调用方拿到完整结果前 effect gate 保持关闭，Recove
 1. 规范 JSON 序列化；
 2. 通过文件锁/后端 lease 获取单调 `writer_epoch`，跨进程拒绝旧 writer；
 3. 用 `expected_seq` 做 compare-and-append，在 writer 内分配连续 seq 和 hash chain；
-4. 单记录写成一个 frame；批次写成 `BEGIN + records + COMMIT` 校验 frame；
+4. 单记录直接写一个 envelope；批次写成 `BEGIN + envelopes + COMMIT` 校验 frame；
 5. 恢复时只有带有效 COMMIT、记录数和 batch hash 均匹配的批次可见，部分批次全部隐藏；
 6. 一次批次追加后 `flush + fsync`，新建/rename 时同步目录，随后才返回 durable ack；
 7. 文件 IO/fsync 在 anyio worker thread 执行，不阻塞 event loop；
 8. 仅在 durable ack 后允许关键动作继续；
 9. SQLite 只能作为可重建投影，永远不能领先 JSONL。
+
+批次 frame 使用保留字段 `"__journal_frame__"`，避免与 envelope 混淆：
+
+- `BEGIN` 包含 `frame_version`、`batch_id`、`record_count`、调用方 `expected_seq` 和按输入
+  `JournalRecord` 计算的 `batch_payload_hash`；
+- 中间 envelope 才分配 `seq` 并进入正常 record hash chain；`BEGIN/COMMIT` 不占 `seq`、不成为
+  `previous_hash` 节点；
+- `COMMIT` 包含相同 batch identity、`first_seq/last_seq`、ordered record hash 汇总和 `tail_hash`；
+- reader 只有在 BEGIN、数量、输入 hash、连续 seq/hash chain 与 COMMIT 全部匹配时才一次性暴露整个
+  批次；frame 本身不是 Timeline record；
+- torn/无效批次不改变可见 `committed_tail_seq`，因此后续合法 `expected_seq` 仍指向 BEGIN 前的尾部，
+  但 writer 必须先进入 `RECOVERY_REQUIRED`，禁止普通 append 覆盖或越过物理残尾；
+- `repair_tail` 只允许在 recovery lease 下把物理尾裁到最后一个 committed frame，并追加 durable
+  recovery record。具体 frame canonical schema 与字节级 hash vectors 由 Phase 1 capability contract 固化。
 
 启动或 resume 必须逐行验证 JSON、seq、payload hash 和 hash chain。允许识别 torn final line，
 但不得静默跳过：Session 进入 `RECOVERY_REQUIRED`，由显式恢复操作裁决。中间损坏恒为不可自动恢复。
@@ -379,6 +422,28 @@ redaction 只发生在 Timeline、导出和权限视图，不能改变唯一事�
 - 完整 payload 增加磁盘和隐私治理成本；
 - 第三方 MessageStore 需升级为 SessionJournal 才能声明 strict 完整审计；
 - 旧 transcript 只能标为未验证或显式迁移。
+
+## 分阶段实施边界
+
+本 ADR 是总决策，不作为单个大爆炸实施计划。每一阶段均需自己的 capability contract、测试和 commit：
+
+1. **Phase 1 — Journal durable core**：版本化核心 DTO/错误/ack/lease、三个初始化 record DTO、canonical
+   JSON 与 hash vectors、单 Session JSONL create/append/append_batch/load/verify、单 writer fencing、
+   torn tail 与 partial batch 检测。它只提供新建 Session 的孤立 backend primitive；不实现
+   `open_existing`、不发恢复 execution lease，也不接 Engine、MessageStore、Timeline 或真实 effect。
+   完整 `SessionJournal` 协议在 Phase 2 补齐恢复/open 语义前不作为稳定公共 API 导出；
+2. **Phase 2 — recovery 与 freeze gate**：recovery lease、repair/reconcile/unfreeze 状态机、Session 级
+   effect gate 和 UNKNOWN 收敛；
+3. **Phase 3 — Session/Thread/Submission 接入**：把 Phase 1 已有初始化批次接入 EnginePool，补全部
+   Op DTO 和 `JournalConversationView`，保持 resume/rewind/compaction 兼容；
+4. **Phase 4 — effect 边界接入**：LLM/Tool/Skill/Approval/HITL/Spawn/Barrier 的 intent、checkpoint、
+   outcome 与失败窗口；
+5. **Phase 5 — Timeline 与迁移**：Timeline/redaction、legacy import、投影重建和最终全量真实 LLM 回归。
+
+Phase 1 不提前实现 projection、legacy migration、blob 外置、签名/WORM 或初始化三类之外的领域
+serializer。**任何阶段只要变更 `src/taifeng/{llm,loop,context,conversation}/`，都必须严格遵守仓库红线：**
+先跑零消耗 selfcheck，再全量运行真实 LLM capability matrix 并提交更新后的
+`docs/real-llm-ledger.{json,md}`；不得由本 ADR 豁免。
 
 ## 验收标准
 
