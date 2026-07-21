@@ -20,9 +20,10 @@ classifiers = [
 dependencies = [
     # 仅引擎核心需要的依赖。业务侧 (provider SDK / DB / cache 后端) 由宿主项目按需引入
     "pydantic>=2.7",
-    "anyio>=4.4",        # 跨 asyncio / trio 取消语义
-    "httpx>=0.27",       # provider 适配层默认 HTTP 客户端
-    "pyyaml>=6.0",       # SKILL.md frontmatter 解析
+    "anyio>=4.4", # 跨 asyncio / trio 取消语义
+    "httpx>=0.27", # provider 适配层默认 HTTP 客户端
+    "pyyaml>=6.0", # SKILL.md frontmatter 解析
+    "rfc8785>=0.1.4,<1",
 ]
 
 [project.optional-dependencies]
