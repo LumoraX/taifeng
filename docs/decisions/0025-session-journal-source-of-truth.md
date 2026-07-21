@@ -47,13 +47,20 @@ class JournalEnvelope:
     schema_version: int
     session_id: str
     seq: int
+    writer_epoch: int
     record_id: str
+    operation_id: str | None
+    attempt_id: str | None
     recorded_at: datetime
+    occurred_at: datetime | None
     record_type: str
     submission_id: str | None
     thread_id: str | None
     turn_id: str | None
     parent_record_id: str | None
+    causation_id: str | None
+    correlation_id: str | None
+    actor: ActorRef
     previous_hash: str | None
     payload_hash: str
     record_hash: str
@@ -63,28 +70,38 @@ class JournalEnvelope:
 约束：
 
 - `seq` 在单 Session 内从 1 严格递增；
-- `record_id` 是幂等键，重复追加返回原 ack，不产生第二条事实；
+- `writer_epoch` 是 Session lease 的 fencing token；旧 writer 的 epoch 不能继续追加；
+- `record_id` 是 Session 内幂等键；只有 record type、payload hash、operation/attempt 完全相同才返回
+  原 ack，任一字段不一致必须抛 `JournalConflictError`；
 - `record_hash` 覆盖规范化 envelope 和 `previous_hash`，形成 hash chain；
 - `recorded_at` 由 Journal writer 在提交时生成，业务方时间可另存 payload，不能替代提交时间；
+- `occurred_at` 是事件发生时间，缺失时显式为 `None`，Timeline 以 `recorded_at` 排序；
+- `turn_id` 跨 suspend/resume 保持稳定，`attempt_id` 区分 retry、rewind 和恢复尝试；
+- `actor` 至少包含 `kind` 与 `source`；宿主未提供 principal 时写 `kind="unknown"`，不得省略；
 - schema 只允许向后兼容增加字段；破坏性变更提升 `schema_version` 并提供迁移器。
+
+规范序列化采用 RFC 8785 JSON Canonicalization Scheme；hash 使用 SHA-256。`payload_hash` 覆盖规范化
+payload；`record_hash` 覆盖除 `record_hash` 自身之外的完整 envelope。首条记录的 `previous_hash`
+使用 64 个字符的零值。Hash chain 用于检测缺失和修改，不声称能抵抗拥有整个文件写权限的攻击者；
+不可抵赖场景需由后端增加签名 checkpoint、WORM 或外部锚点。
 
 ### 必须覆盖的 Record 类型
 
 | 领域 | 权威 Record | 必含内容 |
 | --- | --- | --- |
-| Session | `session_started` / `session_ended` / `session_frozen` | engine 配置、模型/provider、cwd、版本、终态和原因 |
+| Session | `session_started` / `session_ended` / `session_frozen` | engine 配置、模型/provider、cwd、代码版本、终态和原因 |
+| Thread | `thread_created` / `thread_bound` / `thread_terminal` | thread→session 绑定、parent、预留 child id、终态 |
 | 上下文 | `context_snapshot` / `context_compacted` | 实际送模上下文、system/developer/instruction、压缩前后锚与 cache 信息 |
-| 用户入口 | `submission_accepted` / `submission_rejected` | UserMessage、Resume、Cancel、Shutdown 的原始 payload、附件身份与 hash |
+| 用户入口 | `submission_accepted` / `submission_rejected` / `submission_applied` | 每一种 `Op` 的原始 payload、附件身份与 hash、应用结果 |
 | Instructions | `instruction_resolved` / `instruction_failed` | scope、source、完整内容、版本/hash、解析结果 |
 | Skill | `skill_selected` / `skill_dispatch_started` / `skill_dispatch_finished` | skill id、版本/hash、实际 SKILL.md 快照、参数、父子谱系、结果/错误 |
-| LLM | `llm_request_committed` / `llm_response_committed` | 实发 ApiRequest、provider request id、完整最终 ResponseItem、usage、错误 |
-| Tool | `tool_intent_committed` / `tool_outcome_committed` | 名称、完整参数、effect kind、幂等键、结果、错误、耗时 |
+| LLM | `llm_request_committed` / `llm_response_checkpoint` / `llm_response_committed` | 实发 request、provider request id、有序 normalized items、usage、finish/error |
+| Tool | `tool_intent_committed` / `tool_outcome_committed` | 名称、原始参数、hook/policy 后有效参数、完整结果/data、错误、耗时 |
 | 审批 | `approval_requested` / `approval_decided` | call id、策略、展示内容、选项、actor、决定、理由、有效范围 |
 | HITL | `hitl_requested` / `hitl_submitted` / `hitl_resolved` | 问题/schema、原始人类输入、自动决议标记、关联 call/request id |
 | 挂起恢复 | `suspension_created` / `resolution_submitted` / `suspension_settled` | record/pending 快照、全部 resolution、partial/full/abort 结果 |
-| 编排 | `spawn_intent` / `spawn_outcome` / `barrier_state` | parent/child thread、skill、handle、等待集合、终态 |
+| 编排 | `spawn_intent` / `spawn_outcome` / `barrier_state` | parent/预留 child thread、skill、handle、barrier revision、成员快照、终态 |
 | 对话 | `conversation_item` | 原始 `ResponseItem`，供 MessageStore 兼容视图读取 |
-| Timeline | `semantic_event` | 低频权威语义事件；实时 EventMsg 由它投影 |
 
 “完整”指 Taifeng 实际拥有并用于执行或展示的内容完整保存。模型未返回的隐藏推理不属于可审计输入，
 不得伪造；provider 返回的 encrypted reasoning item 按原值保存。二进制附件可以使用内容寻址引用，
@@ -94,10 +111,20 @@ class JournalEnvelope:
 
 ```python
 class SessionJournal(Protocol):
+    async def open_session(
+        self,
+        session: SessionDescriptor,
+        *,
+        expected_seq: int = 0,
+        cancel: CancellationToken | None = None,
+    ) -> SessionLease: ...
+
     async def append(
         self,
         record: JournalRecord,
         *,
+        lease: SessionLease,
+        expected_seq: int,
         durability: Durability = Durability.COMMITTED,
         cancel: CancellationToken | None = None,
     ) -> JournalAck: ...
@@ -106,6 +133,8 @@ class SessionJournal(Protocol):
         self,
         records: Sequence[JournalRecord],
         *,
+        lease: SessionLease,
+        expected_seq: int,
         durability: Durability = Durability.COMMITTED,
         cancel: CancellationToken | None = None,
     ) -> Sequence[JournalAck]: ...
@@ -115,22 +144,36 @@ class SessionJournal(Protocol):
     ) -> AsyncIterator[JournalEnvelope]: ...
 
     async def verify(self, session_id: str) -> JournalVerification: ...
+
+    async def health(self, lease: SessionLease) -> JournalHealthReport: ...
+    async def reconcile(
+        self, lease: SessionLease, operation_id: str, resolution: ReconciliationResult
+    ) -> JournalAck: ...
+    async def recover(
+        self, lease: SessionLease, *, expected_seq: int
+    ) -> SessionRecovery: ...
+    async def close_session(self, lease: SessionLease) -> None: ...
 ```
 
 `append_batch` 对一个逻辑边界原子提交，例如“审批决定 + tool intent”或“tool outcome +
-conversation_item”。取消只允许发生在提交开始前；一旦写入开始，短暂 shield 直至明确成功或失败，
-避免调用方取消后不知道记录是否落盘。
+conversation_item”。`JournalAck` 必含 committed seq 范围、record ids、尾 hash、writer epoch 和实际
+durability。取消只允许发生在提交开始前；一旦写入开始，短暂 shield 直至明确成功或失败，避免
+调用方取消后不知道记录是否落盘。shield 和 fsync 都有有界 deadline；超时视为 ack 不确定，
+Session 进入 `RECOVERY_REQUIRED`，不能假定未写。
 
 ## 默认 JSONL 实现
 
-默认 `JsonlSessionJournal` 每 Session 单文件、单 writer：
+默认 `JsonlSessionJournal` 每 Session 单文件、单异步 writer worker：
 
 1. 规范 JSON 序列化；
-2. 在 writer 锁内分配 `seq` 和 hash chain；
-3. 追加完整一行；
-4. `flush` 后执行 `fsync`；新建/rename 时同步目录；
-5. 仅在 durable ack 后允许关键动作继续；
-6. SQLite 只能作为可重建投影，永远不能领先 JSONL。
+2. 通过文件锁/后端 lease 获取单调 `writer_epoch`，跨进程拒绝旧 writer；
+3. 用 `expected_seq` 做 compare-and-append，在 writer 内分配连续 seq 和 hash chain；
+4. 单记录写成一个 frame；批次写成 `BEGIN + records + COMMIT` 校验 frame；
+5. 恢复时只有带有效 COMMIT、记录数和 batch hash 均匹配的批次可见，部分批次全部隐藏；
+6. 一次批次追加后 `flush + fsync`，新建/rename 时同步目录，随后才返回 durable ack；
+7. 文件 IO/fsync 在 anyio worker thread 执行，不阻塞 event loop；
+8. 仅在 durable ack 后允许关键动作继续；
+9. SQLite 只能作为可重建投影，永远不能领先 JSONL。
 
 启动或 resume 必须逐行验证 JSON、seq、payload hash 和 hash chain。允许识别 torn final line，
 但不得静默跳过：Session 进入 `RECOVERY_REQUIRED`，由显式恢复操作裁决。中间损坏恒为不可自动恢复。
@@ -142,25 +185,32 @@ conversation_item”。取消只允许发生在提交开始前；一旦写入开
 
 ### 入口规则
 
-Submission 先写 `submission_accepted`，再改变内存 history 或开始 turn。写失败时拒绝该 Submission，
-原始用户输入仍由调用方保有，Session 进入冻结态。
+Session 创建先原子提交 `session_started + thread_created + thread_bound`，再向调用方返回可提交的
+Engine。Submission 先写 `submission_accepted`，再改变内存 history 或开始 turn。写失败时拒绝该
+Submission，原始输入仍由调用方保有，Session 进入冻结态。
+
+`submission_accepted` 覆盖当前 `Op` union 的全部成员，而不是只覆盖对话：`UserMessage`、
+`InjectSystemMessage`、`InjectUserInput`、`Cancel`、`CompactNow`、`ThreadRollback`、`UpdateBudget`、
+`RefreshSnapshot`、`UpdateInstructions`、`Resume`、`Rewind`、`SendToPeer`、`Shutdown`。新增 Op 必须
+先登记 journal serializer；否则 strict engine 拒绝启动。
 
 ### 外部调用规则
 
-所有可能产生费用、网络调用或外部状态变化的动作必须遵循：
+所有可能产生费用、网络调用或外部状态变化的 effect 必须遵循：
 
 ```text
-durable intent → execute once → durable outcome
+durable intent → at-most-one live dispatch → durable outcome or UNKNOWN
 ```
 
-- LLM：先提交完整 request，再调用 provider，再提交最终 response/error；
+- LLM：先提交完整 request，再调用 provider，先提交 response checkpoint 才投递对应 UI delta，
+  最后提交有序 normalized item 列表、partial/aborted/complete 终态、usage 和 error；
 - Tool/Skill：先提交完整参数和 effect metadata，再执行，再提交结果；
 - Spawn：先提交 child intent，再创建 child，结果关联 parent intent；
 - Approval/HITL：请求和决定都是独立事实，决定必须在执行被批准动作前提交。
 
-`tool_intent_committed` 必须包含：
+所有 effect intent（LLM、Tool、Skill、Spawn、Barrier/peer wake）必须包含：
 
-- `effect_kind`: `pure | idempotent | external_non_idempotent`；
+- `effect_kind`: `pure | idempotent | reconcilable | external_non_idempotent`；
 - `idempotency_key`（适用时）；
 - `reconciliation`：恢复时查询、重试或人工确认策略。
 
@@ -168,11 +218,14 @@ durable intent → execute once → durable outcome
 
 | 失败位置 | 行为 |
 | --- | --- |
-| intent 提交前/时失败 | 不执行动作；冻结当前 Session |
+| intent 提交前/时失败或 ack 不确定 | 不启动动作；冻结当前 Session |
 | 动作失败且 outcome 成功提交 | 正常记录失败，可按 failure policy 继续 |
 | 动作已完成、outcome 提交失败 | 冻结 Session；状态 `UNKNOWN/RECOVERY_REQUIRED`，禁止通用自动重试 |
 | Timeline/EventMsg 投影失败 | 不影响 Journal；记录投影落后水位，可重放补齐 |
 | SQLite 投影失败 | 不影响 Journal；标记 stale，后台重建 |
+
+Journal 不承诺跨崩溃 exactly-once。未匹配 intent 在恢复时一律是 `UNKNOWN`；仅当 effect 明确幂等，
+或 reconciler 证明未执行/已成功后，才允许显式重试或补写 outcome。
 
 异常后若连 `session_frozen` 都无法写入，冻结状态至少保存在 engine 内存和 logger；重启时由“未配对 intent”
 扫描重建 `RECOVERY_REQUIRED`，因此不能依赖最后一条错误记录本身。
@@ -181,22 +234,30 @@ durable intent → execute once → durable outcome
 
 Engine 维护 `JournalHealth = healthy | frozen | recovery_required`：
 
+- 第一次观察到 Journal 失败后，原子 gate 禁止启动新的 LLM、Tool、Skill、spawn、barrier 和 peer effect；
 - `frozen/recovery_required` 拒绝 UserMessage、Resume、spawn、LLM、Skill 和 Tool；
 - Cancel、读取 Timeline、verify、reconcile、关闭 Session 仍允许；
 - child/spawn 共用所属 Session Journal；任一关键写失败冻结同 Session 的 root 和全部 child；
 - 其他 AgentEngine/Session 使用独立 writer 和健康状态，不受影响。
 
+已经越过 dispatch gate 的并发 effect 只能 best-effort cancel，不能承诺撤销；它们全部进入 `UNKNOWN`
+并等待 reconcile。Journal 不可用时执行的紧急 Cancel/close 是安全降级动作，必须在内存 health report
+中标记 `audit_complete=False`，恢复后补记，不能声称当时已可靠审计。
+
 ## MessageStore 兼容
 
-默认 `JsonlMessageStore` 同时实现 `MessageStore` 和 `SessionJournal`，但物理上只写 Journal：
+默认存储由 session-bound `JournalConversationView` 同时提供 MessageStore 兼容能力，但物理上只写
+Journal：
 
-- `MessageStore.append(item)` 转成 `conversation_item`；
+- view 在构造时绑定 `SessionLease` 和 thread→session 路由；
+- `MessageStore.append(item)` 在同一 Session Journal 转成 `conversation_item`；
 - `load_thread` 过滤 Journal 中的 `conversation_item` 并保序返回；
 - rewind、resume、compaction 无需理解其他 Record；
 - 新 Timeline 读取所有 Record；
 - 禁止默认实现同时写旧 transcript 和新 journal。
 
-第三方 store 若要启用 strict 模式，必须实现 `SessionJournal`，或使用同一事务后端同时实现两个协议。
+根 thread 必须在 EnginePool 返回 engine 前完成 Session/Thread 原子绑定。第三方 store 若要启用 strict
+模式，必须实现 `SessionJournal`，或使用同一事务后端同时实现两个协议。
 仅实现旧 `MessageStore` 的后端进入显式 `compat` 模式并暴露 `audit_complete=False`，不能伪装成完整审计。
 
 ## Timeline 投影
@@ -207,15 +268,19 @@ Engine 维护 `JournalHealth = healthy | frozen | recovery_required`：
 - 支持按 turn、submission、actor、record_type、call_id、skill_id 筛选；
 - user 输入、HITL 回答和审批决定默认显示完整内容；敏感展示由调用方访问控制决定；
 - 每项可回链原始 `record_id/seq`；
-- 实时 EventMsg 仅作为“新水位到了”的通知，客户端断线后用 `after_seq` 补读。
+- 领域 record 是唯一权威表示，projector 直接映射 EventMsg；不另写重复的 `semantic_event`；
+- 投影至少一次，EventMsg 携带可选 `journal_record_id/journal_seq` 供去重；
+- 实时 EventMsg 仅作为“新水位到了”的通知，客户端断线后用 `after_seq` 补读；
+- LLM delta 只有在对应 `llm_response_checkpoint` durable 后才对 UI 可见，因此用户已看到的内容必可审计。
 
 ## 敏感数据与保留
 
-完整记录会包含 prompt、上下文、工具参数和输出。内核提供 `JournalContentPolicy` 注入点，但不绑定业务：
+原始 Journal 始终保存可恢复的完整 payload，或保存同等可靠、内容寻址且不可变的加密 blob 引用。
+redaction 只发生在 Timeline、导出和权限视图，不能改变唯一事实源。投影视图提供：
 
-- `full`：本地默认，保存 Taifeng 实际拥有的全部内容；
-- `redacted`：调用方提供确定性 redactor，同时保存 redaction manifest 和原 payload hash；
-- `metadata_only`：不满足完整审计，只能显式选择且 `audit_complete=False`。
+- `full`：有权调用方读取完整内容；
+- `redacted`：确定性脱敏，同时返回 redaction manifest 和原 payload hash；
+- `metadata_only`：仅查询元数据并显式返回 `audit_complete=False`。
 
 访问控制、加密密钥和保留期由宿主后端负责；OTel 永不承载正文 Journal payload。
 
@@ -262,7 +327,11 @@ Engine 维护 `JournalHealth = healthy | frozen | recovery_required`：
 4. 每个 Tool/Skill/LLM intent 都有 outcome，或启动恢复时标为 UNKNOWN；
 5. EventMsg 队列丢弃不造成 Timeline 缺口；
 6. JSONL 尾部撕裂、hash 不匹配、seq 跳号均被检测，不静默跳过；
-7. Journal 写失败后当前 Session 不再产生模型、工具、Skill 或 spawn 副作用；
+7. Journal 写失败被观察后当前 Session 不再启动新的模型、工具、Skill、spawn、barrier 或 peer 副作用；
 8. 一个 Session 冻结不影响其他 Session；
 9. MessageStore resume/rewind/compaction 回归不变；
 10. 基础层变更通过全量 pytest，并按仓库红线刷新真实 LLM capability ledger。
+11. 并发 effect 在冻结前已启动时全部进入 UNKNOWN，恢复不会自动重复非幂等操作；
+12. `append_batch` 中途 kill -9 后没有部分批次对 reader 可见；
+13. 两个 writer 竞争同一 Session 时旧 fencing epoch 的追加被拒绝；
+14. 任一已投递给 UI 的 LLM 文本都能从 durable response checkpoint 重建。
