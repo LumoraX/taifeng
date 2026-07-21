@@ -71,8 +71,10 @@ class JournalEnvelope:
 
 - `seq` 在单 Session 内从 1 严格递增；
 - `writer_epoch` 是 Session lease 的 fencing token；旧 writer 的 epoch 不能继续追加；
-- `record_id` 是 Session 内幂等键；只有 record type、payload hash、operation/attempt 完全相同才返回
-  原 ack，任一字段不一致必须抛 `JournalConflictError`；
+- `record_id` 是 Session 内幂等键；重复追加必须比较调用方提供的完整 canonical `JournalRecord`
+  （含 actor、session/thread/turn、operation/attempt、causation/correlation、occurred_at、record type
+  和 payload），只排除 writer 分配的 seq、epoch、recorded_at、previous/hash；任一差异必须抛
+  `JournalConflictError`；
 - `record_hash` 覆盖规范化 envelope 和 `previous_hash`，形成 hash chain；
 - `recorded_at` 由 Journal writer 在提交时生成，业务方时间可另存 payload，不能替代提交时间；
 - `occurred_at` 是事件发生时间，缺失时显式为 `None`，Timeline 以 `recorded_at` 排序；
@@ -84,6 +86,11 @@ class JournalEnvelope:
 payload；`record_hash` 覆盖除 `record_hash` 自身之外的完整 envelope。首条记录的 `previous_hash`
 使用 64 个字符的零值。Hash chain 用于检测缺失和修改，不声称能抵抗拥有整个文件写权限的攻击者；
 不可抵赖场景需由后端增加签名 checkpoint、WORM 或外部锚点。
+
+所有调用方值在进入 Journal 前转换为 canonical DTO：datetime 统一 RFC 3339 UTC、Enum 使用稳定值、
+Path 使用绝对 file URI、bytes 使用 base64 + SHA-256 描述，mapping key 必须是字符串，浮点仅允许有限
+IEEE-754 值，NaN/Infinity 拒绝。`ActorRef` 是版本化 DTO，不接受任意对象。不同语言实现必须通过
+同一组 canonical JSON/hash conformance vectors。
 
 ### 必须覆盖的 Record 类型
 
@@ -111,13 +118,29 @@ payload；`record_hash` 覆盖除 `record_hash` 自身之外的完整 envelope�
 
 ```python
 class SessionJournal(Protocol):
-    async def open_session(
+    async def create_session(
         self,
         session: SessionDescriptor,
         *,
         expected_seq: int = 0,
         cancel: CancellationToken | None = None,
     ) -> SessionLease: ...
+
+    async def open_existing(
+        self,
+        session_id: str,
+        *,
+        expected_seq: int,
+        cancel: CancellationToken | None = None,
+    ) -> SessionOpenResult: ...
+
+    async def acquire_recovery_lease(
+        self,
+        session_id: str,
+        *,
+        observed_tail: JournalVerification,
+        cancel: CancellationToken | None = None,
+    ) -> RecoveryLease: ...
 
     async def append(
         self,
@@ -147,11 +170,32 @@ class SessionJournal(Protocol):
 
     async def health(self, lease: SessionLease) -> JournalHealthReport: ...
     async def reconcile(
-        self, lease: SessionLease, operation_id: str, resolution: ReconciliationResult
+        self,
+        lease: RecoveryLease,
+        operation_id: str,
+        resolution: ReconciliationResult,
+        *,
+        expected_seq: int,
+        durability: Durability = Durability.COMMITTED,
+        cancel: CancellationToken | None = None,
     ) -> JournalAck: ...
-    async def recover(
-        self, lease: SessionLease, *, expected_seq: int
-    ) -> SessionRecovery: ...
+    async def repair_tail(
+        self,
+        lease: RecoveryLease,
+        repair: TailRepairDecision,
+        *,
+        expected_seq: int,
+        durability: Durability = Durability.COMMITTED,
+        cancel: CancellationToken | None = None,
+    ) -> JournalAck: ...
+    async def unfreeze(
+        self,
+        lease: RecoveryLease,
+        *,
+        expected_seq: int,
+        durability: Durability = Durability.COMMITTED,
+        cancel: CancellationToken | None = None,
+    ) -> JournalAck: ...
     async def close_session(self, lease: SessionLease) -> None: ...
 ```
 
@@ -160,6 +204,12 @@ conversation_item”。`JournalAck` 必含 committed seq 范围、record ids、�
 durability。取消只允许发生在提交开始前；一旦写入开始，短暂 shield 直至明确成功或失败，避免
 调用方取消后不知道记录是否落盘。shield 和 fsync 都有有界 deadline；超时视为 ack 不确定，
 Session 进入 `RECOVERY_REQUIRED`，不能假定未写。
+
+`open_existing` 只在 verify 完整且无未决 effect 时发放普通新 epoch lease；发现 torn tail、ack 不确定、
+未闭合 intent 或 frozen marker 时只返回 `RECOVERY_REQUIRED`，不发执行 lease。恢复方先 verify，再用
+`acquire_recovery_lease` 获取更高 fencing epoch；旧 lease 立即失效。`repair_tail`、`reconcile`、
+`unfreeze` 都是 COMMITTED Journal 追加，必须携带 recovery lease 和 expected seq。只有全部 UNKNOWN
+完成显式裁决、tail 校验通过并 durable 写入 `session_recovered` 后，`unfreeze` 才返回普通执行 lease。
 
 ## 默认 JSONL 实现
 
@@ -189,10 +239,18 @@ Session 创建先原子提交 `session_started + thread_created + thread_bound`�
 Engine。Submission 先写 `submission_accepted`，再改变内存 history 或开始 turn。写失败时拒绝该
 Submission，原始输入仍由调用方保有，Session 进入冻结态。
 
-`submission_accepted` 覆盖当前 `Op` union 的全部成员，而不是只覆盖对话：`UserMessage`、
+Submission gateway 必须先把 Op 转成对应的版本化 canonical DTO，再写 `submission_accepted`。它覆盖
+当前 `Op` union 的全部成员，而不是只覆盖对话：`UserMessage`、
 `InjectSystemMessage`、`InjectUserInput`、`Cancel`、`CompactNow`、`ThreadRollback`、`UpdateBudget`、
 `RefreshSnapshot`、`UpdateInstructions`、`Resume`、`Rewind`、`SendToPeer`、`Shutdown`。新增 Op 必须
-先登记 journal serializer；否则 strict engine 拒绝启动。
+先登记 journal DTO serializer；否则 strict engine 拒绝启动。
+
+`UpdateInstructions.new_source` 等任意 `InstructionSource` 只保存稳定的 source kind、配置 DTO、版本、
+代码/artifact hash；实际解析内容由 `instruction_resolved` 保存。`Resume.resolutions`、
+`Rewind.new_args` 等自由结构必须先通过 JSON-compatible DTO 校验。闭包、provider 实例或其他无法
+规范化的对象在 `submission_accepted` 前拒绝，写 `submission_rejected`，其中只含 Op kind、稳定类型名、
+安全 descriptor/hash 和拒绝原因，绝不调用可能泄密或不稳定的任意 `repr()`。被拒对象从未进入执行，
+因此不构成执行事实缺失。
 
 ### 外部调用规则
 
@@ -246,8 +304,7 @@ Engine 维护 `JournalHealth = healthy | frozen | recovery_required`：
 
 ## MessageStore 兼容
 
-默认存储由 session-bound `JournalConversationView` 同时提供 MessageStore 兼容能力，但物理上只写
-Journal：
+默认存储由 session-bound `JournalConversationView` 提供 MessageStore 兼容能力，但物理上只写 Journal：
 
 - view 在构造时绑定 `SessionLease` 和 thread→session 路由；
 - `MessageStore.append(item)` 在同一 Session Journal 转成 `conversation_item`；
@@ -256,8 +313,10 @@ Journal：
 - 新 Timeline 读取所有 Record；
 - 禁止默认实现同时写旧 transcript 和新 journal。
 
-根 thread 必须在 EnginePool 返回 engine 前完成 Session/Thread 原子绑定。第三方 store 若要启用 strict
-模式，必须实现 `SessionJournal`，或使用同一事务后端同时实现两个协议。
+根 thread 必须在 EnginePool 返回 engine 前完成 Session/Thread 原子绑定。strict 模式下第三方后端
+只有一个 canonical Journal 写入口；所谓 MessageStore 实现只能是调用该入口的 session-bound facade，
+或从 Journal 可重建的只读/物化投影。投影禁止独立 append，resume/verify/recovery 永远以 Journal
+records 为准；即便数据库能在同一事务中双写表，也不能把物化表声明为第二事实源。
 仅实现旧 `MessageStore` 的后端进入显式 `compat` 模式并暴露 `audit_complete=False`，不能伪装成完整审计。
 
 ## Timeline 投影
@@ -335,3 +394,7 @@ redaction 只发生在 Timeline、导出和权限视图，不能改变唯一事�
 12. `append_batch` 中途 kill -9 后没有部分批次对 reader 可见；
 13. 两个 writer 竞争同一 Session 时旧 fencing epoch 的追加被拒绝；
 14. 任一已投递给 UI 的 LLM 文本都能从 durable response checkpoint 重建。
+15. 相同 record id 但 actor/thread/causation 不同的追加必须冲突；
+16. torn tail 或 ack 不确定后，旧 lease 失效，只有更高 epoch recovery lease 能 repair/reconcile；
+17. 每种 Op DTO 有跨实现 canonical hash vector；NaN、闭包和未登记对象在执行前被拒并安全留痕；
+18. 删除全部 MessageStore 物化数据后可从 Journal 重建，且 resume 结果不变。
