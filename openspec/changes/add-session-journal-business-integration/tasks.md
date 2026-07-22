@@ -7,13 +7,13 @@
 
 ## 2. Versioned domain records
 
-- [ ] 2.1 Write failing tests for V1 DTO required/extra fields, enums, V0 initialization compatibility, and canonical vectors
-- [ ] 2.2 Implement stable submission, turn, LLM, Tool, Skill, thread/session, attachment, and conversation-item payload DTOs
-- [ ] 2.3 Implement deterministic operation/attempt/record identities and conflict-preserving JournalRecord factory helpers
-- [ ] 2.4 Implement explicit ResponseItem serializers/deserializers and reject unknown item kinds before effect
-- [ ] 2.5 Implement secret-safe `StableErrorV1` mapping without arbitrary repr, traceback, address, or secret persistence
-- [ ] 2.6 Implement inline attachment base64/size/SHA-256 validation with injected per-item and total limits
-- [ ] 2.7 Run record contract tests, focused Ruff/mypy, and commit the record slice
+- [x] 2.1 Write failing tests for V1 DTO required/extra fields, enums, V0 initialization compatibility, and canonical vectors
+- [x] 2.2 Implement stable submission, turn, LLM, Tool, Skill, thread/session, attachment, and conversation-item payload DTOs
+- [x] 2.3 Implement deterministic operation/attempt/record identities and conflict-preserving JournalRecord factory helpers
+- [x] 2.4 Implement explicit ResponseItem serializers/deserializers and reject unknown item kinds before effect
+- [x] 2.5 Implement secret-safe `StableErrorV1` mapping without arbitrary repr, traceback, address, or secret persistence
+- [x] 2.6 Implement inline attachment base64/size/SHA-256 validation with injected per-item and total limits
+- [x] 2.7 Run record contract tests, focused Ruff/mypy, and commit the record slice
 
 ## 3. Durable conversation projection
 
