@@ -206,7 +206,9 @@ def test_all_payload_dtos_are_versioned_frozen_and_extra_forbidden() -> None:
         {"op_kind": "user_message", "text": "x", "source": "cli"},
         {"op_kind": "cancel_turn"},
         {"op_kind": "cancel_turn", "target_submission_id": "sub_1", "text": "wrong"},
+        {"op_kind": "cancel_turn", "target_submission_id": "sub_1", "turn_index": 1},
         {"op_kind": "shutdown", "source": "wrong"},
+        {"op_kind": "shutdown", "turn_index": 1},
     ],
 )
 def test_submission_accepted_rejects_missing_or_cross_shape_fields(
@@ -488,6 +490,24 @@ def test_supported_response_item_rejects_invalid_per_kind_payload(
         serialize_response_item(item, source_record_id="source_1")
 
 
+def test_skill_outcome_rejects_raw_error_detail_before_journaling() -> None:
+    """Legacy skill error_detail 不得把 secret/地址原文持久化。"""
+    item = ResponseItem(
+        kind="skill_outcome",
+        id="item_secret",
+        thread_id="thread_1",
+        payload={
+            "skill_id": "research",
+            "outcome": "failure",
+            "error_detail": "secret=TOKEN at 0xDEADBEEF",
+        },
+        metadata={},
+    )
+
+    with pytest.raises(ValidationError):
+        serialize_response_item(item, source_record_id="source_1")
+
+
 def test_conversation_item_record_links_source_and_stable_identity() -> None:
     """Conversation item helper 同时固定 ordinal 身份与 source causation。"""
     item = _response_items()[0]
@@ -593,13 +613,26 @@ def test_attachment_limit_rejects_large_content_before_trusting_declared_size() 
         validate_attachments((disguised,), max_item_bytes=4, max_total_bytes=4)
 
 
-@pytest.mark.parametrize("media_type", ["garbage", " ", "text /plain"])
+@pytest.mark.parametrize(
+    "media_type",
+    ["garbage", " ", "text /plain", "./.", ".text/plain", "text/."],
+)
 def test_attachment_rejects_invalid_media_type(media_type: str) -> None:
     """media_type 必须是无空白的 type/subtype。"""
     with pytest.raises(ValidationError):
         AttachmentV1.model_validate(
             {**_attachment().model_dump(mode="python"), "media_type": media_type}
         )
+
+
+def test_attachment_rejects_noncanonical_base64_pad_bits() -> None:
+    """Zh== 虽可解码为 b'f'，但非 canonical Zg== 必须拒绝。"""
+    attachment = _attachment(b"f").model_copy(update={"content": "Zh=="})
+
+    with pytest.raises(ValueError, match="canonical base64"):
+        attachment.decoded()
+    with pytest.raises(ValueError, match="canonical base64"):
+        validate_attachments((attachment,), max_item_bytes=1, max_total_bytes=1)
 
 
 def test_attachment_rejects_reference_shapes_and_requires_content() -> None:

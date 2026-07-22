@@ -84,7 +84,9 @@ NonNegativeInt = Annotated[int, Field(ge=0)]
 NonNegativeFloat = Annotated[float, Field(ge=0)]
 MediaType = Annotated[
     str,
-    Field(pattern=r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$"),
+    Field(
+        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9!#$&^_.+-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9!#$&^_.+-]*[A-Za-z0-9])?$"
+    ),
 ]
 
 _BASE64_PATTERN = re.compile(
@@ -170,6 +172,8 @@ class AttachmentV1(PayloadModel):
             decoded = base64.b64decode(encoded, validate=True)
         except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
             raise ValueError("attachment content is not strict base64") from exc
+        if base64.b64encode(decoded).decode("ascii") != self.content:
+            raise ValueError("attachment content is not canonical base64")
         if len(decoded) != self.size:
             raise ValueError("attachment decoded size mismatch")
         if hashlib.sha256(decoded).hexdigest() != self.sha256:
@@ -206,7 +210,9 @@ class SubmissionAcceptedV1(PayloadModel):
                 raise ValueError("cancel_turn requires target_submission_id")
             if any(values[name] is not None for name in ("text", "attachments", "source")):
                 raise ValueError("cancel_turn rejects user_message fields")
-        elif any(value is not None for value in values.values()):
+            if self.turn_index is not None:
+                raise ValueError("cancel_turn rejects turn_index")
+        elif any(value is not None for value in values.values()) or self.turn_index is not None:
             raise ValueError("shutdown has no business payload")
         return self
 
@@ -474,7 +480,7 @@ class _SkillOutcomeItemPayload(JournalModel):
     selection_confidence: Annotated[float, Field(ge=0, le=1)] | None = None
     outcome_signal_source: str | None = None
     end_reason: str | None = None
-    error_detail: str | None = None
+    error_detail: None = None
     cost_tokens: NonNegativeInt | None = None
     cost_duration_ms: NonNegativeInt | None = None
     cost_iterations: NonNegativeInt | None = None
