@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime  # noqa: TC003  # Pydantic 运行期解析字段类型
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Never, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
@@ -14,10 +14,127 @@ HashHex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 
+def _raise_frozen_json_value() -> Never:
+    """统一抛出嵌套 JsonValue 的冻结错误。"""
+    raise TypeError("frozen JsonValue cannot be mutated")
+
+
+class _FrozenJsonDict(dict[str, JsonValue]):
+    """保持 dict 序列化兼容性的只读 JsonValue mapping。"""
+
+    def __setitem__(self, key: str, value: JsonValue) -> Never:
+        """拒绝设置键。"""
+        _raise_frozen_json_value()
+
+    def __delitem__(self, key: str) -> Never:
+        """拒绝删除键。"""
+        _raise_frozen_json_value()
+
+    def clear(self) -> Never:
+        """拒绝清空。"""
+        _raise_frozen_json_value()
+
+    def pop(self, key: str, default: object = None) -> Never:
+        """拒绝弹出键。"""
+        _raise_frozen_json_value()
+
+    def popitem(self) -> Never:
+        """拒绝弹出条目。"""
+        _raise_frozen_json_value()
+
+    def setdefault(self, key: str, default: JsonValue = None) -> Never:
+        """拒绝设置默认值。"""
+        _raise_frozen_json_value()
+
+    def update(self, *args: object, **kwargs: JsonValue) -> Never:
+        """拒绝批量更新。"""
+        _raise_frozen_json_value()
+
+    def __ior__(self, value: object) -> Never:  # type: ignore[misc]
+        """拒绝原地合并。"""
+        _raise_frozen_json_value()
+
+
+class _FrozenJsonList(list[JsonValue]):
+    """保持 list 序列化兼容性的只读 JsonValue sequence。"""
+
+    def __setitem__(  # type: ignore[override]
+        self,
+        key: int | slice,
+        value: JsonValue | list[JsonValue],
+    ) -> Never:
+        """拒绝设置元素。"""
+        _raise_frozen_json_value()
+
+    def __delitem__(self, key: int | slice) -> Never:  # type: ignore[override]
+        """拒绝删除元素。"""
+        _raise_frozen_json_value()
+
+    def append(self, value: JsonValue) -> Never:
+        """拒绝追加。"""
+        _raise_frozen_json_value()
+
+    def clear(self) -> Never:
+        """拒绝清空。"""
+        _raise_frozen_json_value()
+
+    def extend(self, values: object) -> Never:
+        """拒绝扩展。"""
+        _raise_frozen_json_value()
+
+    def insert(self, index: int, value: JsonValue) -> Never:  # type: ignore[override]
+        """拒绝插入。"""
+        _raise_frozen_json_value()
+
+    def pop(self, index: int = -1) -> Never:  # type: ignore[override]
+        """拒绝弹出元素。"""
+        _raise_frozen_json_value()
+
+    def remove(self, value: JsonValue) -> Never:
+        """拒绝删除指定元素。"""
+        _raise_frozen_json_value()
+
+    def reverse(self) -> Never:
+        """拒绝原地反转。"""
+        _raise_frozen_json_value()
+
+    def sort(self, *args: object, **kwargs: object) -> Never:
+        """拒绝原地排序。"""
+        _raise_frozen_json_value()
+
+    def __iadd__(self, values: object) -> Never:  # type: ignore[misc]
+        """拒绝原地拼接。"""
+        _raise_frozen_json_value()
+
+    def __imul__(self, value: int) -> Never:  # type: ignore[misc, override]
+        """拒绝原地重复。"""
+        _raise_frozen_json_value()
+
+
+def _freeze_json_value(value: JsonValue) -> JsonValue:
+    """递归复制 JsonValue，并把所有可变容器替换为冻结子类。"""
+    if isinstance(value, dict):
+        return _FrozenJsonDict(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return _FrozenJsonList(_freeze_json_value(item) for item in value)
+    return value
+
+
 class JournalModel(BaseModel):
     """核心 DTO 共同约束：冻结、禁止额外字段。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    @model_validator(mode="after")
+    def _deep_freeze_json_fields(self) -> Self:
+        """深拷贝并冻结 DTO 的直接 dict/list 字段。"""
+        for field_name in type(self).model_fields:
+            value = getattr(self, field_name)
+            if isinstance(value, (dict, list)):
+                object.__setattr__(self, field_name, _freeze_json_value(value))
+        return self
 
 
 class Durability(StrEnum):

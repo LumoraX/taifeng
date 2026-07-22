@@ -154,6 +154,32 @@ async def test_create_session_retry_reuses_same_live_result(tmp_path: Path) -> N
 
 
 @pytest.mark.anyio
+async def test_create_session_snapshots_descriptor_before_first_await(
+    tmp_path: Path,
+) -> None:
+    """create 等待 registry lock 时，调用方改写不得污染 identity 或落盘内容。"""
+    journal = JsonlSessionJournalCore(tmp_path)
+    descriptor = _descriptor().model_copy(update={"config": {"value": 1}})
+    results: list[object] = []
+    await journal._registry_lock.acquire()  # noqa: SLF001
+
+    async def create_while_blocked() -> None:
+        """让 create 在已计算输入 identity 后等待 registry lock。"""
+        results.append(await journal.create_session(descriptor))
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(create_while_blocked)
+        await anyio.lowlevel.checkpoint()
+        descriptor.config["value"] = 2
+        journal._registry_lock.release()  # noqa: SLF001
+
+    loaded = [item async for item in journal.load("ses_1")]
+    retry = _descriptor().model_copy(update={"config": {"value": 1}})
+    assert loaded[0].payload["config"] == {"value": 1}
+    assert await journal.create_session(retry) == results[0]
+
+
+@pytest.mark.anyio
 async def test_existing_file_is_not_adopted_by_another_core(tmp_path: Path) -> None:
     """另一个 core 不得把已存在文件当成自己的 live Session。"""
     creator = JsonlSessionJournalCore(tmp_path)
@@ -263,6 +289,18 @@ async def test_ack_loss_retry_returns_original_ack_before_cas(tmp_path: Path) ->
     retried = await journal.append(record, lease=lease, expected_seq=3)
 
     assert retried == first
+
+
+@pytest.mark.anyio
+async def test_ack_loss_retry_still_requires_live_lease(tmp_path: Path) -> None:
+    """幂等命中可绕过旧 CAS，但不得绕过 live lease fencing。"""
+    journal, lease = await _created_journal(tmp_path)
+    record = _record()
+    await journal.append(record, lease=lease, expected_seq=3)
+    forged = lease.model_copy(update={"lease_id": "forged_lease"})
+
+    with pytest.raises(JournalLeaseError):
+        await journal.append(record, lease=forged, expected_seq=3)
 
 
 @pytest.mark.anyio
@@ -406,6 +444,35 @@ async def test_injected_io_failure_returns_no_ack_or_tail_advance(
 
 
 @pytest.mark.anyio
+async def test_fsync_failure_after_complete_append_requires_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """完整 COMMIT 已写入但 fsync 失败时，结果不确定且必须冻结 writer。"""
+    journal, lease = await _created_journal(tmp_path)
+
+    def fail_fsync(_fd: int) -> None:
+        """模拟 flush 后的 file fsync 失败。"""
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+
+    with pytest.raises(JournalRecoveryRequiredError) as raised:
+        await journal.append(_record(), lease=lease, expected_seq=3)
+
+    verification = await journal.verify("ses_1")
+    assert raised.value.committed_tail_seq == 3
+    assert verification.health is JournalHealth.HEALTHY
+    assert verification.committed_tail_seq == 4
+    with pytest.raises(JournalRecoveryRequiredError):
+        await journal.append(
+            _record(record_id="rec_2"),
+            lease=lease,
+            expected_seq=4,
+        )
+
+
+@pytest.mark.anyio
 async def test_slow_fsync_does_not_block_event_loop(tmp_path: Path) -> None:
     """同步慢 IO 必须在线程池执行，让独立 async ticker 持续运行。"""
     adapter = _SlowAppendAdapter(0.05)
@@ -430,6 +497,37 @@ async def test_slow_fsync_does_not_block_event_loop(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_commit_uses_pre_io_snapshot_for_idempotency(tmp_path: Path) -> None:
+    """即使绕过 DTO validator，IO await 期间改写也不能污染 committed 索引。"""
+    adapter = _SlowAppendAdapter(0.05)
+    journal = JsonlSessionJournalCore(tmp_path, sync_file_adapter=adapter)
+    created = await journal.create_session(_descriptor())
+    mutable = JournalRecord.model_construct(
+        session_id="ses_1",
+        record_id="rec_1",
+        record_type="test_record",
+        actor=ActorRef(kind="user", source="test"),
+        payload={"value": 1},
+    )
+
+    async def append_mutable() -> None:
+        """提交绕过 validator 构造的 record。"""
+        await journal.append(mutable, lease=created.lease, expected_seq=3)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(append_mutable)
+        await anyio.to_thread.run_sync(adapter.started.wait)
+        mutable.payload["value"] = 2
+
+    with pytest.raises(JournalConflictError, match="record content conflict"):
+        await journal.append(
+            _record(payload={"value": 2}),
+            lease=created.lease,
+            expected_seq=3,
+        )
+
+
+@pytest.mark.anyio
 async def test_close_releases_live_lease_without_writing_session_end(
     tmp_path: Path,
 ) -> None:
@@ -446,3 +544,41 @@ async def test_close_releases_live_lease_without_writing_session_end(
         "thread_created",
         "thread_bound",
     ]
+
+
+@pytest.mark.anyio
+async def test_close_rejects_append_already_queued_on_writer_lock(
+    tmp_path: Path,
+) -> None:
+    """close 先获得排队顺序后，旧 writer 引用不得在 close 返回后提交。"""
+    journal, lease = await _created_journal(tmp_path)
+    writer = journal._writers["ses_1"]  # noqa: SLF001
+    await writer.lock.acquire()
+    outcomes: list[str] = []
+
+    async def close_while_blocked() -> None:
+        """排队等待 writer lock 并记录 close 返回。"""
+        await journal.close()
+        outcomes.append("closed")
+
+    async def append_while_blocked() -> None:
+        """持有旧 writer 引用排队，验证 close 后 lease 已失效。"""
+        try:
+            await journal.append(_record(), lease=lease, expected_seq=3)
+        except JournalLeaseError:
+            outcomes.append("rejected")
+        else:
+            outcomes.append("committed")
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(close_while_blocked)
+        await anyio.lowlevel.checkpoint()
+        task_group.start_soon(append_while_blocked)
+        await anyio.lowlevel.checkpoint()
+        writer.lock.release()
+
+    records = [item async for item in journal.load("ses_1")]
+    assert "closed" in outcomes
+    assert "rejected" in outcomes
+    assert "committed" not in outcomes
+    assert len(records) == 3

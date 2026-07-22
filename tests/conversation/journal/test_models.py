@@ -97,6 +97,27 @@ def test_models_are_frozen_and_reject_extra_fields() -> None:
         actor.kind = "system"  # type: ignore[misc]
 
 
+def test_json_containers_are_deeply_frozen_and_detached() -> None:
+    """frozen DTO 的嵌套 dict/list 也不得被调用方原地改写。"""
+    original = {"nested": [1]}
+    record = JournalRecord(
+        session_id="ses_1",
+        record_id="rec_1",
+        record_type="test",
+        actor=ActorRef(kind="user", source="test"),
+        payload=original,
+    )
+    original["nested"].append(2)
+
+    assert record.payload == {"nested": [1]}
+    with pytest.raises(TypeError, match="frozen JsonValue"):
+        record.payload["other"] = True
+    nested = record.payload["nested"]
+    assert isinstance(nested, list)
+    with pytest.raises(TypeError, match="frozen JsonValue"):
+        nested.append(3)
+
+
 def test_record_envelope_ack_and_verification_shapes() -> None:
     """存储层所需核心结果 DTO 必须能表达严格 tail 与 durability。"""
     actor = ActorRef(kind="system", source="taifeng")

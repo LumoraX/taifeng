@@ -49,6 +49,10 @@ _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ZERO_HASH = "0" * 64
 
 
+class _CommitOutcomeUncertainError(Exception):
+    """文件可能已被部分或完整修改，调用方不能安全重试。"""
+
+
 def _validate_committed_record_ids(decoded: DecodedJournal) -> None:
     """拒绝 committed 区域中相同 id 的不同 caller fingerprint。"""
     fingerprints: dict[str, str] = {}
@@ -119,10 +123,14 @@ class DefaultSyncFileAdapter:
 
     def append_durable(self, path: Path, payload: bytes) -> None:
         """追加 batch，并在返回前完成 file flush+fsync。"""
-        with path.open("ab") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+        stream = path.open("ab")
+        try:
+            with stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as exc:
+            raise _CommitOutcomeUncertainError from exc
 
 
 @dataclass(frozen=True)
@@ -145,6 +153,7 @@ class _LiveWriter:
     committed_tail_hash: str
     committed_by_record_id: dict[str, _CommittedRecord]
     recovery_required: bool = False
+    closed: bool = False
 
 
 class JsonlSessionJournalCore:
@@ -174,6 +183,10 @@ class JsonlSessionJournalCore:
 
     async def create_session(self, descriptor: SessionDescriptor) -> SessionCreateResult:
         """独占创建 Session，并 durable commit 三记录初始化 batch。"""
+        descriptor = SessionDescriptor.model_validate(
+            descriptor.model_dump(mode="python")
+        )
+        records = build_initialization_records(descriptor)
         path = self._session_path(descriptor.session_id)
         fingerprint = canonical_hash(model_canonical_data(descriptor))
         async with self._registry_lock:
@@ -196,7 +209,7 @@ class JsonlSessionJournalCore:
                 lease_id=uuid4().hex,
             )
             encoded = encode_batch(
-                build_initialization_records(descriptor),
+                records,
                 batch_id=f"{descriptor.creation_operation_id}:init",
                 expected_seq=0,
                 writer_epoch=lease.writer_epoch,
@@ -214,7 +227,6 @@ class JsonlSessionJournalCore:
             except TimeoutError as exc:
                 raise JournalRecoveryRequiredError(descriptor.session_id, 0) from exc
             result = SessionCreateResult(lease=lease, ack=encoded.ack)
-            records = build_initialization_records(descriptor)
             self._writers[descriptor.session_id] = _LiveWriter(
                 descriptor_fingerprint=fingerprint,
                 creation_operation_id=descriptor.creation_operation_id,
@@ -253,6 +265,8 @@ class JsonlSessionJournalCore:
             for writer in writers:
                 await writer.lock.acquire()
             try:
+                for writer in writers:
+                    writer.closed = True
                 self._writers.clear()
             finally:
                 for writer in reversed(writers):
@@ -268,6 +282,10 @@ class JsonlSessionJournalCore:
         """在 per-session lock 内按幂等、lease、CAS 顺序 durable 追加。"""
         if not records:
             raise ValueError("journal batch must contain at least one record")
+        records = tuple(
+            JournalRecord.model_validate(record.model_dump(mode="python"))
+            for record in records
+        )
         session_id = records[0].session_id
         if any(record.session_id != session_id for record in records):
             raise ValueError("all records in a batch must belong to one session")
@@ -275,6 +293,8 @@ class JsonlSessionJournalCore:
         if writer is None:
             raise JournalLeaseError(session_id, "no live writer")
         async with writer.lock:
+            if writer.closed:
+                raise JournalLeaseError(session_id, "writer closed")
             if writer.recovery_required:
                 raise JournalRecoveryRequiredError(
                     session_id,
@@ -292,10 +312,10 @@ class JsonlSessionJournalCore:
                 or scanned.verification.committed_tail_hash != writer.committed_tail_hash
             ):
                 raise JournalIntegrityError("live writer tail mismatch")
+            self._validate_lease(lease, writer)
             existing_ack = self._idempotent_ack(records, writer)
             if existing_ack is not None:
                 return existing_ack
-            self._validate_lease(lease, writer)
             if expected_seq != writer.committed_tail_seq:
                 raise JournalConflictError(
                     "expected_seq conflict",
@@ -348,6 +368,7 @@ class JsonlSessionJournalCore:
     ) -> JournalAck:
         """生成、持久化 batch，并只在 fsync 成功后推进内存 tail/index。"""
         lease = writer.result.lease
+        fingerprints = tuple(record_fingerprint(record) for record in records)
         encoded = encode_batch(
             records,
             batch_id=uuid4().hex,
@@ -363,15 +384,15 @@ class JsonlSessionJournalCore:
                 path,
                 b"".join(encoded.lines),
             )
-        except TimeoutError as exc:
+        except (TimeoutError, _CommitOutcomeUncertainError) as exc:
             writer.recovery_required = True
             raise JournalRecoveryRequiredError(
                 lease.session_id,
                 writer.committed_tail_seq,
             ) from exc
-        for record in records:
+        for record, fingerprint in zip(records, fingerprints, strict=True):
             writer.committed_by_record_id[record.record_id] = _CommittedRecord(
-                fingerprint=record_fingerprint(record),
+                fingerprint=fingerprint,
                 ack=encoded.ack,
             )
         writer.committed_tail_seq = encoded.ack.last_seq

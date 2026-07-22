@@ -136,3 +136,28 @@ def test_envelope_payload_tampering_is_rejected() -> None:
             initial_seq=7,
             initial_hash="a" * 64,
         )
+
+
+@pytest.mark.parametrize(
+    ("replacement", "reason"),
+    [
+        (b'"seq":"8"', "invalid journal schema"),
+        (b'"seq":8,"seq":8', "non-canonical JSON"),
+    ],
+)
+def test_noncanonical_or_duplicate_physical_json_is_rejected(
+    replacement: bytes,
+    reason: str,
+) -> None:
+    """物理行不得借助类型强转或重复键伪装成原 canonical envelope。"""
+    encoded = _encoded(count=1)
+    lines = list(encoded.lines)
+    lines[1] = lines[1].replace(b'"seq":8', replacement, 1)
+
+    with pytest.raises(JournalIntegrityError, match=reason):
+        decode_committed_lines(
+            lines,
+            session_id="ses_1",
+            initial_seq=7,
+            initial_hash="a" * 64,
+        )

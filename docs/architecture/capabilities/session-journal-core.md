@@ -15,6 +15,8 @@ redaction、blob 外置或签名/WORM。调用方不能把本阶段描述为完�
 
 所有 DTO 使用 frozen、`extra="forbid"` 的 Pydantic model。调用方 payload 只接受递归 `JsonValue`：
 `None | bool | int | finite float | str | list[JsonValue] | dict[str, JsonValue]`。
+DTO 会递归复制并冻结嵌套 dict/list；`create_session` 与 `append_batch` 还必须在首次 await 前重新验证并快照
+完整调用方输入，后续 identity、编码和幂等索引只能使用该快照。
 
 ### 2.1 Actor 与 Session 初始化
 
@@ -160,20 +162,22 @@ core 实例维护 per-session live writer cache。同一 `creation_operation_id`
 fingerprint 且 lease 仍 live 的同进程重试返回同一个 create result。其他 writer/operation/进程实例对已存在
 文件只能收到 `JournalBusyError` 或 `JournalAlreadyExistsError`，不得复制旧 lease。
 
-每次 append 必须完整匹配 session id、writer id、writer epoch、lease id。`close()` 只释放 lease/cache/文件
-资源，不写 `session_ended`。跨进程接管与更高 epoch 由 Phase 2 负责。
+每次 append 必须完整匹配 session id、writer id、writer epoch、lease id。`close()` 在 per-session lock 内先把
+writer 标记为 closed，再释放 lease/cache/文件资源；已经取得旧 writer 引用但仍排队等待 lock 的 append 也必须
+拒绝。`close()` 不写 `session_ended`。跨进程接管与更高 epoch 由 Phase 2 负责。
 
 ## 6. 幂等与 CAS 顺序
 
 同一 Session lock 内固定执行：
 
-1. 查 committed record id；
-2. 单条 fingerprint 相同返回原 ack，不看旧 `expected_seq`；不同抛 `JournalConflictError`；
-3. batch 只有全部 id 属于同一原 batch、顺序和 fingerprint 相同才返回原 batch ack；部分重叠、跨 batch
+1. 拒绝 recovery-required 状态并 strict scan 当前物理 tail；
+2. 校验 live lease 全字段；幂等重试只绕过旧 CAS，不能绕过 fencing；
+3. 查 committed record id；
+4. 单条 fingerprint 相同返回原 ack，不看旧 `expected_seq`；不同抛 `JournalConflictError`；
+5. batch 只有全部 id 属于同一原 batch、顺序和 fingerprint 相同才返回原 batch ack；部分重叠、跨 batch
    重组或内容不同均冲突；
-4. 没有幂等命中时才要求 `expected_seq == committed_tail_seq`；
-5. 校验 live lease；
-6. 生成并 durable commit 新 batch。
+6. 没有幂等命中时才要求 `expected_seq == committed_tail_seq`；
+7. 生成并 durable commit 新 batch。
 
 torn、未 committed batch 内出现同 record id 不算幂等成功；ordinary append 必须拒绝。
 
@@ -182,6 +186,8 @@ torn、未 committed batch 内出现同 record id 不算幂等成功；ordinary 
 - open/write/flush/fsync/目录 fsync/scan 必须通过 `anyio.to_thread.run_sync`，不得阻塞 event loop。
 - commit 入口前允许取消且不得写入；开始文件变更后用有界 shield 等待明确 ack 或异常。
 - `COMMITTED` ack 只在 file flush+fsync 完成后返回；新建文件还必须 fsync 父目录。
+- append 开始修改文件后的 write/flush/fsync error 属于结果不确定，必须返回 `JournalRecoveryRequiredError`
+  并冻结 live writer；文件变更前的明确 IO error 可以用原 CAS 重试。
 - append_batch 返回一个覆盖完整 seq 范围的 `JournalAck`。
 
 ## 8. Strict load / verify
@@ -192,6 +198,7 @@ torn、未 committed batch 内出现同 record id 不算幂等成功；ordinary 
 | torn final physical line | `RECOVERY_REQUIRED` + 最后 committed tail |
 | incomplete final batch | `RECOVERY_REQUIRED` + BEGIN 前 committed tail |
 | malformed middle line | `JournalIntegrityError` |
+| non-canonical physical JSON / duplicate key / schema type coercion | `JournalIntegrityError` |
 | seq gap / duplicate | `JournalIntegrityError` |
 | payload/previous/record hash mismatch | `JournalIntegrityError` |
 | conflicting committed record id | `JournalIntegrityError` |
@@ -202,8 +209,10 @@ torn、未 committed batch 内出现同 record id 不算幂等成功；ordinary 
 ## 9. 验收
 
 - canonical/hash vectors 覆盖 key 顺序、Unicode、`1.0 → 1`、非有限数字与非法对象。
-- batch 覆盖 valid、missing COMMIT、frame hash mismatch 和 kill-window 可见性。
-- append 覆盖 ack-loss retry、record conflict、partial overlap、stale expected seq 与 stale lease。
-- IO 覆盖取消、slow fsync 不阻塞 event loop、fsync error 不返回 ack。
+- batch 覆盖 valid、missing COMMIT、frame hash mismatch、物理 JSON canonical/schema strictness 和
+  kill-window 可见性。
+- append 覆盖 ack-loss retry 仍校验 live lease、record conflict、partial overlap、stale expected seq 与 stale lease。
+- lifecycle 覆盖 create 首次 await 前输入快照，以及 close 先排队时拒绝已取得旧 writer 引用的 append。
+- IO 覆盖取消、slow fsync 不阻塞 event loop，以及 COMMIT 已写入后 fsync error 触发 recovery-required。
 - strict verify 覆盖本契约第 8 节全部状态。
 - focused tests、全量 pytest、real-LLM selfcheck 与 capability matrix/ledger 刷新全部通过后，Phase 1 才可完成。

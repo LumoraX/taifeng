@@ -15,7 +15,10 @@ from taifeng.conversation.journal.canonical import (
     payload_hash,
     record_fingerprint,
 )
-from taifeng.conversation.journal.errors import JournalIntegrityError
+from taifeng.conversation.journal.errors import (
+    JournalIntegrityError,
+    NonCanonicalValueError,
+)
 from taifeng.conversation.journal.models import (
     Durability,
     JournalAck,
@@ -185,11 +188,18 @@ def encode_batch(
 def _parse_line(raw: bytes | str, *, line_no: int) -> dict[str, object]:
     """解析一行 JSON object，并把底层异常收敛为 integrity error。"""
     try:
+        raw_bytes = raw.encode("utf-8") if isinstance(raw, str) else raw
         value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError) as exc:
         raise JournalIntegrityError("invalid JSON", line_no=line_no) from exc
     if not isinstance(value, dict):
         raise JournalIntegrityError("line must contain a JSON object", line_no=line_no)
+    try:
+        canonical = canonical_bytes(value)
+    except NonCanonicalValueError as exc:
+        raise JournalIntegrityError("non-canonical JSON", line_no=line_no) from exc
+    if raw_bytes.removesuffix(b"\n") != canonical:
+        raise JournalIntegrityError("non-canonical JSON", line_no=line_no)
     return value
 
 
@@ -198,7 +208,7 @@ def _parse_model[ModelT: JournalModel](
 ) -> ModelT:
     """校验 frame/envelope model，并保留物理行号。"""
     try:
-        return model_type.model_validate(value)
+        return model_type.model_validate_json(canonical_bytes(value), strict=True)
     except ValidationError as exc:
         raise JournalIntegrityError("invalid journal schema", line_no=line_no) from exc
 
