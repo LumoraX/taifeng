@@ -18,7 +18,7 @@ def _gen_sub_id() -> str:
 class UserMessage(BaseModel):
     kind: Literal["user_message"] = "user_message"
     text: str
-    attachments: list[dict] = Field(default_factory=list)
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CancelTurn(BaseModel):

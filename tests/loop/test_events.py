@@ -1,7 +1,21 @@
 """EventMsg 子类构造 / 序列化测试。"""
 from __future__ import annotations
 
-from taifeng.loop.event import EventMsg, ToolBatchDispatched
+from typing import get_args
+
+from taifeng.loop.event import EventMsg, MsgKind, ToolBatchDispatched
+
+
+def test_all_declared_resource_and_compaction_events_are_registered() -> None:
+    """所有已声明事件都必须登记到 MsgKind，避免判别联合与实现漂移。"""
+    assert {
+        "skill_spawn_rejected",
+        "resource_limit_exceeded",
+        "compaction_degradation_warning",
+        "compaction_integrity_rolled_back",
+        "context_budget_exceeded",
+        "suspension_expired",
+    } <= set(get_args(MsgKind))
 
 
 def test_tool_batch_dispatched_serializes() -> None:

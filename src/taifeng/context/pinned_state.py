@@ -17,7 +17,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from taifeng.context.truncate import truncate_middle
 
@@ -102,7 +105,7 @@ class PinnedStateRegistry:
         """注销 source;不存在 → ``KeyError``(显式失败,非 silent)。"""
         del self._sources[name]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[PinnedStateSource]:
         """按注册序迭代 source(dict 保序)。"""
         return iter(self._sources.values())
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from taifeng.skill.orchestration import OrchestrationSpec
@@ -109,7 +109,7 @@ class SkillDefinition:
     exposure: SkillExposure = field(default_factory=SkillExposure)
 
     # === 业务透传 ===
-    frontmatter_raw: dict = field(default_factory=dict)
+    frontmatter_raw: dict[str, Any] = field(default_factory=dict)
     scripts: tuple[ScriptDescriptor, ...] = ()
     source: SkillSource = "user"
 
