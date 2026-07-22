@@ -180,7 +180,7 @@ class LiteLLMSession:
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:  # noqa: C901
         try:
-            import litellm  # type: ignore[import-not-found]
+            import litellm
         except ImportError as e:  # pragma: no cover
             raise InvalidRequestError(
                 "LiteLLM not installed. Run: pip install 'taifeng[litellm]'"

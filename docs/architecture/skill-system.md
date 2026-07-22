@@ -200,7 +200,13 @@ class SkillRegistry(Protocol):
 
     def get(self, skill_id: str) -> SkillDefinition | None: ...
     def snapshot(self) -> SkillSnapshot: ...
+    def watch(self) -> AsyncIterator[SkillSnapshot]: ...
 ```
+
+`watch()` 与 LLM session 的 `stream()` 使用相同异步迭代器契约：协议方法直接返回
+`AsyncIterator[SkillSnapshot]`，文件系统实现可用带 `yield` 的 `async def`。消费者
+直接 `async for snapshot in registry.watch()`，不先 await；这避免把异步生成器误标成
+`Coroutine[..., AsyncIterator[...]]`。
 
 ## 静态环检测（load-time）
 

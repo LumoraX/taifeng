@@ -68,15 +68,21 @@ class ModelClientSession(Protocol):
     每个 turn 重建，避免 sticky header / cache key 跨 turn 污染。
     """
 
-    async def stream(
+    def stream(
         self,
-        prompt: "ApiRequest",
+        request: "ApiRequest",
     ) -> AsyncIterator[ResponseEvent]:
         """流式调用，按 ResponseEvent 产出。"""
 
     async def __aenter__(self) -> "ModelClientSession": ...
     async def __aexit__(self, *exc) -> None: ...
 ```
+
+`stream()` 在协议层是返回 `AsyncIterator` 的普通方法；具体 provider 使用带
+`yield` 的 `async def` 实现异步生成器。调用方直接 `async for event in
+session.stream(request)`，不先 `await stream()`。具体 provider 的 session 类型只要
+结构化满足 `ModelClientSession`，其 `session()` 就可协变返回该具体类型，无需给
+`ModelClient` 增加泛型参数或运行时 cast。
 
 ## ApiRequest 统一格式
 
