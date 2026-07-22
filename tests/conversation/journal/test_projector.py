@@ -3,200 +3,35 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import anyio
 import pytest
 
 import taifeng.conversation.journal as journal_package
 from taifeng.conversation.journal.canonical import model_canonical_data
-from taifeng.conversation.journal.framing import encode_batch
-from taifeng.conversation.journal.models import (
-    ActorRef,
-    JournalAck,
-    JournalEnvelope,
-    JournalRecord,
-)
 from taifeng.conversation.journal.projector import (
     JournalConversationProjector,
     ProjectionOrderError,
 )
 from taifeng.conversation.journal.records import serialize_response_item
-from taifeng.conversation.models import ResponseItem, assistant_message, user_message
+from taifeng.conversation.models import assistant_message, user_message
 from taifeng.conversation.transcript import JsonlMessageStore
+from tests.conversation.journal.projector_test_support import (
+    _NOW,
+    _conversation_record,
+    _create_explicit_projection,
+    _domain_record,
+    _encoded,
+    _FailingDirectory,
+    _history,
+    _MemoryProjectionStore,
+    _YieldingJsonlMessageStore,
+    _YieldingProjectionStore,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
-
-_NOW = datetime(2026, 7, 22, 8, 0, tzinfo=UTC)
-_ZERO_HASH = "0" * 64
-
-
-def _conversation_record(item: ResponseItem, *, record_id: str) -> JournalRecord:
-    """把测试 item 包装成明确的 conversation_item record。"""
-    payload = serialize_response_item(item, source_record_id=f"source_{record_id}")
-    return JournalRecord(
-        session_id="ses_1",
-        record_id=record_id,
-        record_type="conversation_item",
-        actor=ActorRef(kind="system", source="test"),
-        payload=model_canonical_data(payload),
-        thread_id=item.thread_id,
-    )
-
-
-def _domain_record(*, record_id: str) -> JournalRecord:
-    """构造 ack 内允许存在的非 conversation 领域 record。"""
-    return JournalRecord(
-        session_id="ses_1",
-        record_id=record_id,
-        record_type="turn_completed",
-        actor=ActorRef(kind="system", source="test"),
-        payload={"payload_version": 1, "status": "complete"},
-        thread_id="thr_1",
-    )
-
-
-def _encoded(
-    records: tuple[JournalRecord, ...], *, expected_seq: int = 3
-) -> tuple[tuple[JournalEnvelope, ...], JournalAck]:
-    """通过真实 frame codec 构造匹配的 envelopes/ack。"""
-    batch = encode_batch(
-        records,
-        batch_id=f"batch_{expected_seq}_{len(records)}",
-        expected_seq=expected_seq,
-        writer_epoch=2,
-        previous_hash=_ZERO_HASH,
-        recorded_at=_NOW,
-    )
-    return batch.envelopes, batch.ack
-
-
-class _MemoryProjectionStore:
-    """可观察写效果并注入部分失败的最小投影 store。"""
-
-    def __init__(self) -> None:
-        self.items: dict[str, list[ResponseItem]] = {}
-        self.append_calls = 0
-        self.create_calls = 0
-        self.fail_after_first_once = False
-        self.fail_before_write_once = False
-        self.fail_threads: set[str] = set()
-        self.fail_load_threads: set[str] = set()
-        self._projection_locks: dict[str, anyio.Lock] = {}
-
-    def projection_lock(self, thread_id: str) -> anyio.Lock:
-        """让同一 fake store 上的多个 projector 共享 thread 锁。"""
-        return self._projection_locks.setdefault(thread_id, anyio.Lock())
-
-    async def ensure_projection_thread(self, thread_id: str) -> None:
-        """内存 fake 不需要修复 metadata 文件。"""
-
-    async def create_projection_thread(
-        self,
-        *,
-        thread_id: str,
-        cwd: str | None,
-        entry_skill_id: str,
-        source: str,
-        extra: dict[str, Any],
-    ) -> str:
-        """记录 bootstrap 效果。"""
-        self.create_calls += 1
-        if thread_id in self.items:
-            raise FileExistsError(thread_id)
-        self.items[thread_id] = []
-        return thread_id
-
-    async def append_batch(self, items: list[ResponseItem]) -> None:
-        """按需在首条写入后失败，模拟非原子 materialization。"""
-        self.append_calls += 1
-        if self.fail_before_write_once:
-            self.fail_before_write_once = False
-            raise OSError("injected pre-write projection failure")
-        if items and items[0].thread_id in self.fail_threads:
-            raise OSError("injected projection failure")
-        if self.fail_after_first_once:
-            self.fail_after_first_once = False
-            first = items[0]
-            self.items.setdefault(first.thread_id, []).append(first)
-            raise OSError("injected partial projection failure")
-        for item in items:
-            self.items.setdefault(item.thread_id, []).append(item)
-
-    async def load_thread(self, thread_id: str) -> AsyncIterator[ResponseItem]:
-        """返回当前持久化 history 的异步快照。"""
-        if thread_id in self.fail_load_threads:
-            raise OSError("injected projection load failure")
-        snapshot = list(self.items.get(thread_id, ()))
-
-        async def _items() -> AsyncIterator[ResponseItem]:
-            for item in snapshot:
-                yield item
-
-        return _items()
-
-
-class _YieldingProjectionStore(_MemoryProjectionStore):
-    """append 前让出调度，稳定暴露 load-then-append 并发竞争。"""
-
-    async def append_batch(self, items: list[ResponseItem]) -> None:
-        """让并发 project 有机会同时观察旧 history。"""
-        self.append_calls += 1
-        await anyio.lowlevel.checkpoint()
-        for item in items:
-            self.items.setdefault(item.thread_id, []).append(item)
-
-
-class _YieldingJsonlMessageStore(JsonlMessageStore):
-    """使用真实 JSONL，仅在 append 前让出调度以放大跨 projector 竞争。"""
-
-    def __init__(self, threads_dir: Path) -> None:
-        super().__init__(threads_dir)
-        self.append_calls = 0
-
-    async def append_batch(self, items: list[ResponseItem]) -> None:
-        """让两个 projector 有机会在落盘前分别完成 history 检查。"""
-        self.append_calls += 1
-        await anyio.lowlevel.checkpoint()
-        await super().append_batch(items)
-
-
-class _FailingDirectory:
-    """在 JSONL exclusive-create 后拒绝 metadata 注册。"""
-
-    def __init__(self) -> None:
-        self.upsert_calls = 0
-
-    async def upsert_metadata(self, metadata: object) -> None:
-        """模拟 derived directory 暂时不可用。"""
-        self.upsert_calls += 1
-        raise OSError("injected directory failure")
-
-    async def close(self) -> None:
-        """满足 store close 路径。"""
-
-
-async def _history(store: _MemoryProjectionStore, thread_id: str) -> list[ResponseItem]:
-    """收集 fake store 的异步 history。"""
-    return [item async for item in await store.load_thread(thread_id)]
-
-
-async def _create_explicit_projection(store: JsonlMessageStore) -> str:
-    """用完整审计 metadata 创建固定测试 projection。"""
-    return await store.create_projection_thread(
-        thread_id="thr_explicit",
-        cwd="/work",
-        entry_skill_id="general",
-        source="system",
-        extra={
-            "audit_required": True,
-            "journal_session_id": "ses_1",
-            "journal_schema_version": 1,
-        },
-    )
 
 
 @pytest.mark.anyio
@@ -518,6 +353,35 @@ async def test_replay_detects_reversed_durable_history_order() -> None:
 
 
 @pytest.mark.anyio
+async def test_missing_suffix_cannot_append_after_unrelated_history_tail() -> None:
+    """history=[item1,item3] 时不得把缺失 item2 追加为错误的 [item1,item3,item2]。"""
+    first = user_message(text="one", thread_id="thr_1").model_copy(
+        update={"id": "item_1", "created_at": _NOW}
+    )
+    second = user_message(text="two", thread_id="thr_1").model_copy(
+        update={"id": "item_2", "created_at": _NOW}
+    )
+    later = user_message(text="three", thread_id="thr_1").model_copy(
+        update={"id": "item_3", "created_at": _NOW}
+    )
+    envelopes, ack = _encoded(
+        (
+            _conversation_record(first, record_id="rec_1"),
+            _conversation_record(second, record_id="rec_2"),
+        )
+    )
+    store = _MemoryProjectionStore()
+    store.items["thr_1"] = [first, later]
+
+    result = await JournalConversationProjector(store).project(envelopes, ack)
+
+    assert result.stale is True
+    assert result.projected_seq == 0
+    assert result.failure_class == "projection_order_conflict"
+    assert [item.id for item in await _history(store, "thr_1")] == ["item_1", "item_3"]
+
+
+@pytest.mark.anyio
 async def test_replay_rebuilds_deleted_transcript_despite_in_memory_watermark() -> None:
     """watermark 已前进后投影文件被重建为空，Journal 重放仍必须恢复内容。"""
     item = user_message(text="one", thread_id="thr_1").model_copy(
@@ -649,6 +513,23 @@ async def test_two_projectors_share_real_store_thread_lock(tmp_path: Path) -> No
 
 
 @pytest.mark.anyio
+async def test_real_store_close_releases_projection_state(tmp_path: Path) -> None:
+    """store-owned state 生命周期止于 close，不能泄漏到已关闭 target。"""
+    store = JsonlMessageStore(tmp_path)
+    await _create_explicit_projection(store)
+    item = user_message(text="one", thread_id="thr_explicit").model_copy(
+        update={"id": "item_1", "created_at": _NOW}
+    )
+    envelopes, ack = _encoded((_conversation_record(item, record_id="rec_1"),))
+    result = await JournalConversationProjector(store).project(envelopes, ack)
+    assert store.projection_state("thr_explicit") == (result, None)
+
+    await store.close()
+
+    assert store.projection_state("thr_explicit") == (None, None)
+
+
+@pytest.mark.anyio
 async def test_seq_gaps_preserve_journal_order_and_ignore_domain_ack_records() -> None:
     """conversation envelope 可跳过同 ack 的领域 record，但顺序仍由 seq 决定。"""
     first = user_message(text="one", thread_id="thr_1").model_copy(
@@ -737,6 +618,55 @@ async def test_stale_gap_blocks_higher_seq_until_failed_batch_replays() -> None:
     assert advanced.stale is False
     assert advanced.projected_seq == 6
     assert [item.id for item in await _history(store, "thr_1")] == ["item_5", "item_6"]
+
+
+@pytest.mark.anyio
+async def test_stale_gap_is_shared_across_projector_instances() -> None:
+    """同一 store/thread 的 p1 seq5 失败必须阻止 p2 越过到 seq6。"""
+    fifth = user_message(text="five", thread_id="thr_1").model_copy(
+        update={"id": "item_5", "created_at": _NOW}
+    )
+    sixth = user_message(text="six", thread_id="thr_1").model_copy(
+        update={"id": "item_6", "created_at": _NOW}
+    )
+    envelopes_5, ack_5 = _encoded(
+        (_conversation_record(fifth, record_id="rec_5"),), expected_seq=4
+    )
+    envelopes_6, ack_6 = _encoded(
+        (_conversation_record(sixth, record_id="rec_6"),), expected_seq=5
+    )
+    store = _MemoryProjectionStore()
+    store.fail_before_write_once = True
+    first = JournalConversationProjector(store)
+    second = JournalConversationProjector(store)
+
+    failed = await first.project(envelopes_5, ack_5)
+    blocked = await second.project(envelopes_6, ack_6)
+
+    assert blocked == failed
+    assert second.state("thr_1") == failed
+    assert await _history(store, "thr_1") == []
+
+
+@pytest.mark.anyio
+async def test_same_thread_id_on_different_stores_has_isolated_state() -> None:
+    """store A 的 stale state 不得阻止 store B 上同名 thread 的健康投影。"""
+    item = user_message(text="six", thread_id="thr_1").model_copy(
+        update={"id": "item_6", "created_at": _NOW}
+    )
+    envelopes, ack = _encoded(
+        (_conversation_record(item, record_id="rec_6"),), expected_seq=5
+    )
+    failed_store = _MemoryProjectionStore()
+    failed_store.fail_before_write_once = True
+    healthy_store = _MemoryProjectionStore()
+    await JournalConversationProjector(failed_store).project(envelopes, ack)
+
+    healthy = await JournalConversationProjector(healthy_store).project(envelopes, ack)
+
+    assert healthy.stale is False
+    assert healthy.projected_seq == 6
+    assert [entry.id for entry in await _history(healthy_store, "thr_1")] == ["item_6"]
 
 
 @pytest.mark.anyio

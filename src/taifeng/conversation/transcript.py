@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
     # TelemetrySink 走 telemetry/__init__.py 会引入循环 (telemetry → loop → context → conversation)
     # 这里只用作类型注解，运行时不需要解析
+    from taifeng.conversation.journal.projector import ProjectionResult
     from taifeng.telemetry.sink import TelemetrySink
 
 
@@ -260,6 +261,7 @@ class JsonlMessageStore(MessageStore):
         )
         self._hook = NoopIndexHook()
         self._projection_locks: dict[str, anyio.Lock] = {}
+        self._projection_states: dict[str, tuple[ProjectionResult, int | None]] = {}
 
     # -----------------------------------------------------------------
     # Thread lifecycle
@@ -321,6 +323,21 @@ class JsonlMessageStore(MessageStore):
         except FileExistsError:
             # 另一个同进程恢复者已完成 exclusive-create；禁止覆盖，直接复用。
             return
+
+    def projection_state(
+        self, thread_id: str
+    ) -> tuple[ProjectionResult | None, int | None]:
+        """读取 materialization target 的共享 result 与 blocked seq。"""
+        return self._projection_states.get(thread_id, (None, None))
+
+    def update_projection_state(
+        self,
+        thread_id: str,
+        result: ProjectionResult,
+        blocked_seq: int | None,
+    ) -> None:
+        """在 projection_lock 内更新共享 materialization state。"""
+        self._projection_states[thread_id] = (result, blocked_seq)
 
     async def create_projection_thread(
         self,
@@ -438,3 +455,5 @@ class JsonlMessageStore(MessageStore):
 
     async def close(self) -> None:
         await self._directory.close()
+        self._projection_locks.clear()
+        self._projection_states.clear()

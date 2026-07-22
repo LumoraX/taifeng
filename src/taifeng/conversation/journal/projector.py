@@ -59,6 +59,21 @@ class ConversationProjectionStore(Protocol):
         """确保 audited projection 文件及 metadata 存在。"""
         ...
 
+    def projection_state(
+        self, thread_id: str
+    ) -> tuple[ProjectionResult | None, int | None]:
+        """读取 store-owned result 与 blocked seq。"""
+        ...
+
+    def update_projection_state(
+        self,
+        thread_id: str,
+        result: ProjectionResult,
+        blocked_seq: int | None,
+    ) -> None:
+        """在共享 thread 锁内更新 store-owned state。"""
+        ...
+
     async def append_batch(self, items: list[ResponseItem]) -> None:
         """按输入顺序追加 conversation items。"""
         ...
@@ -162,8 +177,6 @@ class JournalConversationProjector:
 
     def __init__(self, store: ConversationProjectionStore) -> None:
         self._store = store
-        self._states: dict[str, ProjectionResult] = {}
-        self._blocked_seq: dict[str, int] = {}
 
     async def bootstrap_thread(
         self,
@@ -186,10 +199,10 @@ class JournalConversationProjector:
 
     def state(self, thread_id: str) -> ProjectionResult:
         """返回 thread 当前 watermark/stale 快照。"""
-        return self._states.get(
-            thread_id,
-            ProjectionResult(thread_id=thread_id, projected_seq=0, stale=False),
-        )
+        result, _ = self._store.projection_state(thread_id)
+        if result is not None:
+            return result
+        return ProjectionResult(thread_id=thread_id, projected_seq=0, stale=False)
 
     async def project(
         self,
@@ -210,7 +223,7 @@ class JournalConversationProjector:
     ) -> ProjectionResult:
         """在 per-thread 锁内核对 durable history、去重并追加缺失 suffix。"""
         current = self.state(thread_id)
-        blocked_seq = self._blocked_seq.get(thread_id)
+        _, blocked_seq = self._store.projection_state(thread_id)
         if blocked_seq is not None and all(entry.seq != blocked_seq for entry in projected):
             return current
         first_missing = 0
@@ -264,6 +277,18 @@ class JournalConversationProjector:
                 (index for index, value in enumerate(present) if not value),
                 len(present),
             )
+            if (
+                first_missing < len(projected)
+                and projected_positions
+                and projected_positions[-1] < len(history) - 1
+            ):
+                return self._set_stale(
+                    thread_id,
+                    current.projected_seq,
+                    "projection_order_conflict",
+                    projected[first_missing].record_id,
+                    projected[first_missing].seq,
+                )
             if any(present[first_missing:]):
                 return self._set_stale(
                     thread_id,
@@ -304,8 +329,7 @@ class JournalConversationProjector:
             projected_seq=max(current.projected_seq, projected[-1].seq),
             stale=False,
         )
-        self._states[thread_id] = healthy
-        self._blocked_seq.pop(thread_id, None)
+        self._store.update_projection_state(thread_id, healthy, None)
         return healthy
 
     def _set_stale(
@@ -317,7 +341,7 @@ class JournalConversationProjector:
         failure_seq: int,
     ) -> ProjectionResult:
         """保存并返回稳定的 materialization stale 分类。"""
-        current = self._states.get(thread_id)
+        current, _ = self._store.projection_state(thread_id)
         if current is not None and current.stale:
             return current
         stale = ProjectionResult(
@@ -327,6 +351,5 @@ class JournalConversationProjector:
             failure_class=failure_class,
             failure_record_id=failure_record_id,
         )
-        self._states[thread_id] = stale
-        self._blocked_seq[thread_id] = failure_seq
+        self._store.update_projection_state(thread_id, stale, failure_seq)
         return stale
