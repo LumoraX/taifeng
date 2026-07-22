@@ -86,7 +86,7 @@ PYTHONPATH=src uv run mypy src/taifeng
 
 1. 普通注解与 EventMsg 注册表。
 2. 异步迭代器协议。
-3. ModelClient 泛型 session 协议及所有 provider。
+3. 验证具体 session 的协变返回类型及所有 provider。
 4. 真实缺陷。
 5. 第三方依赖与 OTel 类型边界。
 
