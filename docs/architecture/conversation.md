@@ -10,6 +10,28 @@
 - **零配置开箱即用**（避免库变 framework）：传 `storage_dir` 一个参数即拿到完整能力
 - **不引第三方 DB 依赖**（R1 强制）：src 内仅允许 stdlib `sqlite3`
 
+## 实验性 SessionJournal durable core（Phase 1）
+
+`taifeng.conversation.journal` 现包含一个隔离的、实验性的 Session 级 durable core。它使用 RFC 8785
+canonical JSON、SHA-256 envelope hash chain、`BEGIN + envelopes + COMMIT` 原子 batch、同进程 live lease
+fencing，以及 fail-closed strict verification。每次 durable ack 都在 file flush+fsync 后返回；新建文件还会
+fsync 父目录。同步文件操作和 strict scan 全部经 anyio worker thread 执行。
+
+这一能力当前**不是默认 conversation 持久化路径**：
+
+- `AgentEngine`、`EnginePool`、`MessageWriter` / `MessageStore` 和 EventMsg 均未接入 SessionJournal；
+- 现有 per-thread JSONL transcript、resume、reconstruct 和 corrupt-line tolerance 行为保持不变；
+- Phase 1 只写 `session_started`、`thread_created`、`thread_bound` 三种初始化记录，以及显式调用方提交的测试/
+  基础 record；尚未覆盖 LLM、Tool、Skill、HITL、审批或外部 effect；
+- 不支持 `open_existing`、跨进程崩溃接管、repair/reconcile/unfreeze 或历史迁移；`close()` 只释放 live lease，
+  不写 `session_ended`；
+- 因此不得把本阶段描述成“Engine 已获得完整审计真相源”或“生产 resume 已迁移”。完整边界以
+  [SessionJournal Durable Core（Phase 1）能力契约](capabilities/session-journal-core.md) 和
+  [ADR 0025](../decisions/0025-session-journal-source-of-truth.md) 为准。
+
+后续阶段完成 recovery/open 与 Engine 单写接入前，本页其余章节描述的默认 thread transcript 仍是现行行为；
+SessionJournal 不与它双写，也不改变其公共 API。
+
 ## 三协议总览
 
 ```
