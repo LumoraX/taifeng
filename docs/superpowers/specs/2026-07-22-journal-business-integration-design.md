@@ -95,12 +95,13 @@ canonical vectors：payload 无 `payload_version`，record id 固定为
 ### SessionAuditCoordinator
 
 新增 `loop/audit.py`。每个活跃 Session 恰有一个 coordinator，持有 core、lease、
-expected seq、root cancellation、health 和 projected seq。它提供：
+expected seq、`session_root_cancel`、每个 active turn 的 `target_turn_cancel`、health 和 projected seq。
+它提供：
 
 - `record()` / `record_batch()`：只以 durable ack 推进 seq；
 - `commit_conversation_batch()`：提交领域 record 与有序 conversation items；
 - `ensure_effect_allowed()`：任何 effect 前检查 health；
-- `freeze()`：第一次失败原子转 `FROZEN/RECOVERY_REQUIRED` 并取消 root token；
+- `freeze()`：第一次失败原子转 `FROZEN/RECOVERY_REQUIRED` 并取消 session root token；
 - `finish()`：供 EnginePool 唯一调用的幂等终结入口，写 terminal records 后 `close_session()`；
 - `mark_projection_stale()`：不冻结执行事实，只报告投影水位落后。
 
@@ -301,15 +302,20 @@ EnginePool 构造期验证静态配置和 tool/provider capability；Submission 
 ### CancelTurn 与 Shutdown
 
 - `CancelTurn` 使用自己的 submission id，payload 指向 target submission。healthy 时先 durable 写
-  `submission_accepted(cancel_turn)`，再发 root cancellation；目标 turn 完成 terminal 收敛后写
+  `submission_accepted(cancel_turn)`，再只触发该 target turn 及其 child effect subtree 的
+  `target_turn_cancel`；不得触发 `session_root_cancel`。目标 turn 完成 terminal 收敛后写
   `submission_applied(result_status=cancelled|already_terminal|not_found)`，并列出 terminal record ids。
-- `Shutdown` 先 durable 写 `submission_accepted(shutdown)` 并关闭新 submission intake，再由
-  EnginePool 唯一调用 `coordinator.finish()`：收敛所有在途 turn/thread，最终原子提交该 Shutdown 的
-  `submission_applied + thread_terminal* + session_ended`，然后释放 lease。
+- `Shutdown` 在 lifecycle lock 下竞争 `OPEN → FINISHING`。胜者先关闭新 submission intake 并登记唯一
+  shutdown submission id，再 durable 写 `submission_accepted(shutdown)`，随后触发
+  `session_root_cancel` 并由 EnginePool 唯一调用 `coordinator.finish()`。finish 收敛所有在途 turn/thread，
+  最终原子提交该 Shutdown 的 `submission_applied + thread_terminal* + session_ended`，然后释放 lease。
 - frozen/Journal 不可用时，CancelTurn 与 Shutdown 仍可作为安全降级动作执行，但不能伪造 durable
   acceptance/applied；health/logger 标记 `audit_complete=false`。它们是冻结态唯一允许的新控制动作。
-- 同一 CancelTurn/Shutdown submission 的重试使用相同 record ids；并发 Shutdown/release 归并到同一
-  finish future，不重复终结记录或 close。
+- 同一 CancelTurn/Shutdown submission 的重试使用相同 record ids。若 release/close 或另一个 Shutdown
+  已先把状态改为 FINISHING，后到的 Shutdown 在 `submission_accepted` 前稳定返回
+  `SessionFinishingError`，不能加入旧 future，也不生成第二组 terminal；同一 submission id 的重试只读取
+  已登记结果。finish 必须收敛在 admission 关闭前已经 accepted/排队的 UserMessage，未 accepted 的队列项
+  稳定拒绝。
 
 ### LLM 与 UI delta
 
@@ -367,9 +373,15 @@ outcome 或 unknown。Journal finalization 使用独立 shield，不能复用已
   unknown 并冻结。
 - EnginePool 是 Session 生命周期唯一 owner；`Shutdown` handler、`release()`、`close()` 都只能请求它调用
   同一个 `coordinator.finish()`，其他组件不得直接写 session terminal 或调用 close_session。
-- `finish()` 由 per-session lock/future 合并并发调用；生命周期 operation id 固定为
-  `{session_id}:lifecycle:end`，thread terminal id 固定包含 thread id，session ended id 固定包含 session id。
-  已成功 finish 的重试返回同一结果，不二次 append/close。
+- lifecycle 在同一 per-session lock 下执行 `OPEN → FINISHING → CLOSED`。从 OPEN 进入 FINISHING 的胜者
+  原子关闭 intake、快照所有已 accepted/in-flight submission，并创建唯一 finish future；后续
+  release/close 只 await 它，后续不同 id 的 Shutdown 在 acceptance 前拒绝。已成功 finish 的重试返回同一
+  结果，不二次 append/close。
+- 生命周期 operation id 固定为 `{session_id}:lifecycle:end`。按 thread id 排序后，
+  `thread_terminal.record_id = {operation_id}:thread_terminal:none:{thread_ordinal}`；
+  `session_ended.record_id = {operation_id}:session_ended:none:0`。若首个胜者是 Shutdown，其
+  `submission_applied` 仍使用该 submission 自身 operation id 与通用 factory 公式，并与 terminal records
+  同 batch；release/close 胜出时不存在伪造的 Shutdown applied。
 - `finish()` 先收敛 turn，再原子提交全部尚未提交的 `thread_terminal` 与 `session_ended`（Shutdown 时同批含
   `submission_applied`），最后只调用一次 `close_session(lease)`。terminal commit 失败则 emergency close，
   future 返回 `audit_complete=false`；不得把它缓存成成功。
@@ -418,7 +430,9 @@ live pool 内不可继续；进程重启后 audited marker 阻止 legacy resume�
 - intent 写失败时 effect spy=0；outcome 写失败后后续 LLM/Tool/Skill spy=0。
 - 一个 Session frozen，另一个正常。
 - CancelTurn 的 accepted→target terminal→applied 与 not-found/already-terminal；Shutdown 的 intake close、
-  terminal batch、emergency cancel；并发 Shutdown/release/close 只产生一组 terminal records 与一次 close。
+  terminal batch、emergency cancel；两个并发 turn 取消一个时另一个及其后续 effect 继续。
+- release-vs-Shutdown、两个不同 id 的 Shutdown、已 accepted/排队 UserMessage 的收敛；并发
+  Shutdown/release/close 只产生一组确定 record-id 的 terminal records 与一次 close。
 
 ### Capability gates
 
