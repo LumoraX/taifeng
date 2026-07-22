@@ -6,7 +6,7 @@ import hashlib
 import math
 from datetime import UTC, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import rfc8785
 from pydantic import BaseModel
@@ -90,7 +90,7 @@ def model_canonical_data(model: BaseModel) -> dict[str, JsonValue]:
     normalized = _model_value(model)
     if not isinstance(normalized, dict):  # pragma: no cover - BaseModel dump 恒为 mapping
         raise NonCanonicalValueError("model dump must be a mapping")
-    return cast("dict[str, JsonValue]", normalized)
+    return normalized
 
 
 def payload_hash(payload: dict[str, JsonValue]) -> str:
