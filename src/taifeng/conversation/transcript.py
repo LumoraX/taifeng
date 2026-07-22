@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from pydantic import ValidationError
 
 from taifeng.conversation.models import (
@@ -134,14 +135,16 @@ class JsonlMessageWriter:
         tags: tuple[str, ...] = (),
         extra: dict[str, Any] | None = None,
         created_at: float | None = None,
+        updated_at: float | None = None,
     ) -> str:
         """以调用方预分配 id exclusive-create thread；仅供内核投影 bootstrap。"""
         now = time.time() if created_at is None else created_at
+        updated = now if updated_at is None else updated_at
         meta_line = {
             "__meta__": True,
             "thread_id": thread_id,
             "created_at": now,
-            "updated_at": now,
+            "updated_at": updated,
             "entry_skill_id": entry_skill_id,
             "source": source,
             "tags": list(tags),
@@ -256,6 +259,7 @@ class JsonlMessageStore(MessageStore):
             threads_dir=self._root,
         )
         self._hook = NoopIndexHook()
+        self._projection_locks: dict[str, anyio.Lock] = {}
 
     # -----------------------------------------------------------------
     # Thread lifecycle
@@ -291,6 +295,32 @@ class JsonlMessageStore(MessageStore):
         )
         await self._directory.upsert_metadata(meta)
         return tid
+
+    def projection_lock(self, thread_id: str) -> anyio.Lock:
+        """返回同一 store 内跨 projector 共享的 per-thread materialization 锁。"""
+        return self._projection_locks.setdefault(thread_id, anyio.Lock())
+
+    async def ensure_projection_thread(self, thread_id: str) -> None:
+        """从 derived directory 恢复被删除的 audited JSONL projection metadata。"""
+        path = self._writer._thread_path(thread_id)  # noqa: SLF001
+        if path.exists():
+            return
+        meta = await self._directory.get_metadata(thread_id)
+        if meta is None or meta.extra.get("audit_required") is not True:
+            raise FileNotFoundError(f"audited projection metadata not found: {thread_id}")
+        try:
+            await self._writer._create_thread_with_id(  # noqa: SLF001
+                thread_id=meta.thread_id,
+                entry_skill_id=meta.entry_skill_id,
+                source=meta.source,
+                tags=meta.tags,
+                extra=meta.extra,
+                created_at=meta.created_at,
+                updated_at=meta.updated_at,
+            )
+        except FileExistsError:
+            # 另一个同进程恢复者已完成 exclusive-create；禁止覆盖，直接复用。
+            return
 
     async def create_projection_thread(
         self,

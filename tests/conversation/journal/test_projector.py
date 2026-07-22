@@ -82,8 +82,17 @@ class _MemoryProjectionStore:
         self.append_calls = 0
         self.create_calls = 0
         self.fail_after_first_once = False
+        self.fail_before_write_once = False
         self.fail_threads: set[str] = set()
         self.fail_load_threads: set[str] = set()
+        self._projection_locks: dict[str, anyio.Lock] = {}
+
+    def projection_lock(self, thread_id: str) -> anyio.Lock:
+        """让同一 fake store 上的多个 projector 共享 thread 锁。"""
+        return self._projection_locks.setdefault(thread_id, anyio.Lock())
+
+    async def ensure_projection_thread(self, thread_id: str) -> None:
+        """内存 fake 不需要修复 metadata 文件。"""
 
     async def create_projection_thread(
         self,
@@ -104,6 +113,9 @@ class _MemoryProjectionStore:
     async def append_batch(self, items: list[ResponseItem]) -> None:
         """按需在首条写入后失败，模拟非原子 materialization。"""
         self.append_calls += 1
+        if self.fail_before_write_once:
+            self.fail_before_write_once = False
+            raise OSError("injected pre-write projection failure")
         if items and items[0].thread_id in self.fail_threads:
             raise OSError("injected projection failure")
         if self.fail_after_first_once:
@@ -138,6 +150,20 @@ class _YieldingProjectionStore(_MemoryProjectionStore):
             self.items.setdefault(item.thread_id, []).append(item)
 
 
+class _YieldingJsonlMessageStore(JsonlMessageStore):
+    """使用真实 JSONL，仅在 append 前让出调度以放大跨 projector 竞争。"""
+
+    def __init__(self, threads_dir: Path) -> None:
+        super().__init__(threads_dir)
+        self.append_calls = 0
+
+    async def append_batch(self, items: list[ResponseItem]) -> None:
+        """让两个 projector 有机会在落盘前分别完成 history 检查。"""
+        self.append_calls += 1
+        await anyio.lowlevel.checkpoint()
+        await super().append_batch(items)
+
+
 class _FailingDirectory:
     """在 JSONL exclusive-create 后拒绝 metadata 注册。"""
 
@@ -156,6 +182,21 @@ class _FailingDirectory:
 async def _history(store: _MemoryProjectionStore, thread_id: str) -> list[ResponseItem]:
     """收集 fake store 的异步 history。"""
     return [item async for item in await store.load_thread(thread_id)]
+
+
+async def _create_explicit_projection(store: JsonlMessageStore) -> str:
+    """用完整审计 metadata 创建固定测试 projection。"""
+    return await store.create_projection_thread(
+        thread_id="thr_explicit",
+        cwd="/work",
+        entry_skill_id="general",
+        source="system",
+        extra={
+            "audit_required": True,
+            "journal_session_id": "ses_1",
+            "journal_schema_version": 1,
+        },
+    )
 
 
 @pytest.mark.anyio
@@ -227,27 +268,16 @@ async def test_metadata_registration_failure_keeps_rebuildable_file_and_rejects_
     store = JsonlMessageStore(tmp_path)
     directory = _FailingDirectory()
     store._directory = directory  # type: ignore[assignment]  # noqa: SLF001
-    kwargs = {
-        "thread_id": "thr_explicit",
-        "cwd": "/work",
-        "entry_skill_id": "general",
-        "source": "system",
-        "extra": {
-            "audit_required": True,
-            "journal_session_id": "ses_1",
-            "journal_schema_version": 1,
-        },
-    }
 
     with pytest.raises(OSError, match="directory failure"):
-        await store.create_projection_thread(**kwargs)
+        await _create_explicit_projection(store)
 
     path = tmp_path / "thr_explicit.jsonl"
     metadata = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
     assert metadata["thread_id"] == "thr_explicit"
     assert metadata["extra"]["audit_required"] is True
     with pytest.raises(FileExistsError):
-        await store.create_projection_thread(**kwargs)
+        await _create_explicit_projection(store)
     assert directory.upsert_calls == 1
     await store.close()
 
@@ -462,6 +492,32 @@ async def test_existing_same_item_id_with_different_content_marks_stale() -> Non
 
 
 @pytest.mark.anyio
+async def test_replay_detects_reversed_durable_history_order() -> None:
+    """ID 与内容都相同但物理 history 逆序时必须 stale，不能健康推进 watermark。"""
+    first = user_message(text="one", thread_id="thr_1").model_copy(
+        update={"id": "item_1", "created_at": _NOW}
+    )
+    second = user_message(text="two", thread_id="thr_1").model_copy(
+        update={"id": "item_2", "created_at": _NOW}
+    )
+    envelopes, ack = _encoded(
+        (
+            _conversation_record(first, record_id="rec_1"),
+            _conversation_record(second, record_id="rec_2"),
+        )
+    )
+    store = _MemoryProjectionStore()
+    store.items["thr_1"] = [second, first]
+
+    result = await JournalConversationProjector(store).project(envelopes, ack)
+
+    assert result.stale is True
+    assert result.projected_seq == 0
+    assert result.failure_class == "projection_order_conflict"
+    assert store.append_calls == 0
+
+
+@pytest.mark.anyio
 async def test_replay_rebuilds_deleted_transcript_despite_in_memory_watermark() -> None:
     """watermark 已前进后投影文件被重建为空，Journal 重放仍必须恢复内容。"""
     item = user_message(text="one", thread_id="thr_1").model_copy(
@@ -479,6 +535,46 @@ async def test_replay_rebuilds_deleted_transcript_despite_in_memory_watermark() 
     assert replayed.projected_seq == 4
     assert await _history(store, "thr_1") == [item]
     assert store.append_calls == 2
+
+
+@pytest.mark.anyio
+async def test_real_jsonl_replay_recreates_audited_metadata_after_file_deletion(
+    tmp_path: Path,
+) -> None:
+    """删除默认投影文件后，同一 projector 重放必须先恢复显式 id 的审计 metadata。"""
+    store = JsonlMessageStore(tmp_path)
+    projector = JournalConversationProjector(store)
+    await projector.bootstrap_thread(
+        thread_id="thr_explicit",
+        cwd="/work",
+        entry_skill_id="general",
+        source="system",
+        extra={
+            "audit_required": True,
+            "journal_session_id": "ses_1",
+            "journal_schema_version": 1,
+        },
+    )
+    item = user_message(text="one", thread_id="thr_explicit").model_copy(
+        update={"id": "item_1", "created_at": _NOW}
+    )
+    envelopes, ack = _encoded((_conversation_record(item, record_id="rec_1"),))
+    await projector.project(envelopes, ack)
+    path = tmp_path / "thr_explicit.jsonl"
+    path.unlink()
+
+    replayed = await projector.project(envelopes, ack)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    metadata = json.loads(lines[0])
+    assert replayed.stale is False
+    assert metadata["__meta__"] is True
+    assert metadata["thread_id"] == "thr_explicit"
+    assert metadata["extra"]["audit_required"] is True
+    assert metadata["extra"]["journal_session_id"] == "ses_1"
+    assert metadata["extra"]["journal_schema_version"] == 1
+    assert len([item async for item in await store.load_thread("thr_explicit")]) == 1
+    await store.close()
 
 
 @pytest.mark.anyio
@@ -528,6 +624,28 @@ async def test_concurrent_same_batch_is_serialized_per_thread() -> None:
     assert len(results) == 2
     assert [item.id for item in await _history(store, "thr_1")] == ["item_1"]
     assert store.append_calls == 1
+
+
+@pytest.mark.anyio
+async def test_two_projectors_share_real_store_thread_lock(tmp_path: Path) -> None:
+    """两个 projector 共享真实 store 时不得同时 load 空 history 后重复追加。"""
+    store = _YieldingJsonlMessageStore(tmp_path)
+    await _create_explicit_projection(store)
+    item = user_message(text="one", thread_id="thr_explicit").model_copy(
+        update={"id": "item_1", "created_at": _NOW}
+    )
+    envelopes, ack = _encoded((_conversation_record(item, record_id="rec_1"),))
+    first = JournalConversationProjector(store)
+    second = JournalConversationProjector(store)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(first.project, envelopes, ack)
+        task_group.start_soon(second.project, envelopes, ack)
+
+    history = [item async for item in await store.load_thread("thr_explicit")]
+    assert [item.id for item in history] == ["item_1"]
+    assert store.append_calls == 1
+    await store.close()
 
 
 @pytest.mark.anyio
@@ -585,6 +703,40 @@ async def test_partial_materialization_failure_is_stale_and_replay_converges() -
     assert recovered.stale is False
     assert recovered.projected_seq == 5
     assert await _history(store, "thr_1") == await _history(clean_store, "thr_1")
+
+
+@pytest.mark.anyio
+async def test_stale_gap_blocks_higher_seq_until_failed_batch_replays() -> None:
+    """seq5 投影失败后 seq6 不能越过缺口；重放 seq5 后才允许按序收敛。"""
+    fifth = user_message(text="five", thread_id="thr_1").model_copy(
+        update={"id": "item_5", "created_at": _NOW}
+    )
+    sixth = user_message(text="six", thread_id="thr_1").model_copy(
+        update={"id": "item_6", "created_at": _NOW}
+    )
+    envelopes_5, ack_5 = _encoded(
+        (_conversation_record(fifth, record_id="rec_5"),), expected_seq=4
+    )
+    envelopes_6, ack_6 = _encoded(
+        (_conversation_record(sixth, record_id="rec_6"),), expected_seq=5
+    )
+    store = _MemoryProjectionStore()
+    store.fail_before_write_once = True
+    projector = JournalConversationProjector(store)
+
+    failed = await projector.project(envelopes_5, ack_5)
+    blocked = await projector.project(envelopes_6, ack_6)
+
+    assert failed.stale is True
+    assert blocked == failed
+    assert await _history(store, "thr_1") == []
+    recovered = await projector.project(envelopes_5, ack_5)
+    advanced = await projector.project(envelopes_6, ack_6)
+    assert recovered.stale is False
+    assert recovered.projected_seq == 5
+    assert advanced.stale is False
+    assert advanced.projected_seq == 6
+    assert [item.id for item in await _history(store, "thr_1")] == ["item_5", "item_6"]
 
 
 @pytest.mark.anyio

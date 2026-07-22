@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-import anyio
 from pydantic import ValidationError
 
 from taifeng.conversation.journal.records import (
@@ -15,6 +14,8 @@ from taifeng.conversation.journal.records import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
+
+    import anyio
 
     from taifeng.conversation.journal.models import JournalAck, JournalEnvelope
     from taifeng.conversation.models import ResponseItem
@@ -48,6 +49,14 @@ class ConversationProjectionStore(Protocol):
         extra: dict[str, Any],
     ) -> str:
         """用调用方预分配 id 创建空投影。"""
+        ...
+
+    def projection_lock(self, thread_id: str) -> anyio.Lock:
+        """返回同一 store 内跨 projector 共享的 per-thread 锁。"""
+        ...
+
+    async def ensure_projection_thread(self, thread_id: str) -> None:
+        """确保 audited projection 文件及 metadata 存在。"""
         ...
 
     async def append_batch(self, items: list[ResponseItem]) -> None:
@@ -154,7 +163,7 @@ class JournalConversationProjector:
     def __init__(self, store: ConversationProjectionStore) -> None:
         self._store = store
         self._states: dict[str, ProjectionResult] = {}
-        self._locks: dict[str, anyio.Lock] = {}
+        self._blocked_seq: dict[str, int] = {}
 
     async def bootstrap_thread(
         self,
@@ -190,7 +199,7 @@ class JournalConversationProjector:
         """验证完整 batch 后按 Journal seq 物化；store 失败只返回 stale。"""
         projected = _validate_batch(envelopes, ack)
         thread_id = projected[0].item.thread_id
-        lock = self._locks.setdefault(thread_id, anyio.Lock())
+        lock = self._store.projection_lock(thread_id)
         async with lock:
             return await self._materialize(thread_id, projected)
 
@@ -201,8 +210,12 @@ class JournalConversationProjector:
     ) -> ProjectionResult:
         """在 per-thread 锁内核对 durable history、去重并追加缺失 suffix。"""
         current = self.state(thread_id)
+        blocked_seq = self._blocked_seq.get(thread_id)
+        if blocked_seq is not None and all(entry.seq != blocked_seq for entry in projected):
+            return current
         first_missing = 0
         try:
+            await self._store.ensure_projection_thread(thread_id)
             iterator = await self._store.load_thread(thread_id)
             history = [item async for item in iterator]
             existing = {item.id: item for item in history}
@@ -212,14 +225,41 @@ class JournalConversationProjector:
                     current.projected_seq,
                     "duplicate_stored_item_id",
                     projected[0].record_id,
+                    projected[0].seq,
                 )
             for entry in projected:
                 stored = existing.get(entry.item.id)
                 if stored is not None and stored != entry.item:
                     return self._set_stale(
-                        thread_id, current.projected_seq, "item_id_conflict", entry.record_id
+                        thread_id,
+                        current.projected_seq,
+                        "item_id_conflict",
+                        entry.record_id,
+                        entry.seq,
                     )
+            positions = {item.id: index for index, item in enumerate(history)}
             present = [entry.item.id in existing for entry in projected]
+            projected_positions = [
+                positions[entry.item.id]
+                for entry, is_present in zip(projected, present, strict=True)
+                if is_present
+            ]
+            ordered_positions = all(
+                right == left + 1
+                for left, right in zip(
+                    projected_positions,
+                    projected_positions[1:],
+                    strict=False,
+                )
+            )
+            if not ordered_positions:
+                return self._set_stale(
+                    thread_id,
+                    current.projected_seq,
+                    "projection_order_conflict",
+                    projected[0].record_id,
+                    projected[0].seq,
+                )
             first_missing = next(
                 (index for index, value in enumerate(present) if not value),
                 len(present),
@@ -230,6 +270,7 @@ class JournalConversationProjector:
                     current.projected_seq,
                     "projection_order_conflict",
                     projected[0].record_id,
+                    projected[0].seq,
                 )
             if (
                 history
@@ -241,6 +282,7 @@ class JournalConversationProjector:
                     current.projected_seq,
                     "projection_order_conflict",
                     projected[0].record_id,
+                    projected[0].seq,
                 )
             items = [entry.item for entry in projected[first_missing:]]
             if items:
@@ -251,6 +293,11 @@ class JournalConversationProjector:
                 current.projected_seq,
                 type(exc).__name__,
                 projected[first_missing].record_id if first_missing < len(projected) else None,
+                (
+                    projected[first_missing].seq
+                    if first_missing < len(projected)
+                    else projected[0].seq
+                ),
             )
         healthy = ProjectionResult(
             thread_id=thread_id,
@@ -258,6 +305,7 @@ class JournalConversationProjector:
             stale=False,
         )
         self._states[thread_id] = healthy
+        self._blocked_seq.pop(thread_id, None)
         return healthy
 
     def _set_stale(
@@ -266,8 +314,12 @@ class JournalConversationProjector:
         projected_seq: int,
         failure_class: str,
         failure_record_id: str | None,
+        failure_seq: int,
     ) -> ProjectionResult:
         """保存并返回稳定的 materialization stale 分类。"""
+        current = self._states.get(thread_id)
+        if current is not None and current.stale:
+            return current
         stale = ProjectionResult(
             thread_id=thread_id,
             projected_seq=projected_seq,
@@ -276,4 +328,5 @@ class JournalConversationProjector:
             failure_record_id=failure_record_id,
         )
         self._states[thread_id] = stale
+        self._blocked_seq[thread_id] = failure_seq
         return stale
