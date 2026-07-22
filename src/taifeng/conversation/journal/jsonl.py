@@ -258,6 +258,17 @@ class JsonlSessionJournalCore:
             expected_seq=expected_seq,
         )
 
+    async def close_session(self, lease: SessionLease) -> None:
+        """验证 lease 后只释放一个 Session 的 live writer。"""
+        async with self._registry_lock:
+            writer = self._writers.get(lease.session_id)
+            if writer is None:
+                raise JournalLeaseError(lease.session_id, "no live writer")
+            async with writer.lock:
+                self._validate_lease(lease, writer)
+                writer.closed = True
+                self._writers.pop(lease.session_id, None)
+
     async def close(self) -> None:
         """等待在途写完成并清理 live leases，不追加领域 record。"""
         async with self._registry_lock:

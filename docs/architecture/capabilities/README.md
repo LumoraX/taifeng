@@ -52,6 +52,7 @@ Aligned with [conversation.md](../conversation.md).
 
 | Contract | Coverage |
 | --- | --- |
+| [session-journal-business-integration](session-journal-business-integration.md) | Experimental strict runtime slice for new Sessions: Journal-first submissions, LLM/Tool/call_skill intent and outcome, durable conversation items, and per-Session fail-closed gating |
 | [session-journal-core](session-journal-core.md) | Phase 1 experimental durable core: canonical envelope/hash chain, atomic JSONL batch frames, live single-writer fencing, strict verification |
 | [jsonl-transcript](jsonl-transcript.md) | `MessageWriter`, metadata line, POSIX atomic append, corrupt-line tolerance, `resume_thread_id`, `initial_history`, and `thread_resumed` events |
 | [thread-directory](thread-directory.md) | `ThreadMetadata`, `ThreadFilter`, `ThreadPage`, SQLite self-healing, `NullThreadDirectory`, and directory error classes |
