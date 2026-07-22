@@ -1,10 +1,13 @@
-"""JSONL 主存实现 —— JsonlMessageWriter (新, MessageWriter 协议) + JsonlMessageStore (legacy, T4 改造为兼容封装)。
+"""JSONL 主存实现。
+
+包含 JsonlMessageWriter（新 MessageWriter 协议）和 JsonlMessageStore（legacy 兼容封装）。
 
 文件布局：
 
 - 新（``JsonlMessageWriter``）: ``<threads_dir>/<thread_id>.jsonl``（flat 布局）
   首行 ``{"__meta__": true, ...ThreadMetadata 字段}``（自包含，可用于 rebuild_index）
-- 旧（``JsonlMessageStore``）: ``<threads_dir>/YYYY/MM/DD/rollout-{ts}-{thread_id}.jsonl``（date-bucketed）
+- 旧（``JsonlMessageStore``）:
+  ``<threads_dir>/YYYY/MM/DD/rollout-{ts}-{thread_id}.jsonl``（date-bucketed）
   + ``<threads_dir>/index.db``（SQLite 旁路索引）
 
 写入策略：
@@ -24,7 +27,6 @@ from __future__ import annotations
 import json
 import secrets
 import time
-from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,6 +44,8 @@ from taifeng.conversation.store import MessageStore
 from taifeng.loop.event import EventMsg, TranscriptSkippedCorruptLine
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
     # TelemetrySink 走 telemetry/__init__.py 会引入循环 (telemetry → loop → context → conversation)
     # 这里只用作类型注解，运行时不需要解析
     from taifeng.telemetry.sink import TelemetrySink
@@ -90,7 +94,7 @@ class JsonlMessageWriter:
     事件；未传则静默跳过。
     """
 
-    def __init__(self, threads_dir: str | Path, *, sink: "TelemetrySink | None" = None) -> None:
+    def __init__(self, threads_dir: str | Path, *, sink: TelemetrySink | None = None) -> None:
         self._root = Path(threads_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._sink = sink
@@ -113,7 +117,26 @@ class JsonlMessageWriter:
     ) -> str:
         """创建新 thread，写入首行 metadata，返回全局唯一 thread_id。"""
         thread_id = _generate_thread_id()
-        now = time.time()
+        return await self._create_thread_with_id(
+            thread_id=thread_id,
+            entry_skill_id=entry_skill_id,
+            source=source,
+            tags=tags,
+            extra=extra,
+        )
+
+    async def _create_thread_with_id(
+        self,
+        *,
+        thread_id: str,
+        entry_skill_id: str,
+        source: str,
+        tags: tuple[str, ...] = (),
+        extra: dict[str, Any] | None = None,
+        created_at: float | None = None,
+    ) -> str:
+        """以调用方预分配 id exclusive-create thread；仅供内核投影 bootstrap。"""
+        now = time.time() if created_at is None else created_at
         meta_line = {
             "__meta__": True,
             "thread_id": thread_id,
@@ -137,7 +160,11 @@ class JsonlMessageWriter:
         path = self._thread_path(thread_id)
         with path.open("a", encoding="utf-8") as f:
             for item in items:
-                line = json.dumps(item.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+                line = json.dumps(
+                    item.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
                 # 单次 write 保证 < PIPE_BUF 行原子（line 应 < 4KB）
                 f.write(line + "\n")
 
@@ -214,7 +241,8 @@ class JsonlMessageStore(MessageStore):
     - ``select_resume_path(cwd)`` 简化为「最近 cwd 匹配的 thread」（旧版 last_kind 启发不再追踪）
     - ``item_count`` 不再追踪（``ThreadInfo`` 返回 0），需要的话用 ``load_thread`` 计数
 
-    **新代码不应使用本类**；改用 ``AgentEngine(storage_dir=..., thread_directory=..., index_hook=...)``
+    **新代码不应使用本类**；改用
+    ``AgentEngine(storage_dir=..., thread_directory=..., index_hook=...)``
     三协议接口（spec：docs/architecture/conversation.md
     """
 
@@ -260,6 +288,42 @@ class JsonlMessageStore(MessageStore):
             source=src,
             tags=(),
             extra=extra,
+        )
+        await self._directory.upsert_metadata(meta)
+        return tid
+
+    async def create_projection_thread(
+        self,
+        *,
+        thread_id: str,
+        cwd: str | None,
+        entry_skill_id: str,
+        source: str,
+        extra: dict[str, Any],
+    ) -> str:
+        """用预分配 id 创建默认 JSONL 投影，并同步登记 matching metadata。
+
+        directory 是可重建派生索引；注册失败会向上传播并保留已 exclusive-create 的自包含
+        JSONL，后续同 id 重试仍拒绝覆盖，运维可通过 rebuild_index 恢复索引。
+        """
+        merged_extra: dict[str, Any] = {"cwd": cwd} if cwd is not None else {}
+        merged_extra.update(extra)
+        now = time.time()
+        tid = await self._writer._create_thread_with_id(  # noqa: SLF001
+            thread_id=thread_id,
+            entry_skill_id=entry_skill_id,
+            source=source,
+            extra=merged_extra,
+            created_at=now,
+        )
+        meta = ThreadMetadata(
+            thread_id=tid,
+            created_at=now,
+            updated_at=now,
+            entry_skill_id=entry_skill_id,
+            source=source,
+            tags=(),
+            extra=merged_extra,
         )
         await self._directory.upsert_metadata(meta)
         return tid

@@ -29,6 +29,11 @@ from taifeng.conversation.journal.models import (
     SessionLease,
     build_initialization_records,
 )
+from taifeng.conversation.journal.projector import (
+    JournalConversationProjector,
+    ProjectionOrderError,
+    ProjectionResult,
+)
 from taifeng.conversation.journal.records import (
     ApprovedSafeMessage,
     AttachmentV1,
@@ -78,6 +83,7 @@ __all__ = [
     "JournalAlreadyExistsError",
     "JournalBusyError",
     "JournalConflictError",
+    "JournalConversationProjector",
     "JournalEnvelope",
     "JournalError",
     "JournalHealth",
@@ -94,6 +100,8 @@ __all__ = [
     "LlmResponseCommittedV1",
     "LlmStatus",
     "PayloadModel",
+    "ProjectionOrderError",
+    "ProjectionResult",
     "RootThreadDescriptor",
     "SessionCreateResult",
     "SessionDescriptor",
