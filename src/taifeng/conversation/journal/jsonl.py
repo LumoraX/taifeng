@@ -21,14 +21,21 @@ from taifeng.conversation.journal.errors import (
     JournalAlreadyExistsError,
     JournalBusyError,
     JournalConflictError,
+    JournalIntegrityError,
     JournalLeaseError,
     JournalRecoveryRequiredError,
 )
-from taifeng.conversation.journal.framing import decode_committed_lines, encode_batch
+from taifeng.conversation.journal.framing import (
+    DecodedJournal,
+    decode_committed_lines,
+    encode_batch,
+)
 from taifeng.conversation.journal.models import (
     JournalAck,
     JournalEnvelope,
+    JournalHealth,
     JournalRecord,
+    JournalVerification,
     SessionCreateResult,
     SessionDescriptor,
     SessionLease,
@@ -40,6 +47,41 @@ if TYPE_CHECKING:
 
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ZERO_HASH = "0" * 64
+
+
+def _validate_committed_record_ids(decoded: DecodedJournal) -> None:
+    """拒绝 committed 区域中相同 id 的不同 caller fingerprint。"""
+    fingerprints: dict[str, str] = {}
+    for batch in decoded.batches:
+        for envelope, fingerprint in zip(
+            batch.envelopes,
+            batch.fingerprints,
+            strict=True,
+        ):
+            existing = fingerprints.get(envelope.record_id)
+            if existing is not None and existing != fingerprint:
+                raise JournalIntegrityError(
+                    f"conflicting duplicate record_id: {envelope.record_id}"
+                )
+            fingerprints[envelope.record_id] = fingerprint
+
+
+def _decode_physical(payload: bytes, *, session_id: str) -> DecodedJournal:
+    """strict decode 物理 bytes，并把无换行最终行收敛为 torn tail。"""
+    lines = payload.splitlines(keepends=True)
+    physical_tail_torn = bool(payload) and not payload.endswith(b"\n")
+    complete_lines = lines[:-1] if physical_tail_torn else lines
+    decoded = decode_committed_lines(complete_lines, session_id=session_id)
+    _validate_committed_record_ids(decoded)
+    if not physical_tail_torn:
+        return decoded
+    verification = decoded.verification.model_copy(
+        update={
+            "health": JournalHealth.RECOVERY_REQUIRED,
+            "physical_tail_torn": True,
+        }
+    )
+    return DecodedJournal(decoded.envelopes, decoded.batches, verification)
 
 
 class SyncFileAdapter(Protocol):
@@ -238,6 +280,18 @@ class JsonlSessionJournalCore:
                     session_id,
                     writer.committed_tail_seq,
                 )
+            scanned = await self._scan(session_id)
+            if scanned.verification.health is JournalHealth.RECOVERY_REQUIRED:
+                writer.recovery_required = True
+                raise JournalRecoveryRequiredError(
+                    session_id,
+                    scanned.verification.committed_tail_seq,
+                )
+            if (
+                scanned.verification.committed_tail_seq != writer.committed_tail_seq
+                or scanned.verification.committed_tail_hash != writer.committed_tail_hash
+            ):
+                raise JournalIntegrityError("live writer tail mismatch")
             existing_ack = self._idempotent_ack(records, writer)
             if existing_ack is not None:
                 return existing_ack
@@ -345,19 +399,28 @@ class JsonlSessionJournalCore:
         *,
         after_seq: int = 0,
     ) -> AsyncIterator[JournalEnvelope]:
-        """strict 读取已 committed envelopes；当前切片只处理完整物理行。"""
-        path = self._session_path(session_id)
+        """strict 读取已 committed envelopes，partial/torn batch 保持不可见。"""
         try:
-            payload = await anyio.to_thread.run_sync(
-                self._sync_file_adapter.read_bytes,
-                path,
-            )
+            decoded = await self._scan(session_id)
         except FileNotFoundError:
             return
-        decoded = decode_committed_lines(payload.splitlines(keepends=True), session_id=session_id)
         for envelope in decoded.envelopes:
             if envelope.seq > after_seq:
                 yield envelope
+
+    async def verify(self, session_id: str) -> JournalVerification:
+        """在线程池 strict scan，并返回 committed tail 与物理尾健康状态。"""
+        return (await self._scan(session_id)).verification
+
+    async def _scan(self, session_id: str) -> DecodedJournal:
+        """把同步读取和完整 codec 校验整体派发到 worker thread。"""
+        path = self._session_path(session_id)
+        return await anyio.to_thread.run_sync(self._scan_sync, path, session_id)
+
+    def _scan_sync(self, path: Path, session_id: str) -> DecodedJournal:
+        """同步读取并 strict decode 一个 Session 文件。"""
+        payload = self._sync_file_adapter.read_bytes(path)
+        return _decode_physical(payload, session_id=session_id)
 
 
 __all__ = [
