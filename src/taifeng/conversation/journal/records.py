@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003  # Pydantic 运行期需要
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, get_args
 
 from pydantic import BeforeValidator, Field, field_validator, model_validator
 
@@ -41,25 +41,9 @@ from taifeng.llm.errors import (
 )
 from taifeng.tool.spec import ToolResult
 
-type SupportedItemKind = Literal[
-    "user_message",
-    "assistant_message",
-    "function_call",
-    "function_call_output",
-    "reasoning",
-    "skill_outcome",
-]
+type SupportedItemKind = Literal["user_message", "assistant_message", "function_call", "function_call_output", "reasoning", "skill_outcome"]  # noqa: E501
 
-_SUPPORTED_ITEM_KINDS: frozenset[str] = frozenset(
-    {
-        "user_message",
-        "assistant_message",
-        "function_call",
-        "function_call_output",
-        "reasoning",
-        "skill_outcome",
-    }
-)
+_SUPPORTED_ITEM_KINDS = frozenset(get_args(SupportedItemKind.__value__))
 
 
 def _canonical_mapping(value: object) -> dict[str, JsonValue]:
@@ -81,17 +65,10 @@ def _canonical_list(value: object) -> list[JsonValue]:
 CanonicalMapping = Annotated[dict[str, JsonValue], BeforeValidator(_canonical_mapping)]
 CanonicalList = Annotated[list[JsonValue], BeforeValidator(_canonical_list)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
-NonNegativeFloat = Annotated[float, Field(ge=0)]
-MediaType = Annotated[
-    str,
-    Field(
-        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9!#$&^_.+-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9!#$&^_.+-]*[A-Za-z0-9])?$"
-    ),
-]
+_MEDIA_COMPONENT = r"[A-Za-z0-9](?:[A-Za-z0-9!#$&^_.+-]*[A-Za-z0-9])?"
+MediaType = Annotated[str, Field(pattern=rf"^{_MEDIA_COMPONENT}/{_MEDIA_COMPONENT}$")]
 
-_BASE64_PATTERN = re.compile(
-    r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
-)
+_BASE64_PATTERN = re.compile(r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$")
 
 
 def _decoded_base64_size(content: str) -> int:
@@ -135,12 +112,6 @@ class SkillStatus(StrEnum):
     REJECTED = "rejected"
     CANCELLED = "cancelled"
     UNKNOWN = "unknown"
-
-
-# 兼容更明确的领域命名，二者仍是同一枚举类型。
-LlmResponseStatus = LlmStatus
-ToolOutcomeStatus = ToolStatus
-SkillDispatchStatus = SkillStatus
 
 
 class StableErrorV1(PayloadModel):
@@ -338,7 +309,7 @@ class ToolOutcomeCommittedV1(PayloadModel):
     status: ToolStatus
     output: str
     data: CanonicalMapping
-    duration_ms: NonNegativeFloat
+    duration_ms: Annotated[float, Field(ge=0)]
     stable_error: StableErrorV1 | None = None
 
 
@@ -370,9 +341,9 @@ class SkillDispatchStartedV1(PayloadModel):
 class SkillDispatchFinishedV1(PayloadModel):
     """Skill dispatch 的 durable 终态，允许 quota rejection 无 started record。"""
 
-    started_record_id: str | None = None
+    started_record_id: NonEmptyStr | None = None
     call_id: NonEmptyStr
-    child_thread_id: str | None = None
+    child_thread_id: NonEmptyStr | None = None
     status: SkillStatus
     end_reason: str | None = None
     final_text: str | None = None
@@ -504,6 +475,33 @@ class _SkillOutcomeItemPayload(JournalModel):
     ts_unix: NonNegativeInt | None = None
 
 
+def _is_canonical_uint(value: str) -> bool:
+    """只接受无前导零的 ASCII 非负整数。"""
+    return value.isascii() and value.isdigit() and (value == "0" or value[0] != "0")
+
+
+def _operation_kind(value: str) -> str | None:
+    """按唯一 grammar 识别 simple/turn/llm/tool/skill operation。"""
+    parts = value.split(":")
+    if len(parts) == 1:
+        return "simple" if parts[0] else None
+    if len(parts) == 3:
+        return "lifecycle" if parts[0] and parts[1:] == ["lifecycle", "end"] else None
+    if len(parts) not in (4, 6, 8) or not all(parts[:2]):
+        return None
+    if parts[2] != "turn" or not _is_canonical_uint(parts[3]):
+        return None
+    if len(parts) == 4:
+        return "turn"
+    if len(parts) == 6 and parts[4] == "llm" and _is_canonical_uint(parts[5]):
+        return "llm"
+    if len(parts) == 6 and parts[4] == "tool" and parts[5]:
+        return "tool"
+    if len(parts) == 8 and parts[4] == "tool" and parts[5] and parts[6] == "skill" and parts[7]:
+        return "skill"
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class JournalIdentities:
     """一个 submission 的稳定 operation identity 派生器。"""
@@ -520,6 +518,14 @@ class JournalIdentities:
         if any(":" in item for item in components):
             raise ValueError("journal identity components must be delimiter-free")
 
+    def _owns(self, operation_id: str, kind: str) -> bool:
+        """检查 canonical operation 是否属于当前 thread/submission。"""
+        parts = operation_id.split(":")
+        return (
+            _operation_kind(operation_id) == kind
+            and parts[:2] == [self.thread_id, self.submission_id]
+        )
+
     def turn(self, index: int) -> str:
         """构造 root/child turn identity。"""
         if index < 0:
@@ -528,22 +534,34 @@ class JournalIdentities:
 
     def llm(self, turn_id: str, iteration: int) -> str:
         """构造 logical LLM call identity。"""
+        if not self._owns(turn_id, "turn"):
+            raise ValueError("LLM parent must be this identity's canonical turn")
         if iteration < 0:
             raise ValueError("LLM iteration must be non-negative")
         return f"{turn_id}:llm:{iteration}"
 
     def attempt(self, llm_operation_id: str, retry_ordinal: int) -> str:
         """构造真实 network attempt identity。"""
+        if not self._owns(llm_operation_id, "llm"):
+            raise ValueError("attempt parent must be this identity's canonical LLM operation")
         if retry_ordinal < 0:
             raise ValueError("retry ordinal must be non-negative")
         return f"{llm_operation_id}:attempt:{retry_ordinal}"
 
     def tool(self, turn_id: str, call_id: str) -> str:
         """构造 Tool call identity。"""
+        if not self._owns(turn_id, "turn"):
+            raise ValueError("tool parent must be this identity's canonical turn")
+        if not call_id or ":" in call_id:
+            raise ValueError("tool call id must be non-empty and delimiter-free")
         return f"{turn_id}:tool:{call_id}"
 
     def skill(self, tool_operation_id: str, target_skill_id: str) -> str:
         """构造 Skill dispatch identity。"""
+        if not self._owns(tool_operation_id, "tool"):
+            raise ValueError("skill parent must be this identity's canonical tool operation")
+        if not target_skill_id or ":" in target_skill_id:
+            raise ValueError("target skill id must be non-empty and delimiter-free")
         return f"{tool_operation_id}:skill:{target_skill_id}"
 
 
@@ -558,10 +576,17 @@ def record_id(
         raise ValueError("record ordinal must be non-negative")
     if not record_type or ":" in record_type:
         raise ValueError("record type must be non-empty and delimiter-free")
+    operation_kind = _operation_kind(operation_id)
+    if operation_kind is None:
+        raise ValueError("operation id is not canonical")
     if attempt_id == "none":
         raise ValueError("attempt id 'none' is reserved")
-    if f":{record_type}:" in operation_id:
-        raise ValueError("operation id contains the record type boundary")
+    if attempt_id is not None:
+        prefix = f"{operation_id}:attempt:"
+        ordinal_text = attempt_id.removeprefix(prefix)
+        valid_attempt = attempt_id.startswith(prefix) and _is_canonical_uint(ordinal_text)
+        if operation_kind != "llm" or not valid_attempt:
+            raise ValueError("attempt id must be canonical and belong to its LLM operation")
     attempt = attempt_id if attempt_id is not None else "none"
     return f"{operation_id}:{record_type}:{attempt}:{ordinal}"
 
@@ -707,15 +732,8 @@ def conversation_item_record(
 
 
 _PUBLIC_LLM_ERRORS: tuple[type[LLMError], ...] = (
-    RateLimitError,
-    TransientNetworkError,
-    ServerError,
-    ContentFilterError,
-    ContextOverflowError,
-    AuthenticationError,
-    InvalidRequestError,
-    CancelledError,
-    RequestTooLargeError,
+    RateLimitError, TransientNetworkError, ServerError, ContentFilterError, ContextOverflowError,
+    AuthenticationError, InvalidRequestError, CancelledError, RequestTooLargeError,
 )
 
 
@@ -743,14 +761,9 @@ def stable_error(
             failure_class = "unknown"
             retryable = False
             safe_message = None
-    descriptor_hash = canonical_hash(
-        {
-            "code": code,
-            "class_name": class_name,
-            "failure_class": failure_class,
-            "retryable": retryable,
-        }
-    )
+    descriptor = {"code": code, "class_name": class_name,
+                  "failure_class": failure_class, "retryable": retryable}
+    descriptor_hash = canonical_hash(descriptor)
     return StableErrorV1(
         code=code,
         class_name=class_name,
@@ -770,11 +783,13 @@ def validate_attachments(
     """在 acceptance 前使用注入上限校验附件声明与完整正文。"""
     if max_item_bytes < 0 or max_total_bytes < 0:
         raise ValueError("attachment byte limits must be non-negative")
-    max_encoded_length = ((max_item_bytes + 2) // 3) * 4
     decoded_total = 0
     for item in attachments:
-        if len(item.content) > max_encoded_length:
-            raise ValueError("attachment encoded per-item byte limit exceeded")
+        remaining = max_total_bytes - decoded_total
+        encoded_budget = ((min(max_item_bytes, remaining) + 2) // 3) * 4
+        if len(item.content) > encoded_budget:
+            limit = "total" if remaining < max_item_bytes else "per-item"
+            raise ValueError(f"attachment encoded {limit} byte limit exceeded")
         decoded_size = _decoded_base64_size(item.content)
         if decoded_size > max_item_bytes:
             raise ValueError("attachment encoded per-item byte limit exceeded")
@@ -782,19 +797,3 @@ def validate_attachments(
         if decoded_total > max_total_bytes:
             raise ValueError("attachment encoded total byte limit exceeded")
     return tuple(item.decoded() for item in attachments)
-
-
-__all__ = [
-    "ApprovedSafeMessage", "AttachmentV1", "ConversationItemV1", "JournalIdentities",
-    "JournalRecordFactory", "LlmRequestCommittedV1", "LlmResponseCheckpointV1",
-    "LlmResponseCommittedV1", "LlmResponseStatus", "LlmStatus", "PayloadModel",
-    "SessionEndedV1", "SkillDispatchFinishedV1", "SkillDispatchStartedV1",
-    "SkillDispatchStatus", "SkillSelectedV1", "SkillStatus", "StableErrorV1",
-    "SubmissionAcceptedV1", "SubmissionAppliedV1", "SubmissionRejectedV1",
-    "ThreadBoundV1", "ThreadCreatedV1", "ThreadTerminalV1", "ToolIntentCommittedV1",
-    "ToolOutcomeCommittedV1", "ToolOutcomeStatus", "ToolStatus", "TurnCancelledV1",
-    "TurnCompletedV1", "TurnFailedV1", "TurnStartedV1",
-    "UnsupportedConversationItemError", "conversation_item_record",
-    "deserialize_response_item", "record_id", "serialize_response_item", "stable_error",
-    "validate_attachments",
-]

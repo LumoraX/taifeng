@@ -308,9 +308,6 @@ def test_stable_identities_and_record_ids_are_deterministic() -> None:
     attempt = ids.attempt(llm, 1)
     assert tool == f"{turn}:tool:call_1"
     assert ids.skill(tool, "research") == f"{tool}:skill:research"
-    assert record_id(llm, "llm_request_committed", "attempt_1", 0) == (
-        f"{llm}:llm_request_committed:attempt_1:0"
-    )
     assert record_id(llm, "llm_request_committed", attempt) == (
         f"{llm}:llm_request_committed:{attempt}:0"
     )
@@ -338,11 +335,11 @@ def test_record_id_rejects_sentinel_and_boundary_collisions() -> None:
         record_id("operation_1", "probe", "none")
     with pytest.raises(ValueError, match="delimiter"):
         record_id("operation_1", "bad:type")
-    with pytest.raises(ValueError, match="boundary"):
+    with pytest.raises(ValueError, match="canonical"):
         record_id("root:probe:embedded", "probe")
 
     factory = _record_factory()
-    with pytest.raises(ValueError, match="boundary"):
+    with pytest.raises(ValueError, match="canonical"):
         factory.build(
             operation_id="root:turn_started:embedded",
             record_type="turn_started",
@@ -354,6 +351,41 @@ def test_record_id_rejects_sentinel_and_boundary_collisions() -> None:
                 budget_snapshot={},
             ),
         )
+
+
+def test_identity_grammar_rejects_cross_parent_and_leaf_collisions() -> None:
+    """派生 identity 必须属于当前实例，leaf 不得伪造后续 grammar。"""
+    ids = JournalIdentities("session_1", "thread_1", "submission_1")
+    turn = ids.turn(0)
+    tool = ids.tool(turn, "call")
+
+    with pytest.raises(ValueError, match="canonical turn"):
+        ids.llm("other:submission_1:turn:0", 0)
+    with pytest.raises(ValueError, match="canonical turn"):
+        ids.tool("thread_1:other:turn:0", "call")
+    with pytest.raises(ValueError, match="canonical LLM"):
+        ids.attempt("other:submission_1:turn:0:llm:0", 0)
+    with pytest.raises(ValueError, match="canonical tool"):
+        ids.skill("other:submission_1:turn:0:tool:other", "target")
+    with pytest.raises(ValueError, match="delimiter"):
+        ids.tool(turn, "call:skill:target")
+    with pytest.raises(ValueError, match="delimiter"):
+        ids.skill(tool, "target:child")
+
+
+def test_record_id_rejects_cross_field_collision_reproduction() -> None:
+    """已知 a:b:c:d 交叉分割不得产生两个可接受 tuple。"""
+    with pytest.raises(ValueError):
+        record_id("a", "b", "c:d")
+    with pytest.raises(ValueError):
+        record_id("a:b", "c", "d")
+
+
+def test_record_id_accepts_canonical_lifecycle_end_operation() -> None:
+    """后续 coordinator 的 Session 终态 identity 属于批准 grammar。"""
+    assert record_id("session_1:lifecycle:end", "session_ended") == (
+        "session_1:lifecycle:end:session_ended:none:0"
+    )
 
 
 def _record_factory() -> JournalRecordFactory:
@@ -637,13 +669,30 @@ def test_non_rejected_skill_finish_requires_started_and_child_lineage(
             SkillDispatchFinishedV1.model_validate(data)
 
 
+@pytest.mark.parametrize("status", ["success", "error", "cancelled", "unknown"])
+@pytest.mark.parametrize("field", ["started_record_id", "child_thread_id"])
+def test_non_rejected_skill_finish_rejects_empty_lineage(
+    status: str, field: str
+) -> None:
+    """非 rejected lineage 必须是非空稳定 ID。"""
+    data = {
+        "started_record_id": "started_1",
+        "call_id": "call_1",
+        "child_thread_id": "thread_child",
+        "status": status,
+    }
+    data[field] = ""
+    with pytest.raises(ValidationError):
+        SkillDispatchFinishedV1.model_validate(data)
+
+
 @pytest.mark.parametrize("field", ["started_record_id", "child_thread_id"])
 @pytest.mark.parametrize("value", ["unexpected", ""])
 def test_rejected_skill_finish_forbids_started_and_child_lineage(
     field: str, value: str
 ) -> None:
     """Quota rejection 没有启动 child，不得伪造 started/thread lineage。"""
-    with pytest.raises(ValidationError, match="rejected"):
+    with pytest.raises(ValidationError, match="rejected" if value else None):
         SkillDispatchFinishedV1.model_validate(
             {"call_id": "call_1", "status": "rejected", field: value}
         )
@@ -715,6 +764,22 @@ def test_attachment_length_gate_runs_before_exact_base64_scan(
     monkeypatch.setattr(journal_records, "_decoded_base64_size", forbidden_scan)
     with pytest.raises(ValueError, match="encoded per-item"):
         validate_attachments((attachment,), max_item_bytes=1, max_total_bytes=1)
+
+
+def test_attachment_remaining_total_gate_runs_before_exact_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """首个附件已超小总预算时，不得因单项上限很大进入扫描。"""
+    attachment = _attachment(b"x").model_copy(update={"content": "AAAA" * 10_000})
+
+    def forbidden_scan(content: str) -> int:
+        raise AssertionError(f"exact scan reached for {len(content)} bytes")
+
+    monkeypatch.setattr(journal_records, "_decoded_base64_size", forbidden_scan)
+    with pytest.raises(ValueError, match="encoded total"):
+        validate_attachments(
+            (attachment,), max_item_bytes=1_000_000, max_total_bytes=1
+        )
 
 
 def test_attachment_total_limit_stops_before_scanning_later_items(
