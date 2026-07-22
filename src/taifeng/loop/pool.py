@@ -38,6 +38,8 @@ from taifeng.tool.runtime import ToolCallRuntime
 from taifeng.tool.spec import ToolSpec
 
 if TYPE_CHECKING:
+    from taifeng.skill.registry import SkillSnapshot
+    from taifeng.skill.watcher import SkillFileWatcher
     from taifeng.telemetry.sink import TelemetrySink
 
 logger = logging.getLogger(__name__)
@@ -299,6 +301,7 @@ class EnginePool:
         self._root_cancel = CancellationToken(name="pool")
         self._closed = False
         self._watcher_task: asyncio.Task[None] | None = None
+        self._watcher: SkillFileWatcher | None = None
 
     # ------------------------------------------------------------------
     # Factory
@@ -495,7 +498,7 @@ class EnginePool:
         if auto_watch_skills:
             from taifeng.skill.watcher import SkillFileWatcher
 
-            async def _on_change(snap) -> None:
+            async def _on_change(snap: SkillSnapshot) -> None:
                 logger.info("skill snapshot refreshed via watcher → version=%d", snap.version)
                 # 通知所有活跃 engine（lock-in 语义：当前 turn 不变；下个 turn 取新 snapshot）
                 async with pool._lock:
@@ -572,7 +575,7 @@ class EnginePool:
 
             # === engine-resume-by-thread-id ===
             # 分支：resume 已有 thread vs. 新建 thread
-            initial_history: list = []
+            initial_history: list[ResponseItem] = []
             if resume_thread_id is not None:
                 # 物化 store 中的历史
                 gen = await self._store.load_thread(resume_thread_id)

@@ -177,8 +177,8 @@ def make_apply_patch_tool(
         # 整组一次 permission 审批（spec: apply_patch 是一组原子操作）
         if policy is not None:
             req = PermissionRequest(
-                scope="apply_patch",
-                target=str(root),
+                scope="tool_use",
+                target="apply_patch",
                 reason="LLM 请求应用一组结构化补丁",
                 metadata={
                     "patch_count": len(patches),

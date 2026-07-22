@@ -11,12 +11,43 @@ from pathlib import Path
 import pytest
 
 from taifeng.loop.cancellation import CancellationToken
+from taifeng.permission import (
+    CallbackPrompter,
+    PermissionDecision,
+    PermissionPolicy,
+    PermissionRequest,
+)
 from taifeng.tool.builtins.apply_patch import make_apply_patch_tool
 from taifeng.tool.spec import ToolContext
 
 
 def _ctx() -> ToolContext:
     return ToolContext(call_id="c1", cancel=CancellationToken(), thread_id="t1")
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_requests_tool_use_permission(tmp_path: Path) -> None:
+    """结构化补丁按工具调用审批，不能发出不存在的 apply_patch scope。"""
+    captured: list[PermissionRequest] = []
+
+    async def check(request: PermissionRequest) -> PermissionDecision:
+        captured.append(request)
+        return PermissionDecision.allow(reason="test")
+
+    policy = PermissionPolicy(
+        default_mode="ask",
+        prompter=CallbackPrompter(check),
+    )
+    spec = make_apply_patch_tool(root_dir=tmp_path, policy=policy)
+    result = await spec.handler(
+        {"patches": [{"path": "new.txt", "new_text": "ok", "create": True}]},
+        _ctx(),
+    )
+
+    assert not result.is_error
+    assert [(request.scope, request.target) for request in captured] == [
+        ("tool_use", "apply_patch")
+    ]
 
 
 # --------------------------------------------------------------------

@@ -121,9 +121,9 @@ def _cmd_skill_validate(args: argparse.Namespace) -> int:
         print(f"✓ {len(snap.entries())} entry skill(s)")
         print("✓ no cycle detected (static analysis)")
         # 列一下 reachable 集合
-        for e in snap.entries():
-            reachable = snap.reachable_from(e.id) - {e.id}
-            print(f"  entry={e.id} reachable={len(reachable)} skills")
+        for entry in snap.entries():
+            reachable = snap.reachable_from(entry.id) - {entry.id}
+            print(f"  entry={entry.id} reachable={len(reachable)} skills")
         return 0
 
     return asyncio.run(run())
@@ -347,7 +347,8 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.set_defaults(func=_cmd_mcp_serve)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    result: int = args.func(args)
+    return result
 
 
 if __name__ == "__main__":  # pragma: no cover

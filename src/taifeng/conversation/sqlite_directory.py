@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import sqlite3
 import time
@@ -254,7 +255,7 @@ class SqliteThreadDirectory:
                 payload = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
                 cursor_updated_at = float(payload["updated_at"])
                 cursor_thread_id = str(payload["thread_id"])
-            except (ValueError, KeyError, json.JSONDecodeError, base64.binascii.Error) as e:
+            except (ValueError, KeyError, json.JSONDecodeError, binascii.Error) as e:
                 await self._emit(DirectoryCursorReset(data={"cursor": cursor, "cause": repr(e)}))
                 cursor_updated_at = None
                 cursor_thread_id = None
@@ -346,7 +347,8 @@ class SqliteThreadDirectory:
             "FROM thread WHERE thread_id = ?",
             (thread_id,),
         )
-        return cur.fetchone()
+        row = cur.fetchone()
+        return tuple(row) if row is not None else None
 
     def _sync_select_threads(
         self,

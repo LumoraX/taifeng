@@ -25,7 +25,7 @@ import logging
 from typing import Any
 
 from taifeng.tool.registry import ToolRegistry
-from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from taifeng.tool.spec import ToolContext, ToolFunc, ToolResult, ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ class McpStdioClient:
     async def _send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
         if self._closed:
             return
-        payload = {"jsonrpc": "2.0", "method": method}
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
         if params is not None:
             payload["params"] = params
         line = json.dumps(payload, separators=(",", ":")) + "\n"
@@ -314,7 +314,7 @@ async def register_mcp_tools_async(
 
         local_name = f"{tool_prefix}{name}"
 
-        async def _handler_factory(mcp_name: str = name):  # 闭包绑定
+        async def _handler_factory(mcp_name: str = name) -> ToolFunc:  # 闭包绑定
             async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 try:
                     result = await asyncio.wait_for(
