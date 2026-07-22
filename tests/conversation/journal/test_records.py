@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 import taifeng.conversation as conversation
+import taifeng.conversation.journal.records as journal_records
 from taifeng.conversation.journal import ActorRef, JournalConflictError
 from taifeng.conversation.journal.canonical import (
     canonical_bytes,
@@ -60,7 +61,7 @@ from taifeng.conversation.journal.records import (
     validate_attachments,
 )
 from taifeng.conversation.models import ResponseItem
-from taifeng.llm.errors import InvalidRequestError
+from taifeng.llm.errors import InvalidRequestError, ServerError
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
@@ -304,14 +305,55 @@ def test_stable_identities_and_record_ids_are_deterministic() -> None:
     assert turn == "thread_1:submission_1:turn:2"
     assert llm == f"{turn}:llm:3"
     assert ids.attempt(llm, 1) == f"{llm}:attempt:1"
+    attempt = ids.attempt(llm, 1)
     assert tool == f"{turn}:tool:call_1"
     assert ids.skill(tool, "research") == f"{tool}:skill:research"
     assert record_id(llm, "llm_request_committed", "attempt_1", 0) == (
         f"{llm}:llm_request_committed:attempt_1:0"
     )
+    assert record_id(llm, "llm_request_committed", attempt) == (
+        f"{llm}:llm_request_committed:{attempt}:0"
+    )
     assert record_id(tool, "tool_intent_committed") == (
         f"{tool}:tool_intent_committed:none:0"
     )
+
+
+@pytest.mark.parametrize(
+    ("session_id", "thread_id", "submission_id"),
+    [("session:1", "thread_1", "sub_1"), ("session_1", "thread:1", "sub_1"),
+     ("session_1", "thread_1", "sub:1")],
+)
+def test_identity_base_components_reject_delimiter_collisions(
+    session_id: str, thread_id: str, submission_id: str
+) -> None:
+    """Identity leaf 不得携分隔符，避免不同 tuple 得到同一字符串。"""
+    with pytest.raises(ValueError, match="delimiter"):
+        JournalIdentities(session_id, thread_id, submission_id)
+
+
+def test_record_id_rejects_sentinel_and_boundary_collisions() -> None:
+    """None sentinel、record type 和 operation boundary 必须保持可逆编码。"""
+    with pytest.raises(ValueError, match="reserved"):
+        record_id("operation_1", "probe", "none")
+    with pytest.raises(ValueError, match="delimiter"):
+        record_id("operation_1", "bad:type")
+    with pytest.raises(ValueError, match="boundary"):
+        record_id("root:probe:embedded", "probe")
+
+    factory = _record_factory()
+    with pytest.raises(ValueError, match="boundary"):
+        factory.build(
+            operation_id="root:turn_started:embedded",
+            record_type="turn_started",
+            payload=TurnStartedV1(
+                turn_index=0,
+                entry_skill_id="general",
+                skill_snapshot_version="v1",
+                model="sim",
+                budget_snapshot={},
+            ),
+        )
 
 
 def _record_factory() -> JournalRecordFactory:
@@ -549,14 +591,62 @@ def test_stable_error_never_persists_unknown_exception_text_or_address() -> None
 
 
 def test_stable_error_only_allows_explicit_public_or_tool_safe_messages() -> None:
-    """仅白名单 Taifeng 公开错误和 ToolResult 可提供 safe_message。"""
-    public = stable_error(InvalidRequestError("public invalid request"))
-    tool = stable_error(ToolResult.error("safe tool failure"))
+    """精确公开错误和 ToolResult 也不能自动声明原文安全。"""
+    errors = [
+        InvalidRequestError("secret=TOKEN /private/secret at 0xDEADBEEF"),
+        ServerError("secret=TOKEN /private/secret at 0xDEADBEEF"),
+        ToolResult.error("secret=TOKEN /private/secret at 0xDEADBEEF"),
+    ]
+    for error in errors:
+        mapped = stable_error(error)
+        wire = canonical_bytes(model_canonical_data(mapped)).decode()
+        assert mapped.safe_message is None
+        assert "TOKEN" not in wire and "/private/secret" not in wire
+        assert "0xDEADBEEF" not in wire
 
-    assert public.safe_message == "public invalid request"
+
+def test_stable_error_requires_explicit_approved_message_boundary() -> None:
+    """只有显式冻结 wrapper 可向已分类错误附加 sanitized message。"""
+    approved = journal_records.ApprovedSafeMessage("request rejected")
+
+    public = stable_error(InvalidRequestError("raw secret"), approved_message=approved)
+    tool = stable_error(ToolResult.error("raw secret"), approved_message=approved)
+    unknown = stable_error(RuntimeError("raw secret"), approved_message=approved)
+
+    assert public.safe_message == "request rejected"
     assert public.code == "invalid_request"
-    assert tool.safe_message == "safe tool failure"
+    assert tool.safe_message == "request rejected"
     assert tool.code == "tool_result_error"
+    assert unknown.safe_message is None
+
+
+@pytest.mark.parametrize("status", ["success", "error", "cancelled", "unknown"])
+def test_non_rejected_skill_finish_requires_started_and_child_lineage(
+    status: str,
+) -> None:
+    """任何非 rejected 终态都必须指向 started record 和 child thread。"""
+    for missing in ("started_record_id", "child_thread_id"):
+        data = {
+            "started_record_id": "started_1",
+            "call_id": "call_1",
+            "child_thread_id": "thread_child",
+            "status": status,
+        }
+        data[missing] = None
+        with pytest.raises(ValidationError, match="non-rejected"):
+            SkillDispatchFinishedV1.model_validate(data)
+
+
+@pytest.mark.parametrize("field", ["started_record_id", "child_thread_id"])
+@pytest.mark.parametrize("value", ["unexpected", ""])
+def test_rejected_skill_finish_forbids_started_and_child_lineage(
+    field: str, value: str
+) -> None:
+    """Quota rejection 没有启动 child，不得伪造 started/thread lineage。"""
+    with pytest.raises(ValidationError, match="rejected"):
+        SkillDispatchFinishedV1.model_validate(
+            {"call_id": "call_1", "status": "rejected", field: value}
+        )
 
 
 def _attachment(content: bytes = b"hello") -> AttachmentV1:
@@ -611,6 +701,41 @@ def test_attachment_limit_rejects_large_content_before_trusting_declared_size() 
 
     with pytest.raises(ValueError, match="encoded per-item"):
         validate_attachments((disguised,), max_item_bytes=4, max_total_bytes=4)
+
+
+def test_attachment_length_gate_runs_before_exact_base64_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超大正文必须由 O(1) 长度闸门拒绝，不进入正则/精确扫描。"""
+    attachment = _attachment(b"x").model_copy(update={"content": "AAAA" * 10_000})
+
+    def forbidden_scan(content: str) -> int:
+        raise AssertionError(f"exact scan reached for {len(content)} bytes")
+
+    monkeypatch.setattr(journal_records, "_decoded_base64_size", forbidden_scan)
+    with pytest.raises(ValueError, match="encoded per-item"):
+        validate_attachments((attachment,), max_item_bytes=1, max_total_bytes=1)
+
+
+def test_attachment_total_limit_stops_before_scanning_later_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """增量总量超限后立即停止，不预扫描后续附件。"""
+    attachments = (_attachment(b"123"), _attachment(b"456"), _attachment(b"789"))
+    original = journal_records._decoded_base64_size
+    calls = 0
+
+    def counted_scan(content: str) -> int:
+        nonlocal calls
+        calls += 1
+        if calls > 2:
+            raise AssertionError("scanned attachment after total overflow")
+        return original(content)
+
+    monkeypatch.setattr(journal_records, "_decoded_base64_size", counted_scan)
+    with pytest.raises(ValueError, match="encoded total"):
+        validate_attachments(attachments, max_item_bytes=3, max_total_bytes=5)
+    assert calls == 2
 
 
 @pytest.mark.parametrize(

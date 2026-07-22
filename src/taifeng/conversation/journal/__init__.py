@@ -30,6 +30,7 @@ from taifeng.conversation.journal.models import (
     build_initialization_records,
 )
 from taifeng.conversation.journal.records import (
+    ApprovedSafeMessage,
     AttachmentV1,
     ConversationItemV1,
     JournalIdentities,
@@ -72,6 +73,7 @@ from taifeng.conversation.journal.records import (
 
 __all__ = [
     "ActorRef",
+    "ApprovedSafeMessage",
     "AttachmentV1",
     "ConversationItemV1",
     "Durability",

@@ -154,6 +154,13 @@ class StableErrorV1(PayloadModel):
     retryable: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovedSafeMessage:
+    """调用方已显式审批、可进入 durable record 的消息。"""
+
+    text: str
+
+
 class AttachmentV1(PayloadModel):
     """完整内联 base64 附件；V1 不接受 URI 或临时路径。"""
 
@@ -372,6 +379,16 @@ class SkillDispatchFinishedV1(PayloadModel):
     usage: CanonicalMapping | None = None
     stable_error: StableErrorV1 | None = None
 
+    @model_validator(mode="after")
+    def _validate_lineage(self) -> Self:
+        """拒绝 rejection 伪 lineage 和非 rejection 缺 lineage。"""
+        lineage = (self.started_record_id, self.child_thread_id)
+        if self.status is SkillStatus.REJECTED and lineage != (None, None):
+            raise ValueError("rejected skill dispatch forbids started/child lineage")
+        if self.status is not SkillStatus.REJECTED and any(item is None for item in lineage):
+            raise ValueError("non-rejected skill dispatch requires started/child lineage")
+        return self
+
 
 class ThreadCreatedV1(PayloadModel):
     """V1 child/root thread 创建描述（V0 初始化不使用此 DTO）。"""
@@ -496,9 +513,12 @@ class JournalIdentities:
     submission_id: str
 
     def __post_init__(self) -> None:
-        """拒绝会产生模糊 identity 的空组件。"""
-        if not self.session_id or not self.thread_id or not self.submission_id:
+        """拒绝会产生模糊 identity 的空或含分隔符组件。"""
+        components = (self.session_id, self.thread_id, self.submission_id)
+        if any(not item for item in components):
             raise ValueError("journal identity components must be non-empty")
+        if any(":" in item for item in components):
+            raise ValueError("journal identity components must be delimiter-free")
 
     def turn(self, index: int) -> str:
         """构造 root/child turn identity。"""
@@ -536,6 +556,12 @@ def record_id(
     """构造不受 payload 内容影响的确定性 record id。"""
     if ordinal < 0:
         raise ValueError("record ordinal must be non-negative")
+    if not record_type or ":" in record_type:
+        raise ValueError("record type must be non-empty and delimiter-free")
+    if attempt_id == "none":
+        raise ValueError("attempt id 'none' is reserved")
+    if f":{record_type}:" in operation_id:
+        raise ValueError("operation id contains the record type boundary")
     attempt = attempt_id if attempt_id is not None else "none"
     return f"{operation_id}:{record_type}:{attempt}:{ordinal}"
 
@@ -693,21 +719,25 @@ _PUBLIC_LLM_ERRORS: tuple[type[LLMError], ...] = (
 )
 
 
-def stable_error(error: BaseException | ToolResult) -> StableErrorV1:
+def stable_error(
+    error: BaseException | ToolResult,
+    *,
+    approved_message: ApprovedSafeMessage | None = None,
+) -> StableErrorV1:
     """把已批准公开错误/ToolResult 或未知异常映射为安全 DTO。"""
     if isinstance(error, ToolResult):
         code = "tool_result_error" if error.is_error else "tool_result"
         class_name = "ToolResult"
         failure_class = "tool_error" if error.is_error else "none"
         retryable = False
-        safe_message: str | None = error.output
+        safe_message: str | None = approved_message.text if approved_message else None
     else:
         class_name = type(error).__name__
         if type(error) in _PUBLIC_LLM_ERRORS:
             code = error.kind  # type: ignore[attr-defined]
             failure_class = error.failure_class  # type: ignore[attr-defined]
             retryable = error.retryable  # type: ignore[attr-defined]
-            safe_message = str(error)
+            safe_message = approved_message.text if approved_message else None
         else:
             code = "unknown_exception"
             failure_class = "unknown"
@@ -740,55 +770,31 @@ def validate_attachments(
     """在 acceptance 前使用注入上限校验附件声明与完整正文。"""
     if max_item_bytes < 0 or max_total_bytes < 0:
         raise ValueError("attachment byte limits must be non-negative")
-    decoded_sizes = tuple(_decoded_base64_size(item.content) for item in attachments)
-    if any(size > max_item_bytes for size in decoded_sizes):
-        raise ValueError("attachment encoded per-item byte limit exceeded")
-    if sum(decoded_sizes) > max_total_bytes:
-        raise ValueError("attachment encoded total byte limit exceeded")
-    if any(item.size > max_item_bytes for item in attachments):
-        raise ValueError("attachment per-item byte limit exceeded")
-    if sum(item.size for item in attachments) > max_total_bytes:
-        raise ValueError("attachment total byte limit exceeded")
+    max_encoded_length = ((max_item_bytes + 2) // 3) * 4
+    decoded_total = 0
+    for item in attachments:
+        if len(item.content) > max_encoded_length:
+            raise ValueError("attachment encoded per-item byte limit exceeded")
+        decoded_size = _decoded_base64_size(item.content)
+        if decoded_size > max_item_bytes:
+            raise ValueError("attachment encoded per-item byte limit exceeded")
+        decoded_total += decoded_size
+        if decoded_total > max_total_bytes:
+            raise ValueError("attachment encoded total byte limit exceeded")
     return tuple(item.decoded() for item in attachments)
 
 
 __all__ = [
-    "AttachmentV1",
-    "ConversationItemV1",
-    "JournalIdentities",
-    "JournalRecordFactory",
-    "LlmRequestCommittedV1",
-    "LlmResponseCheckpointV1",
-    "LlmResponseCommittedV1",
-    "LlmResponseStatus",
-    "LlmStatus",
-    "PayloadModel",
-    "SessionEndedV1",
-    "SkillDispatchFinishedV1",
-    "SkillDispatchStartedV1",
-    "SkillDispatchStatus",
-    "SkillSelectedV1",
-    "SkillStatus",
-    "StableErrorV1",
-    "SubmissionAcceptedV1",
-    "SubmissionAppliedV1",
-    "SubmissionRejectedV1",
-    "ThreadBoundV1",
-    "ThreadCreatedV1",
-    "ThreadTerminalV1",
-    "ToolIntentCommittedV1",
-    "ToolOutcomeCommittedV1",
-    "ToolOutcomeStatus",
-    "ToolStatus",
-    "TurnCancelledV1",
-    "TurnCompletedV1",
-    "TurnFailedV1",
-    "TurnStartedV1",
-    "UnsupportedConversationItemError",
-    "conversation_item_record",
-    "deserialize_response_item",
-    "record_id",
-    "serialize_response_item",
-    "stable_error",
+    "ApprovedSafeMessage", "AttachmentV1", "ConversationItemV1", "JournalIdentities",
+    "JournalRecordFactory", "LlmRequestCommittedV1", "LlmResponseCheckpointV1",
+    "LlmResponseCommittedV1", "LlmResponseStatus", "LlmStatus", "PayloadModel",
+    "SessionEndedV1", "SkillDispatchFinishedV1", "SkillDispatchStartedV1",
+    "SkillDispatchStatus", "SkillSelectedV1", "SkillStatus", "StableErrorV1",
+    "SubmissionAcceptedV1", "SubmissionAppliedV1", "SubmissionRejectedV1",
+    "ThreadBoundV1", "ThreadCreatedV1", "ThreadTerminalV1", "ToolIntentCommittedV1",
+    "ToolOutcomeCommittedV1", "ToolOutcomeStatus", "ToolStatus", "TurnCancelledV1",
+    "TurnCompletedV1", "TurnFailedV1", "TurnStartedV1",
+    "UnsupportedConversationItemError", "conversation_item_record",
+    "deserialize_response_item", "record_id", "serialize_response_item", "stable_error",
     "validate_attachments",
 ]
