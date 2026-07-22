@@ -16,6 +16,7 @@ from taifeng.conversation.journal import (
     JournalAlreadyExistsError,
     JournalBusyError,
     JournalConflictError,
+    JournalHealth,
     JournalLeaseError,
     JournalRecord,
     JournalRecoveryRequiredError,
@@ -105,6 +106,20 @@ class _FailOnceAppendAdapter(DefaultSyncFileAdapter):
             self.failed = True
             raise OSError("injected append failure")
         super().append_durable(path, payload)
+
+
+class _PartialCreateFailureAdapter(DefaultSyncFileAdapter):
+    """只落 BEGIN 后注入 create IO failure，模拟初始化中断。"""
+
+    def create_exclusive(self, path: Path, payload: bytes) -> None:
+        """写入未提交物理尾后抛出明确 IO error。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        begin_line = payload.splitlines(keepends=True)[0]
+        with path.open("xb") as stream:
+            stream.write(begin_line)
+            stream.flush()
+            os.fsync(stream.fileno())
+        raise OSError("injected create failure")
 
 
 @pytest.mark.anyio
@@ -197,6 +212,26 @@ async def test_create_session_fsyncs_file_and_parent_directory(
     await journal.create_session(_descriptor())
 
     assert len(fsync_calls) == 2
+
+
+@pytest.mark.anyio
+async def test_initialization_write_failure_returns_no_lease_or_records(
+    tmp_path: Path,
+) -> None:
+    """初始化未到 COMMIT 时不得返回 lease，也不得暴露部分三记录。"""
+    journal = JsonlSessionJournalCore(
+        tmp_path,
+        sync_file_adapter=_PartialCreateFailureAdapter(),
+    )
+
+    with pytest.raises(OSError, match="injected create failure"):
+        await journal.create_session(_descriptor())
+
+    records = [item async for item in journal.load("ses_1")]
+    verification = await journal.verify("ses_1")
+    assert records == []
+    assert verification.health is JournalHealth.RECOVERY_REQUIRED
+    assert verification.committed_tail_seq == 0
 
 
 @pytest.mark.anyio
