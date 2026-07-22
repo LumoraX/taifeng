@@ -128,7 +128,10 @@ Journal 重放；resume/verify/recovery 不得读取它作为权威输入。自�
 - EnginePool 预分配 root thread id，先创建 Journal，再让 projector 创建同 id 的 transcript。
 - MessageStore/Jsonl 默认实现增加“使用调用方给定 thread id 创建空投影”的内部能力；非 audit
   调用仍由 store 自己生成 id。
-- AgentEngine 先提交 submission batch，再从其中 conversation item 更新 hot history。
+- audit-required 的 `AgentEngine.submit()` 是 admission gateway：在 lifecycle/admission lock 内先提交
+  submission batch 并取得 durable ack，再把携带 ack/record ids 的 token 入 actor queue；禁止
+  enqueue-first。queue 内因此不存在未 accepted submission。ack 后 actor 才从其中 conversation item 更新
+  hot history；若 durable accepted 后内存 enqueue 异常，Session freeze/recovery-required。
 - TurnRunner 只从 coordinator ack 后的 item 更新 history/投影。
 - provider 每个真实网络 attempt 通过 `ModelAttemptObserver` 在发送前获取 durable permit；没有
   observer 能力的 ModelClient 在 audit-required 模式启动时拒绝。
@@ -295,8 +298,9 @@ EnginePool 构造期验证静态配置和 tool/provider capability；Submission 
 ### UserMessage
 
 1. canonicalize；非法输入 durable 写 `submission_rejected`，返回稳定拒绝，Session 保持 healthy。
-2. 原子提交 `submission_accepted + conversation_item(user_message) + submission_applied`。
-3. ack 后更新 hot history，再投影 MessageStore；投影失败只标 stale。
+2. admission lock 内原子提交 `submission_accepted + conversation_item(user_message) + submission_applied`。
+3. ack 后把 durable-accepted token 入 actor queue；actor 取出后更新 hot history，再投影 MessageStore；
+   投影失败只标 stale。
 4. durable 写 `turn_started`，进入 LLM。
 
 ### CancelTurn 与 Shutdown
@@ -314,8 +318,9 @@ EnginePool 构造期验证静态配置和 tool/provider capability；Submission 
 - 同一 CancelTurn/Shutdown submission 的重试使用相同 record ids。若 release/close 或另一个 Shutdown
   已先把状态改为 FINISHING，后到的 Shutdown 在 `submission_accepted` 前稳定返回
   `SessionFinishingError`，不能加入旧 future，也不生成第二组 terminal；同一 submission id 的重试只读取
-  已登记结果。finish 必须收敛在 admission 关闭前已经 accepted/排队的 UserMessage，未 accepted 的队列项
-  稳定拒绝。
+  已登记结果。finish 必须收敛 admission 关闭前所有已经 durable accepted 的 queued/in-flight UserMessage。
+  因为 acceptance-before-enqueue，不存在 queued-but-unaccepted；FINISHING 后的新请求在 enqueue/acceptance 前
+  直接返回 `SessionFinishingError`。
 
 ### LLM 与 UI delta
 
@@ -373,8 +378,9 @@ outcome 或 unknown。Journal finalization 使用独立 shield，不能复用已
   unknown 并冻结。
 - EnginePool 是 Session 生命周期唯一 owner；`Shutdown` handler、`release()`、`close()` 都只能请求它调用
   同一个 `coordinator.finish()`，其他组件不得直接写 session terminal 或调用 close_session。
-- lifecycle 在同一 per-session lock 下执行 `OPEN → FINISHING → CLOSED`。从 OPEN 进入 FINISHING 的胜者
-  原子关闭 intake、快照所有已 accepted/in-flight submission，并创建唯一 finish future；后续
+- lifecycle 与 admission 共用同一 per-session lock，执行 `OPEN → FINISHING → CLOSED`。从 OPEN 进入
+  FINISHING 的胜者原子关闭 intake、快照所有 durable-accepted queued/in-flight submission，并创建唯一
+  finish future；后续
   release/close 只 await 它，后续不同 id 的 Shutdown 在 acceptance 前拒绝。已成功 finish 的重试返回同一
   结果，不二次 append/close。
 - 生命周期 operation id 固定为 `{session_id}:lifecycle:end`。按 thread id 排序后，
@@ -431,7 +437,8 @@ live pool 内不可继续；进程重启后 audited marker 阻止 legacy resume�
 - 一个 Session frozen，另一个正常。
 - CancelTurn 的 accepted→target terminal→applied 与 not-found/already-terminal；Shutdown 的 intake close、
   terminal batch、emergency cancel；两个并发 turn 取消一个时另一个及其后续 effect 继续。
-- release-vs-Shutdown、两个不同 id 的 Shutdown、已 accepted/排队 UserMessage 的收敛；并发
+- release-vs-Shutdown、两个不同 id 的 Shutdown、accepted-but-queued UserMessage 必须收敛；transition 后
+  请求不得 durable accept、不得入队，并返回 SessionFinishingError。并发
   Shutdown/release/close 只产生一组确定 record-id 的 terminal records 与一次 close。
 
 ### Capability gates
