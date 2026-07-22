@@ -97,7 +97,7 @@ from taifeng.skill.eligibility import RuntimeCapabilities
 from taifeng.skill.registry import SkillSnapshot
 from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获，不可放 TYPE_CHECKING
 from taifeng.tool.runtime import ToolCallRuntime
-from taifeng.tool.spec import ToolContext
+from taifeng.tool.spec import ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -387,7 +387,7 @@ class TurnRunner:
         # DoomLoopDetector 实例同样在 run() 起点按 config 新建（turn 级生命周期）
         self._doom_loop: DoomLoopDetector | None = None
 
-    async def _emit(self, msg) -> None:
+    async def _emit(self, msg: Any) -> None:
         try:
             await self.emit(EventMsg(submission_id=self.submission_id, msg=msg))
         except Exception:
@@ -1734,7 +1734,7 @@ class TurnRunner:
         arguments: dict[str, Any],
         parent_stack: CallStack,
         ctx: ToolContext,
-    ):
+    ) -> ToolResult:
         """派发子 skill —— 启动一个嵌套 TurnRunner 处理。
 
         子 skill 共享 store / snapshot / tool_runtime / compressors，
@@ -1759,7 +1759,6 @@ class TurnRunner:
         # 不创建 thread / 不跑子 turn，返回 error 让 LLM 自行调整（fork-bomb 防护）。
         if self.spawn_registry is not None:
             from taifeng.loop.spawn import SpawnLimitError
-            from taifeng.tool.spec import ToolResult
             try:
                 async with self.spawn_registry.reserve():
                     return await self._spawn_sub_runner(
@@ -1789,7 +1788,7 @@ class TurnRunner:
         arguments: dict[str, Any],
         parent_stack: CallStack,
         ctx: ToolContext,
-    ):
+    ) -> ToolResult:
         """实际派发子 TurnRunner（已通过 K1 spawn 准入）。"""
         # G3 subagent-isolation-policy: 根据 dispatch_policy.subagent_approval_mode
         # 决定子 TurnRunner 收到的 permission_policy。inherit + 父=None → None；
@@ -1889,8 +1888,6 @@ class TurnRunner:
             history_buffer=[seed],
         )
         outcome = await sub_runner.run()
-        from taifeng.tool.spec import ToolResult
-
         # 子 turn 挂起：子 thread 内已落 SuspensionRecord 并 emit turn_suspended。
         # 父的 call_skill 必须随之挂起（而非把挂起误当成功/失败回填），否则父 turn
         # 会带着占位结果继续/完成，子挂起永远无法回传父调用栈（item d 的根因）。

@@ -82,7 +82,7 @@ class OpenAICompatSession:
     async def __aenter__(self) -> OpenAICompatSession:
         return self
 
-    async def __aexit__(self, *exc) -> None:  # noqa: ANN002
+    async def __aexit__(self, *exc: object) -> None:
         pass
 
     def _build_payload(self, req: ApiRequest) -> dict[str, Any]:

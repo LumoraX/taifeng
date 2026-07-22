@@ -281,11 +281,11 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
     return f"[{ts}] {tag} {arrow} {body}"
 
 
-def _short(s: Any, n: int) -> str:
-    s = str(s)
-    if len(s) <= n:
-        return s
-    return s[: n - 3] + "..."
+def _short(value: Any, n: int) -> str:
+    text = str(value)
+    if len(text) <= n:
+        return text
+    return text[: n - 3] + "..."
 
 
 class ConsoleSink:

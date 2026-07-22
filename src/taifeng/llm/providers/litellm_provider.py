@@ -175,7 +175,7 @@ class LiteLLMSession:
     async def __aenter__(self) -> LiteLLMSession:
         return self
 
-    async def __aexit__(self, *exc) -> None:  # noqa: ANN002
+    async def __aexit__(self, *exc: object) -> None:
         pass
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:  # noqa: C901
