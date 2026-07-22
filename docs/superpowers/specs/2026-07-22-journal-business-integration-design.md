@@ -41,7 +41,7 @@ Journal。
 
 ```text
 llm_response_committed + conversation_item(reasoning?) + conversation_item(assistant)
-tool_outcome_committed + conversation_item(function_call) + conversation_item(function_call_output)
+tool_outcome_committed + conversation_item(function_call_output, source_call_item_id)
 submission_accepted + conversation_item(user_message) + submission_applied
 ```
 
@@ -84,7 +84,13 @@ Journal core 由调用方创建并注入 EnginePool，所有权仍属于调用�
 
 `JournalRecord.schema_version` 由 record factory 固定填写，writer 原样复制到 envelope；seq、hash、
 `recorded_at` 和 writer epoch 才由 writer 分配。`turn_index`、`call_id`、`parent_call_id` 属于对应
-payload DTO，不新增错误的 JournalRecord 顶层字段。每个 payload 含 `payload_version=1`。
+payload DTO，不新增错误的 JournalRecord 顶层字段。本变更新增的领域 payload 均含
+`payload_version=1`。
+
+Phase 1 `create_session()` 生成的 `session_started/thread_created/thread_bound` 是已提交的初始化 V0
+canonical vectors：payload 无 `payload_version`，record id 固定为
+`{creation_operation_id}:{record_type}`，本变更不重写它们。decoder 同时支持初始化 V0 与新增 V1；
+通用 record-id factory 只处理初始化三记录之外的新 record。child thread 一律使用下述 V1 DTO。
 
 ### SessionAuditCoordinator
 
@@ -95,7 +101,7 @@ expected seq、root cancellation、health 和 projected seq。它提供：
 - `commit_conversation_batch()`：提交领域 record 与有序 conversation items；
 - `ensure_effect_allowed()`：任何 effect 前检查 health；
 - `freeze()`：第一次失败原子转 `FROZEN/RECOVERY_REQUIRED` 并取消 root token；
-- `finish()`：写 thread/session terminal records，再 `close_session()`；
+- `finish()`：供 EnginePool 唯一调用的幂等终结入口，写 terminal records 后 `close_session()`；
 - `mark_projection_stale()`：不冻结执行事实，只报告投影水位落后。
 
 child thread 共享 root coordinator 和 lease，通过 thread/turn/call lineage 区分。不得为
@@ -134,14 +140,14 @@ Journal 重放；resume/verify/recovery 不得读取它作为权威输入。自�
 | 对象 | Identity |
 |---|---|
 | submission | 现有 `submission_id` |
-| turn | `{submission_id}:turn:{turn_index}` |
+| root/child turn | `{thread_id}:{submission_id}:turn:{turn_index}` |
 | LLM logical call | `{turn_id}:llm:{iteration}` |
 | LLM network attempt | `{llm_operation_id}:attempt:{retry_ordinal}` |
 | tool call | `{turn_id}:tool:{call_id}` |
 | skill dispatch | `{tool_operation_id}:skill:{target_skill_id}` |
 | child thread | 预分配 `thread_id` |
 
-record id 由 factory 统一生成：
+除 Phase 1 初始化 V0 外，record id 由 factory 统一生成：
 
 ```text
 {operation_id}:{record_type}:{attempt_id-or-none}:{ordinal}
@@ -158,15 +164,21 @@ item index。相同逻辑重试产生相同完整 JournalRecord；payload 变化
 
 | Record | Payload V1 |
 |---|---|
-| `submission_accepted` | `payload_version, op_kind="user_message", turn_index, text, attachments, source` |
-| `submission_applied` | `payload_version, accepted_record_id, conversation_item_ids` |
+| `submission_accepted` | `payload_version, op_kind, turn_index?, text?, attachments?, source?, target_submission_id?` |
+| `submission_applied` | `payload_version, accepted_record_id, result_status, conversation_item_ids, terminal_record_ids` |
 | `submission_rejected` | `payload_version, op_kind, stable_error, input_descriptor_hash` |
 | `turn_started` | `payload_version, turn_index, entry_skill_id, skill_snapshot_version, model, budget_snapshot` |
 | `turn_completed` | `payload_version, turn_index, end_reason, iterations, usage, final_item_ids` |
 | `turn_failed` | `payload_version, turn_index, stable_error, effect_state` |
 | `turn_cancelled` | `payload_version, turn_index, cancellation_reason, effect_state` |
 
-附件 DTO 为 `AttachmentRefV1 {kind, media_type, size, sha256, uri?}`；不保存不可验证临时对象。
+`submission_accepted` 以 discriminator 校验三种形状：UserMessage 必须含 text/attachments/source；
+CancelTurn 必须含 target_submission_id；Shutdown 不含业务参数。
+
+附件 DTO 为完整内联的
+`AttachmentV1 {kind, media_type, size, sha256, encoding="base64", content}`。gateway 在 acceptance 前
+解码 content、校验 size/sha256 与配置注入的单附件/总大小上限；临时路径、缺失 content、digest 不匹配
+均写 `submission_rejected`。durable URI、content-addressed blob 与外置加密另立变更，本切片不接受引用型附件。
 
 ### LLM
 
@@ -180,8 +192,12 @@ LLM status 为 `complete | error | cancelled | unknown`。`normalized_items` 保
 assistant text、reasoning、tool calls 和 provider 可见 encrypted item；不伪造隐藏推理。
 
 每次真实 provider attempt 都有独立 `attempt_id`。`ModelAttemptObserver.before_attempt()` 必须在网络
-dispatch 前 durable 写 `llm_request_committed` 并返回 permit；`after_attempt()` 只回传 attempt 元数据，
-最终 checkpoint/commit 由 TurnRunner 收敛。provider 内 retry ordinal 从 0 单调增加并接受测试注入。
+dispatch 前 durable 写 attempt-specific `llm_request_committed` 并返回 permit；provider 捕获该 attempt
+的完整 normalized result/error/cancel 后，必须 `await after_attempt()` durable 写对应
+`llm_response_checkpoint`，得到 ack 才能返回结果或进入下一次内部 retry。TurnRunner 只负责最终 logical
+`llm_response_committed` 与 conversation items。request/checkpoint 共用 operation_id 与 attempt_id，
+checkpoint causation 指向 request；observer/ack 异常使该 attempt 为 unknown 并冻结，禁止 retry。
+retry ordinal 从 0 单调增加并接受测试注入。
 
 ### Tool
 
@@ -205,13 +221,14 @@ ToolCallRequest 建立前形成 `turn_failed`，无 tool intent；not-offered ca
 | `skill_selected` | `payload_version, call_id, skill_id, version, definition_hash, body_hash, full_definition, arguments, selection_origin, confidence?` |
 | `skill_dispatch_started` | `payload_version, selected_record_id, call_id, parent_call_id?, child_thread_id, call_stack, arguments` |
 | `skill_dispatch_finished` | `payload_version, started_record_id?, call_id, child_thread_id?, status, end_reason?, final_text?, usage?, stable_error?` |
-| `thread_created` | `payload_version, entry_skill_id, source, parent_thread_id?` |
+| `thread_created` | `payload_version, entry_skill_id, source, tags, extra, parent_thread_id?, call_id?` |
 | `thread_bound` | `payload_version, session_id, thread_id, call_id?` |
 | `thread_terminal` | `payload_version, status, end_reason, stable_error?` |
 | `session_ended` | `payload_version, status, reason, audit_complete` |
 
 Skill status 为 `success | error | rejected | cancelled | unknown`。quota rejection 允许
 `skill_selected → skill_dispatch_finished(status="rejected", started_record_id=None)`；没有伪造 started。
+root 初始化使用前述 V0 `thread_created/thread_bound`；child 的 V1 保留相同基础字段并增加 lineage。
 
 ### Conversation item
 
@@ -269,8 +286,9 @@ EnginePool 构造期验证静态配置和 tool/provider capability；Submission 
 2. 预分配 root thread id，不写 MessageStore。
 3. `create_session` 原子提交 `session_started + thread_created + thread_bound`。
 4. projector 用该 id 创建带 audit marker 的空 transcript。
-5. projector 失败：追加 `thread_terminal + session_ended(audit_complete=true, reason=projection_bootstrap_failed)`，
-   close_session，Engine 创建失败。若终结记录也失败，freeze 后紧急 close，audit_complete=false 只进日志。
+5. projector 失败：EnginePool 调用唯一的 `coordinator.finish(reason=projection_bootstrap_failed)`，追加
+   `thread_terminal + session_ended(audit_complete=true)` 后 close_session，Engine 创建失败。若终结记录也
+   失败，finish 执行紧急 close，audit_complete=false 只进日志。
 6. 成功后才启动并返回 Engine。
 
 ### UserMessage
@@ -280,21 +298,35 @@ EnginePool 构造期验证静态配置和 tool/provider capability；Submission 
 3. ack 后更新 hot history，再投影 MessageStore；投影失败只标 stale。
 4. durable 写 `turn_started`，进入 LLM。
 
+### CancelTurn 与 Shutdown
+
+- `CancelTurn` 使用自己的 submission id，payload 指向 target submission。healthy 时先 durable 写
+  `submission_accepted(cancel_turn)`，再发 root cancellation；目标 turn 完成 terminal 收敛后写
+  `submission_applied(result_status=cancelled|already_terminal|not_found)`，并列出 terminal record ids。
+- `Shutdown` 先 durable 写 `submission_accepted(shutdown)` 并关闭新 submission intake，再由
+  EnginePool 唯一调用 `coordinator.finish()`：收敛所有在途 turn/thread，最终原子提交该 Shutdown 的
+  `submission_applied + thread_terminal* + session_ended`，然后释放 lease。
+- frozen/Journal 不可用时，CancelTurn 与 Shutdown 仍可作为安全降级动作执行，但不能伪造 durable
+  acceptance/applied；health/logger 标记 `audit_complete=false`。它们是冻结态唯一允许的新控制动作。
+- 同一 CancelTurn/Shutdown submission 的重试使用相同 record ids；并发 Shutdown/release 归并到同一
+  finish future，不重复终结记录或 close。
+
 ### LLM 与 UI delta
 
 1. build/preflight 完成，生成 logical operation id。
 2. provider 每个网络 attempt 在 dispatch 前通过 observer durable 写
    `llm_request_committed(attempt_id=...)`。
 3. TurnRunner 缓冲 provider delta，不发 EventMsg。
-4. stream 明确 complete/error/cancel 后，在 cancellation-independent shield 内 durable 写
-   `llm_response_checkpoint`，包含当前完整 normalized items 和 status。
+4. 每个 attempt 明确 complete/error/cancel 后，observer 在 cancellation-independent shield 内 durable 写
+   `llm_response_checkpoint`，包含该 attempt 当前完整 normalized items 和 status。
 5. checkpoint ack 后按原顺序发布对应 EventMsg delta；因此任何已展示内容都能由 checkpoint 重建。
 6. 原子提交 `llm_response_committed + conversation_item(reasoning/assistant/function_call...)`。
 7. ack 后更新 hot history并投影；只有此后才能开始 tool effect 或 turn terminal。
 
-provider retry 的每个 attempt 都先有 request record；失败 attempt 的 checkpoint status=error，下一 attempt
-使用新 attempt_id。最终 logical call committed record causation 指向最后 checkpoint，并 correlation 到同一
-logical operation。
+provider retry 的每个 attempt 都先有 request record，且失败 attempt 的 checkpoint status=error durable ack
+发生在下一 attempt 前；下一 attempt 使用新 attempt_id。最终 logical call committed record causation 指向
+最后 checkpoint，并 correlation 到同一 logical operation。attempt 在 dispatch 后若无法证明结果，checkpoint
+写 unknown（若 Journal 可用）并冻结；不得进入 retry。
 
 ### Tool batch 收敛
 
@@ -302,9 +334,11 @@ logical operation。
 2. 将所有 executable/rejected request 的 `tool_intent_committed` 按 call index 原子提交。
 3. 为 executable calls 启动受 coordinator gate 保护的 task；每个 task 捕获所有异常为结构化状态。
 4. parent cancel 时 best-effort 取消 siblings；使用 cancellation-independent 有界 shield 收敛每个已提交
-   intent。明确完成写 success/error/cancelled，无法确认写 unknown。
+   intent。只有尚未越过 dispatch gate，或 runtime 明确确认 effect 未发生/已终止且结果已知，才写
+   cancelled；仅捕获取消异常、超时或无法撤销的外部动作一律写 unknown。
 5. 按 call index 原子提交全部 `tool_outcome_committed`，并为每个 call 同批提交
-   `conversation_item(function_call/function_call_output)`。
+   `conversation_item(function_call_output)`，其 payload 引用 LLM batch 已 durable 的唯一
+   `function_call item_id` 与 tool intent record；不得重复写 function_call。
 6. ack 后更新 history/投影。任何 unknown 使 coordinator 进入 recovery-required，不开始下一次 LLM。
 
 `asyncio.gather` 必须改为不因单个未预期异常丢失其他 outcome 的收敛器；每个 intent 恰有一个 terminal
@@ -316,8 +350,12 @@ outcome 或 unknown。Journal finalization 使用独立 shield，不能复用已
 2. spawn quota preflight。拒绝则提交 `skill_dispatch_finished(rejected)`，不创建 child。
 3. quota 通过后预分配 child thread id，原子提交
    `skill_dispatch_started + thread_created + thread_bound + conversation_item(child seed)`。
-4. ack 后 projector 创建 child transcript、hot child history 应用 seed，再运行 child TurnRunner。
-5. child normal/error/cancel 后原子提交 `skill_dispatch_finished + thread_terminal`。
+4. child turn 继承 parent submission_id，以 child thread id 生成独立
+   `{child_thread_id}:{submission_id}:turn:{turn_index}`；ack 后 hot child history 应用 seed，再运行 child
+   TurnRunner。child transcript 投影失败只标 stale，不阻止以 hot history 执行。
+5. child normal/error/cancel 后原子提交
+   `skill_dispatch_finished + thread_terminal + conversation_item(skill_outcome)`；skill_outcome 是旁路记账项，
+   source_record_id 指向 finished record。
 6. outer tool 收敛器随后提交 `tool_outcome_committed + parent conversation items`。
 7. 任何 suspension 为 unsupported：在产生 HITL effect 前 gate 拒绝；若自定义 tool/skill 仍抛
    SuspendSignal，提交 error outcome 并冻结以暴露能力声明违约。
@@ -327,9 +365,15 @@ outcome 或 unknown。Journal finalization 使用独立 shield，不能复用已
 - 正常 turn：最后一个原子 batch 为 `turn_completed` 与最终 conversation items（若有）。
 - failure/cancel：在独立 shield 中写 `turn_failed` 或 `turn_cancelled`；若存在未闭合 effect，状态为
   unknown 并冻结。
-- `EnginePool.release(session)`：先提交所有活跃 thread 的 `thread_terminal`，再 `session_ended`，最后
-  `close_session(lease)`。
-- `EnginePool.close()` 对每个 Session 串行执行 release；不调用外部 owner 的 core.close。
+- EnginePool 是 Session 生命周期唯一 owner；`Shutdown` handler、`release()`、`close()` 都只能请求它调用
+  同一个 `coordinator.finish()`，其他组件不得直接写 session terminal 或调用 close_session。
+- `finish()` 由 per-session lock/future 合并并发调用；生命周期 operation id 固定为
+  `{session_id}:lifecycle:end`，thread terminal id 固定包含 thread id，session ended id 固定包含 session id。
+  已成功 finish 的重试返回同一结果，不二次 append/close。
+- `finish()` 先收敛 turn，再原子提交全部尚未提交的 `thread_terminal` 与 `session_ended`（Shutdown 时同批含
+  `submission_applied`），最后只调用一次 `close_session(lease)`。terminal commit 失败则 emergency close，
+  future 返回 `audit_complete=false`；不得把它缓存成成功。
+- `EnginePool.close()` 对每个 Session 串行请求 finish；不调用外部 owner 的 core.close。
 
 ## 失败语义
 
@@ -352,9 +396,11 @@ live pool 内不可继续；进程重启后 audited marker 阻止 legacy resume�
 ### Contract/unit
 
 - 每个 payload DTO 的必填/extra/enum/canonical vectors。
+- 初始化 V0 vectors 与 child thread V1 DTO/record-id 的兼容解码。
 - operation/attempt/record id 稳定性与冲突。
 - ResponseItem serializer 覆盖所有允许 kind，未知 kind 拒绝。
 - StableError 不泄露 repr、地址或 secret。
+- inline attachment 的缺失正文、临时路径、大小/hash 不匹配与上限拒绝。
 - close_session lease、Session 隔离和 global owner 边界。
 
 ### Integration/ordering
@@ -362,11 +408,17 @@ live pool 内不可继续；进程重启后 audited marker 阻止 legacy resume�
 - checkpoint-before-delta：在 checkpoint 前模拟崩溃，断言 UI 无 delta；ack 后 delta 可从 Journal 重建。
 - submission、LLM、tool 和 call_skill 的精确 success/error/cancel/freeze 序列表。
 - provider 内部 retry：每次真实 attempt 有唯一 attempt id/request，最终 commit lineage 正确。
-- 并行 tools：部分完成、unexpected exception、parent cancel、outcome unknown 和 sibling 收敛。
+- provider retry 强制 previous checkpoint ack-before-next-attempt，observer/ack failure 不 retry。
+- 并行 tools：部分完成、unexpected exception、parent cancel、outcome unknown 和 sibling 收敛；分别覆盖取消
+  发生在 intent 后、dispatch 前、effect 中、effect 完成后四个窗口。
+- success/rejected/cancelled/parallel tool 均只有一个 function_call，并与一个 output 正确配对。
 - 每个 MessageStore bootstrap/append 部分失败点：Journal 完整、hot history 正确、projection stale、可重放。
-- quota rejection、child-create projection failure、child error/cancel、三层 lineage、thread terminal。
+- quota rejection、child-create projection failure、child 仍以 hot history 执行、child error/cancel、
+  skill_outcome、三层 lineage、thread terminal。
 - intent 写失败时 effect spy=0；outcome 写失败后后续 LLM/Tool/Skill spy=0。
 - 一个 Session frozen，另一个正常。
+- CancelTurn 的 accepted→target terminal→applied 与 not-found/already-terminal；Shutdown 的 intake close、
+  terminal batch、emergency cancel；并发 Shutdown/release/close 只产生一组 terminal records 与一次 close。
 
 ### Capability gates
 
