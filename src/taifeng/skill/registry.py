@@ -64,7 +64,7 @@ class SkillRegistry(Protocol):
     def get(self, skill_id: str) -> SkillDefinition | None:
         ...
 
-    async def watch(self) -> AsyncIterator[SkillSnapshot]:
+    def watch(self) -> AsyncIterator[SkillSnapshot]:
         """订阅快照变更（可选实现）。"""
         ...
 

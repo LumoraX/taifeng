@@ -17,7 +17,7 @@ from taifeng.loop.cancellation import CancellationToken
 class ModelClientSession(Protocol):
     """Turn 级 session。每个 turn 重建，避免 sticky header / cache key 跨 turn 污染。"""
 
-    async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
+    def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
         """流式调用，按 ``ResponseEvent`` 顺序产出。
 
         实现要点：
@@ -29,7 +29,7 @@ class ModelClientSession(Protocol):
     async def __aenter__(self) -> ModelClientSession:
         ...
 
-    async def __aexit__(self, *exc) -> None:  # noqa: ANN002
+    async def __aexit__(self, *exc: object) -> None:
         ...
 
 
