@@ -48,9 +48,10 @@ PYTHONPATH=src uv run mypy src/taifeng
 ### 3. ModelClient session 返回类型
 
 各 provider 返回自己的 session 具体类。协议若固定要求 `ModelClientSession`，mypy
-在结构化协议匹配中会拒绝这些窄返回类型。采用协变类型参数表达
-`ModelClient[SessionT]`，让 provider 和 `SimClient` 保留具体返回类型，同时所有
-消费者仍按 `ModelClientSession` 能力使用。
+当前拒绝这些窄返回类型，是第 2 节中 `stream()` 被错误声明成 coroutine 的连锁结果。
+最小 mypy 复现已确认：把协议改为普通 `def` 返回 `AsyncIterator[T]` 后，具体 session
+类可结构化满足 `ModelClientSession`，provider 的窄返回类型也可合法覆盖。因此保留
+非泛型 `ModelClient`，不增加新的公开类型参数。
 
 验证：增加静态类型契约样例并运行 provider/SimClient 集成测试，确保不加入运行时
 强制转换。
@@ -110,8 +111,8 @@ PYTHONPATH=src uv run mypy src/taifeng
 - `PYTHONPATH=src uv run mypy src/taifeng` 为 0 errors。
 - 定向新增测试、相关模块测试与全量 `tests/` 通过。
 - Ruff 检查通过。
-- 同步公开接口活文档：`docs/architecture/llm-client.md` 记录 stream 与泛型 session
-  契约；`docs/architecture/skill-system.md` 记录 watch 的异步迭代器契约。
+- 同步公开接口活文档：`docs/architecture/llm-client.md` 记录 stream 与具体 session
+  协变契约；`docs/architecture/skill-system.md` 记录 watch 的异步迭代器契约。
 - 本次不新增或修改 LLM 策略类能力，因此不更新 `docs/capability-matrix.md`；若实施
   中发现必须改变策略能力，则暂停并把能力登记纳入验收。
 - 因涉及 `llm/loop/context/conversation`，先运行真实 LLM selfcheck，再运行完整
