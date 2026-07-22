@@ -75,9 +75,10 @@ PYTHONPATH=src uv run mypy src/taifeng
 - 在开发依赖中加入 `types-PyYAML`，同步 lockfile。
 - OTel 的 `span_exporter` 显式声明为 SDK `SpanExporter`，`metric_exporter` 显式声明为
   SDK `MetricExporter`；HTTP 与 gRPC exporter 都通过对应抽象传给 processor/reader。
-- `_tracer_provider` 与 `_meter_provider` 分别显式声明为 API 层 `TracerProvider` 与
-  `MeterProvider`，兼容测试注入和内部构造的 SDK provider。所有 OTel 类型仍放在
-  现有 optional-extra 导入边界内；未安装 extra 时模块可导入、构造 sink 才报错。
+- `_tracer_provider` 与 `_meter_provider` 分别显式声明为 SDK `TracerProvider` 与
+  `MeterProvider`。这是 sink 实际调用 `force_flush/shutdown` 所需的最窄契约，也兼容
+  测试注入和内部构造。所有 OTel 类型仍放在现有 optional-extra 导入边界内；未安装
+  extra 时模块可导入、构造 sink 才报错。
 
 验证：分别在未启用和启用可选 OTel 依赖的类型检查路径中验证；现有 telemetry
 测试不得回退。

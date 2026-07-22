@@ -43,6 +43,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
+    "types-PyYAML>=6.0",
     # examples/web_ui/ demo 的运行时依赖（demo only，不进生产）
     "fastapi>=0.115",
     "uvicorn>=0.30",

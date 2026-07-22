@@ -17,8 +17,10 @@ from typing import TYPE_CHECKING, Any, Literal
 import taifeng as _taifeng_pkg
 
 if TYPE_CHECKING:
-    from opentelemetry.metrics import Counter, MeterProvider
-    from opentelemetry.trace import Span, TracerProvider
+    from opentelemetry.metrics import Counter
+    from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
+    from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
+    from opentelemetry.trace import Span
 
 # OTel 包按 optional extra 提供；未装时构造时报错，而非 import 时报错
 try:
@@ -37,10 +39,13 @@ try:
         OTLPSpanExporter as _OTLPSpanExporterHttp,
     )
     from opentelemetry.sdk.metrics import MeterProvider as _SdkMeterProvider
-    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.sdk.metrics.export import (
+        MetricExporter,
+        PeriodicExportingMetricReader,
+    )
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider as _SdkTracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
     from opentelemetry.trace import Status, StatusCode
 
     _OTEL_AVAILABLE = True
@@ -143,8 +148,8 @@ class OtelTelemetrySink:
         self,
         config: OtelSinkConfig,
         *,
-        tracer_provider: TracerProvider | None = None,
-        meter_provider: MeterProvider | None = None,
+        tracer_provider: SdkTracerProvider | None = None,
+        meter_provider: SdkMeterProvider | None = None,
     ) -> None:
         """构造一个 OTel sink。
 
@@ -164,6 +169,7 @@ class OtelTelemetrySink:
         self._config = config
 
         # ---- TracerProvider ----
+        self._tracer_provider: SdkTracerProvider
         if tracer_provider is None:
             resource = Resource.create(
                 {
@@ -173,6 +179,7 @@ class OtelTelemetrySink:
                 }
             )
             tp = _SdkTracerProvider(resource=resource)
+            span_exporter: SpanExporter
             if config.protocol == "grpc":
                 span_exporter = _OTLPSpanExporterGrpc(endpoint=config.otlp_endpoint)
             else:
@@ -183,6 +190,7 @@ class OtelTelemetrySink:
             self._tracer_provider = tracer_provider
 
         # ---- MeterProvider ----
+        self._meter_provider: SdkMeterProvider
         if meter_provider is None:
             resource = Resource.create(
                 {
@@ -191,6 +199,7 @@ class OtelTelemetrySink:
                     **config.resource_attributes,
                 }
             )
+            metric_exporter: MetricExporter
             if config.protocol == "grpc":
                 metric_exporter = _OTLPMetricExporterGrpc(endpoint=config.otlp_endpoint)
             else:

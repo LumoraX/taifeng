@@ -271,8 +271,8 @@ from opentelemetry.sdk.trace.export import SpanExporter
 
 span_exporter: SpanExporter
 metric_exporter: MetricExporter
-self._tracer_provider: TracerProvider = tp
-self._meter_provider: MeterProvider = mp
+self._tracer_provider: SdkTracerProvider = tp
+self._meter_provider: SdkMeterProvider = mp
 ```
 
 保持导入在现有 optional-extra try/TYPE_CHECKING 边界内。
