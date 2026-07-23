@@ -109,7 +109,7 @@ class _MemoryProjectionStore:
         items = tuple([item async for item in iterator])
         return ProjectionSnapshot(
             items=items,
-            identity=ProjectionFileIdentity(0, 0, len(items), len(items)),
+            identity=ProjectionFileIdentity(0, 0, len(items), len(items), len(items)),
         )
 
     async def append_projection_batch(

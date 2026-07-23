@@ -52,7 +52,7 @@ from taifeng.conversation.store import MessageStore
 from taifeng.loop.event import EventMsg, TranscriptSkippedCorruptLine
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     # TelemetrySink 走 telemetry/__init__.py 会引入循环 (telemetry → loop → context → conversation)
     # 这里只用作类型注解，运行时不需要解析
@@ -436,14 +436,47 @@ class JsonlMessageStore(MessageStore):
         """
         merged_extra: dict[str, Any] = {"cwd": cwd} if cwd is not None else {}
         merged_extra.update(extra)
+        session_id = merged_extra.get("journal_session_id")
+        if _is_audited_metadata(merged_extra) and isinstance(session_id, str):
+            async with self._projection_target.bootstrap_scope(
+                thread_id,
+                session_id,
+            ) as mark_persisted:
+                return await self._persist_projection_thread(
+                    thread_id=thread_id,
+                    entry_skill_id=entry_skill_id,
+                    source=source,
+                    extra=merged_extra,
+                    mark_persisted=mark_persisted,
+                )
+        return await self._persist_projection_thread(
+            thread_id=thread_id,
+            entry_skill_id=entry_skill_id,
+            source=source,
+            extra=merged_extra,
+            mark_persisted=None,
+        )
+
+    async def _persist_projection_thread(
+        self,
+        *,
+        thread_id: str,
+        entry_skill_id: str,
+        source: str,
+        extra: dict[str, Any],
+        mark_persisted: Callable[[], None] | None,
+    ) -> str:
+        """在 caller 已取得 bootstrap scope 后写 JSONL 并登记 directory。"""
         now = time.time()
         tid = await self._writer._create_thread_with_id(  # noqa: SLF001
             thread_id=thread_id,
             entry_skill_id=entry_skill_id,
             source=source,
-            extra=merged_extra,
+            extra=extra,
             created_at=now,
         )
+        if mark_persisted is not None:
+            mark_persisted()
         meta = ThreadMetadata(
             thread_id=tid,
             created_at=now,
@@ -451,13 +484,9 @@ class JsonlMessageStore(MessageStore):
             entry_skill_id=entry_skill_id,
             source=source,
             tags=(),
-            extra=merged_extra,
+            extra=extra,
         )
         await self._directory.upsert_metadata(meta)
-        if _is_audited_metadata(merged_extra):
-            session_id = merged_extra["journal_session_id"]
-            if isinstance(session_id, str):
-                self._projection_target.bind_expected_session_id(thread_id, session_id)
         self._projection_target.invalidate(thread_id)
         return tid
 

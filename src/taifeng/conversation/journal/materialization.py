@@ -20,7 +20,7 @@ from pydantic import ValidationError
 from taifeng.conversation.models import ResponseItem
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from taifeng.conversation.journal.projector import ProjectionResult
 
@@ -37,6 +37,7 @@ class ProjectionFileIdentity:
     inode: int
     size: int
     modified_ns: int
+    changed_ns: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,14 +109,24 @@ class _PhysicalProjectionTarget:
         with self._guard:
             return self.session_ids.get(thread_id)
 
-    def bind_session_id(self, thread_id: str, session_id: str) -> None:
-        """为 thread 绑定唯一 Journal Session identity。"""
+    def reserve_session_id(self, thread_id: str, session_id: str) -> bool:
+        """原子预留 identity；返回是否由本次调用新建。"""
         with self._guard:
-            existing = self.session_ids.setdefault(thread_id, session_id)
-            if existing != session_id:
+            existing = self.session_ids.get(thread_id)
+            if existing is not None and existing != session_id:
                 raise ProjectionLifecycleError(
                     "projection target is bound to another Journal Session"
                 )
+            if existing is not None:
+                return False
+            self.session_ids[thread_id] = session_id
+            return True
+
+    def release_session_id(self, thread_id: str, session_id: str) -> None:
+        """仅撤销仍属于本次 identity 的未持久 reservation。"""
+        with self._guard:
+            if self.session_ids.get(thread_id) == session_id:
+                self.session_ids.pop(thread_id, None)
 
     def clear(self) -> None:
         """最终 handle 释放时清除所有 backend-bound 派生状态。"""
@@ -154,11 +165,18 @@ def safe_thread_path(root: Path, thread_id: str) -> Path:
 
 def _identity(stat_result: os.stat_result) -> ProjectionFileIdentity:
     """把平台 stat 结果收窄成稳定的投影身份。"""
+    raw_changed_ns = getattr(stat_result, "st_ctime_ns", None)
+    changed_ns = (
+        raw_changed_ns
+        if isinstance(raw_changed_ns, int)
+        else int(stat_result.st_ctime * 1_000_000_000)
+    )
     return ProjectionFileIdentity(
         device=stat_result.st_dev,
         inode=stat_result.st_ino,
         size=stat_result.st_size,
         modified_ns=stat_result.st_mtime_ns,
+        changed_ns=changed_ns,
     )
 
 
@@ -455,6 +473,34 @@ class ProjectionTargetHandle:
         finally:
             self._leave()
 
+    @asynccontextmanager
+    async def bootstrap_scope(
+        self,
+        thread_id: str,
+        session_id: str,
+    ) -> AsyncIterator[Callable[[], None]]:
+        """在共享 thread 锁内 prewrite reserve Session identity。"""
+        self._admit()
+        try:
+            async with self._target.lock_for(thread_id):
+                newly_reserved = self._target.reserve_session_id(
+                    thread_id,
+                    session_id,
+                )
+                persisted = False
+
+                def mark_persisted() -> None:
+                    nonlocal persisted
+                    persisted = True
+
+                try:
+                    yield mark_persisted
+                finally:
+                    if newly_reserved and not persisted:
+                        self._target.release_session_id(thread_id, session_id)
+        finally:
+            self._leave()
+
     def _admit(self) -> None:
         """只允许 OPEN handle 准入，并绑定物理 target backend。"""
         with self._guard:
@@ -502,7 +548,7 @@ class ProjectionTargetHandle:
 
     def bind_expected_session_id(self, thread_id: str, session_id: str) -> None:
         """把 audited bootstrap/directory identity 绑定到 physical target。"""
-        self._target.bind_session_id(thread_id, session_id)
+        self._target.reserve_session_id(thread_id, session_id)
 
     async def existing_file_session_id(self, thread_id: str) -> str | None:
         """只读现存 self-contained JSONL 的 audited Session identity。"""
