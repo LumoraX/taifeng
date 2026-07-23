@@ -60,6 +60,22 @@ class CancellationToken:
             child._mark_cancelled()
         return child
 
+    def detach(self) -> bool:
+        """安全解除当前 token 与直接 parent 的边，不改变自身或 subtree 取消状态。
+
+        root、已 detach，或 parent 已不再持有该 identity 时返回 ``False``。
+        """
+        parent = self._parent
+        if parent is None:
+            return False
+        for index, child in enumerate(parent._children):
+            if child is self:
+                parent._children.pop(index)
+                self._parent = None
+                return True
+        self._parent = None
+        return False
+
     def cancel(self) -> None:
         """取消本 token 与所有后代。"""
         if self._cancelled:

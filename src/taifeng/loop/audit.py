@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
@@ -28,6 +29,8 @@ from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+_HASH_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class AuditHealth(StrEnum):
@@ -71,7 +74,12 @@ class SessionAuditFrozenError(RuntimeError):
             f"session={session_id}, code={cause.code}, class={cause.class_name}"
         )
         self.session_id = session_id
-        self.cause = cause
+        self._cause = _copy_stable_error(cause)
+
+    @property
+    def cause(self) -> StableErrorV1:
+        """返回稳定首因副本，避免异常接收方篡改 coordinator 内部状态。"""
+        return _copy_stable_error(self._cause)
 
 
 class _JournalAppendCore(Protocol):
@@ -130,6 +138,35 @@ def _projection_failure(result: ProjectionResult) -> StableErrorV1:
     )
 
 
+def _copy_stable_error(error: StableErrorV1) -> StableErrorV1:
+    """重建稳定错误，阻断调用方用 object.__setattr__ 篡改内部状态。"""
+    return StableErrorV1(
+        payload_version=error.payload_version,
+        code=error.code,
+        class_name=error.class_name,
+        failure_class=error.failure_class,
+        safe_message=error.safe_message,
+        descriptor_hash=error.descriptor_hash,
+        retryable=error.retryable,
+    )
+
+
+def _copy_projection_snapshot(
+    snapshot: ProjectionAuditSnapshot,
+) -> ProjectionAuditSnapshot:
+    """深复制 projection snapshot 及其可绕过 frozen 的 Pydantic failure。"""
+    return ProjectionAuditSnapshot(
+        thread_id=snapshot.thread_id,
+        projected_seq=snapshot.projected_seq,
+        stale=snapshot.stale,
+        failure=(
+            _copy_stable_error(snapshot.failure)
+            if snapshot.failure is not None
+            else None
+        ),
+    )
+
+
 class SessionAuditCoordinator:
     """串行化一个 Session 的 Journal append，并隔离其 fail-closed 状态。"""
 
@@ -154,6 +191,7 @@ class SessionAuditCoordinator:
         self._health = AuditHealth.HEALTHY
         self._effect_gate_open = True
         self._frozen_error: SessionAuditFrozenError | None = None
+        self._first_failure: StableErrorV1 | None = None
         self._targets: dict[str, CancellationToken] = {}
         self._projections: dict[str, ProjectionAuditSnapshot] = {}
 
@@ -220,11 +258,14 @@ class SessionAuditCoordinator:
                 lease=self._lease,
                 expected_seq=self._expected_seq,
             )
-            self._validate_ack(ack, records)
+            ack = self._validate_ack(ack, records)
         except (KeyboardInterrupt, SystemExit) as error:
             self.freeze(error)
             raise
-        except Exception as error:
+        except BaseException as error:
+            if isinstance(error, anyio.get_cancelled_exc_class()):
+                self.freeze(error)
+                raise
             failure = error
         if failure is not None:
             self.freeze(failure)
@@ -249,11 +290,24 @@ class SessionAuditCoordinator:
 
     def _validate_ack(
         self,
-        ack: JournalAck,
+        ack: object,
         records: tuple[JournalRecord, ...],
-    ) -> None:
-        """要求 ack 精确覆盖当前新 batch、lease epoch 与 expected seq。"""
-        if not isinstance(ack, JournalAck):
+    ) -> JournalAck:
+        """以 exact type 重验并重建 ack，拒绝 coercion、子类与 caller 别名。"""
+        if type(ack) is not JournalAck:
+            raise _InvalidJournalAckError
+        assert isinstance(ack, JournalAck)
+        if (
+            type(ack.session_id) is not str
+            or type(ack.first_seq) is not int
+            or type(ack.last_seq) is not int
+            or type(ack.record_ids) is not tuple
+            or any(type(record_id) is not str or not record_id for record_id in ack.record_ids)
+            or type(ack.tail_hash) is not str
+            or _HASH_HEX_PATTERN.fullmatch(ack.tail_hash) is None
+            or type(ack.writer_epoch) is not int
+            or type(ack.durability) is not Durability
+        ):
             raise _InvalidJournalAckError
         expected_record_ids = tuple(record.record_id for record in records)
         expected_first_seq = self._expected_seq + 1
@@ -268,6 +322,15 @@ class SessionAuditCoordinator:
         )
         if not valid:
             raise _InvalidJournalAckError
+        return JournalAck(
+            session_id=ack.session_id,
+            first_seq=ack.first_seq,
+            last_seq=ack.last_seq,
+            record_ids=ack.record_ids,
+            tail_hash=ack.tail_hash,
+            writer_epoch=ack.writer_epoch,
+            durability=ack.durability,
+        )
 
     async def ensure_effect_allowed(self) -> None:
         """effect 前 fail-closed 检查；冻结后永远返回同一稳定错误。"""
@@ -280,7 +343,12 @@ class SessionAuditCoordinator:
         """第一次调用同步、无 await 地固定首因、关 gate 并取消整个 Session。"""
         if self._frozen_error is not None:
             return self._frozen_error
-        stable_cause = cause if isinstance(cause, StableErrorV1) else _journal_failure(cause)
+        stable_cause = (
+            _copy_stable_error(cause)
+            if isinstance(cause, StableErrorV1)
+            else _journal_failure(cause)
+        )
+        self._first_failure = _copy_stable_error(stable_cause)
         frozen = SessionAuditFrozenError(self.session_id, stable_cause)
         self._frozen_error = frozen
         self._health = AuditHealth.RECOVERY_REQUIRED
@@ -320,6 +388,7 @@ class SessionAuditCoordinator:
         if current is not token:
             return False
         self._targets.pop(target_id)
+        token.detach()
         return True
 
     def cancel_target(self, target_id: str) -> bool:
@@ -348,7 +417,7 @@ class SessionAuditCoordinator:
         current = self._projections.get(result.thread_id)
         incoming_seq = result.projected_seq
         if current is not None and not current.stale and incoming_seq < current.projected_seq:
-            return current
+            return _copy_projection_snapshot(current)
         projected_seq = max(
             current.projected_seq if current is not None else 0,
             incoming_seq,
@@ -361,8 +430,7 @@ class SessionAuditCoordinator:
             if current is not None and current.stale
             else _projection_failure(result),
         )
-        self._projections[result.thread_id] = state
-        return state
+        return self._store_projection(state)
 
     def update_projection(self, result: ProjectionResult) -> ProjectionAuditSnapshot:
         """重验并镜像 projector 结果；健康 replay 单调推进或清 stale。"""
@@ -378,8 +446,16 @@ class SessionAuditCoordinator:
             )
         else:
             state = self._healthy_projection_state(current, validated.projected_seq)
-        self._projections[validated.thread_id] = state
-        return state
+        return self._store_projection(state)
+
+    def _store_projection(
+        self,
+        state: ProjectionAuditSnapshot,
+    ) -> ProjectionAuditSnapshot:
+        """内部保存与 caller 返回各自深复制，永不共享 snapshot/failure。"""
+        internal = _copy_projection_snapshot(state)
+        self._projections[state.thread_id] = internal
+        return _copy_projection_snapshot(internal)
 
     @staticmethod
     def _validated_projection_result(result: ProjectionResult) -> ProjectionResult:
@@ -410,7 +486,8 @@ class SessionAuditCoordinator:
 
     def projection_snapshot(self, thread_id: str) -> ProjectionAuditSnapshot | None:
         """读取一个 thread 的冻结投影快照。"""
-        return self._projections.get(thread_id)
+        state = self._projections.get(thread_id)
+        return _copy_projection_snapshot(state) if state is not None else None
 
     def snapshot(self) -> SessionAuditSnapshot:
         """返回不暴露可变 mapping/token/core 的只读状态快照。"""
@@ -421,11 +498,14 @@ class SessionAuditCoordinator:
             effect_gate_open=self._effect_gate_open,
             root_cancelled=self._session_root_cancel.is_cancelled,
             first_failure=(
-                self._frozen_error.cause if self._frozen_error is not None else None
+                _copy_stable_error(self._first_failure)
+                if self._first_failure is not None
+                else None
             ),
             active_target_ids=tuple(sorted(self._targets)),
             projections=tuple(
-                self._projections[thread_id] for thread_id in sorted(self._projections)
+                _copy_projection_snapshot(self._projections[thread_id])
+                for thread_id in sorted(self._projections)
             ),
         )
 
