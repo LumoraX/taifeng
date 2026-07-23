@@ -181,7 +181,7 @@ async def test_finish_snapshots_durable_accepted_work_and_closes_admission() -> 
     assert initial.accepted_work_ids == ()
 
     completed_work = await coordinator.admit_work("sub_completed", durable_accept)
-    completed_work.complete()
+    await completed_work.complete()
     work = await coordinator.admit_work("sub_in_flight", durable_accept)
     assert accepted
     assert coordinator.snapshot().lifecycle is SessionLifecycle.OPEN
@@ -214,7 +214,7 @@ async def test_finish_snapshots_durable_accepted_work_and_closes_admission() -> 
             await coordinator.admit_work("sub_2", rejected_accept)
         assert not rejected_called
         await coordinator.ensure_effect_allowed()
-        work.complete()
+        await work.complete()
 
     assert result is not None
     assert result.audit_complete
@@ -265,7 +265,7 @@ async def test_finish_cannot_cut_between_durable_accept_and_work_registration() 
             await anyio.lowlevel.checkpoint()
         assert coordinator.snapshot().accepted_work_ids == ("sub_racing",)
         assert accepted_work is not None
-        accepted_work.complete()
+        await accepted_work.complete()
 
     assert coordinator.snapshot().audit_complete is True
     assert core.close_calls == [_lease()]
@@ -319,7 +319,7 @@ async def test_duplicate_pending_work_id_is_rejected_without_waiting_or_acceptin
     assert isinstance(duplicate_error, ValueError)
     assert not duplicate_called
     assert first_work is not None
-    first_work.complete()
+    await first_work.complete()
 
 
 @pytest.mark.anyio
@@ -686,7 +686,7 @@ async def test_finishing_one_session_does_not_mutate_another_session() -> None:
                 break
             await anyio.lowlevel.checkpoint()
         second_result = await second.finish(thread_terminals=(), reason="released")
-        work.complete()
+        await work.complete()
 
     assert second_result.audit_complete
     assert second.snapshot().lifecycle is SessionLifecycle.CLOSED

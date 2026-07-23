@@ -302,11 +302,29 @@ class SessionAuditCoordinator:
                     work = AcceptedWork(
                         work_id=reservation.work_id,
                         _completed=anyio.Event(),
+                        _retire=lambda accepted: self._retire_accepted_work(
+                            reservation,
+                            accepted,
+                        ),
                     )
                     reservation.settle_accepted(work)
                     result = (work, self._lifecycle)
         assert result is not None
         return result
+
+    async def _retire_accepted_work(
+        self,
+        reservation: _AdmissionReservation,
+        work: AcceptedWork,
+    ) -> None:
+        """按 reservation/work identity 即时退休，并唤醒已快照的 finish waiter。"""
+        with anyio.CancelScope(shield=True):
+            async with self._lifecycle_lock:
+                if reservation.accepted_work is not work:
+                    return
+                if self._admissions.get(reservation.work_id) is reservation:
+                    self._admissions.pop(reservation.work_id)
+                work._mark_completed()  # noqa: SLF001
 
     async def finish(
         self,

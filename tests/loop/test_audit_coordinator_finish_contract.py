@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import anyio
 import pytest
 
 import taifeng.loop.audit_lifecycle as audit_lifecycle
@@ -97,12 +100,12 @@ async def test_completed_reservations_are_pruned_before_each_new_admission() -> 
             f"sub_completed_{index}",
             durable_accept,
         )
-        completed.complete()
+        await completed.complete()
     pending = await coordinator.admit_work("sub_pending", durable_accept)
 
     assert coordinator.snapshot().accepted_work_ids == ("sub_pending",)
     assert len(coordinator._admissions) == 1  # noqa: SLF001
-    pending.complete()
+    await pending.complete()
     result = await coordinator.finish(thread_terminals=(), reason="released")
     assert result.audit_complete
 
@@ -143,3 +146,127 @@ def test_finish_contract_snapshot_starts_with_unknown_release_fact() -> None:
     assert snapshot.lifecycle is SessionLifecycle.OPEN
     assert snapshot.audit_complete is None
     assert snapshot.lease_released is None
+
+
+@pytest.mark.anyio
+async def test_complete_immediately_retires_single_reservation() -> None:
+    """work complete 返回时 snapshot 与内部 map 都不得保留 phantom in-flight。"""
+    coordinator = _coordinator(_LifecycleCore())
+
+    async def durable_accept() -> None:
+        return None
+
+    work = await coordinator.admit_work("done", durable_accept)
+    await work.complete()
+
+    assert coordinator.snapshot().accepted_work_ids == ()
+    assert len(coordinator._admissions) == 0  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_idle_session_retires_one_hundred_completed_reservations() -> None:
+    """无后续 admission/finish 的 idle Session 也不能积累 completed Event/reservation。"""
+    coordinator = _coordinator(_LifecycleCore())
+
+    async def durable_accept() -> None:
+        return None
+
+    for index in range(100):
+        work = await coordinator.admit_work(f"done_{index}", durable_accept)
+        await work.complete()
+
+    assert coordinator.snapshot().accepted_work_ids == ()
+    assert len(coordinator._admissions) == 0  # noqa: SLF001
+
+
+class _ObservedCompletionEvent:
+    """显式暴露 finish 已进入 completion wait 的测试 barrier。"""
+
+    def __init__(self) -> None:
+        """初始化真实 completion event 与 waiter barrier。"""
+        self._completed = anyio.Event()
+        self.wait_entered = anyio.Event()
+
+    def is_set(self) -> bool:
+        """代理 completion 状态。"""
+        return self._completed.is_set()
+
+    def set(self) -> None:
+        """代理幂等完成通知。"""
+        self._completed.set()
+
+    async def wait(self) -> None:
+        """先通知测试 finish 已持有快照，再等待完成。"""
+        self.wait_entered.set()
+        await self._completed.wait()
+
+
+@pytest.mark.anyio
+async def test_finish_snapshot_race_and_double_complete_have_no_lost_wakeup() -> None:
+    """finish 已快照 reservation 时，complete 必须退休 map 并唤醒旧对象 waiter。"""
+    coordinator = _coordinator(_LifecycleCore())
+
+    async def durable_accept() -> None:
+        return None
+
+    work = await coordinator.admit_work("racing", durable_accept)
+    observed = _ObservedCompletionEvent()
+    object.__setattr__(work, "_completed", observed)
+    finish_result = None
+
+    async def finish() -> None:
+        nonlocal finish_result
+        finish_result = await coordinator.finish(
+            thread_terminals=(),
+            reason="released",
+        )
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(finish)
+        await observed.wait_entered.wait()
+        await work.complete()
+        await work.complete()
+
+    assert finish_result is not None and finish_result.audit_complete
+    assert coordinator.snapshot().accepted_work_ids == ()
+    assert len(coordinator._admissions) == 0  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_wrong_work_identity_cannot_retire_live_reservation() -> None:
+    """持有同 callback 的错误 token 也不能退休 reservation 中的真实 work。"""
+    coordinator = _coordinator(_LifecycleCore())
+
+    async def durable_accept() -> None:
+        return None
+
+    work = await coordinator.admit_work("live", durable_accept)
+    impostor = replace(work, _completed=anyio.Event())
+
+    await impostor.complete()
+
+    assert coordinator.snapshot().accepted_work_ids == ("live",)
+    assert len(coordinator._admissions) == 1  # noqa: SLF001
+    await work.complete()
+
+
+@pytest.mark.anyio
+async def test_late_complete_retires_unresolved_work_without_reviving_closed_session() -> None:
+    """timeout/CLOSED 后真实 token 晚完成可清 introspection，但不得复活 lifecycle。"""
+    coordinator = _coordinator(_LifecycleCore(), finish_timeout=0.01)
+
+    async def durable_accept() -> None:
+        return None
+
+    work = await coordinator.admit_work("late", durable_accept)
+    result = await coordinator.finish(thread_terminals=(), reason="released")
+    assert not result.audit_complete
+    assert coordinator.snapshot().accepted_work_ids == ("late",)
+
+    await work.complete()
+
+    snapshot = coordinator.snapshot()
+    assert snapshot.lifecycle is SessionLifecycle.CLOSED
+    assert snapshot.audit_complete is False
+    assert snapshot.accepted_work_ids == ()
+    assert len(coordinator._admissions) == 0  # noqa: SLF001

@@ -215,7 +215,15 @@ The system SHALL coordinate admission and lifecycle through `OPEN → FINISHING 
 
 #### Scenario: Completed admission history is pruned
 - **WHEN** a long-lived OPEN Session repeatedly admits and completes work
-- **THEN** the lifecycle coordinator prunes settled completed reservations before the next admission and finish snapshot, retaining only pending or accepted-incomplete work
+- **THEN** asynchronous completion returns only after the lifecycle coordinator atomically retires the matching reservation and signals its completion event, leaving no completed reservation in idle introspection or memory
+
+#### Scenario: Completion races with finish snapshot
+- **WHEN** finish snapshots an accepted reservation concurrently with completion, completion is repeated, or a mismatched work token attempts retirement
+- **THEN** the snapshotted waiter receives the completion signal without lost wakeup, repeated completion is idempotent, and only the exact reservation/work identity can be retired
+
+#### Scenario: Work completes after failed finish closes the Session
+- **WHEN** unresolved accepted work completes after the Session is already CLOSED
+- **THEN** completion retires that unresolved introspection entry without reopening lifecycle, audit, admission, or effect gates
 
 #### Scenario: Normal finish completes
 - **WHEN** all accepted work and thread terminals have converged

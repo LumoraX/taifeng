@@ -386,8 +386,11 @@ outcome 或 unknown。Journal finalization 使用独立 shield，不能复用已
   finish future；后续
   release/close 只 await 它，后续不同 id 的 Shutdown 在 acceptance 前拒绝。future 内部保存 canonical
   value，每个 caller 得到值相等但对象与嵌套 failure 独立的防御性副本；重试不二次 append/close。
-- admission map 在下一次 admission 与 finish 快照前移除 settled 且 completed 的 reservation，只保留
-  pending 或 accepted-incomplete work；durable Journal identity 继续负责历史重复判定。
+- `AcceptedWork.complete()` 是 coordinator-driven async completion：在 cancellation-independent shield 与
+  lifecycle lock 内按 reservation/work identity 立即移除对应 reservation，再 set completion Event。finish
+  已快照的 reservation 仍由同一 Event 唤醒；double complete 幂等，错误 token 不得退休其他 work，
+  CLOSED 后晚完成只清理 unresolved introspection、不复活 Session。map 始终只保留 pending 或
+  accepted-incomplete work；durable Journal identity 继续负责历史重复判定。
 - 生命周期 operation id 固定为 `{session_id}:lifecycle:end`。按 thread id 排序后，
   `thread_terminal.record_id = {operation_id}:thread_terminal:none:{thread_ordinal}`；
   `session_ended.record_id = {operation_id}:session_ended:none:0`。若首个胜者是 Shutdown，其

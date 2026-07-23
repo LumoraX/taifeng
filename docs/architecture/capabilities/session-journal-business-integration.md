@@ -122,8 +122,10 @@ lifecycle 是 `OPEN → FINISHING → CLOSED`：
 - 进入 FINISHING 的胜者关闭 intake、快照全部 durable-accepted queued/in-flight submissions，并创建唯一
   finish future；
 - accepted-but-queued work 必须在 `session_ended` 前收敛；
-- 下一次 admission 与 finish 快照前剪枝 settled 且 completed 的 reservation，只跟踪 pending 或
-  accepted-incomplete work；
+- `AcceptedWork.complete()` 通过 coordinator async callback，在 shield 与 lifecycle lock 内校验
+  reservation/work identity、立即退休 map entry 并 set completion Event，只跟踪 pending 或
+  accepted-incomplete work；已快照 finish waiter 不丢唤醒，double complete 幂等，CLOSED 后晚完成只清
+  unresolved introspection、不复活 Session；
 - FINISHING/CLOSED 后的新请求不得 durable accept 或 enqueue，返回 `SessionFinishingError`；
 - 并发 release/close 只等待同一 canonical future value，但每个 caller 得到对象与嵌套 failure 独立的
   防御性副本；并发不同 Shutdown id 在 acceptance 前拒绝。

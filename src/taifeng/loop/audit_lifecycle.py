@@ -17,7 +17,7 @@ from taifeng.conversation.journal.records import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Awaitable, Callable, Collection
 
     from taifeng.conversation.journal.records import StableErrorV1
 
@@ -46,9 +46,14 @@ class AcceptedWork:
 
     work_id: str
     _completed: anyio.Event
+    _retire: Callable[[AcceptedWork], Awaitable[None]]
 
-    def complete(self) -> None:
-        """幂等标记 accepted work 已完成或已确定收敛。"""
+    async def complete(self) -> None:
+        """在 coordinator lifecycle lock 内幂等完成并退休 reservation。"""
+        await self._retire(self)
+
+    def _mark_completed(self) -> None:
+        """仅供 coordinator 在完成 retirement 临界区内唤醒 finish waiter。"""
         self._completed.set()
 
     @property

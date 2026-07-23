@@ -117,8 +117,10 @@ EnginePool 是 Session 生命周期唯一 owner。`Shutdown`、`release()`、`cl
   唯一 finish future。
 - FINISHING 后的新请求既不 durable accept 也不入队，返回 `SessionFinishingError`。
 - accepted-but-queued submission 必须在 `session_ended` 前收敛。
-- settled 且 completed 的 reservation 在下一次 admission 与 finish 快照前剪枝；只保留 pending 或
-  accepted-incomplete work，历史重复 identity 仍由 durable Journal 判定。
+- `AcceptedWork.complete()` 通过 coordinator async callback，在 shield 与 lifecycle lock 内校验
+  reservation/work identity、立即移除 reservation 并 set completion Event；已快照的 finish waiter 不会
+  丢唤醒，double complete 幂等，错误 token 不会误删，CLOSED 后晚完成只清 introspection。map 只保留
+  pending 或 accepted-incomplete work，历史重复 identity 仍由 durable Journal 判定。
 
 `CancelTurn` 只触发目标 turn 及 child effect subtree 的 target token，不触发 Session root。freeze 和
 Shutdown 才取消 Session root。首个 Shutdown 可在同一 lock 内赢得 FINISHING，登记唯一 shutdown id，
