@@ -18,6 +18,7 @@ from taifeng.conversation.journal.canonical import (
     record_fingerprint,
 )
 from taifeng.conversation.journal.errors import (
+    CommitNotStartedError,
     JournalAlreadyExistsError,
     JournalBusyError,
     JournalConflictError,
@@ -47,10 +48,6 @@ if TYPE_CHECKING:
 
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ZERO_HASH = "0" * 64
-
-
-class _CommitOutcomeUncertainError(Exception):
-    """文件可能已被部分或完整修改，调用方不能安全重试。"""
 
 
 def _validate_committed_record_ids(decoded: DecodedJournal) -> None:
@@ -98,7 +95,7 @@ class SyncFileAdapter(Protocol):
         """读取完整物理 Journal bytes。"""
 
     def append_durable(self, path: Path, payload: bytes) -> None:
-        """追加完整 batch，并在返回前 flush+fsync。"""
+        """追加并 fsync；明确未 mutation 时用 CommitNotStartedError。"""
 
 
 class DefaultSyncFileAdapter:
@@ -123,14 +120,14 @@ class DefaultSyncFileAdapter:
 
     def append_durable(self, path: Path, payload: bytes) -> None:
         """追加 batch，并在返回前完成 file flush+fsync。"""
-        stream = path.open("ab")
         try:
-            with stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
+            stream = path.open("ab")
         except OSError as exc:
-            raise _CommitOutcomeUncertainError from exc
+            raise CommitNotStartedError(exc) from None
+        with stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
 
 
 @dataclass(frozen=True)
@@ -139,6 +136,14 @@ class _CommittedRecord:
 
     fingerprint: str
     ack: JournalAck
+
+
+@dataclass(frozen=True)
+class _AppendSnapshot:
+    """append 在任何 await 前固定的 records 与 caller fingerprints。"""
+
+    records: tuple[JournalRecord, ...]
+    fingerprints: tuple[str, ...]
 
 
 @dataclass
@@ -153,7 +158,18 @@ class _LiveWriter:
     committed_tail_hash: str
     committed_by_record_id: dict[str, _CommittedRecord]
     recovery_required: bool = False
+    recovery_cause: str | None = None
     closed: bool = False
+
+
+def _snapshot_records(records: tuple[JournalRecord, ...]) -> _AppendSnapshot:
+    """同步重建 caller DTO，并只从该快照预计算一次 fingerprint。"""
+    snapshots = tuple(
+        JournalRecord.model_validate(record.model_dump(mode="python"))
+        for record in records
+    )
+    fingerprints = tuple(record_fingerprint(record) for record in snapshots)
+    return _AppendSnapshot(snapshots, fingerprints)
 
 
 class JsonlSessionJournalCore:
@@ -293,12 +309,9 @@ class JsonlSessionJournalCore:
         """在 per-session lock 内按幂等、lease、CAS 顺序 durable 追加。"""
         if not records:
             raise ValueError("journal batch must contain at least one record")
-        records = tuple(
-            JournalRecord.model_validate(record.model_dump(mode="python"))
-            for record in records
-        )
-        session_id = records[0].session_id
-        if any(record.session_id != session_id for record in records):
+        snapshot = _snapshot_records(records)
+        session_id = snapshot.records[0].session_id
+        if any(record.session_id != session_id for record in snapshot.records):
             raise ValueError("all records in a batch must belong to one session")
         writer = self._writers.get(session_id)
         if writer is None:
@@ -306,25 +319,23 @@ class JsonlSessionJournalCore:
         async with writer.lock:
             if writer.closed:
                 raise JournalLeaseError(session_id, "writer closed")
+            self._validate_lease(lease, writer)
             if writer.recovery_required:
-                raise JournalRecoveryRequiredError(
-                    session_id,
-                    writer.committed_tail_seq,
-                )
+                raise self._writer_recovery_error(writer)
             scanned = await self._scan(session_id)
             if scanned.verification.health is JournalHealth.RECOVERY_REQUIRED:
                 writer.recovery_required = True
-                raise JournalRecoveryRequiredError(
-                    session_id,
-                    scanned.verification.committed_tail_seq,
+                writer.recovery_cause = "physical_tail"
+                raise self._writer_recovery_error(
+                    writer,
+                    committed_tail_seq=scanned.verification.committed_tail_seq,
                 )
             if (
                 scanned.verification.committed_tail_seq != writer.committed_tail_seq
                 or scanned.verification.committed_tail_hash != writer.committed_tail_hash
             ):
                 raise JournalIntegrityError("live writer tail mismatch")
-            self._validate_lease(lease, writer)
-            existing_ack = self._idempotent_ack(records, writer)
+            existing_ack = self._idempotent_ack(snapshot, writer)
             if existing_ack is not None:
                 return existing_ack
             if expected_seq != writer.committed_tail_seq:
@@ -333,36 +344,40 @@ class JsonlSessionJournalCore:
                     expected_seq=expected_seq,
                     actual_seq=writer.committed_tail_seq,
                 )
-            return await self._commit_new_batch(records, writer)
+            return await self._commit_new_batch(snapshot, writer)
 
     def _idempotent_ack(
         self,
-        records: tuple[JournalRecord, ...],
+        snapshot: _AppendSnapshot,
         writer: _LiveWriter,
     ) -> JournalAck | None:
         """在 CAS 前检查完整原 batch 重试；任何部分命中均 fail closed。"""
         indexed = tuple(
-            writer.committed_by_record_id.get(record.record_id) for record in records
+            writer.committed_by_record_id.get(record.record_id)
+            for record in snapshot.records
         )
         if not any(item is not None for item in indexed):
             return None
         if not all(item is not None for item in indexed):
             raise JournalConflictError("batch idempotency conflict")
         committed = tuple(item for item in indexed if item is not None)
-        fingerprints = tuple(record_fingerprint(record) for record in records)
         if any(
             item.fingerprint != fingerprint
-            for item, fingerprint in zip(committed, fingerprints, strict=True)
+            for item, fingerprint in zip(
+                committed,
+                snapshot.fingerprints,
+                strict=True,
+            )
         ):
-            if len(records) == 1:
+            if len(snapshot.records) == 1:
                 raise JournalConflictError(
                     "record content conflict",
-                    record_id=records[0].record_id,
+                    record_id=snapshot.records[0].record_id,
                 )
             raise JournalConflictError("batch idempotency conflict")
         ack = committed[0].ack
         if any(item.ack != ack for item in committed) or ack.record_ids != tuple(
-            record.record_id for record in records
+            record.record_id for record in snapshot.records
         ):
             raise JournalConflictError("batch idempotency conflict")
         return ack
@@ -370,38 +385,63 @@ class JsonlSessionJournalCore:
     def _validate_lease(self, lease: SessionLease, writer: _LiveWriter) -> None:
         """要求 lease capability 与当前 live writer 全字段一致。"""
         if lease != writer.result.lease:
-            raise JournalLeaseError(lease.session_id, "lease fields do not match")
+            raise JournalLeaseError(
+                writer.result.lease.session_id,
+                "lease fields do not match",
+            )
+
+    def _writer_recovery_error(
+        self,
+        writer: _LiveWriter,
+        *,
+        committed_tail_seq: int | None = None,
+    ) -> JournalRecoveryRequiredError:
+        """从冻结 writer 构造不含底层异常文本的稳定恢复错误。"""
+        return JournalRecoveryRequiredError(
+            writer.result.lease.session_id,
+            writer.committed_tail_seq
+            if committed_tail_seq is None
+            else committed_tail_seq,
+            cause=writer.recovery_cause or "physical_state_unknown",
+        )
 
     async def _commit_new_batch(
         self,
-        records: tuple[JournalRecord, ...],
+        snapshot: _AppendSnapshot,
         writer: _LiveWriter,
     ) -> JournalAck:
         """生成、持久化 batch，并只在 fsync 成功后推进内存 tail/index。"""
         lease = writer.result.lease
-        fingerprints = tuple(record_fingerprint(record) for record in records)
         encoded = encode_batch(
-            records,
+            snapshot.records,
             batch_id=uuid4().hex,
             expected_seq=writer.committed_tail_seq,
             writer_epoch=lease.writer_epoch,
             previous_hash=writer.committed_tail_hash,
             recorded_at=datetime.now(UTC),
+            record_fingerprints=snapshot.fingerprints,
         )
         path = self._session_path(lease.session_id)
+        outcome_unknown = False
         try:
             await self._run_sync_commit(
                 self._sync_file_adapter.append_durable,
                 path,
                 b"".join(encoded.lines),
             )
-        except (TimeoutError, _CommitOutcomeUncertainError) as exc:
+        except CommitNotStartedError as exc:
+            raise exc.error from None
+        except BaseException:
+            outcome_unknown = True
+        if outcome_unknown:
             writer.recovery_required = True
-            raise JournalRecoveryRequiredError(
-                lease.session_id,
-                writer.committed_tail_seq,
-            ) from exc
-        for record, fingerprint in zip(records, fingerprints, strict=True):
+            writer.recovery_cause = "commit_outcome_unknown"
+            raise self._writer_recovery_error(writer) from None
+        for record, fingerprint in zip(
+            snapshot.records,
+            snapshot.fingerprints,
+            strict=True,
+        ):
             writer.committed_by_record_id[record.record_id] = _CommittedRecord(
                 fingerprint=fingerprint,
                 ack=encoded.ack,
@@ -416,7 +456,10 @@ class JsonlSessionJournalCore:
         *args: object,
     ) -> None:
         """提交前接受取消；提交开始后 shield，并以 deadline 收敛未知结果。"""
-        await anyio.lowlevel.checkpoint_if_cancelled()
+        try:
+            await anyio.lowlevel.checkpoint_if_cancelled()
+        except BaseException as exc:
+            raise CommitNotStartedError(exc) from None
         with anyio.CancelScope(shield=True):
             with anyio.fail_after(self._commit_timeout):
                 await anyio.to_thread.run_sync(

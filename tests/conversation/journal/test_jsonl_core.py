@@ -12,6 +12,7 @@ import pytest
 
 from taifeng.conversation.journal import (
     ActorRef,
+    CommitNotStartedError,
     JournalAck,
     JournalAlreadyExistsError,
     JournalBusyError,
@@ -24,10 +25,7 @@ from taifeng.conversation.journal import (
     SessionDescriptor,
     SessionLease,
 )
-from taifeng.conversation.journal.jsonl import (
-    DefaultSyncFileAdapter,
-    JsonlSessionJournalCore,
-)
+from taifeng.conversation.journal.jsonl import DefaultSyncFileAdapter, JsonlSessionJournalCore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,7 +102,7 @@ class _FailOnceAppendAdapter(DefaultSyncFileAdapter):
         """第一次抛 OSError，后续正常提交。"""
         if not self.failed:
             self.failed = True
-            raise OSError("injected append failure")
+            raise CommitNotStartedError(OSError("injected append failure"))
         super().append_durable(path, payload)
 
 
@@ -159,7 +157,15 @@ async def test_create_session_snapshots_descriptor_before_first_await(
 ) -> None:
     """create 等待 registry lock 时，调用方改写不得污染 identity 或落盘内容。"""
     journal = JsonlSessionJournalCore(tmp_path)
-    descriptor = _descriptor().model_copy(update={"config": {"value": 1}})
+    base = _descriptor()
+    descriptor = SessionDescriptor.model_construct(
+        schema_version=base.schema_version,
+        session_id=base.session_id,
+        creation_operation_id=base.creation_operation_id,
+        writer_id=base.writer_id,
+        root_thread=base.root_thread,
+        config={"value": 1},
+    )
     results: list[object] = []
     await journal._registry_lock.acquire()  # noqa: SLF001
 

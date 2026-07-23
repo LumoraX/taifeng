@@ -16,7 +16,8 @@ redaction、blob 外置或签名/WORM。调用方不能把本阶段描述为完�
 所有 DTO 使用 frozen、`extra="forbid"` 的 Pydantic model。调用方 payload 只接受递归 `JsonValue`：
 `None | bool | int | finite float | str | list[JsonValue] | dict[str, JsonValue]`。
 DTO 会递归复制并冻结嵌套 dict/list；`create_session` 与 `append_batch` 还必须在首次 await 前重新验证并快照
-完整调用方输入，后续 identity、编码和幂等索引只能使用该快照。
+完整调用方输入。append 快照同时预计算 caller fingerprints；后续 BEGIN、编码、幂等比较和 committed
+索引必须复用同一组快照与 fingerprints，不得在 IO 返回后从原 DTO 重算。
 
 ### 2.1 Actor 与 Session 初始化
 
@@ -170,8 +171,9 @@ writer 标记为 closed，再释放 lease/cache/文件资源；已经取得旧 w
 
 同一 Session lock 内固定执行：
 
-1. 拒绝 recovery-required 状态并 strict scan 当前物理 tail；
-2. 校验 live lease 全字段；幂等重试只绕过旧 CAS，不能绕过 fencing；
+1. 校验 live lease 的 session id、writer id、writer epoch、lease id 全字段；无效 capability 不得触发
+   scan，也不得观察 recovery/integrity 状态；
+2. 拒绝 recovery-required 状态并 strict scan 当前物理 tail；
 3. 查 committed record id；
 4. 单条 fingerprint 相同返回原 ack，不看旧 `expected_seq`；不同抛 `JournalConflictError`；
 5. batch 只有全部 id 属于同一原 batch、顺序和 fingerprint 相同才返回原 batch ack；部分重叠、跨 batch
@@ -186,8 +188,10 @@ torn、未 committed batch 内出现同 record id 不算幂等成功；ordinary 
 - open/write/flush/fsync/目录 fsync/scan 必须通过 `anyio.to_thread.run_sync`，不得阻塞 event loop。
 - commit 入口前允许取消且不得写入；开始文件变更后用有界 shield 等待明确 ack 或异常。
 - `COMMITTED` ack 只在 file flush+fsync 完成后返回；新建文件还必须 fsync 父目录。
-- append 开始修改文件后的 write/flush/fsync error 属于结果不确定，必须返回 `JournalRecoveryRequiredError`
-  并冻结 live writer；文件变更前的明确 IO error 可以用原 CAS 重试。
+- `SyncFileAdapter` 只有在明确证明目标尚未开始 mutation 时，才能用 `CommitNotStartedError` 包装原异常；
+  该错误可透传并用原 CAS 重试。dispatch 后其余异常、取消和 timeout 一律按结果不确定处理。
+- 结果不确定必须返回 `JournalRecoveryRequiredError(cause="commit_outcome_unknown")` 并冻结 live writer；
+  recovery error 不得携带底层异常文本，后续 append 返回同一稳定 cause，且不得再次 dispatch。
 - append_batch 返回一个覆盖完整 seq 范围的 `JournalAck`。
 
 ## 8. Strict load / verify
@@ -211,8 +215,10 @@ torn、未 committed batch 内出现同 record id 不算幂等成功；ordinary 
 - canonical/hash vectors 覆盖 key 顺序、Unicode、`1.0 → 1`、非有限数字与非法对象。
 - batch 覆盖 valid、missing COMMIT、frame hash mismatch、物理 JSON canonical/schema strictness 和
   kill-window 可见性。
-- append 覆盖 ack-loss retry 仍校验 live lease、record conflict、partial overlap、stale expected seq 与 stale lease。
+- append 覆盖 caller nested mutation、batch precommit snapshot、ack-loss retry 仍先校验完整 live lease、
+  record conflict、partial overlap、stale expected seq 与 stale lease。
 - lifecycle 覆盖 create 首次 await 前输入快照，以及 close 先排队时拒绝已取得旧 writer 引用的 append。
-- IO 覆盖取消、slow fsync 不阻塞 event loop，以及 COMMIT 已写入后 fsync error 触发 recovery-required。
+- IO 覆盖 mutation 前取消、mutation 后取消/异常、slow fsync 不阻塞 event loop，以及 COMMIT 已写入后
+  fsync error 触发 recovery-required。
 - strict verify 覆盖本契约第 8 节全部状态。
 - focused tests、全量 pytest、real-LLM selfcheck 与 capability matrix/ledger 刷新全部通过后，Phase 1 才可完成。

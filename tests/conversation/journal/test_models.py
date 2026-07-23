@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +21,9 @@ from taifeng.conversation.journal.models import (
     SessionLease,
     build_initialization_records,
 )
+
+if TYPE_CHECKING:
+    from taifeng.conversation.journal.models import JsonValue
 
 
 def _descriptor() -> SessionDescriptor:
@@ -94,12 +98,12 @@ def test_models_are_frozen_and_reject_extra_fields() -> None:
     with pytest.raises(ValidationError):
         ActorRef.model_validate({"kind": "user", "source": "cli", "unexpected": True})
     with pytest.raises(ValidationError):
-        actor.kind = "system"  # type: ignore[misc]
+        actor.kind = "system"
 
 
 def test_json_containers_are_deeply_frozen_and_detached() -> None:
     """frozen DTO 的嵌套 dict/list 也不得被调用方原地改写。"""
-    original = {"nested": [1]}
+    original: dict[str, JsonValue] = {"nested": [1]}
     record = JournalRecord(
         session_id="ses_1",
         record_id="rec_1",
@@ -107,7 +111,9 @@ def test_json_containers_are_deeply_frozen_and_detached() -> None:
         actor=ActorRef(kind="user", source="test"),
         payload=original,
     )
-    original["nested"].append(2)
+    original_nested = original["nested"]
+    assert isinstance(original_nested, list)
+    original_nested.append(2)
 
     assert record.payload == {"nested": [1]}
     with pytest.raises(TypeError, match="frozen JsonValue"):
@@ -116,6 +122,29 @@ def test_json_containers_are_deeply_frozen_and_detached() -> None:
     assert isinstance(nested, list)
     with pytest.raises(TypeError, match="frozen JsonValue"):
         nested.append(3)
+
+
+def test_model_copy_update_detaches_and_freezes_nested_json() -> None:
+    """可信 copy/update 入口也不得把调用方容器挂回 frozen DTO。"""
+    record = JournalRecord(
+        session_id="ses_1",
+        record_id="rec_1",
+        record_type="test",
+        actor=ActorRef(kind="user", source="test"),
+        payload={"value": 0},
+    )
+    replacement = {"nested": {"values": [1]}}
+
+    copied = record.model_copy(update={"payload": replacement})
+    replacement["nested"]["values"].append(2)
+
+    assert copied.payload == {"nested": {"values": [1]}}
+    nested = copied.payload["nested"]
+    assert isinstance(nested, dict)
+    values = nested["values"]
+    assert isinstance(values, list)
+    with pytest.raises(TypeError, match="frozen JsonValue"):
+        values.append(3)
 
 
 def test_record_envelope_ack_and_verification_shapes() -> None:

@@ -70,6 +70,7 @@ class EncodedBatch:
     commit: BatchCommit
     ack: JournalAck
     lines: tuple[bytes, ...]
+    fingerprints: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,7 @@ def encode_batch(
     writer_epoch: int,
     previous_hash: str,
     recorded_at: datetime,
+    record_fingerprints: tuple[str, ...] | None = None,
 ) -> EncodedBatch:
     """把非空 records 编码成一个原子 batch；frame 不占 record seq。"""
     if not records:
@@ -144,7 +146,13 @@ def encode_batch(
     if len({record.record_id for record in records}) != len(records):
         raise ValueError("record ids must be unique within a new batch")
 
-    fingerprints = tuple(record_fingerprint(record) for record in records)
+    fingerprints = (
+        tuple(record_fingerprint(record) for record in records)
+        if record_fingerprints is None
+        else record_fingerprints
+    )
+    if len(fingerprints) != len(records):
+        raise ValueError("record fingerprints must match record count")
     begin = BatchBegin(
         batch_id=batch_id,
         record_count=len(records),
@@ -182,7 +190,7 @@ def encode_batch(
         durability=Durability.COMMITTED,
     )
     lines = (_frame_line(begin), *map(_envelope_line, envelope_tuple), _frame_line(commit))
-    return EncodedBatch(begin, envelope_tuple, commit, ack, tuple(lines))
+    return EncodedBatch(begin, envelope_tuple, commit, ack, tuple(lines), fingerprints)
 
 
 def _parse_line(raw: bytes | str, *, line_no: int) -> dict[str, object]:

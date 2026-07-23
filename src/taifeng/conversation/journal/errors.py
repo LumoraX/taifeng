@@ -7,6 +7,15 @@ class JournalError(Exception):
     """所有 Journal 领域错误的基类。"""
 
 
+class CommitNotStartedError(Exception):
+    """适配器明确证明目标尚未开始 mutation，可安全透传原错误。"""
+
+    def __init__(self, error: BaseException) -> None:
+        """保存原错误但不把其文本复制到边界异常。"""
+        super().__init__("journal commit did not start")
+        self.error = error
+
+
 class NonCanonicalValueError(JournalError):
     """调用方值无法转换为规范 JsonValue。"""
 
@@ -62,14 +71,22 @@ class JournalIntegrityError(JournalError):
 
 
 class JournalRecoveryRequiredError(JournalError):
-    """物理尾未完成，普通执行必须等待显式恢复。"""
+    """物理尾或 commit 结果不确定，普通执行必须等待显式恢复。"""
 
-    def __init__(self, session_id: str, committed_tail_seq: int) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        committed_tail_seq: int,
+        *,
+        cause: str = "physical_state_unknown",
+    ) -> None:
         super().__init__(
-            f"journal recovery required: session={session_id}, tail={committed_tail_seq}"
+            "journal recovery required: "
+            f"session={session_id}, tail={committed_tail_seq}, cause={cause}"
         )
         self.session_id = session_id
         self.committed_tail_seq = committed_tail_seq
+        self.cause = cause
 
 
 class JournalLeaseError(JournalError):

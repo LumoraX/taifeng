@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime  # noqa: TC003  # Pydantic 运行期解析字段类型
 from enum import StrEnum
-from typing import Annotated, Never, Self
+from typing import TYPE_CHECKING, Annotated, Never, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Any
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
@@ -135,6 +139,17 @@ class JournalModel(BaseModel):
             if isinstance(value, (dict, list)):
                 object.__setattr__(self, field_name, _freeze_json_value(value))
         return self
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        """copy/update 后重新校验并深冻，隔离调用方持有的嵌套容器。"""
+        copied = super().model_copy(update=update, deep=deep)
+        values = copied.model_dump(mode="python", round_trip=True)
+        return type(self).model_validate(values)
 
 
 class Durability(StrEnum):

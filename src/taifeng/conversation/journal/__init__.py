@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from taifeng.conversation.journal.errors import (
+    CommitNotStartedError,
     JournalAlreadyExistsError,
     JournalBusyError,
     JournalConflictError,
@@ -78,6 +79,7 @@ __all__ = [
     "ApprovedSafeMessage",
     "AttachmentV1",
     "ConversationItemV1",
+    "CommitNotStartedError",
     "Durability",
     "JournalAck",
     "JournalAlreadyExistsError",
