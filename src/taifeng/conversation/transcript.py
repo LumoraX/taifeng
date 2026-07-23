@@ -398,6 +398,13 @@ class JsonlMessageStore(MessageStore):
             raise FileNotFoundError(
                 f"audited projection session identity not found: {thread_id}"
             )
+        file_session_id = await self._projection_target.existing_file_session_id(
+            thread_id
+        )
+        if file_session_id is not None and file_session_id != session_id:
+            raise ValueError(
+                "projection file and directory Journal Session identities differ"
+            )
         self._projection_target.bind_expected_session_id(thread_id, session_id)
         return session_id
 

@@ -241,6 +241,39 @@ def _read_stable_file(path: Path) -> tuple[bytes, ProjectionFileIdentity]:
         os.close(fd)
 
 
+def _existing_file_session_id(path: Path, thread_id: str) -> str | None:
+    """只读现存 JSONL 自包含 header，返回完整 audited Session identity。"""
+    if _stat_identity(path) is None:
+        return None
+    raw, _ = _read_stable_file(path)
+    first_line = raw.splitlines()[0] if raw else b""
+    try:
+        metadata = json.loads(first_line)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ProjectionLifecycleError(
+            "projection file has invalid audited metadata"
+        ) from exc
+    extra = metadata.get("extra") if isinstance(metadata, dict) else None
+    session_id = extra.get("journal_session_id") if isinstance(extra, dict) else None
+    schema_version = extra.get("journal_schema_version") if isinstance(extra, dict) else None
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("__meta__") is not True
+        or metadata.get("thread_id") != thread_id
+        or not isinstance(extra, dict)
+        or extra.get("audit_required") is not True
+        or not isinstance(session_id, str)
+        or not session_id
+        or isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version < 1
+    ):
+        raise ProjectionLifecycleError(
+            "projection file has incomplete audited metadata"
+        )
+    return session_id
+
+
 def _truncate_existing(
     path: Path,
     expected: ProjectionFileIdentity,
@@ -471,6 +504,15 @@ class ProjectionTargetHandle:
         """把 audited bootstrap/directory identity 绑定到 physical target。"""
         self._target.bind_session_id(thread_id, session_id)
 
+    async def existing_file_session_id(self, thread_id: str) -> str | None:
+        """只读现存 self-contained JSONL 的 audited Session identity。"""
+        path = safe_thread_path(self._target.root, thread_id)
+        return await anyio.to_thread.run_sync(
+            _existing_file_session_id,
+            path,
+            thread_id,
+        )
+
     def replay_window(self, thread_id: str) -> ProjectionReplayWindow | None:
         """返回 generation reset 的共享 replay 窗口。"""
         return self._target.replay_windows.get(thread_id)
@@ -510,6 +552,18 @@ class ProjectionTargetHandle:
         metadata: dict[str, object],
     ) -> ProjectionSnapshot:
         """用 O(1) stat 复用 cache；身份变化时在线程中严格重扫/修复。"""
+        expected_session = self._target.session_id_for(thread_id)
+        extra = metadata.get("extra")
+        directory_session = (
+            extra.get("journal_session_id") if isinstance(extra, dict) else None
+        )
+        if (
+            expected_session is not None
+            and directory_session != expected_session
+        ):
+            raise ProjectionLifecycleError(
+                "projection directory changed Journal Session identity"
+            )
         path = safe_thread_path(self._target.root, thread_id)
         cached = self._target.snapshots.get(thread_id)
         current = await anyio.to_thread.run_sync(_stat_identity, path)

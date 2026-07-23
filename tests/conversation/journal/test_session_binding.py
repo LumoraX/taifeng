@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -163,3 +164,84 @@ async def test_fake_projection_store_uses_session_identity_protocol() -> None:
     assert store.items["thr_explicit"] == before
     assert store.projection_state("thr_explicit") == before_state
     assert store.append_calls == 1
+
+
+@pytest.mark.anyio
+async def test_restart_rejects_directory_session_retarget_before_metadata_repair(
+    tmp_path: Path,
+) -> None:
+    """restart 时 directory 不得把既有自包含 JSONL 从 Session A 改绑到 B。"""
+    store = JsonlMessageStore(tmp_path)
+    projector = JournalConversationProjector(store)
+    await projector.bootstrap_thread(
+        thread_id="thr_explicit",
+        cwd=None,
+        entry_skill_id="general",
+        source="system",
+        extra={
+            "audit_required": True,
+            "journal_session_id": "ses_A",
+            "journal_schema_version": 1,
+        },
+    )
+    await projector.project(*_session_projection_batch("ses_A"))
+    metadata = await store._directory.get_metadata("thr_explicit")  # noqa: SLF001
+    assert metadata is not None
+    await store._directory.upsert_metadata(  # noqa: SLF001
+        replace(
+            metadata,
+            extra={
+                **metadata.extra,
+                "journal_session_id": "ses_B",
+            },
+        )
+    )
+    await store.close()
+    reopened = JsonlMessageStore(tmp_path)
+    path = tmp_path / "thr_explicit.jsonl"
+    before = path.read_bytes()
+    before_history = [item async for item in await reopened.load_thread("thr_explicit")]
+    before_state = reopened.projection_state("thr_explicit")
+    before_scans = reopened.projection_scan_count("thr_explicit")
+
+    with pytest.raises(ProjectionOrderError, match="Journal Session"):
+        await JournalConversationProjector(reopened).project(
+            *_session_projection_batch("ses_B")
+        )
+
+    after_history = [item async for item in await reopened.load_thread("thr_explicit")]
+    assert path.read_bytes() == before
+    assert after_history == before_history
+    assert reopened.projection_state("thr_explicit") == before_state
+    assert reopened.projection_scan_count("thr_explicit") == before_scans
+    await reopened.close()
+
+
+@pytest.mark.anyio
+async def test_restart_accepts_matching_file_and_directory_session_identity(
+    tmp_path: Path,
+) -> None:
+    """restart 后 JSONL 与 directory identity 一致时保持正常投影。"""
+    store = JsonlMessageStore(tmp_path)
+    await JournalConversationProjector(store).bootstrap_thread(
+        thread_id="thr_explicit",
+        cwd=None,
+        entry_skill_id="general",
+        source="system",
+        extra={
+            "audit_required": True,
+            "journal_session_id": "ses_A",
+            "journal_schema_version": 1,
+        },
+    )
+    await store.close()
+    reopened = JsonlMessageStore(tmp_path)
+
+    result = await JournalConversationProjector(reopened).project(
+        *_session_projection_batch("ses_A")
+    )
+
+    history = [item async for item in await reopened.load_thread("thr_explicit")]
+    assert result.stale is False
+    assert [item.id for item in history] == ["item_1"]
+    await reopened.close()
