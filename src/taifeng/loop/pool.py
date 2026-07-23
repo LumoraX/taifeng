@@ -20,15 +20,14 @@ from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
 from taifeng.conversation.store import MessageStore
 from taifeng.conversation.transcript import JsonlMessageStore
 from taifeng.loop.audit_bootstrap import (
-    AuditSessionReleaseError,
     AuditStoreBinding,
     ensure_legacy_resume_allowed,
     validate_pool_audit,
 )
 from taifeng.loop.audit_config import AuditConfig, validate_audit_session_request
-from taifeng.loop.audit_lifecycle import ThreadTerminalRequest
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
+from taifeng.loop.pool_lifecycle import close_engine_pool, release_pool_session
 from taifeng.loop.pool_session import (
     create_started_pool_engine,
     finalize_resumed_engine,
@@ -158,11 +157,11 @@ def _resolve_store_binding(
     """只从 exact nominal 类型冻结 store 能力，不执行任意 descriptor。"""
     if audit is None:
         legacy_projection: JsonlMessageStore | None = None
-        if isinstance(store, JsonlMessageStore):
+        if type(store) is JsonlMessageStore:
             legacy_projection = store
         elif (
             type(store) is _HookEmittingStore
-            and isinstance(store._inner, JsonlMessageStore)  # noqa: SLF001
+            and type(store._inner) is JsonlMessageStore  # noqa: SLF001
         ):
             legacy_projection = store._inner  # noqa: SLF001
         return AuditStoreBinding(legacy_projection, None, None, None)
@@ -394,11 +393,13 @@ class EnginePool:
         self._engines: dict[str, AgentEngine] = {}
         self._engine_tasks: dict[str, asyncio.Task[None]] = {}
         self._audit_sessions: dict[str, AuditedSessionState] = {}
+        self._release_tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._root_cancel = CancellationToken(name="pool")
         self._closed = False
         self._watcher_task: asyncio.Task[None] | None = None
         self._watcher: SkillFileWatcher | None = None
+        self._close_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Factory
@@ -730,64 +731,8 @@ class EnginePool:
             session_id: 要释放的会话 id。
             force: True 时无视 has_live_spawns 强制释放（pool.close 全局拆除走此路）。
         """
-        async with self._lock:
-            engine = self._engines.get(session_id)
-            # 保活闸：非 force 且仍有 live spawn → 不弹出、不关停，原样保留。
-            if engine is not None and not force and engine.has_live_spawns():
-                return
-            engine = self._engines.pop(session_id, None)
-            task = self._engine_tasks.pop(session_id, None)
-            audit_state = self._audit_sessions.pop(session_id, None)
-        if engine is not None:
-            await engine.shutdown()
-        if task is not None:
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except TimeoutError:
-                task.cancel()
-        if audit_state is not None:
-            result = await audit_state.coordinator.finish(
-                thread_terminals=(
-                    ThreadTerminalRequest(
-                        thread_id=audit_state.thread_id,
-                        status="complete",
-                        end_reason="session_released",
-                    ),
-                ),
-                reason="session_released",
-                status="complete",
-            )
-            if not result.audit_complete or not result.lease_released:
-                raise AuditSessionReleaseError(
-                    session_id,
-                    finish_result=result,
-                )
+        await release_pool_session(self, session_id, force=force)
 
     async def close(self) -> None:
-        async with self._lock:
-            self._closed = True
-            ids = list(self._engines.keys())
-        release_error: AuditSessionReleaseError | None = None
-        for sid in ids:
-            # 全局拆除：force 释放，无视保活闸（进程退出时 detached spawn 也应随之停）。
-            try:
-                await self.release(sid, force=True)
-            except AuditSessionReleaseError as exc:
-                release_error = release_error or exc
-        # 停止 watcher
-        if self._watcher_task is not None and not self._watcher_task.done():
-            watcher = getattr(self, "_watcher", None)
-            if watcher is not None:
-                watcher.stop()
-            try:
-                await asyncio.wait_for(self._watcher_task, timeout=3.0)
-            except (TimeoutError, asyncio.CancelledError):
-                self._watcher_task.cancel()
-        self._root_cancel.cancel()
-        # store-protocol-decoupling T5: 先 await hook runner（5s grace + cancel overrun），
-        # 再关 store；保证 pending hook 在 store 关闭前完成或被显式 abandoned
-        if self._hook_runner is not None:
-            await self._hook_runner.shutdown(grace_seconds=5.0)
-        await self._store.close()
-        if release_error is not None:
-            raise release_error
+        """全量收敛 Session 与共享资源；并发/cancel caller 复用同一 worker。"""
+        await close_engine_pool(self)

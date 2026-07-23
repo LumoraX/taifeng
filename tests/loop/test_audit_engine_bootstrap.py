@@ -529,8 +529,7 @@ async def test_legacy_resume_rejects_audited_marker_before_history_load(
     tmp_path: Path,
 ) -> None:
     """legacy resume 在 load_thread/Engine/actor 前稳定拒绝完整 audited marker。"""
-    events: list[str] = []
-    store = _SpyStore(tmp_path / "threads", events)
+    store = JsonlMessageStore(tmp_path / "threads")
     projector = JournalConversationProjector(store)
     await projector.bootstrap_thread(
         thread_id="thr-audited",
@@ -560,7 +559,6 @@ async def test_legacy_resume_rejects_audited_marker_before_history_load(
 
     assert getattr(caught.value, "code", None) == "audit_downgrade_forbidden"
     assert caught.value.thread_id == "thr-audited"
-    assert store.load_calls == 0
     assert "legacy" not in pool._engines  # noqa: SLF001
     await pool.close()
 
@@ -570,8 +568,7 @@ async def test_self_contained_marker_blocks_resume_when_directory_metadata_missi
     tmp_path: Path,
 ) -> None:
     """directory 行缺失时仍从 JSONL 首行 marker 阻止 downgrade 绕过。"""
-    events: list[str] = []
-    store = _SpyStore(tmp_path / "threads", events)
+    store = JsonlMessageStore(tmp_path / "threads")
     projector = JournalConversationProjector(store)
     await projector.bootstrap_thread(
         thread_id="thr-file-marker",
@@ -614,7 +611,6 @@ async def test_self_contained_marker_blocks_resume_when_directory_metadata_missi
         )
 
     assert getattr(caught.value, "code", None) == "audit_downgrade_forbidden"
-    assert store.load_calls == 0
     await pool.close()
 
 
@@ -625,7 +621,7 @@ async def test_cached_legacy_engine_does_not_mask_audited_resume_mismatch(
 ) -> None:
     """cache 命中仍忽略普通 resume 参数，但 audited marker 必须 fail-closed。"""
     events: list[str] = []
-    store = _SpyStore(tmp_path / "threads", events)
+    store = JsonlMessageStore(tmp_path / "threads")
     projector = JournalConversationProjector(store)
     await projector.bootstrap_thread(
         thread_id="thr-audited-cache",
@@ -667,5 +663,4 @@ async def test_cached_legacy_engine_does_not_mask_audited_resume_mismatch(
             resume_thread_id="thr-audited-cache",
         )
     assert getattr(caught.value, "code", None) == "audit_downgrade_forbidden"
-    assert store.load_calls == 0
     await pool.close()

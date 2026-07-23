@@ -470,3 +470,257 @@ async def test_bootstrap_failure_uses_stage_specific_terminal_reason(
     assert terminal.record_type == "thread_terminal"
     assert terminal.payload["end_reason"] == expected_reason
     assert terminal.payload["stable_error"]["code"] == expected_reason
+
+
+class _ShutdownFailureEngine(_EngineSpy):
+    """shutdown 抛错的 Engine spy。"""
+
+    def __init__(self, *, failure: BaseException, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._failure = failure
+
+    async def shutdown(self) -> None:
+        """记录后抛出注入错误。"""
+        self._events.append("engine_shutdown")
+        raise self._failure
+
+
+class _ActorFailureEngine(_EngineSpy):
+    """actor task 立即失败的 Engine spy。"""
+
+    def __init__(self, *, failure: BaseException, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._failure = failure
+
+    async def run(self, cancel: object) -> None:
+        """记录后抛出注入错误。"""
+        del cancel
+        self._events.append("actor_run")
+        raise self._failure
+
+
+class _BlockingShutdownEngine(_EngineSpy):
+    """允许测试精确取消 release caller 的 Engine spy。"""
+
+    def __init__(
+        self,
+        *,
+        shutdown_started: asyncio.Event,
+        shutdown_continue: asyncio.Event,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._shutdown_started = shutdown_started
+        self._shutdown_continue = shutdown_continue
+
+    async def shutdown(self) -> None:
+        """等待测试放行，模拟 caller cancel 时仍在收敛。"""
+        self._events.append("engine_shutdown")
+        self._shutdown_started.set()
+        await self._shutdown_continue.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_point", "expected_stage"),
+    [("shutdown", "engine_shutdown"), ("actor", "engine_task")],
+)
+async def test_release_failure_still_finishes_before_stable_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+    expected_stage: str,
+) -> None:
+    """Engine shutdown/task 异常都不能跳过唯一 Journal finish。"""
+    events: list[str] = []
+    core = _JournalCore(events)
+    failure = OSError("secret=engine-lifecycle")
+
+    def _factory(**kwargs: Any) -> _EngineSpy:
+        if failure_point == "shutdown":
+            return _ShutdownFailureEngine(failure=failure, events=events, **kwargs)
+        return _ActorFailureEngine(failure=failure, events=events, **kwargs)
+
+    monkeypatch.setattr(pool_module, "AgentEngine", _factory)
+    pool = _pool(tmp_path, core, events)
+    await pool.get_or_create(
+        session_id=f"ses-{failure_point}-failure",
+        entry_skill_id="entry",
+    )
+    await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError) as caught:
+        await pool.release(f"ses-{failure_point}-failure")
+
+    assert getattr(caught.value, "code", None) == "engine_pool_release_failed"
+    assert caught.value.stage == expected_stage
+    assert "secret" not in str(caught.value)
+    assert events.count("journal_terminal") == 1
+    assert core.close_calls == 1
+    assert f"ses-{failure_point}-failure" not in pool._audit_sessions  # noqa: SLF001
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_release_caller_does_not_cancel_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """caller cancel 只取消等待，ownership 保留到后台 finish 完成。"""
+    events: list[str] = []
+    core = _JournalCore(events)
+    shutdown_started = asyncio.Event()
+    shutdown_continue = asyncio.Event()
+    lease_closed = asyncio.Event()
+    original_close = core.close_session
+
+    async def _close_session(lease: SessionLease) -> None:
+        await original_close(lease)
+        lease_closed.set()
+
+    core.close_session = _close_session  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        pool_module,
+        "AgentEngine",
+        lambda **kwargs: _BlockingShutdownEngine(
+            events=events,
+            shutdown_started=shutdown_started,
+            shutdown_continue=shutdown_continue,
+            **kwargs,
+        ),
+    )
+    pool = _pool(tmp_path, core, events)
+    await pool.get_or_create(session_id="ses-cancel-release", entry_skill_id="entry")
+    caller = asyncio.create_task(pool.release("ses-cancel-release"))
+    await shutdown_started.wait()
+
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert "ses-cancel-release" in pool._audit_sessions  # noqa: SLF001
+    worker = pool._release_tasks["ses-cancel-release"]  # noqa: SLF001
+    shutdown_continue.set()
+    await asyncio.wait_for(lease_closed.wait(), timeout=1.0)
+    await asyncio.wait_for(asyncio.shield(worker), timeout=1.0)
+    assert "ses-cancel-release" not in pool._audit_sessions  # noqa: SLF001
+    assert core.close_calls == 1
+    await pool.close()
+
+
+class _WatcherSpy:
+    """记录 close 是否停止 watcher。"""
+
+    def __init__(self, events: list[str], stopped: asyncio.Event) -> None:
+        self._events = events
+        self._stopped = stopped
+
+    def stop(self) -> None:
+        """记录同步 stop。"""
+        self._events.append("watcher_stop")
+        self._stopped.set()
+
+
+class _HookRunnerSpy:
+    """记录 close 是否关闭 hook runner。"""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def shutdown(self, *, grace_seconds: float) -> None:
+        """记录有界 shutdown。"""
+        del grace_seconds
+        self._events.append("hook_shutdown")
+
+
+@pytest.mark.asyncio
+async def test_close_cleans_every_resource_after_first_release_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """close 保留首错，但仍收敛其余 Session、watcher、hook 与 store。"""
+    events: list[str] = []
+    core = _JournalCore(events)
+    first_failure = OSError("secret=first-release")
+    store = JsonlMessageStore(tmp_path / "threads")
+    original_store_close = store.close
+
+    async def _close_store() -> None:
+        events.append("store_close")
+        await original_store_close()
+
+    monkeypatch.setattr(store, "close", _close_store)
+
+    def _factory(**kwargs: Any) -> _EngineSpy:
+        if kwargs["session_id"] == "ses-close-a":
+            return _ShutdownFailureEngine(
+                failure=first_failure,
+                events=events,
+                **kwargs,
+            )
+        return _EngineSpy(events=events, **kwargs)
+
+    monkeypatch.setattr(pool_module, "AgentEngine", _factory)
+    pool = _pool(tmp_path, core, events, store=store)
+    await pool.get_or_create(session_id="ses-close-a", entry_skill_id="entry")
+    await pool.get_or_create(session_id="ses-close-b", entry_skill_id="entry")
+    watcher_block = asyncio.Event()
+    pool._watcher_task = asyncio.create_task(watcher_block.wait())  # noqa: SLF001
+    pool._watcher = _WatcherSpy(  # type: ignore[assignment]  # noqa: SLF001
+        events,
+        watcher_block,
+    )
+    pool._hook_runner = _HookRunnerSpy(events)  # type: ignore[assignment]  # noqa: SLF001
+
+    with pytest.raises(RuntimeError) as caught:
+        await pool.close()
+
+    assert getattr(caught.value, "code", None) == "engine_pool_release_failed"
+    assert caught.value.session_id == "ses-close-a"
+    assert "secret" not in str(caught.value)
+    assert core.close_calls == 2
+    assert pool._engines == {}  # noqa: SLF001
+    assert pool._audit_sessions == {}  # noqa: SLF001
+    assert pool._root_cancel.is_cancelled is True  # noqa: SLF001
+    assert "watcher_stop" in events
+    assert "hook_shutdown" in events
+    assert "store_close" in events
+
+
+class _LegacyJsonlSubclass(JsonlMessageStore):
+    """audit-only marker override 不得在 legacy binding 中执行。"""
+
+    def __init__(self, threads_dir: Path) -> None:
+        super().__init__(threads_dir)
+        self.marker_calls = 0
+
+    async def audited_projection_marker(self, thread_id: str) -> object:
+        """若被执行则证明 legacy store binding 信任了 subclass override。"""
+        del thread_id
+        self.marker_calls += 1
+        raise AssertionError("audit-only marker override executed")
+
+
+@pytest.mark.asyncio
+async def test_legacy_jsonl_subclass_does_not_execute_marker_override(
+    tmp_path: Path,
+) -> None:
+    """audit=None 仅 exact 默认 JSONL store 才绑定 audited marker。"""
+    store = _LegacyJsonlSubclass(tmp_path / "threads")
+    pool = EnginePool(
+        skill_registry=_Registry(),  # type: ignore[arg-type]
+        model_client=SimClient(turns=[]),
+        store=store,
+        tool_registry=ToolRegistry(),
+        compressors=[],
+    )
+
+    with pytest.raises(ValueError, match="not found or empty"):
+        await pool.get_or_create(
+            session_id="legacy-subclass",
+            entry_skill_id="entry",
+            resume_thread_id="missing-thread",
+        )
+
+    assert store.marker_calls == 0
+    await pool.close()
