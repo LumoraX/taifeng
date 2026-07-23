@@ -1054,6 +1054,32 @@ class AgentEngine:
         except Exception:
             logger.exception("memory on_session_end failed (ignored)")
 
+    async def _finalize_run_lifecycle(
+        self,
+        cancel: CancellationToken,
+        *,
+        shutdown_requested: bool,
+    ) -> None:
+        """按原顺序收敛 actor、operation、持久化 flush 与订阅者终态。"""
+        self._running = False
+        cancel.cancel()
+        # R4:任何退出路径(Shutdown / root-cancel break / 异常)统一取消全部
+        # TTL 定时器——孤儿定时器到期后会向无人消费的队列 submit(可能永久阻塞)
+        self._cancel_ttl_timers()
+        actor_cancellation = await self._converge_operations()
+        if shutdown_requested:
+            # K3 teardown 必须在所有会话 operation 收敛后再最终 flush。
+            await self._memory_session_end()
+        # 通知所有 subscriber 退出：经统一投递路径，shutdown 也获全局 seq +
+        # per-subscriber delivery_seq（保持两个序号在退出事件上同样连续可自检）。
+        shutdown_ev = EventMsg(submission_id="*", msg=ShutdownMsg())
+        shutdown_ev.seq = self._seq
+        self._seq += 1
+        for subscriber in list(self._all_subs):
+            self._deliver(subscriber, shutdown_ev)
+        if actor_cancellation is not None:
+            raise actor_cancellation
+
     # -----------------------------------------------------------------
     # Main loop
     # -----------------------------------------------------------------
@@ -1219,24 +1245,10 @@ class AgentEngine:
                     )
                     continue
         finally:
-            self._running = False
-            cancel.cancel()
-            # R4:任何退出路径(Shutdown / root-cancel break / 异常)统一取消全部
-            # TTL 定时器——孤儿定时器到期后会向无人消费的队列 submit(可能永久阻塞)
-            self._cancel_ttl_timers()
-            actor_cancellation = await self._converge_operations()
-            if shutdown_requested:
-                # K3 teardown 必须在所有会话 operation 收敛后再最终 flush。
-                await self._memory_session_end()
-            # 通知所有 subscriber 退出：经统一投递路径，shutdown 也获全局 seq +
-            # per-subscriber delivery_seq（保持两个序号在退出事件上同样连续可自检）。
-            shutdown_ev = EventMsg(submission_id="*", msg=ShutdownMsg())
-            shutdown_ev.seq = self._seq
-            self._seq += 1
-            for subscriber in list(self._all_subs):
-                self._deliver(subscriber, shutdown_ev)
-            if actor_cancellation is not None:
-                raise actor_cancellation
+            await self._finalize_run_lifecycle(
+                cancel,
+                shutdown_requested=shutdown_requested,
+            )
 
     async def _run_turn_for(self, sub: Submission, root_cancel: CancellationToken) -> None:
         assert isinstance(sub.op, UserMessage)
