@@ -131,6 +131,41 @@ class AuditCapabilityError(ValueError):
         self.code = code
 
 
+type AuditToolEffectKind = Literal[
+    "pure",
+    "idempotent",
+    "reconcilable",
+    "external_non_idempotent",
+]
+"""ADR 0025 定义的稳定 Tool effect 分类。"""
+
+type AuditToolReconciliationMode = Literal["none", "query", "retry", "manual"]
+"""strict audit Tool 恢复策略的有限集合。"""
+
+AUDIT_TOOL_EFFECT_KINDS: frozenset[AuditToolEffectKind] = frozenset(
+    {"pure", "idempotent", "reconcilable", "external_non_idempotent"}
+)
+"""Task 8.2 可复用的稳定 effect kind 集合。"""
+
+AUDIT_TOOL_RECONCILIATION_MODES: frozenset[AuditToolReconciliationMode] = (
+    frozenset({"none", "query", "retry", "manual"})
+)
+"""Task 8.2 可复用的稳定 reconciliation mode 集合。"""
+
+AUDIT_TOOL_EFFECT_RECONCILIATION: frozenset[
+    tuple[AuditToolEffectKind, AuditToolReconciliationMode]
+] = frozenset(
+    {
+        ("pure", "none"),
+        ("idempotent", "retry"),
+        ("reconcilable", "query"),
+        ("reconcilable", "manual"),
+        ("external_non_idempotent", "manual"),
+    }
+)
+"""Task 8.2 可复用的 effect kind / reconciliation 合法组合。"""
+
+
 _OBJECT_CAPABILITY_RULES = (
     ("custom_store", "audit_custom_store_unsupported"),
     ("custom_directory", "audit_custom_directory_unsupported"),
@@ -162,9 +197,6 @@ _SPAWN_TOOL_NAMES = frozenset({"spawn_skill", "kill_skill", "run_in_background"}
 _BARRIER_TOOL_NAMES = frozenset({"await_skills", "join_skill", "wait_for_task"})
 _PEER_TOOL_NAMES = frozenset({"send_message", "wait_peer"})
 _HITL_TOOL_NAMES = frozenset({"request_user_input"})
-_EFFECT_KINDS = frozenset(
-    {"pure", "idempotent", "reconcilable", "external_non_idempotent"}
-)
 _MISSING = object()
 
 
@@ -215,8 +247,27 @@ def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
 
 def _validate_model_capability(inputs: AuditStaticInputs) -> None:
     """只接受 nominal observer-aware ModelClient 边界。"""
-    if not isinstance(inputs.model_client, AttemptObservableModelClient):
+    client_type = type(inputs.model_client)
+    mro = type.__getattribute__(client_type, "__mro__")
+    if AttemptObservableModelClient not in mro:
         raise AuditCapabilityError("audit_model_attempt_unobservable")
+    if not _has_concrete_observer_method(mro):
+        raise AuditCapabilityError("audit_model_attempt_unobservable")
+
+
+def _has_concrete_observer_method(mro: tuple[type, ...]) -> bool:
+    """静态确认 observer-aware method 由真实 subclass 函数实现。"""
+    method_name = "session_with_attempt_observer"
+    for owner in mro:
+        if owner is AttemptObservableModelClient:
+            return False
+        namespace = type.__getattribute__(owner, "__dict__")
+        implementation = namespace.get(method_name, _MISSING)
+        if implementation is not _MISSING:
+            return inspect.isfunction(implementation) and not bool(
+                getattr(implementation, "__isabstractmethod__", False)
+            )
+    return False
 
 
 def _validate_skill_capability(inputs: AuditStaticInputs) -> None:
@@ -229,7 +280,7 @@ def _validate_tool_capabilities(tools: tuple[object, ...]) -> None:
     """拒绝静态 Tool 能力并 fail-closed 校验内部 audit metadata view。"""
     for tool in tools:
         name = _static_tool_attribute(tool, "name")
-        if not isinstance(name, str):
+        if type(name) is not str:
             raise AuditCapabilityError("audit_tool_metadata_incomplete")
         if name in _SPAWN_TOOL_NAMES:
             raise AuditCapabilityError("audit_spawn_unsupported")
@@ -253,14 +304,21 @@ def _validate_tool_metadata(tool: object) -> None:
         for value in (effect_kind, idempotency_key, reconciliation, can_suspend)
     ):
         raise AuditCapabilityError("audit_tool_metadata_incomplete")
-    if not isinstance(effect_kind, str) or effect_kind not in _EFFECT_KINDS:
+    if (
+        type(effect_kind) is not str
+        or effect_kind not in AUDIT_TOOL_EFFECT_KINDS
+    ):
         raise AuditCapabilityError("audit_tool_effect_kind_invalid")
     if idempotency_key is not None and (
-        not isinstance(idempotency_key, str) or not idempotency_key
+        type(idempotency_key) is not str or not idempotency_key
     ):
         raise AuditCapabilityError("audit_tool_metadata_incomplete")
-    if not isinstance(reconciliation, str) or not reconciliation:
-        raise AuditCapabilityError("audit_tool_metadata_incomplete")
+    if (
+        type(reconciliation) is not str
+        or reconciliation not in AUDIT_TOOL_RECONCILIATION_MODES
+        or (effect_kind, reconciliation) not in AUDIT_TOOL_EFFECT_RECONCILIATION
+    ):
+        raise AuditCapabilityError("audit_tool_reconciliation_invalid")
     if can_suspend is not False:
         raise AuditCapabilityError("audit_tool_suspension_unsupported")
 
@@ -276,11 +334,16 @@ def _static_tool_attribute(tool: object, attribute: str) -> object:
 
 
 __all__ = [
+    "AUDIT_TOOL_EFFECT_KINDS",
+    "AUDIT_TOOL_EFFECT_RECONCILIATION",
+    "AUDIT_TOOL_RECONCILIATION_MODES",
     "AttemptObservableModelClient",
     "AuditCapabilityError",
     "AuditConfig",
     "AuditJournalCore",
     "AuditStaticInputs",
+    "AuditToolEffectKind",
+    "AuditToolReconciliationMode",
     "validate_audit_config",
     "validate_audit_session_request",
 ]

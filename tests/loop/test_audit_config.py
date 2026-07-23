@@ -99,6 +99,27 @@ class _DuckObservedClient:
         return kwargs
 
 
+class _DescriptorObservedClient(AttemptObservableModelClient):
+    """用 property 伪装 observer-aware method 的真实 subclass。"""
+
+    def __init__(self) -> None:
+        self._inner = SimClient(turns=[SimTurn(text="descriptor")])
+
+    def session(
+        self,
+        *,
+        cancel: CancellationToken,
+        model: str | None = None,
+    ) -> ModelClientSession:
+        """实现普通 session。"""
+        return self._inner.session(cancel=cancel, model=model)
+
+    @property
+    def session_with_attempt_observer(self) -> object:  # type: ignore[override]
+        """若 validator 执行 descriptor，测试必须立即失败。"""
+        raise AssertionError("descriptor must not execute")
+
+
 @dataclass(frozen=True, slots=True)
 class _AuditedTool:
     """Task 5 validator 使用的完整内部 tool metadata view。"""
@@ -306,6 +327,33 @@ def test_duck_observer_methods_do_not_satisfy_nominal_client_boundary() -> None:
     assert caught.value.code == "audit_model_attempt_unobservable"
 
 
+def test_abc_virtual_subclass_registration_cannot_bypass_nominal_boundary() -> None:
+    """ABC.register 不得把普通 SimClient 变成真实 observer-aware client。"""
+    AttemptObservableModelClient.register(SimClient)
+    inputs = replace(
+        _static_inputs(),
+        model_client=SimClient(turns=[SimTurn(text="virtual")]),
+    )
+
+    with pytest.raises(AuditCapabilityError) as caught:
+        validate_audit_config(_config(), static_inputs=inputs)
+
+    assert caught.value.code == "audit_model_attempt_unobservable"
+
+
+def test_observer_aware_method_must_be_real_non_descriptor_implementation() -> None:
+    """真实继承仍不能用 property 伪装 observer-aware method。"""
+    inputs = replace(
+        _static_inputs(),
+        model_client=cast("Any", _DescriptorObservedClient()),
+    )
+
+    with pytest.raises(AuditCapabilityError) as caught:
+        validate_audit_config(_config(), static_inputs=inputs)
+
+    assert caught.value.code == "audit_model_attempt_unobservable"
+
+
 @pytest.mark.parametrize(
     ("tool_name", "expected_code"),
     [
@@ -386,6 +434,70 @@ def test_tool_effect_kind_uses_adr_0025_taxonomy() -> None:
     assert caught.value.code == "audit_tool_effect_kind_invalid"
 
 
+@pytest.mark.parametrize(
+    ("effect_kind", "reconciliation"),
+    [
+        ("pure", "retry"),
+        ("idempotent", "none"),
+        ("reconcilable", "retry"),
+        ("external_non_idempotent", "query"),
+    ],
+)
+def test_tool_effect_and_reconciliation_combination_is_constrained(
+    effect_kind: str,
+    reconciliation: str,
+) -> None:
+    """effect kind 只接受契约规定的 recovery 策略组合。"""
+    tool = replace(
+        _AuditedTool(),
+        effect_kind=cast("Any", effect_kind),
+        reconciliation=reconciliation,
+    )
+    inputs = replace(_static_inputs(), tools=(tool,))
+
+    with pytest.raises(AuditCapabilityError) as caught:
+        validate_audit_config(_config(), static_inputs=inputs)
+
+    assert caught.value.code == "audit_tool_reconciliation_invalid"
+
+
+def test_garbage_tool_reconciliation_is_rejected() -> None:
+    """任意非空字符串不能作为 reconciliation mode。"""
+    tool = replace(_AuditedTool(), reconciliation="garbage")
+    inputs = replace(_static_inputs(), tools=(tool,))
+
+    with pytest.raises(AuditCapabilityError) as caught:
+        validate_audit_config(_config(), static_inputs=inputs)
+
+    assert caught.value.code == "audit_tool_reconciliation_invalid"
+
+
+@pytest.mark.parametrize(
+    ("effect_kind", "reconciliation"),
+    [
+        ("pure", "none"),
+        ("idempotent", "retry"),
+        ("reconcilable", "query"),
+        ("reconcilable", "manual"),
+        ("external_non_idempotent", "manual"),
+    ],
+)
+def test_supported_tool_effect_and_reconciliation_combinations_pass(
+    effect_kind: str,
+    reconciliation: str,
+) -> None:
+    """ADR 0025 的有限 effect/recovery 组合可复用并稳定通过。"""
+    tool = replace(
+        _AuditedTool(),
+        effect_kind=cast("Any", effect_kind),
+        reconciliation=reconciliation,
+    )
+    validate_audit_config(
+        _config(),
+        static_inputs=replace(_static_inputs(), tools=(tool,)),
+    )
+
+
 def test_tool_metadata_properties_are_not_executed_during_static_validation() -> None:
     """metadata 读取不执行 property/任意 duck getter。"""
 
@@ -423,6 +535,28 @@ def test_tool_metadata_comparison_hooks_are_not_executed() -> None:
         can_suspend: bool = False
 
     inputs = replace(_static_inputs(), tools=(_UnsafeMetadataTool(),))
+
+    with pytest.raises(AuditCapabilityError) as caught:
+        validate_audit_config(_config(), static_inputs=inputs)
+
+    assert caught.value.code == "audit_tool_effect_kind_invalid"
+
+
+def test_tool_metadata_string_subclass_hooks_are_not_executed() -> None:
+    """字符串子类不进入 set membership，避免执行其比较/hash hooks。"""
+
+    class _ExplosiveStr(str):
+        def __eq__(self, other: object) -> bool:
+            raise AssertionError(other)
+
+        def __hash__(self) -> int:
+            raise AssertionError("hash")
+
+    tool = replace(
+        _AuditedTool(),
+        effect_kind=cast("Any", _ExplosiveStr("pure")),
+    )
+    inputs = replace(_static_inputs(), tools=(tool,))
 
     with pytest.raises(AuditCapabilityError) as caught:
         validate_audit_config(_config(), static_inputs=inputs)
