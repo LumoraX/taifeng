@@ -366,6 +366,41 @@ async def test_stale_lease_is_rejected_before_frozen_writer_state(tmp_path: Path
 
 
 @pytest.mark.anyio
+async def test_forged_lease_queued_behind_close_cannot_observe_closed_state(
+    tmp_path: Path,
+) -> None:
+    """合法 close 先持锁后，排队的伪造 lease 仍必须先 fencing。"""
+    adapter = _CountingReadAdapter()
+    journal = JsonlSessionJournalCore(tmp_path, sync_file_adapter=adapter)
+    created = await journal.create_session(_descriptor())
+    writer = journal._writers["ses_1"]  # noqa: SLF001
+    forged = created.lease.model_copy(update={"lease_id": "forged"})
+    await writer.lock.acquire()
+    reasons: list[str] = []
+
+    async def close_while_blocked() -> None:
+        """使用合法 lease 先排队关闭 live writer。"""
+        await journal.close_session(created.lease)
+
+    async def append_forged_while_blocked() -> None:
+        """后排队的伪造 lease 记录稳定拒绝原因。"""
+        try:
+            await journal.append(_record(), lease=forged, expected_seq=3)
+        except JournalLeaseError as exc:
+            reasons.append(exc.reason)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(close_while_blocked)
+        await anyio.lowlevel.checkpoint()
+        task_group.start_soon(append_forged_while_blocked)
+        await anyio.lowlevel.checkpoint()
+        writer.lock.release()
+
+    assert reasons == ["lease fields do not match"]
+    assert adapter.read_calls == 0
+
+
+@pytest.mark.anyio
 async def test_valid_retry_with_old_cas_still_returns_original_ack(tmp_path: Path) -> None:
     """合法 lease 的精确 retry 仍在 CAS 前返回原 ack。"""
     journal = JsonlSessionJournalCore(tmp_path)

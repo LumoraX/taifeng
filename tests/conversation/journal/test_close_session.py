@@ -130,8 +130,8 @@ async def test_close_session_rejects_append_queued_after_close(
                 lease=created.lease,
                 expected_seq=3,
             )
-        except JournalLeaseError:
-            outcomes.append("rejected")
+        except JournalLeaseError as exc:
+            outcomes.append(exc.reason)
         else:
             outcomes.append("committed")
 
@@ -142,6 +142,6 @@ async def test_close_session_rejects_append_queued_after_close(
         await anyio.lowlevel.checkpoint()
         writer.lock.release()
 
-    assert outcomes == ["closed", "rejected"]
+    assert outcomes == ["closed", "writer closed"]
     records = [item async for item in journal.load("ses_1")]
     assert len(records) == 3

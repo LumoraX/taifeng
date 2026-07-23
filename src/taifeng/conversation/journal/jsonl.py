@@ -317,9 +317,9 @@ class JsonlSessionJournalCore:
         if writer is None:
             raise JournalLeaseError(session_id, "no live writer")
         async with writer.lock:
+            self._validate_lease(lease, writer)
             if writer.closed:
                 raise JournalLeaseError(session_id, "writer closed")
-            self._validate_lease(lease, writer)
             if writer.recovery_required:
                 raise self._writer_recovery_error(writer)
             scanned = await self._scan(session_id)
