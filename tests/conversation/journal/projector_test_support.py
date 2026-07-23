@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,10 @@ import anyio
 
 from taifeng.conversation.journal.canonical import model_canonical_data
 from taifeng.conversation.journal.framing import encode_batch
+from taifeng.conversation.journal.materialization import (
+    ProjectionFileIdentity,
+    ProjectionSnapshot,
+)
 from taifeng.conversation.journal.models import (
     ActorRef,
     JournalAck,
@@ -87,8 +92,30 @@ class _MemoryProjectionStore:
         """让同一 fake store 上的多个 projector 共享 thread 锁。"""
         return self._projection_locks.setdefault(thread_id, anyio.Lock())
 
-    async def ensure_projection_thread(self, thread_id: str) -> None:
-        """内存 fake 不需要修复 metadata 文件。"""
+    @asynccontextmanager
+    async def projection_scope(self, thread_id: str) -> AsyncIterator[None]:
+        """fake store 复用原有 per-thread 锁模拟 scoped materialization。"""
+        async with self.projection_lock(thread_id):
+            yield
+
+    async def load_projection_snapshot(self, thread_id: str) -> ProjectionSnapshot:
+        """把 fake history 包装成 projector 的统一 snapshot。"""
+        iterator = await self.load_thread(thread_id)
+        items = tuple([item async for item in iterator])
+        return ProjectionSnapshot(
+            items=items,
+            identity=ProjectionFileIdentity(0, 0, len(items), len(items)),
+        )
+
+    async def append_projection_batch(
+        self,
+        thread_id: str,
+        items: list[ResponseItem],
+        expected_identity: ProjectionFileIdentity,
+    ) -> None:
+        """fake 忽略物理 identity，但保留原故障注入语义。"""
+        del thread_id, expected_identity
+        await self.append_batch(items)
 
     def projection_state(
         self, thread_id: str
@@ -173,6 +200,17 @@ class _YieldingJsonlMessageStore(JsonlMessageStore):
         self.append_calls += 1
         await anyio.lowlevel.checkpoint()
         await super().append_batch(items)
+
+    async def append_projection_batch(
+        self,
+        thread_id: str,
+        items: list[ResponseItem],
+        expected_identity: ProjectionFileIdentity,
+    ) -> None:
+        """在统一 audited append 边界记录调用并让出调度。"""
+        self.append_calls += 1
+        await anyio.lowlevel.checkpoint()
+        await super().append_projection_batch(thread_id, items, expected_identity)
 
 
 class _FailingDirectory:

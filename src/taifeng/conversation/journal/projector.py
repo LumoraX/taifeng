@@ -13,10 +13,13 @@ from taifeng.conversation.journal.records import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import Sequence
+    from contextlib import AbstractAsyncContextManager
 
-    import anyio
-
+    from taifeng.conversation.journal.materialization import (
+        ProjectionFileIdentity,
+        ProjectionSnapshot,
+    )
     from taifeng.conversation.journal.models import JournalAck, JournalEnvelope
     from taifeng.conversation.models import ResponseItem
 
@@ -51,12 +54,8 @@ class ConversationProjectionStore(Protocol):
         """用调用方预分配 id 创建空投影。"""
         ...
 
-    def projection_lock(self, thread_id: str) -> anyio.Lock:
-        """返回同一 store 内跨 projector 共享的 per-thread 锁。"""
-        ...
-
-    async def ensure_projection_thread(self, thread_id: str) -> None:
-        """确保 audited projection 文件及 metadata 存在。"""
+    def projection_scope(self, thread_id: str) -> AbstractAsyncContextManager[None]:
+        """准入 store handle 并持有物理 target 的 per-thread 锁。"""
         ...
 
     def projection_state(
@@ -74,12 +73,17 @@ class ConversationProjectionStore(Protocol):
         """在共享 thread 锁内更新 store-owned state。"""
         ...
 
-    async def append_batch(self, items: list[ResponseItem]) -> None:
-        """按输入顺序追加 conversation items。"""
+    async def load_projection_snapshot(self, thread_id: str) -> ProjectionSnapshot:
+        """加载已验证 metadata 的 cache-aware snapshot。"""
         ...
 
-    async def load_thread(self, thread_id: str) -> AsyncIterator[ResponseItem]:
-        """按 durable 写入顺序加载已投影 items。"""
+    async def append_projection_batch(
+        self,
+        thread_id: str,
+        items: list[ResponseItem],
+        expected_identity: ProjectionFileIdentity,
+    ) -> None:
+        """按 snapshot identity 追加 conversation items。"""
         ...
 
 
@@ -90,6 +94,23 @@ class _ProjectedEnvelope:
     seq: int
     record_id: str
     item: ResponseItem
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectionConflict:
+    """历史核对时发现的稳定 stale 分类与责任 record。"""
+
+    failure_class: str
+    record_id: str
+    seq: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MaterializationPlan:
+    """历史核对成功后需要追加的 suffix 及其起始下标。"""
+
+    first_missing: int
+    items: tuple[ResponseItem, ...]
 
 
 def _validate_audit_metadata(extra: dict[str, Any]) -> None:
@@ -129,12 +150,8 @@ def _validate_envelope(envelope: JournalEnvelope, ack: JournalAck) -> _Projected
     return _ProjectedEnvelope(seq=envelope.seq, record_id=envelope.record_id, item=item)
 
 
-def _validate_batch(
-    envelopes: Sequence[JournalEnvelope], ack: JournalAck
-) -> tuple[_ProjectedEnvelope, ...]:
-    """在任何 store write 前验证完整单 thread batch。"""
-    if not envelopes:
-        raise ProjectionOrderError("projection batch must not be empty")
+def _validate_ack(ack: JournalAck) -> None:
+    """验证 ack 覆盖连续范围且 record id 唯一。"""
     if ack.first_seq > ack.last_seq:
         raise ProjectionOrderError("ack sequence range is invalid")
     expected_record_count = ack.last_seq - ack.first_seq + 1
@@ -142,6 +159,13 @@ def _validate_batch(
         raise ProjectionOrderError("ack record ids must cover its complete sequence range")
     if len(set(ack.record_ids)) != len(ack.record_ids):
         raise ProjectionOrderError("ack record ids must be unique")
+
+
+def _project_envelopes(
+    envelopes: Sequence[JournalEnvelope],
+    ack: JournalAck,
+) -> tuple[_ProjectedEnvelope, ...]:
+    """逐条验证 Journal 顺序、ack offset 与 item 唯一性。"""
     projected: list[_ProjectedEnvelope] = []
     seen_records: set[str] = set()
     seen_items: set[str] = set()
@@ -152,8 +176,7 @@ def _validate_batch(
         if envelope.record_id in seen_records:
             raise ProjectionOrderError("envelope record ids must be unique")
         entry = _validate_envelope(envelope, ack)
-        ack_offset = envelope.seq - ack.first_seq
-        if ack.record_ids[ack_offset] != envelope.record_id:
+        if ack.record_ids[envelope.seq - ack.first_seq] != envelope.record_id:
             raise ProjectionOrderError("envelope order does not match ack record order")
         if entry.item.id in seen_items:
             raise ProjectionOrderError("conversation item ids must be unique")
@@ -161,18 +184,88 @@ def _validate_batch(
         previous_seq = envelope.seq
         seen_records.add(envelope.record_id)
         seen_items.add(entry.item.id)
+    return tuple(projected)
+
+
+def _validate_batch(
+    envelopes: Sequence[JournalEnvelope], ack: JournalAck
+) -> tuple[_ProjectedEnvelope, ...]:
+    """在任何 store write 前验证完整单 thread batch。"""
+    if not envelopes:
+        raise ProjectionOrderError("projection batch must not be empty")
+    _validate_ack(ack)
+    projected = _project_envelopes(envelopes, ack)
     thread_ids = {entry.item.thread_id for entry in projected}
     if len(thread_ids) != 1:
         raise ProjectionOrderError("cross-thread projection batches are not supported")
-    return tuple(projected)
+    return projected
+
+
+def _content_conflict(
+    history: list[ResponseItem],
+    projected: tuple[_ProjectedEnvelope, ...],
+) -> _ProjectionConflict | None:
+    """检测 stored id 重复或同 id 不同内容。"""
+    existing = {item.id: item for item in history}
+    if len(existing) != len(history):
+        first = projected[0]
+        return _ProjectionConflict("duplicate_stored_item_id", first.record_id, first.seq)
+    for entry in projected:
+        stored = existing.get(entry.item.id)
+        if stored is not None and stored != entry.item:
+            return _ProjectionConflict("item_id_conflict", entry.record_id, entry.seq)
+    return None
+
+
+def _order_plan(
+    history: list[ResponseItem],
+    projected: tuple[_ProjectedEnvelope, ...],
+) -> _MaterializationPlan | _ProjectionConflict:
+    """验证已存在 items 连续且仅允许缺失 suffix。"""
+    positions = {item.id: index for index, item in enumerate(history)}
+    present = [entry.item.id in positions for entry in projected]
+    projected_positions = [
+        positions[entry.item.id]
+        for entry, is_present in zip(projected, present, strict=True)
+        if is_present
+    ]
+    first_missing = next(
+        (index for index, value in enumerate(present) if not value),
+        len(present),
+    )
+    ordered = all(
+        right == left + 1
+        for left, right in zip(projected_positions, projected_positions[1:], strict=False)
+    )
+    suffix_follows_tail = not (
+        first_missing < len(projected)
+        and projected_positions
+        and projected_positions[-1] < len(history) - 1
+    )
+    if not ordered or not suffix_follows_tail or any(present[first_missing:]):
+        entry = projected[first_missing] if first_missing < len(projected) else projected[0]
+        return _ProjectionConflict("projection_order_conflict", entry.record_id, entry.seq)
+    return _MaterializationPlan(
+        first_missing=first_missing,
+        items=tuple(entry.item for entry in projected[first_missing:]),
+    )
+
+
+def _plan_materialization(
+    history: list[ResponseItem],
+    projected: tuple[_ProjectedEnvelope, ...],
+) -> _MaterializationPlan | _ProjectionConflict:
+    """把内容与顺序核对组合成一个无副作用 materialization plan。"""
+    conflict = _content_conflict(history, projected)
+    return conflict if conflict is not None else _order_plan(history, projected)
 
 
 class JournalConversationProjector:
     """只把 covering durable JournalAck 对应的 conversation envelopes 投影到 store。
 
     每次调用只接受一个 thread；ack 可覆盖同 batch 中未传入的领域 records，因此 seq gap 合法。
-    watermark 是 projector 实例内的 per-thread 状态，重启后通过 Journal 顺序重放恢复；item 去重则
-    每次读取 durable transcript，以便新 projector 或部分 append 失败后仍可收敛。
+    watermark 是物理 materialization target 的 per-thread 状态，target 最后一个 handle 关闭后释放；
+    item 去重通过 identity-aware snapshot cache 校验，新 projector 与部分失败后仍可收敛。
     """
 
     def __init__(self, store: ConversationProjectionStore) -> None:
@@ -212,8 +305,7 @@ class JournalConversationProjector:
         """验证完整 batch 后按 Journal seq 物化；store 失败只返回 stale。"""
         projected = _validate_batch(envelopes, ack)
         thread_id = projected[0].item.thread_id
-        lock = self._store.projection_lock(thread_id)
-        async with lock:
+        async with self._store.projection_scope(thread_id):
             return await self._materialize(thread_id, projected)
 
     async def _materialize(
@@ -226,92 +318,34 @@ class JournalConversationProjector:
         _, blocked_seq = self._store.projection_state(thread_id)
         if blocked_seq is not None and all(entry.seq != blocked_seq for entry in projected):
             return current
+        if projected[-1].seq < current.projected_seq:
+            return self._set_stale(
+                thread_id,
+                current.projected_seq,
+                "sequence_regression",
+                projected[0].record_id,
+                projected[0].seq,
+            )
         first_missing = 0
         try:
-            await self._store.ensure_projection_thread(thread_id)
-            iterator = await self._store.load_thread(thread_id)
-            history = [item async for item in iterator]
-            existing = {item.id: item for item in history}
-            if len(existing) != len(history):
+            snapshot = await self._store.load_projection_snapshot(thread_id)
+            history = list(snapshot.items)
+            plan = _plan_materialization(history, projected)
+            if isinstance(plan, _ProjectionConflict):
                 return self._set_stale(
                     thread_id,
                     current.projected_seq,
-                    "duplicate_stored_item_id",
-                    projected[0].record_id,
-                    projected[0].seq,
+                    plan.failure_class,
+                    plan.record_id,
+                    plan.seq,
                 )
-            for entry in projected:
-                stored = existing.get(entry.item.id)
-                if stored is not None and stored != entry.item:
-                    return self._set_stale(
-                        thread_id,
-                        current.projected_seq,
-                        "item_id_conflict",
-                        entry.record_id,
-                        entry.seq,
-                    )
-            positions = {item.id: index for index, item in enumerate(history)}
-            present = [entry.item.id in existing for entry in projected]
-            projected_positions = [
-                positions[entry.item.id]
-                for entry, is_present in zip(projected, present, strict=True)
-                if is_present
-            ]
-            ordered_positions = all(
-                right == left + 1
-                for left, right in zip(
-                    projected_positions,
-                    projected_positions[1:],
-                    strict=False,
-                )
-            )
-            if not ordered_positions:
-                return self._set_stale(
+            first_missing = plan.first_missing
+            if plan.items:
+                await self._store.append_projection_batch(
                     thread_id,
-                    current.projected_seq,
-                    "projection_order_conflict",
-                    projected[0].record_id,
-                    projected[0].seq,
+                    list(plan.items),
+                    snapshot.identity,
                 )
-            first_missing = next(
-                (index for index, value in enumerate(present) if not value),
-                len(present),
-            )
-            if (
-                first_missing < len(projected)
-                and projected_positions
-                and projected_positions[-1] < len(history) - 1
-            ):
-                return self._set_stale(
-                    thread_id,
-                    current.projected_seq,
-                    "projection_order_conflict",
-                    projected[first_missing].record_id,
-                    projected[first_missing].seq,
-                )
-            if any(present[first_missing:]):
-                return self._set_stale(
-                    thread_id,
-                    current.projected_seq,
-                    "projection_order_conflict",
-                    projected[0].record_id,
-                    projected[0].seq,
-                )
-            if (
-                history
-                and first_missing == 0
-                and projected[-1].seq < current.projected_seq
-            ):
-                return self._set_stale(
-                    thread_id,
-                    current.projected_seq,
-                    "projection_order_conflict",
-                    projected[0].record_id,
-                    projected[0].seq,
-                )
-            items = [entry.item for entry in projected[first_missing:]]
-            if items:
-                await self._store.append_batch(items)
         except Exception as exc:  # noqa: BLE001  # materialization 不得冻结 Journal
             return self._set_stale(
                 thread_id,
@@ -324,9 +358,18 @@ class JournalConversationProjector:
                     else projected[0].seq
                 ),
             )
+        return self._set_healthy(thread_id, current.projected_seq, projected[-1].seq)
+
+    def _set_healthy(
+        self,
+        thread_id: str,
+        current_seq: int,
+        observed_seq: int,
+    ) -> ProjectionResult:
+        """保存并返回 materialization 健康 watermark。"""
         healthy = ProjectionResult(
             thread_id=thread_id,
-            projected_seq=max(current.projected_seq, projected[-1].seq),
+            projected_seq=max(current_seq, observed_seq),
             stale=False,
         )
         self._store.update_projection_state(thread_id, healthy, None)

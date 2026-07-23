@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import pytest
@@ -171,6 +171,56 @@ async def test_projector_bootstrap_forwards_complete_audit_metadata() -> None:
     assert store.create_calls == 1
 
 
+def _mutate_ack_contract(
+    mutation: str,
+    envelopes: tuple[Any, ...],
+    ack: Any,
+) -> tuple[list[Any], Any]:
+    """构造只涉及 ack 覆盖字段的错误案例。"""
+    selected = list(envelopes)
+    if mutation == "seq_not_covered":
+        return [envelopes[0]], ack.model_copy(update={"first_seq": 5, "last_seq": 5})
+    if mutation == "record_not_covered":
+        return [envelopes[0]], ack.model_copy(update={"record_ids": ("rec_other",)})
+    if mutation == "session_mismatch":
+        ack = ack.model_copy(update={"session_id": "ses_other"})
+    elif mutation == "epoch_mismatch":
+        ack = ack.model_copy(update={"writer_epoch": 3})
+    elif mutation == "duplicate_ack_record_id":
+        ack = ack.model_copy(update={"record_ids": ("rec_1", "rec_1", "rec_2")})
+    else:
+        ack = ack.model_copy(update={"record_ids": tuple(reversed(ack.record_ids))})
+    return selected, ack
+
+
+def _mutate_envelope_contract(mutation: str, envelopes: tuple[Any, ...]) -> list[Any]:
+    """构造 envelope 顺序、payload 或 thread 级错误案例。"""
+    selected = list(envelopes)
+    if mutation == "non_conversation":
+        selected[0] = selected[0].model_copy(update={"record_type": "turn_completed"})
+    elif mutation == "invalid_payload":
+        selected[0] = selected[0].model_copy(update={"payload": {"payload_version": 1}})
+    elif mutation == "unsorted":
+        selected.reverse()
+    elif mutation == "duplicate_seq":
+        selected[1] = selected[1].model_copy(update={"seq": selected[0].seq})
+    elif mutation == "duplicate_record_id":
+        selected[1] = selected[1].model_copy(update={"record_id": selected[0].record_id})
+    elif mutation == "thread_mismatch":
+        selected[0] = selected[0].model_copy(update={"thread_id": "thr_other"})
+    else:
+        other = user_message(text="other", thread_id="thr_2").model_copy(update={"id": "item_2"})
+        selected[1] = selected[1].model_copy(
+            update={
+                "thread_id": "thr_2",
+                "payload": model_canonical_data(
+                    serialize_response_item(other, source_record_id="source_rec_2")
+                ),
+            }
+        )
+    return selected
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "mutation",
@@ -200,43 +250,18 @@ async def test_contract_mismatch_is_rejected_before_store_writes(mutation: str) 
             _conversation_record(second, record_id="rec_2"),
         )
     )
-    selected = list(envelopes)
-    if mutation == "seq_not_covered":
-        ack = ack.model_copy(update={"first_seq": 5, "last_seq": 5})
-        selected = [envelopes[0]]
-    elif mutation == "record_not_covered":
-        ack = ack.model_copy(update={"record_ids": ("rec_other",)})
-        selected = [envelopes[0]]
-    elif mutation == "session_mismatch":
-        ack = ack.model_copy(update={"session_id": "ses_other"})
-    elif mutation == "epoch_mismatch":
-        ack = ack.model_copy(update={"writer_epoch": 3})
-    elif mutation == "non_conversation":
-        selected[0] = selected[0].model_copy(update={"record_type": "turn_completed"})
-    elif mutation == "invalid_payload":
-        selected[0] = selected[0].model_copy(update={"payload": {"payload_version": 1}})
-    elif mutation == "unsorted":
-        selected.reverse()
-    elif mutation == "duplicate_seq":
-        selected[1] = selected[1].model_copy(update={"seq": selected[0].seq})
-    elif mutation == "duplicate_record_id":
-        selected[1] = selected[1].model_copy(update={"record_id": selected[0].record_id})
-    elif mutation == "duplicate_ack_record_id":
-        ack = ack.model_copy(update={"record_ids": ("rec_1", "rec_1", "rec_2")})
-    elif mutation == "ack_record_order":
-        ack = ack.model_copy(update={"record_ids": tuple(reversed(ack.record_ids))})
-    elif mutation == "thread_mismatch":
-        selected[0] = selected[0].model_copy(update={"thread_id": "thr_other"})
-    elif mutation == "cross_thread":
-        other = user_message(text="other", thread_id="thr_2").model_copy(update={"id": "item_2"})
-        selected[1] = selected[1].model_copy(
-            update={
-                "thread_id": "thr_2",
-                "payload": model_canonical_data(
-                    serialize_response_item(other, source_record_id="source_rec_2")
-                ),
-            }
-        )
+    ack_mutations = {
+        "seq_not_covered",
+        "record_not_covered",
+        "session_mismatch",
+        "epoch_mismatch",
+        "duplicate_ack_record_id",
+        "ack_record_order",
+    }
+    if mutation in ack_mutations:
+        selected, ack = _mutate_ack_contract(mutation, envelopes, ack)
+    else:
+        selected = _mutate_envelope_contract(mutation, envelopes)
 
     store = _MemoryProjectionStore()
     projector = JournalConversationProjector(store)

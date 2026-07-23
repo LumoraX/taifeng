@@ -34,6 +34,12 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from pydantic import ValidationError
 
+from taifeng.conversation.journal.materialization import (
+    ProjectionFileIdentity,
+    ProjectionSnapshot,
+    ProjectionTargetHandle,
+    safe_thread_path,
+)
 from taifeng.conversation.models import (
     ResponseItem,
     ThreadInfo,
@@ -59,6 +65,40 @@ def _generate_thread_id() -> str:
 
 def _iso_to_dt(s: str) -> datetime:
     return datetime.fromisoformat(s)
+
+
+def _exclusive_write(path: Path, line: str) -> None:
+    """在线程 worker 中 exclusive-create 一个 metadata 文件。"""
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write(line)
+
+
+def _is_audited_metadata(extra: dict[str, Any]) -> bool:
+    """验证派生目录保留了完整 audited projection marker。"""
+    session_id = extra.get("journal_session_id")
+    schema_version = extra.get("journal_schema_version")
+    return (
+        extra.get("audit_required") is True
+        and isinstance(session_id, str)
+        and bool(session_id)
+        and not isinstance(schema_version, bool)
+        and isinstance(schema_version, int)
+        and schema_version >= 1
+    )
+
+
+def _metadata_record(metadata: ThreadMetadata) -> dict[str, object]:
+    """把 directory metadata 还原为 JSONL 自包含首行。"""
+    return {
+        "__meta__": True,
+        "thread_id": metadata.thread_id,
+        "created_at": metadata.created_at,
+        "updated_at": metadata.updated_at,
+        "entry_skill_id": metadata.entry_skill_id,
+        "source": metadata.source,
+        "tags": list(metadata.tags),
+        "extra": dict(metadata.extra),
+    }
 
 
 # -----------------------------------------------------------------
@@ -107,7 +147,7 @@ class JsonlMessageWriter:
         return self._root
 
     def _thread_path(self, thread_id: str) -> Path:
-        return self._root / f"{thread_id}.jsonl"
+        return safe_thread_path(self._root, thread_id)
 
     async def create_thread(
         self,
@@ -152,9 +192,8 @@ class JsonlMessageWriter:
             "extra": dict(extra) if extra else {},
         }
         path = self._thread_path(thread_id)
-        # 'x' = exclusive create；重复 thread_id 概率极低（128bit token），冲突时立即报错
-        with path.open("x", encoding="utf-8") as f:
-            f.write(json.dumps(meta_line, ensure_ascii=False, separators=(",", ":")) + "\n")
+        line = json.dumps(meta_line, ensure_ascii=False, separators=(",", ":")) + "\n"
+        await anyio.to_thread.run_sync(_exclusive_write, path, line)
         return thread_id
 
     async def append(self, thread_id: str, items: list[ResponseItem]) -> None:
@@ -260,8 +299,7 @@ class JsonlMessageStore(MessageStore):
             threads_dir=self._root,
         )
         self._hook = NoopIndexHook()
-        self._projection_locks: dict[str, anyio.Lock] = {}
-        self._projection_states: dict[str, tuple[ProjectionResult, int | None]] = {}
+        self._projection_target = ProjectionTargetHandle(self._root)
 
     # -----------------------------------------------------------------
     # Thread lifecycle
@@ -298,37 +336,38 @@ class JsonlMessageStore(MessageStore):
         await self._directory.upsert_metadata(meta)
         return tid
 
-    def projection_lock(self, thread_id: str) -> anyio.Lock:
-        """返回同一 store 内跨 projector 共享的 per-thread materialization 锁。"""
-        return self._projection_locks.setdefault(thread_id, anyio.Lock())
+    def projection_scope(self, thread_id: str) -> Any:
+        """返回 handle admission 与物理 target thread lock 的组合 scope。"""
+        return self._projection_target.scope(thread_id)
 
-    async def ensure_projection_thread(self, thread_id: str) -> None:
-        """从 derived directory 恢复被删除的 audited JSONL projection metadata。"""
-        path = self._writer._thread_path(thread_id)  # noqa: SLF001
-        if path.exists():
-            return
+    async def load_projection_snapshot(self, thread_id: str) -> ProjectionSnapshot:
+        """读取并验证 audited metadata，返回共享 cache snapshot。"""
         meta = await self._directory.get_metadata(thread_id)
-        if meta is None or meta.extra.get("audit_required") is not True:
+        if meta is None or not _is_audited_metadata(meta.extra):
             raise FileNotFoundError(f"audited projection metadata not found: {thread_id}")
-        try:
-            await self._writer._create_thread_with_id(  # noqa: SLF001
-                thread_id=meta.thread_id,
-                entry_skill_id=meta.entry_skill_id,
-                source=meta.source,
-                tags=meta.tags,
-                extra=meta.extra,
-                created_at=meta.created_at,
-                updated_at=meta.updated_at,
-            )
-        except FileExistsError:
-            # 另一个同进程恢复者已完成 exclusive-create；禁止覆盖，直接复用。
-            return
+        return await self._projection_target.load_snapshot(
+            thread_id,
+            _metadata_record(meta),
+        )
+
+    async def append_projection_batch(
+        self,
+        thread_id: str,
+        items: list[ResponseItem],
+        expected_identity: ProjectionFileIdentity,
+    ) -> None:
+        """通过 open-existing + file identity 边界追加 audited projection。"""
+        await self._projection_target.append_batch(thread_id, items, expected_identity)
+
+    def projection_scan_count(self, thread_id: str) -> int:
+        """返回共享物理 target 的完整 snapshot 扫描次数。"""
+        return self._projection_target.scan_count(thread_id)
 
     def projection_state(
         self, thread_id: str
     ) -> tuple[ProjectionResult | None, int | None]:
         """读取 materialization target 的共享 result 与 blocked seq。"""
-        return self._projection_states.get(thread_id, (None, None))
+        return self._projection_target.state(thread_id)
 
     def update_projection_state(
         self,
@@ -337,7 +376,7 @@ class JsonlMessageStore(MessageStore):
         blocked_seq: int | None,
     ) -> None:
         """在 projection_lock 内更新共享 materialization state。"""
-        self._projection_states[thread_id] = (result, blocked_seq)
+        self._projection_target.update_state(thread_id, result, blocked_seq)
 
     async def create_projection_thread(
         self,
@@ -373,6 +412,7 @@ class JsonlMessageStore(MessageStore):
             extra=merged_extra,
         )
         await self._directory.upsert_metadata(meta)
+        self._projection_target.invalidate(thread_id)
         return tid
 
     # -----------------------------------------------------------------
@@ -454,6 +494,5 @@ class JsonlMessageStore(MessageStore):
     # -----------------------------------------------------------------
 
     async def close(self) -> None:
+        await self._projection_target.close()
         await self._directory.close()
-        self._projection_locks.clear()
-        self._projection_states.clear()
