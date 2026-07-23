@@ -17,11 +17,11 @@
 
 ## 3. Durable conversation projection
 
-- [ ] 3.1 Write failing tests for durable-ack-only projection, explicit thread id bootstrap, seq ordering, idempotent replay, and stale watermark
-- [ ] 3.2 Add default JSONL transcript projection bootstrap using a caller-provided thread id and audited metadata
-- [ ] 3.3 Implement `JournalConversationProjector` accepting only acknowledged `conversation_item` envelopes
-- [ ] 3.4 Make projection failure return stale state without freezing Journal execution and prove replay reconstructs the same ordered history
-- [ ] 3.5 Run projector plus legacy transcript tests and commit the projection slice
+- [x] 3.1 Write failing tests for durable-ack-only projection, explicit thread id bootstrap, seq ordering, idempotent replay, and stale watermark
+- [x] 3.2 Add default JSONL transcript projection bootstrap using a caller-provided thread id and audited metadata
+- [x] 3.3 Implement `JournalConversationProjector` accepting only acknowledged `conversation_item` envelopes
+- [x] 3.4 Make projection failure return stale state without freezing Journal execution and prove replay reconstructs the same ordered history
+- [x] 3.5 Run projector plus legacy transcript tests and commit the projection slice
 
 ## 4. SessionAuditCoordinator
 
