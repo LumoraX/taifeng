@@ -378,6 +378,14 @@ class JsonlMessageStore(MessageStore):
         """在 projection_lock 内更新共享 materialization state。"""
         self._projection_target.update_state(thread_id, result, blocked_seq)
 
+    def projection_first_seq(self, thread_id: str) -> int | None:
+        """返回物理 target 最早健康观察的 conversation seq。"""
+        return self._projection_target.first_sequence(thread_id)
+
+    def record_projection_first_seq(self, thread_id: str, seq: int) -> None:
+        """首次健康投影后记录 generation replay 起点。"""
+        self._projection_target.record_first_sequence(thread_id, seq)
+
     async def create_projection_thread(
         self,
         *,

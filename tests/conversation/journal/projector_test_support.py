@@ -87,6 +87,7 @@ class _MemoryProjectionStore:
         self.fail_load_threads: set[str] = set()
         self._projection_locks: dict[str, anyio.Lock] = {}
         self._projection_states: dict[str, tuple[ProjectionResult, int | None]] = {}
+        self._projection_first_sequences: dict[str, int] = {}
 
     def projection_lock(self, thread_id: str) -> anyio.Lock:
         """让同一 fake store 上的多个 projector 共享 thread 锁。"""
@@ -131,6 +132,14 @@ class _MemoryProjectionStore:
     ) -> None:
         """在共享锁内更新 store-owned projection state。"""
         self._projection_states[thread_id] = (result, blocked_seq)
+
+    def projection_first_seq(self, thread_id: str) -> int | None:
+        """返回 fake target 首次健康观察的 conversation seq。"""
+        return self._projection_first_sequences.get(thread_id)
+
+    def record_projection_first_seq(self, thread_id: str, seq: int) -> None:
+        """只记录一次 fake generation replay 起点。"""
+        self._projection_first_sequences.setdefault(thread_id, seq)
 
     async def create_projection_thread(
         self,

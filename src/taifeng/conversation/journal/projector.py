@@ -73,6 +73,14 @@ class ConversationProjectionStore(Protocol):
         """在共享 thread 锁内更新 store-owned state。"""
         ...
 
+    def projection_first_seq(self, thread_id: str) -> int | None:
+        """返回物理 target 首次健康观察的 conversation seq。"""
+        ...
+
+    def record_projection_first_seq(self, thread_id: str, seq: int) -> None:
+        """首次健康投影后记录 generation replay 起点。"""
+        ...
+
     async def load_projection_snapshot(self, thread_id: str) -> ProjectionSnapshot:
         """加载已验证 metadata 的 cache-aware snapshot。"""
         ...
@@ -318,17 +326,21 @@ class JournalConversationProjector:
         _, blocked_seq = self._store.projection_state(thread_id)
         if blocked_seq is not None and all(entry.seq != blocked_seq for entry in projected):
             return current
-        if projected[-1].seq < current.projected_seq:
-            return self._set_stale(
-                thread_id,
-                current.projected_seq,
-                "sequence_regression",
-                projected[0].record_id,
-                projected[0].seq,
-            )
         first_missing = 0
         try:
             snapshot = await self._store.load_projection_snapshot(thread_id)
+            replay_floor = self._store.projection_first_seq(thread_id)
+            if projected[-1].seq < current.projected_seq and not (
+                snapshot.history_reset
+                and projected[0].seq == replay_floor
+            ):
+                return self._set_stale(
+                    thread_id,
+                    current.projected_seq,
+                    "sequence_regression",
+                    projected[0].record_id,
+                    projected[0].seq,
+                )
             history = list(snapshot.items)
             plan = _plan_materialization(history, projected)
             if isinstance(plan, _ProjectionConflict):
@@ -358,20 +370,27 @@ class JournalConversationProjector:
                     else projected[0].seq
                 ),
             )
-        return self._set_healthy(thread_id, current.projected_seq, projected[-1].seq)
+        return self._set_healthy(
+            thread_id,
+            current,
+            projected[0].seq,
+            projected[-1].seq,
+        )
 
     def _set_healthy(
         self,
         thread_id: str,
-        current_seq: int,
-        observed_seq: int,
+        current: ProjectionResult,
+        observed_first_seq: int,
+        observed_last_seq: int,
     ) -> ProjectionResult:
         """保存并返回 materialization 健康 watermark。"""
         healthy = ProjectionResult(
             thread_id=thread_id,
-            projected_seq=max(current_seq, observed_seq),
+            projected_seq=max(current.projected_seq, observed_last_seq),
             stale=False,
         )
+        self._store.record_projection_first_seq(thread_id, observed_first_seq)
         self._store.update_projection_state(thread_id, healthy, None)
         return healthy
 

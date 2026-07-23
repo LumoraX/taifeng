@@ -8,7 +8,7 @@ import os
 import tempfile
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,6 +45,7 @@ class ProjectionSnapshot:
 
     items: tuple[ResponseItem, ...]
     identity: ProjectionFileIdentity
+    history_reset: bool = False
 
 
 class _HandleState(StrEnum):
@@ -65,6 +66,7 @@ class _PhysicalProjectionTarget:
         self.backend_token: object | None = None
         self.thread_locks: dict[str, anyio.Lock] = {}
         self.states: dict[str, tuple[ProjectionResult, int | None]] = {}
+        self.first_sequences: dict[str, int] = {}
         self.snapshots: dict[str, ProjectionSnapshot] = {}
         self.scan_counts: dict[str, int] = {}
 
@@ -94,6 +96,7 @@ class _PhysicalProjectionTarget:
         self.backend_token = None
         self.thread_locks.clear()
         self.states.clear()
+        self.first_sequences.clear()
         self.snapshots.clear()
         self.scan_counts.clear()
 
@@ -191,8 +194,8 @@ def _decode_items(lines: list[bytes]) -> tuple[ResponseItem, ...]:
     return tuple(items)
 
 
-def _read_stable_lines(path: Path) -> tuple[list[bytes], ProjectionFileIdentity]:
-    """从一个稳定 fd 读取，并确认读取后 path 仍指向同一身份。"""
+def _read_stable_file(path: Path) -> tuple[bytes, ProjectionFileIdentity]:
+    """从一个稳定 fd 读取 bytes，并确认读取后 path 仍指向同一身份。"""
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -205,9 +208,50 @@ def _read_stable_lines(path: Path) -> tuple[list[bytes], ProjectionFileIdentity]
         after = _identity(os.fstat(fd))
         if before != after or _stat_identity(path) != after:
             raise ProjectionLifecycleError("projection file identity changed during scan")
-        return b"".join(chunks).splitlines(), after
+        return b"".join(chunks), after
     finally:
         os.close(fd)
+
+
+def _truncate_existing(
+    path: Path,
+    expected: ProjectionFileIdentity,
+    size: int,
+) -> ProjectionFileIdentity:
+    """仅在 path/fd identity 仍匹配时截断未提交物理尾。"""
+    flags = os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        if not _same_open_file(path, fd, expected):
+            raise ProjectionLifecycleError("projection file identity changed before truncate")
+        os.ftruncate(fd, size)
+        os.fsync(fd)
+        truncated = _identity(os.fstat(fd))
+        if _stat_identity(path) != truncated:
+            raise ProjectionLifecycleError("projection file identity changed during truncate")
+        return truncated
+    finally:
+        os.close(fd)
+
+
+def _repair_torn_tail(
+    path: Path,
+    raw: bytes,
+    identity: ProjectionFileIdentity,
+    metadata: dict[str, object],
+) -> tuple[bytes, ProjectionFileIdentity]:
+    """仅截断无换行尾；截断前严格验证 metadata 与全部完整 item 行。"""
+    if not raw or raw.endswith(b"\n"):
+        return raw, identity
+    cutoff = raw.rfind(b"\n") + 1
+    complete_lines = raw[:cutoff].splitlines()
+    if not complete_lines or not _is_expected_metadata(complete_lines[0], metadata):
+        return raw, identity
+    _decode_items(complete_lines[1:])
+    _truncate_existing(path, identity, cutoff)
+    return _read_stable_file(path)
 
 
 def _scan_projection_file(
@@ -217,12 +261,16 @@ def _scan_projection_file(
     """读取、修复 metadata，并返回与最终 inode 对齐的严格 snapshot。"""
     if not path.exists():
         _atomic_rebuild(path, metadata, [])
-    lines, identity = _read_stable_lines(path)
+    raw, identity = _read_stable_file(path)
+    raw, identity = _repair_torn_tail(path, raw, identity, metadata)
+    lines = raw.splitlines()
     if not lines or not _is_expected_metadata(lines[0], metadata):
-        item_lines = _preserved_item_lines(lines)
+        repair_lines = lines[:-1] if raw and not raw.endswith(b"\n") else lines
+        item_lines = _preserved_item_lines(repair_lines)
         _decode_items(item_lines)
         _atomic_rebuild(path, metadata, item_lines)
-        lines, identity = _read_stable_lines(path)
+        raw, identity = _read_stable_file(path)
+        lines = raw.splitlines()
     items = _decode_items(lines[1:])
     return ProjectionSnapshot(items=items, identity=identity)
 
@@ -233,6 +281,22 @@ def _stat_identity(path: Path) -> ProjectionFileIdentity | None:
         return _identity(path.stat())
     except FileNotFoundError:
         return None
+
+
+def _history_was_reset(
+    cached: ProjectionSnapshot | None,
+    current: ProjectionFileIdentity | None,
+    scanned: ProjectionSnapshot,
+) -> bool:
+    """只把同一 target 上已知 history 的缺失或前缀缩短视为 generation reset。"""
+    if cached is None or not cached.items:
+        return False
+    if current is None:
+        return True
+    return (
+        len(scanned.items) < len(cached.items)
+        and cached.items[: len(scanned.items)] == scanned.items
+    )
 
 
 def _serialize_items(items: list[ResponseItem]) -> bytes:
@@ -268,10 +332,18 @@ def _append_existing(
     try:
         if not _same_open_file(path, fd, expected):
             raise ProjectionLifecycleError("projection file identity changed before append")
-        view = memoryview(payload)
-        while view:
-            view = view[os.write(fd, view) :]
-        os.fsync(fd)
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fsync(fd)
+        except BaseException:
+            try:
+                os.ftruncate(fd, expected.size)
+                os.fsync(fd)
+            except OSError:
+                pass
+            raise
         written = _identity(os.fstat(fd))
         if _stat_identity(path) != written:
             raise ProjectionLifecycleError("projection file identity changed during append")
@@ -355,6 +427,14 @@ class ProjectionTargetHandle:
         """在共享 scope 内更新物理 target state。"""
         self._target.states[thread_id] = result, blocked_seq
 
+    def first_sequence(self, thread_id: str) -> int | None:
+        """返回该物理 target 首次健康观察的 conversation seq。"""
+        return self._target.first_sequences.get(thread_id)
+
+    def record_first_sequence(self, thread_id: str, seq: int) -> None:
+        """只记录一次最早健康 seq，供 generation reset 校验 replay 起点。"""
+        self._target.first_sequences.setdefault(thread_id, seq)
+
     async def load_snapshot(
         self,
         thread_id: str,
@@ -367,6 +447,10 @@ class ProjectionTargetHandle:
         if cached is not None and current == cached.identity:
             return cached
         snapshot = await anyio.to_thread.run_sync(_scan_projection_file, path, metadata)
+        snapshot = replace(
+            snapshot,
+            history_reset=_history_was_reset(cached, current, snapshot),
+        )
         self._target.snapshots[thread_id] = snapshot
         self._target.scan_counts[thread_id] = self.scan_count(thread_id) + 1
         return snapshot
@@ -388,6 +472,7 @@ class ProjectionTargetHandle:
         self._target.snapshots[thread_id] = ProjectionSnapshot(
             items=(*cached.items, *items),
             identity=written,
+            history_reset=False,
         )
 
     def scan_count(self, thread_id: str) -> int:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,49 @@ def _one_item_batch() -> tuple[Any, Any]:
         update={"id": "item_1", "created_at": _NOW}
     )
     return _encoded((_conversation_record(item, record_id="rec_1"),))
+
+
+def _two_sequential_batches() -> tuple[tuple[Any, Any], tuple[Any, Any]]:
+    """构造 seq4/item1 与 seq5/item2 两个独立 durable batch。"""
+    first = user_message(text="one", thread_id="thr_explicit").model_copy(
+        update={"id": "item_1", "created_at": _NOW}
+    )
+    second = user_message(text="two", thread_id="thr_explicit").model_copy(
+        update={"id": "item_2", "created_at": _NOW}
+    )
+    batch_1 = _encoded((_conversation_record(first, record_id="rec_1"),))
+    batch_2 = _encoded(
+        (_conversation_record(second, record_id="rec_2"),),
+        expected_seq=4,
+    )
+    return batch_1, batch_2
+
+
+def _inject_partial_write(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rollback_fails: bool,
+) -> None:
+    """让 audited append 先写半条，再抛错；可选同时让回滚失败。"""
+    original_write = os.write
+    write_calls = 0
+
+    def _partial_then_fail(fd: int, payload: memoryview) -> int:
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 1:
+            prefix = payload[: max(1, len(payload) // 2)]
+            return original_write(fd, prefix)
+        if write_calls == 2:
+            raise OSError("injected partial write failure")
+        return original_write(fd, payload)
+
+    monkeypatch.setattr(os, "write", _partial_then_fail)
+    if rollback_fails:
+        def _fail_rollback(_fd: int, _size: int) -> None:
+            raise OSError("rollback failed")
+
+        monkeypatch.setattr(os, "ftruncate", _fail_rollback)
 
 
 class _YieldingStore(JsonlMessageStore):
@@ -359,10 +403,10 @@ async def test_active_physical_target_rejects_different_event_loop(tmp_path: Pat
 
 
 @pytest.mark.anyio
-async def test_lower_seq_after_watermark_is_stale_even_if_projection_was_deleted(
+async def test_lower_seq_after_watermark_without_file_loss_is_stale(
     tmp_path: Path,
 ) -> None:
-    """观察过高 watermark 后，空物理文件不能把低 seq 伪装成合法首次投影。"""
+    """物理 history 未丢失时，低于 watermark 的新 batch 仍必须 stale。"""
     store = JsonlMessageStore(tmp_path)
     await _create_explicit_projection(store)
     higher_item = user_message(text="six", thread_id="thr_explicit").model_copy(
@@ -374,7 +418,6 @@ async def test_lower_seq_after_watermark_is_stale_even_if_projection_was_deleted
     projector = JournalConversationProjector(store)
     healthy = await projector.project(higher, higher_ack)
     assert healthy.projected_seq == 6
-    (tmp_path / "thr_explicit.jsonl").unlink()
     lower_item = user_message(text="five", thread_id="thr_explicit").model_copy(
         update={"id": "item_5", "created_at": _NOW}
     )
@@ -386,6 +429,135 @@ async def test_lower_seq_after_watermark_is_stale_even_if_projection_was_deleted
 
     assert regressed.stale is True
     assert regressed.failure_class == "sequence_regression"
+    await store.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("replay_handle", ["same", "other"])
+async def test_deleted_multibatch_projection_rebuilds_from_earliest_observed_seq(
+    tmp_path: Path,
+    replay_handle: str,
+) -> None:
+    """物理 generation 丢失后，同 target 应从最早已观察 seq 顺序重建全部 items。"""
+    first_store = JsonlMessageStore(tmp_path)
+    await _create_explicit_projection(first_store)
+    first_batch, second_batch = _two_sequential_batches()
+    first_projector = JournalConversationProjector(first_store)
+    await first_projector.project(*first_batch)
+    healthy = await first_projector.project(*second_batch)
+    assert healthy.projected_seq == 5
+    other_store = JsonlMessageStore(tmp_path) if replay_handle == "other" else None
+    replay_store = other_store or first_store
+    replay_projector = JournalConversationProjector(replay_store)
+    (tmp_path / "thr_explicit.jsonl").unlink()
+
+    rebuilt_first = await replay_projector.project(*first_batch)
+    rebuilt_second = await replay_projector.project(*second_batch)
+
+    history = [item async for item in await replay_store.load_thread("thr_explicit")]
+    assert rebuilt_first.stale is False
+    assert rebuilt_second.stale is False
+    assert rebuilt_second.projected_seq == 5
+    assert [item.id for item in history] == ["item_1", "item_2"]
+    if other_store is not None:
+        await other_store.close()
+    await first_store.close()
+
+
+@pytest.mark.anyio
+async def test_partial_os_write_rolls_back_to_known_offset_and_replay_converges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实 byte-partial write 失败应回滚到 expected size，不遗留 torn tail。"""
+    store = JsonlMessageStore(tmp_path)
+    await _create_explicit_projection(store)
+    path = tmp_path / "thr_explicit.jsonl"
+    before = path.read_bytes()
+    envelopes, ack = _one_item_batch()
+    projector = JournalConversationProjector(store)
+    with monkeypatch.context() as patcher:
+        _inject_partial_write(patcher, rollback_fails=False)
+        stale = await projector.project(envelopes, ack)
+
+    assert stale.stale is True
+    assert path.read_bytes() == before
+    replayed = await projector.project(envelopes, ack)
+    assert replayed.stale is False
+    assert [item.id async for item in await store.load_thread("thr_explicit")] == ["item_1"]
+    await store.close()
+
+
+@pytest.mark.anyio
+async def test_restart_repairs_abandoned_torn_tail_and_replay_converges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """异常回滚也失败时，重启 scanner 仅丢弃无换行 torn tail，再由 Journal 重放。"""
+    store = JsonlMessageStore(tmp_path)
+    await _create_explicit_projection(store)
+    path = tmp_path / "thr_explicit.jsonl"
+    before = path.read_bytes()
+    envelopes, ack = _one_item_batch()
+    with monkeypatch.context() as patcher:
+        _inject_partial_write(patcher, rollback_fails=True)
+        stale = await JournalConversationProjector(store).project(envelopes, ack)
+    assert stale.stale is True
+    assert path.read_bytes().startswith(before)
+    assert len(path.read_bytes()) > len(before)
+    await store.close()
+
+    reopened = JsonlMessageStore(tmp_path)
+    replayed = await JournalConversationProjector(reopened).project(envelopes, ack)
+
+    assert replayed.stale is False
+    assert [item.id async for item in await reopened.load_thread("thr_explicit")] == ["item_1"]
+    assert path.read_bytes().endswith(b"\n")
+    await reopened.close()
+
+
+@pytest.mark.anyio
+async def test_unterminated_valid_item_without_metadata_is_not_published(
+    tmp_path: Path,
+) -> None:
+    """即使无换行尾能解析成完整 item，也不能在 metadata 修复时伪造成 committed item。"""
+    initial = JsonlMessageStore(tmp_path)
+    await _create_explicit_projection(initial)
+    envelopes, ack = _one_item_batch()
+    await JournalConversationProjector(initial).project(envelopes, ack)
+    path = tmp_path / "thr_explicit.jsonl"
+    item_line = path.read_bytes().splitlines()[1]
+    await initial.close()
+    path.write_bytes(item_line)
+    reopened = JsonlMessageStore(tmp_path)
+
+    snapshot = await reopened.load_projection_snapshot("thr_explicit")
+
+    assert snapshot.items == ()
+    replayed = await JournalConversationProjector(reopened).project(envelopes, ack)
+    assert replayed.stale is False
+    assert [item.id async for item in await reopened.load_thread("thr_explicit")] == ["item_1"]
+    await reopened.close()
+
+
+@pytest.mark.anyio
+async def test_middle_corruption_remains_fail_closed(tmp_path: Path) -> None:
+    """换行终止的中间坏行不是 torn tail，replay 不得截断或伪造健康 history。"""
+    store = JsonlMessageStore(tmp_path)
+    await _create_explicit_projection(store)
+    first_batch, second_batch = _two_sequential_batches()
+    projector = JournalConversationProjector(store)
+    await projector.project(*first_batch)
+    await projector.project(*second_batch)
+    path = tmp_path / "thr_explicit.jsonl"
+    lines = path.read_bytes().splitlines()
+    corrupted = b"\n".join([lines[0], b"{broken", *lines[1:]]) + b"\n"
+    path.write_bytes(corrupted)
+
+    stale = await projector.project(*second_batch)
+
+    assert stale.stale is True
+    assert path.read_bytes() == corrupted
     await store.close()
 
 
