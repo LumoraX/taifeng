@@ -36,6 +36,7 @@ from pydantic import ValidationError
 
 from taifeng.conversation.journal.materialization import (
     ProjectionFileIdentity,
+    ProjectionReplayWindow,
     ProjectionSnapshot,
     ProjectionTargetHandle,
     safe_thread_path,
@@ -385,6 +386,14 @@ class JsonlMessageStore(MessageStore):
     def record_projection_first_seq(self, thread_id: str, seq: int) -> None:
         """首次健康投影后记录 generation replay 起点。"""
         self._projection_target.record_first_sequence(thread_id, seq)
+
+    def projection_replay_window(self, thread_id: str) -> ProjectionReplayWindow | None:
+        """返回 physical target 当前 generation replay 窗口。"""
+        return self._projection_target.replay_window(thread_id)
+
+    def advance_projection_replay(self, thread_id: str, observed_seq: int) -> None:
+        """推进 generation replay，追平旧 watermark 后清理窗口。"""
+        self._projection_target.advance_replay_window(thread_id, observed_seq)
 
     async def create_projection_thread(
         self,

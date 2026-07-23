@@ -56,6 +56,23 @@ def _two_sequential_batches() -> tuple[tuple[Any, Any], tuple[Any, Any]]:
     return batch_1, batch_2
 
 
+def _sequential_batches(count: int) -> tuple[tuple[Any, Any], ...]:
+    """构造从 seq4 开始、每批一个 item 的任意长度 replay 序列。"""
+    batches: list[tuple[Any, Any]] = []
+    for offset in range(count):
+        seq = 4 + offset
+        item = user_message(text=str(seq), thread_id="thr_explicit").model_copy(
+            update={"id": f"item_{seq}", "created_at": _NOW}
+        )
+        batches.append(
+            _encoded(
+                (_conversation_record(item, record_id=f"rec_{seq}"),),
+                expected_seq=seq - 1,
+            )
+        )
+    return tuple(batches)
+
+
 def _inject_partial_write(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -462,6 +479,60 @@ async def test_deleted_multibatch_projection_rebuilds_from_earliest_observed_seq
     if other_store is not None:
         await other_store.close()
     await first_store.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("batch_count", [3, 5, pytest.param(11, id="N")])
+@pytest.mark.parametrize("replay_handle", ["same", "other"])
+async def test_generation_reset_window_stays_open_until_old_watermark(
+    tmp_path: Path,
+    batch_count: int,
+    replay_handle: str,
+) -> None:
+    """任意长度 generation replay 在追平旧 watermark 前不得清除 reset 窗口。"""
+    first_store = JsonlMessageStore(tmp_path)
+    await _create_explicit_projection(first_store)
+    batches = _sequential_batches(batch_count)
+    first_projector = JournalConversationProjector(first_store)
+    for batch in batches:
+        healthy = await first_projector.project(*batch)
+    old_watermark = 3 + batch_count
+    assert healthy.projected_seq == old_watermark
+    other_store = JsonlMessageStore(tmp_path) if replay_handle == "other" else None
+    replay_store = other_store or first_store
+    replay_projector = JournalConversationProjector(replay_store)
+    (tmp_path / "thr_explicit.jsonl").unlink()
+
+    replayed = [await replay_projector.project(*batch) for batch in batches]
+
+    history = [item async for item in await replay_store.load_thread("thr_explicit")]
+    assert all(not result.stale for result in replayed)
+    assert replayed[-1].projected_seq == old_watermark
+    assert replay_store.projection_replay_window("thr_explicit") is None
+    assert [item.id for item in history] == [f"item_{seq}" for seq in range(4, 4 + batch_count)]
+    if other_store is not None:
+        await other_store.close()
+    await first_store.close()
+
+
+@pytest.mark.anyio
+async def test_generation_reset_rejects_ceiling_batch_before_floor(tmp_path: Path) -> None:
+    """reset 后直接 replay ceiling 不能绕过 floor/progress 顺序并伪造追平。"""
+    store = JsonlMessageStore(tmp_path)
+    await _create_explicit_projection(store)
+    batches = _sequential_batches(3)
+    projector = JournalConversationProjector(store)
+    for batch in batches:
+        await projector.project(*batch)
+    (tmp_path / "thr_explicit.jsonl").unlink()
+
+    out_of_order = await projector.project(*batches[-1])
+
+    history = [item async for item in await store.load_thread("thr_explicit")]
+    assert out_of_order.stale is True
+    assert out_of_order.failure_class == "sequence_regression"
+    assert history == []
+    await store.close()
 
 
 @pytest.mark.anyio

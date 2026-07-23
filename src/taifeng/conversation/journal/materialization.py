@@ -48,6 +48,15 @@ class ProjectionSnapshot:
     history_reset: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectionReplayWindow:
+    """generation reset 后从 floor 有序追平旧 watermark 的共享窗口。"""
+
+    floor: int
+    ceiling: int
+    progress: int | None = None
+
+
 class _HandleState(StrEnum):
     """单个 store handle 的生命周期。"""
 
@@ -67,6 +76,7 @@ class _PhysicalProjectionTarget:
         self.thread_locks: dict[str, anyio.Lock] = {}
         self.states: dict[str, tuple[ProjectionResult, int | None]] = {}
         self.first_sequences: dict[str, int] = {}
+        self.replay_windows: dict[str, ProjectionReplayWindow] = {}
         self.snapshots: dict[str, ProjectionSnapshot] = {}
         self.scan_counts: dict[str, int] = {}
 
@@ -97,6 +107,7 @@ class _PhysicalProjectionTarget:
         self.thread_locks.clear()
         self.states.clear()
         self.first_sequences.clear()
+        self.replay_windows.clear()
         self.snapshots.clear()
         self.scan_counts.clear()
 
@@ -435,6 +446,31 @@ class ProjectionTargetHandle:
         """只记录一次最早健康 seq，供 generation reset 校验 replay 起点。"""
         self._target.first_sequences.setdefault(thread_id, seq)
 
+    def replay_window(self, thread_id: str) -> ProjectionReplayWindow | None:
+        """返回 generation reset 的共享 replay 窗口。"""
+        return self._target.replay_windows.get(thread_id)
+
+    def advance_replay_window(self, thread_id: str, observed_seq: int) -> None:
+        """推进 replay progress；追平旧 watermark 后关闭窗口。"""
+        window = self._target.replay_windows.get(thread_id)
+        if window is None:
+            return
+        if observed_seq >= window.ceiling:
+            self._target.replay_windows.pop(thread_id, None)
+            return
+        self._target.replay_windows[thread_id] = replace(window, progress=observed_seq)
+
+    def _start_replay_window(self, thread_id: str) -> None:
+        """用 reset 前首次 seq 与健康 watermark 建立一次共享 replay 窗口。"""
+        floor = self._target.first_sequences.get(thread_id)
+        state = self._target.states.get(thread_id)
+        if floor is None or state is None or state[0].stale:
+            return
+        self._target.replay_windows.setdefault(
+            thread_id,
+            ProjectionReplayWindow(floor=floor, ceiling=state[0].projected_seq),
+        )
+
     async def load_snapshot(
         self,
         thread_id: str,
@@ -451,6 +487,8 @@ class ProjectionTargetHandle:
             snapshot,
             history_reset=_history_was_reset(cached, current, snapshot),
         )
+        if snapshot.history_reset:
+            self._start_replay_window(thread_id)
         self._target.snapshots[thread_id] = snapshot
         self._target.scan_counts[thread_id] = self.scan_count(thread_id) + 1
         return snapshot

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from taifeng.conversation.journal.materialization import (
         ProjectionFileIdentity,
+        ProjectionReplayWindow,
         ProjectionSnapshot,
     )
     from taifeng.conversation.journal.models import JournalAck, JournalEnvelope
@@ -79,6 +80,14 @@ class ConversationProjectionStore(Protocol):
 
     def record_projection_first_seq(self, thread_id: str, seq: int) -> None:
         """首次健康投影后记录 generation replay 起点。"""
+        ...
+
+    def projection_replay_window(self, thread_id: str) -> ProjectionReplayWindow | None:
+        """返回 physical target 当前 generation replay 窗口。"""
+        ...
+
+    def advance_projection_replay(self, thread_id: str, observed_seq: int) -> None:
+        """推进 generation replay，追平旧 watermark 后清理窗口。"""
         ...
 
     async def load_projection_snapshot(self, thread_id: str) -> ProjectionSnapshot:
@@ -268,6 +277,18 @@ def _plan_materialization(
     return conflict if conflict is not None else _order_plan(history, projected)
 
 
+def _is_generation_replay(
+    projected: tuple[_ProjectedEnvelope, ...],
+    window: ProjectionReplayWindow | None,
+) -> bool:
+    """只允许 replay 窗口从 floor 开始并持续单调推进到 ceiling。"""
+    if window is None or projected[-1].seq > window.ceiling:
+        return False
+    if window.progress is None:
+        return projected[0].seq == window.floor
+    return projected[0].seq > window.progress
+
+
 class JournalConversationProjector:
     """只把 covering durable JournalAck 对应的 conversation envelopes 投影到 store。
 
@@ -329,11 +350,13 @@ class JournalConversationProjector:
         first_missing = 0
         try:
             snapshot = await self._store.load_projection_snapshot(thread_id)
-            replay_floor = self._store.projection_first_seq(thread_id)
-            if projected[-1].seq < current.projected_seq and not (
-                snapshot.history_reset
-                and projected[0].seq == replay_floor
-            ):
+            replay_window = self._store.projection_replay_window(thread_id)
+            invalid_replay = (
+                not _is_generation_replay(projected, replay_window)
+                if replay_window is not None
+                else projected[-1].seq < current.projected_seq
+            )
+            if invalid_replay:
                 return self._set_stale(
                     thread_id,
                     current.projected_seq,
@@ -391,6 +414,7 @@ class JournalConversationProjector:
             stale=False,
         )
         self._store.record_projection_first_seq(thread_id, observed_first_seq)
+        self._store.advance_projection_replay(thread_id, observed_last_seq)
         self._store.update_projection_state(thread_id, healthy, None)
         return healthy
 

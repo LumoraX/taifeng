@@ -12,6 +12,7 @@ from taifeng.conversation.journal.canonical import model_canonical_data
 from taifeng.conversation.journal.framing import encode_batch
 from taifeng.conversation.journal.materialization import (
     ProjectionFileIdentity,
+    ProjectionReplayWindow,
     ProjectionSnapshot,
 )
 from taifeng.conversation.journal.models import (
@@ -88,6 +89,7 @@ class _MemoryProjectionStore:
         self._projection_locks: dict[str, anyio.Lock] = {}
         self._projection_states: dict[str, tuple[ProjectionResult, int | None]] = {}
         self._projection_first_sequences: dict[str, int] = {}
+        self._projection_replay_windows: dict[str, ProjectionReplayWindow] = {}
 
     def projection_lock(self, thread_id: str) -> anyio.Lock:
         """让同一 fake store 上的多个 projector 共享 thread 锁。"""
@@ -140,6 +142,18 @@ class _MemoryProjectionStore:
     def record_projection_first_seq(self, thread_id: str, seq: int) -> None:
         """只记录一次 fake generation replay 起点。"""
         self._projection_first_sequences.setdefault(thread_id, seq)
+
+    def projection_replay_window(self, thread_id: str) -> ProjectionReplayWindow | None:
+        """fake store 默认没有 generation reset replay 窗口。"""
+        return self._projection_replay_windows.get(thread_id)
+
+    def advance_projection_replay(self, thread_id: str, observed_seq: int) -> None:
+        """fake store 若配置窗口，则按 ceiling 推进或清理。"""
+        window = self._projection_replay_windows.get(thread_id)
+        if window is None:
+            return
+        if observed_seq >= window.ceiling:
+            self._projection_replay_windows.pop(thread_id, None)
 
     async def create_projection_thread(
         self,
