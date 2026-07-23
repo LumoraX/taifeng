@@ -328,11 +328,15 @@ def test_duck_observer_methods_do_not_satisfy_nominal_client_boundary() -> None:
 
 
 def test_abc_virtual_subclass_registration_cannot_bypass_nominal_boundary() -> None:
-    """ABC.register 不得把普通 SimClient 变成真实 observer-aware client。"""
-    AttemptObservableModelClient.register(SimClient)
+    """ABC.register 不得把普通本地 dummy 变成真实 observer-aware client。"""
+
+    class _VirtualClient:
+        """仅用于本测试的 virtual subclass，避免污染生产 SimClient。"""
+
+    AttemptObservableModelClient.register(_VirtualClient)
     inputs = replace(
         _static_inputs(),
-        model_client=SimClient(turns=[SimTurn(text="virtual")]),
+        model_client=cast("Any", _VirtualClient()),
     )
 
     with pytest.raises(AuditCapabilityError) as caught:
@@ -564,6 +568,32 @@ def test_tool_metadata_string_subclass_hooks_are_not_executed() -> None:
     assert caught.value.code == "audit_tool_effect_kind_invalid"
 
 
+def test_uninitialized_tool_metadata_slot_is_stably_incomplete() -> None:
+    """未初始化 slots descriptor 不泄漏 AttributeError。"""
+
+    class _UninitializedSlotsTool:
+        __slots__ = (
+            "can_suspend",
+            "effect_kind",
+            "idempotency_key",
+            "name",
+            "reconciliation",
+        )
+
+        def __init__(self) -> None:
+            self.name = "uninitialized_slot"
+            self.idempotency_key = None
+            self.reconciliation = "none"
+            self.can_suspend = False
+
+    inputs = replace(_static_inputs(), tools=(_UninitializedSlotsTool(),))
+
+    with pytest.raises(AuditCapabilityError) as caught:
+        validate_audit_config(_config(), static_inputs=inputs)
+
+    assert caught.value.code == "audit_tool_metadata_incomplete"
+
+
 def test_any_loaded_orchestration_skill_is_rejected() -> None:
     """snapshot 内任一已加载 orchestration 都不能绕过可达性判断。"""
     atomic = _skill("child")
@@ -619,8 +649,19 @@ def test_valid_minimal_audit_configuration_passes_and_is_frozen() -> None:
     ("override", "expected_code"),
     [
         ({"writer_id": ""}, "audit_writer_id_empty"),
+        ({"writer_id": object()}, "audit_writer_id_empty"),
+        ({"writer_id": True}, "audit_writer_id_empty"),
         ({"max_attachment_bytes": 0}, "audit_attachment_limit_invalid"),
+        ({"max_attachment_bytes": object()}, "audit_attachment_limit_invalid"),
+        ({"max_attachment_bytes": True}, "audit_attachment_limit_invalid"),
+        ({"max_attachment_bytes": 1.5}, "audit_attachment_limit_invalid"),
         ({"max_total_attachment_bytes": 0}, "audit_total_attachment_limit_invalid"),
+        (
+            {"max_total_attachment_bytes": object()},
+            "audit_total_attachment_limit_invalid",
+        ),
+        ({"max_total_attachment_bytes": True}, "audit_total_attachment_limit_invalid"),
+        ({"max_total_attachment_bytes": 1.5}, "audit_total_attachment_limit_invalid"),
     ],
 )
 def test_audit_bootstrap_values_are_validated(

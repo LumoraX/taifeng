@@ -84,11 +84,17 @@ class AuditConfig:
 
     def __post_init__(self) -> None:
         """拒绝不能形成稳定 bootstrap/附件边界的基础配置。"""
-        if not self.writer_id:
+        if type(self.writer_id) is not str or not self.writer_id:
             raise ValueError("audit_writer_id_empty")
-        if self.max_attachment_bytes <= 0:
+        if (
+            type(self.max_attachment_bytes) is not int
+            or self.max_attachment_bytes <= 0
+        ):
             raise ValueError("audit_attachment_limit_invalid")
-        if self.max_total_attachment_bytes <= 0:
+        if (
+            type(self.max_total_attachment_bytes) is not int
+            or self.max_total_attachment_bytes <= 0
+        ):
             raise ValueError("audit_total_attachment_limit_invalid")
 
 
@@ -327,7 +333,10 @@ def _static_tool_attribute(tool: object, attribute: str) -> object:
     """静态读取实例字段；property/任意 descriptor 不执行并视为缺失。"""
     value = inspect.getattr_static(tool, attribute, _MISSING)
     if isinstance(value, MemberDescriptorType):
-        return value.__get__(tool, type(tool))
+        try:
+            return value.__get__(tool, type(tool))
+        except AttributeError:
+            return _MISSING
     if isinstance(value, property) or inspect.isroutine(value):
         return _MISSING
     return value
