@@ -50,10 +50,11 @@ class ProjectionSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ProjectionReplayWindow:
-    """generation reset 后从 floor 有序追平旧 watermark 的共享窗口。"""
+    """generation reset 后恢复旧 healthy snapshot 的共享窗口。"""
 
     floor: int
     ceiling: int
+    expected_items: tuple[ResponseItem, ...]
     progress: int | None = None
 
 
@@ -460,15 +461,23 @@ class ProjectionTargetHandle:
             return
         self._target.replay_windows[thread_id] = replace(window, progress=observed_seq)
 
-    def _start_replay_window(self, thread_id: str) -> None:
-        """用 reset 前首次 seq 与健康 watermark 建立一次共享 replay 窗口。"""
+    def _start_replay_window(
+        self,
+        thread_id: str,
+        expected_snapshot: ProjectionSnapshot,
+    ) -> None:
+        """用 reset 前的 healthy snapshot 与 watermark 建立 replay 窗口。"""
         floor = self._target.first_sequences.get(thread_id)
         state = self._target.states.get(thread_id)
         if floor is None or state is None or state[0].stale:
             return
         self._target.replay_windows.setdefault(
             thread_id,
-            ProjectionReplayWindow(floor=floor, ceiling=state[0].projected_seq),
+            ProjectionReplayWindow(
+                floor=floor,
+                ceiling=state[0].projected_seq,
+                expected_items=expected_snapshot.items,
+            ),
         )
 
     async def load_snapshot(
@@ -487,8 +496,8 @@ class ProjectionTargetHandle:
             snapshot,
             history_reset=_history_was_reset(cached, current, snapshot),
         )
-        if snapshot.history_reset:
-            self._start_replay_window(thread_id)
+        if snapshot.history_reset and cached is not None:
+            self._start_replay_window(thread_id, cached)
         self._target.snapshots[thread_id] = snapshot
         self._target.scan_counts[thread_id] = self.scan_count(thread_id) + 1
         return snapshot

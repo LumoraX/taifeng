@@ -277,6 +277,55 @@ def _plan_materialization(
     return conflict if conflict is not None else _order_plan(history, projected)
 
 
+def _validate_generation_prefix(
+    history: list[ResponseItem],
+    plan: _MaterializationPlan,
+    projected: tuple[_ProjectedEnvelope, ...],
+    window: ProjectionReplayWindow,
+) -> _ProjectionConflict | None:
+    """要求本批写后的 history 仍是旧 healthy snapshot 的完整前缀。"""
+    recovered = (*history, *plan.items)
+    expected = window.expected_items
+    prefix_matches = len(recovered) <= len(expected) and recovered == expected[: len(recovered)]
+    complete_at_ceiling = projected[-1].seq < window.ceiling or recovered == expected
+    if prefix_matches and complete_at_ceiling:
+        return None
+    entry = projected[plan.first_missing] if plan.first_missing < len(projected) else projected[0]
+    return _ProjectionConflict(
+        "generation_replay_mismatch",
+        entry.record_id,
+        entry.seq,
+    )
+
+
+def _validated_materialization_plan(
+    history: list[ResponseItem],
+    projected: tuple[_ProjectedEnvelope, ...],
+    window: ProjectionReplayWindow | None,
+) -> _MaterializationPlan | _ProjectionConflict:
+    """组合普通物化与 generation expected-prefix 校验。"""
+    plan = _plan_materialization(history, projected)
+    if isinstance(plan, _ProjectionConflict):
+        if window is None:
+            return plan
+        return _ProjectionConflict(
+            "generation_replay_mismatch",
+            plan.record_id,
+            plan.seq,
+        )
+    if window is None:
+        return plan
+    return _validate_generation_prefix(history, plan, projected, window) or plan
+
+
+def _materialized_seq(
+    current: ProjectionResult,
+    window: ProjectionReplayWindow | None,
+) -> int:
+    """generation replay 中只报告本 generation 已验证的实际进度。"""
+    return current.projected_seq if window is None else window.progress or 0
+
+
 def _is_generation_replay(
     projected: tuple[_ProjectedEnvelope, ...],
     window: ProjectionReplayWindow | None,
@@ -348,9 +397,11 @@ class JournalConversationProjector:
         if blocked_seq is not None and all(entry.seq != blocked_seq for entry in projected):
             return current
         first_missing = 0
+        replay_window: ProjectionReplayWindow | None = None
         try:
             snapshot = await self._store.load_projection_snapshot(thread_id)
             replay_window = self._store.projection_replay_window(thread_id)
+            actual_seq = _materialized_seq(current, replay_window)
             invalid_replay = (
                 not _is_generation_replay(projected, replay_window)
                 if replay_window is not None
@@ -359,17 +410,17 @@ class JournalConversationProjector:
             if invalid_replay:
                 return self._set_stale(
                     thread_id,
-                    current.projected_seq,
+                    actual_seq,
                     "sequence_regression",
                     projected[0].record_id,
                     projected[0].seq,
                 )
             history = list(snapshot.items)
-            plan = _plan_materialization(history, projected)
+            plan = _validated_materialization_plan(history, projected, replay_window)
             if isinstance(plan, _ProjectionConflict):
                 return self._set_stale(
                     thread_id,
-                    current.projected_seq,
+                    actual_seq,
                     plan.failure_class,
                     plan.record_id,
                     plan.seq,
@@ -384,7 +435,7 @@ class JournalConversationProjector:
         except Exception as exc:  # noqa: BLE001  # materialization 不得冻结 Journal
             return self._set_stale(
                 thread_id,
-                current.projected_seq,
+                _materialized_seq(current, replay_window),
                 type(exc).__name__,
                 projected[first_missing].record_id if first_missing < len(projected) else None,
                 (
@@ -408,9 +459,14 @@ class JournalConversationProjector:
         observed_last_seq: int,
     ) -> ProjectionResult:
         """保存并返回 materialization 健康 watermark。"""
+        replay_window = self._store.projection_replay_window(thread_id)
         healthy = ProjectionResult(
             thread_id=thread_id,
-            projected_seq=max(current.projected_seq, observed_last_seq),
+            projected_seq=(
+                observed_last_seq
+                if replay_window is not None
+                else max(current.projected_seq, observed_last_seq)
+            ),
             stale=False,
         )
         self._store.record_projection_first_seq(thread_id, observed_first_seq)
