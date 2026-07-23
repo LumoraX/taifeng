@@ -60,10 +60,11 @@ class CancellationToken:
             child._mark_cancelled()
         return child
 
-    def detach(self) -> bool:
-        """安全解除当前 token 与直接 parent 的边，不改变自身或 subtree 取消状态。
+    def _detach_from_parent(self) -> bool:
+        """供 package owner 解除直接 parent 边，不改变自身或 subtree 取消状态。
 
-        root、已 detach，或 parent 已不再持有该 identity 时返回 ``False``。
+        这是 coordinator 生命周期清理边界，不是稳定 public cancellation API。
+        root、已脱链，或 parent 已不再持有该 identity 时返回 ``False``。
         """
         parent = self._parent
         if parent is None:

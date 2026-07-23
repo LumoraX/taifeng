@@ -34,25 +34,26 @@ def test_child_cancel_does_not_affect_parent() -> None:
     assert not parent.is_cancelled
 
 
-def test_detach_unlinks_only_exact_parent_child_edge() -> None:
-    """detach 只移除当前 token 与 parent 的边，不取消 token/subtree。"""
+def test_token_has_no_public_detach_api() -> None:
+    """parent edge 只能由 package 内部 owner 管理，不暴露稳定 public detach。"""
+    parent = CancellationToken(name="p")
+    child = parent.child("c")
+
+    assert not hasattr(child, "detach")
+    assert child in tuple(parent.descendants())
+
+
+def test_private_parent_unlink_is_idempotent_and_preserves_subtree() -> None:
+    """package-private 脱链只移除直接 parent edge，不取消 token/subtree。"""
     parent = CancellationToken(name="p")
     child = parent.child("c")
     grandchild = child.child("g")
 
-    assert child.detach() is True
-    assert child.detach() is False
+    assert child._detach_from_parent() is True  # noqa: SLF001
+    assert child._detach_from_parent() is False  # noqa: SLF001
     assert tuple(parent.descendants()) == ()
     assert tuple(child.descendants()) == (grandchild,)
     assert not child.is_cancelled and not grandchild.is_cancelled
-
-
-def test_root_and_unparented_tokens_cannot_detach() -> None:
-    """root 或已无 parent 的 token detach 是安全幂等 no-op。"""
-    root = CancellationToken(name="root")
-
-    assert root.detach() is False
-    assert tuple(root.descendants()) == ()
 
 
 def test_already_cancelled_parent_propagates_to_new_child() -> None:

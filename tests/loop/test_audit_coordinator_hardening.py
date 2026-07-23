@@ -14,6 +14,7 @@ from taifeng.conversation.journal import (
     Durability,
     JournalAck,
     JournalRecord,
+    JournalRecoveryRequiredError,
     ProjectionResult,
     RootThreadDescriptor,
     SessionDescriptor,
@@ -136,6 +137,36 @@ class _BlockingCore:
         )
 
 
+class _PrewriteCancelThenAckCore:
+    """遵循协议：raw cancel 仅表示 commit 未开始，后续调用可安全重试。"""
+
+    def __init__(self) -> None:
+        """初始化稳定 raw cancel 与调用计数。"""
+        self.cancellation = asyncio.CancelledError("secret=prewrite")
+        self.calls = 0
+
+    async def append_batch(
+        self,
+        records: tuple[JournalRecord, ...],
+        *,
+        lease: SessionLease,
+        expected_seq: int,
+    ) -> JournalAck:
+        """第一次在 mutation 前抛 raw cancel，第二次返回确定 ack。"""
+        self.calls += 1
+        if self.calls == 1:
+            raise self.cancellation
+        return JournalAck(
+            session_id=lease.session_id,
+            first_seq=expected_seq + 1,
+            last_seq=expected_seq + len(records),
+            record_ids=tuple(record.record_id for record in records),
+            tail_hash=_ZERO_HASH,
+            writer_epoch=lease.writer_epoch,
+            durability=Durability.COMMITTED,
+        )
+
+
 @pytest.mark.anyio
 async def test_cancel_while_waiting_append_lock_does_not_freeze_or_dispatch() -> None:
     """尚未调用 core 的 target cancel 只取消该操作，不冻结 Session。"""
@@ -165,25 +196,21 @@ async def test_cancel_while_waiting_append_lock_does_not_freeze_or_dispatch() ->
 
 
 @pytest.mark.anyio
-async def test_cancelled_error_after_core_invocation_freezes_then_reraises() -> None:
-    """进入 core 后的取消可能已 mutation，必须先冻结再原样抛出。"""
-    cancellation = asyncio.CancelledError("secret=after-mutation")
-    core = _StaticCore(cancellation)
+async def test_raw_cancel_from_conformant_core_is_prewrite_and_retryable() -> None:
+    """core raw cancel 按协议证明无 mutation；coordinator 原样抛出但保持健康。"""
+    core = _PrewriteCancelThenAckCore()
     coordinator = _coordinator(core)
 
     with pytest.raises(asyncio.CancelledError) as first:
         await coordinator.append(_record())
-    with pytest.raises(SessionAuditFrozenError) as append_frozen:
-        await coordinator.append(_record("rec_2"))
-    with pytest.raises(SessionAuditFrozenError) as effect_frozen:
-        await coordinator.ensure_effect_allowed()
+    await coordinator.ensure_effect_allowed()
+    ack = await coordinator.append(_record())
 
-    assert first.value is cancellation
-    assert core.mutated is True and core.calls == 1
-    assert coordinator.session_root_cancel.is_cancelled
-    assert append_frozen.value is effect_frozen.value
-    assert append_frozen.value.cause.class_name == "CancelledError"
-    assert "secret" not in str(append_frozen.value)
+    assert first.value is core.cancellation
+    assert core.calls == 2
+    assert ack.last_seq == coordinator.expected_seq == 4
+    assert coordinator.health is AuditHealth.HEALTHY
+    assert not coordinator.session_root_cancel.is_cancelled
 
 
 @pytest.mark.anyio
@@ -224,19 +251,25 @@ async def test_other_base_exception_after_core_invocation_returns_frozen_error()
 
 
 class _PrewriteCancelledAdapter(DefaultSyncFileAdapter):
-    """让真实 Jsonl core 在 append dispatch 内报告 prewrite cancel。"""
+    """让真实 Jsonl core 第一次 append 明确报告 prewrite cancel。"""
+
+    def __init__(self) -> None:
+        """初始化单次 prewrite cancel 开关。"""
+        self.cancelled = False
 
     def append_durable(self, path: Path, payload: bytes) -> None:
-        """以 core SPI marker 证明文件未写，但 coordinator 仍按 invocation unknown 冻结。"""
-        del path, payload
-        raise CommitNotStartedError(asyncio.CancelledError("secret=core-prewrite"))
+        """第一次证明未写并抛 cancel，第二次真实 durable append。"""
+        if not self.cancelled:
+            self.cancelled = True
+            raise CommitNotStartedError(asyncio.CancelledError("secret=core-prewrite"))
+        super().append_durable(path, payload)
 
 
 @pytest.mark.anyio
-async def test_real_jsonl_core_cancel_conforms_to_coordinator_freeze(
+async def test_real_jsonl_core_prewrite_cancel_stays_healthy_and_retries(
     tmp_path: Path,
 ) -> None:
-    """真实 core 进入 append 后抛取消时，coordinator 必须覆盖其较弱 prewrite 语义。"""
+    """真实 core raw cancel 只来自明确 prewrite，coordinator 不冻结且可重试。"""
     core = JsonlSessionJournalCore(
         tmp_path,
         sync_file_adapter=_PrewriteCancelledAdapter(),
@@ -261,11 +294,74 @@ async def test_real_jsonl_core_cancel_conforms_to_coordinator_freeze(
 
     with pytest.raises(asyncio.CancelledError):
         await coordinator.append(_record())
-    with pytest.raises(SessionAuditFrozenError):
-        await coordinator.ensure_effect_allowed()
+    await coordinator.ensure_effect_allowed()
+    ack = await coordinator.append(_record())
 
+    assert coordinator.health is AuditHealth.HEALTHY
+    assert ack.last_seq == coordinator.expected_seq == 4
+    assert not coordinator.session_root_cancel.is_cancelled
+
+
+class _PostDispatchCancelledAdapter(DefaultSyncFileAdapter):
+    """真实文件 mutation 后抛 cancel，验证 core 必须转换 recovery-required。"""
+
+    def append_durable(self, path: Path, payload: bytes) -> None:
+        """写入 BEGIN 后抛 cancel，制造 commit outcome unknown。"""
+        with path.open("ab") as stream:
+            stream.write(payload.splitlines(keepends=True)[0])
+            stream.flush()
+        raise asyncio.CancelledError("secret=postdispatch")
+
+
+@pytest.mark.anyio
+async def test_real_jsonl_postdispatch_cancel_becomes_recovery_and_freezes(
+    tmp_path: Path,
+) -> None:
+    """真实 core 不得泄漏 postdispatch raw cancel；RecoveryRequired 冻结 coordinator。"""
+    core = JsonlSessionJournalCore(
+        tmp_path,
+        sync_file_adapter=_PostDispatchCancelledAdapter(),
+    )
+    created = await core.create_session(
+        SessionDescriptor(
+            session_id="ses_1",
+            creation_operation_id="create_1",
+            writer_id="writer_1",
+            root_thread=RootThreadDescriptor(
+                thread_id="thr_root",
+                entry_skill_id="general",
+            ),
+            config={"model": "sim"},
+        )
+    )
+    coordinator = SessionAuditCoordinator(
+        core=core,
+        lease=created.lease,
+        expected_seq=created.ack.last_seq,
+    )
+
+    with pytest.raises(SessionAuditFrozenError) as raised:
+        await coordinator.append(_record())
+
+    assert raised.value.cause.code == "journal_recovery_required"
     assert coordinator.health is AuditHealth.RECOVERY_REQUIRED
     assert coordinator.expected_seq == 3
+
+
+@pytest.mark.anyio
+async def test_substitute_core_postdispatch_cancel_must_use_recovery_error() -> None:
+    """替代 core 的 postdispatch cancel 只能通过 RecoveryRequired 表达。"""
+    recovery = JournalRecoveryRequiredError(
+        "ses_1",
+        3,
+        cause="commit_outcome_unknown",
+    )
+    coordinator = _coordinator(_StaticCore(recovery))
+
+    with pytest.raises(SessionAuditFrozenError) as raised:
+        await coordinator.append(_record())
+
+    assert raised.value.cause.code == "journal_recovery_required"
 
 
 class _StringSubclass(str):
@@ -406,6 +502,33 @@ async def test_failed_unregister_keeps_target_attached_for_root_freeze() -> None
     unrelated = CancellationToken(name="unrelated")
 
     assert coordinator.unregister_target("turn_1", unrelated) is False
+    with pytest.raises(SessionAuditFrozenError):
+        await coordinator.append(_record())
+
+    assert target.is_cancelled
+
+
+@pytest.mark.anyio
+async def test_private_parent_edge_break_still_cancels_active_target_on_freeze() -> None:
+    """即使内部 parent edge 被破坏，freeze 仍显式取消 active target 及 subtree。"""
+    coordinator = _coordinator(_StaticCore(OSError("secret=io")))
+    target = coordinator.register_target("turn_1")
+    child = target.child("tool_1")
+    assert target._detach_from_parent() is True  # noqa: SLF001
+
+    with pytest.raises(SessionAuditFrozenError):
+        await coordinator.append(_record())
+
+    assert target.is_cancelled and child.is_cancelled
+
+
+@pytest.mark.anyio
+async def test_active_target_normally_remains_root_descendant_until_unregister() -> None:
+    """未 unregister 的正常 active target 保持 root lineage，并由 freeze 取消。"""
+    coordinator = _coordinator(_StaticCore(OSError("secret=io")))
+    target = coordinator.register_target("turn_1")
+
+    assert target in tuple(coordinator.session_root_cancel.descendants())
     with pytest.raises(SessionAuditFrozenError):
         await coordinator.append(_record())
 

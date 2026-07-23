@@ -92,7 +92,12 @@ class _JournalAppendCore(Protocol):
         lease: SessionLease,
         expected_seq: int,
     ) -> JournalAck:
-        """以 caller expected seq 原子追加一个 batch。"""
+        """以 caller expected seq 原子追加一个 batch。
+
+        契约：raw ``CancelledError`` 只能表示实现已证明 commit 未开始且无 mutation；
+        mutation/dispatch 后的取消必须收敛为确定 ``JournalAck``，或抛
+        ``JournalRecoveryRequiredError``。未知实现不得用 raw cancel 表达 post-dispatch 结果。
+        """
 
 
 class _InvalidJournalAckError(Exception):
@@ -264,7 +269,6 @@ class SessionAuditCoordinator:
             raise
         except BaseException as error:
             if isinstance(error, anyio.get_cancelled_exc_class()):
-                self.freeze(error)
                 raise
             failure = error
         if failure is not None:
@@ -354,6 +358,8 @@ class SessionAuditCoordinator:
         self._health = AuditHealth.RECOVERY_REQUIRED
         self._effect_gate_open = False
         self._session_root_cancel.cancel()
+        for target in tuple(self._targets.values()):
+            target.cancel()
         return frozen
 
     def _raise_if_frozen(self) -> None:
@@ -388,7 +394,7 @@ class SessionAuditCoordinator:
         if current is not token:
             return False
         self._targets.pop(target_id)
-        token.detach()
+        token._detach_from_parent()  # noqa: SLF001
         return True
 
     def cancel_target(self, target_id: str) -> bool:
