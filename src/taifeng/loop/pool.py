@@ -27,7 +27,11 @@ from taifeng.loop.audit_bootstrap import (
 from taifeng.loop.audit_config import AuditConfig, validate_audit_session_request
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
-from taifeng.loop.pool_lifecycle import close_engine_pool, release_pool_session
+from taifeng.loop.pool_lifecycle import (
+    EnginePoolSessionReleasingError,
+    close_engine_pool,
+    release_pool_session,
+)
 from taifeng.loop.pool_session import (
     create_started_pool_engine,
     finalize_resumed_engine,
@@ -675,6 +679,8 @@ class EnginePool:
                 self._audit,
                 resume_thread_id=resume_thread_id,
             )
+            if session_id in self._release_tasks:
+                raise EnginePoolSessionReleasingError(session_id)
             if session_id in self._engines:
                 # 既有 cache 命中：忽略 resume_thread_id（与既有语义一致）
                 return self._engines[session_id]

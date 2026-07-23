@@ -608,6 +608,50 @@ async def test_cancelled_release_caller_does_not_cancel_finish(
     await pool.close()
 
 
+@pytest.mark.asyncio
+async def test_get_or_create_rejects_session_while_release_is_in_flight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """release worker 已登记后不得返回旧 Engine 或重复 bootstrap。"""
+    events: list[str] = []
+    core = _JournalCore(events)
+    shutdown_started = asyncio.Event()
+    shutdown_continue = asyncio.Event()
+    monkeypatch.setattr(
+        pool_module,
+        "AgentEngine",
+        lambda **kwargs: _BlockingShutdownEngine(
+            events=events,
+            shutdown_started=shutdown_started,
+            shutdown_continue=shutdown_continue,
+            **kwargs,
+        ),
+    )
+    pool = _pool(tmp_path, core, events)
+    old_engine = await pool.get_or_create(
+        session_id="ses-release-race",
+        entry_skill_id="entry",
+    )
+    release = asyncio.create_task(pool.release("ses-release-race"))
+    await shutdown_started.wait()
+
+    with pytest.raises(RuntimeError) as caught:
+        await pool.get_or_create(
+            session_id="ses-release-race",
+            entry_skill_id="entry",
+        )
+
+    assert getattr(caught.value, "code", None) == "engine_pool_session_releasing"
+    assert "ses-release-race" in pool._release_tasks  # noqa: SLF001
+    assert pool._engines["ses-release-race"] is old_engine  # noqa: SLF001
+    assert events.count("journal_create") == 1
+    assert events.count("engine_construct") == 1
+    shutdown_continue.set()
+    await release
+    await pool.close()
+
+
 class _WatcherSpy:
     """记录 close 是否停止 watcher。"""
 

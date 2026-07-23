@@ -36,6 +36,17 @@ class EnginePoolReleaseError(RuntimeError):
         self.finish_result = finish_result
 
 
+class EnginePoolSessionReleasingError(RuntimeError):
+    """同一 Session 已进入 release，不能再返回或创建 Engine。"""
+
+    code = "engine_pool_session_releasing"
+
+    def __init__(self, session_id: str) -> None:
+        """只暴露稳定 code/session id。"""
+        super().__init__(f"{self.code}: session={session_id}")
+        self.session_id = session_id
+
+
 @dataclass(frozen=True, slots=True)
 class _ReleaseSnapshot:
     """release worker 独占的对象 identity 快照。"""
@@ -257,6 +268,7 @@ def _consume_task_exception(task: asyncio.Task[None]) -> None:
 
 __all__ = [
     "EnginePoolReleaseError",
+    "EnginePoolSessionReleasingError",
     "close_engine_pool",
     "release_pool_session",
 ]
