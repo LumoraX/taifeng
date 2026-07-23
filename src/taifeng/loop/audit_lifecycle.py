@@ -8,7 +8,17 @@ from typing import TYPE_CHECKING
 
 import anyio
 
+from taifeng.conversation.journal.models import ActorRef, JournalRecord
+from taifeng.conversation.journal.records import (
+    JournalIdentities,
+    JournalRecordFactory,
+    SessionEndedV1,
+    ThreadTerminalV1,
+)
+
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from taifeng.conversation.journal.records import StableErrorV1
 
 
@@ -41,9 +51,60 @@ class AcceptedWork:
         """幂等标记 accepted work 已完成或已确定收敛。"""
         self._completed.set()
 
+    @property
+    def is_completed(self) -> bool:
+        """返回 work 当前是否已收敛，不暴露内部 Event。"""
+        return self._completed.is_set()
+
     async def wait_completed(self) -> None:
         """等待该 accepted work 收敛。"""
         await self._completed.wait()
+
+
+class AdmissionReservation:
+    """shared lock 内登记、锁外 durable accept、再回锁结算的 reservation。"""
+
+    __slots__ = ("_accepted_work", "_settled", "work_id")
+
+    def __init__(self, work_id: str) -> None:
+        """创建 pending acceptance reservation。"""
+        self.work_id = work_id
+        self._settled = anyio.Event()
+        self._accepted_work: AcceptedWork | None = None
+
+    @property
+    def is_settled(self) -> bool:
+        """返回 durable acceptance 是否已有确定结果。"""
+        return self._settled.is_set()
+
+    @property
+    def accepted_work(self) -> AcceptedWork | None:
+        """返回 durable accepted work；failed/pending 均为 None。"""
+        return self._accepted_work
+
+    @property
+    def is_incomplete(self) -> bool:
+        """pending acceptance 或尚未完成的 accepted work 都属于未收敛证据。"""
+        return not self.is_settled or (
+            self._accepted_work is not None and not self._accepted_work.is_completed
+        )
+
+    def settle_accepted(self, work: AcceptedWork) -> None:
+        """在 coordinator lifecycle lock 内结算为 durable accepted。"""
+        if self.is_settled:
+            raise RuntimeError("admission reservation already settled")
+        self._accepted_work = work
+        self._settled.set()
+
+    def settle_failed(self) -> None:
+        """在 coordinator lifecycle lock 内结算为未 durable accept。"""
+        if self.is_settled:
+            raise RuntimeError("admission reservation already settled")
+        self._settled.set()
+
+    async def wait_settled(self) -> None:
+        """等待锁外 durable acceptance 回到 shared lock 完成结算。"""
+        await self._settled.wait()
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +157,57 @@ class FinishFuture:
         await self._completed.wait()
         assert self._result is not None
         return self._result
+
+
+def build_terminal_records(
+    *,
+    session_id: str,
+    requests: tuple[ThreadTerminalRequest, ...],
+    committed_thread_ids: Collection[str],
+    status: str,
+    reason: str,
+) -> tuple[JournalRecord, ...]:
+    """复用 V1 factory 生成排序、稳定 ordinal 的唯一 terminal batch。"""
+    operation_id = f"{session_id}:lifecycle:end"
+    factory = JournalRecordFactory(
+        session_id=session_id,
+        actor=ActorRef(kind="system", source="session_lifecycle"),
+        identities=JournalIdentities(session_id, "lifecycle", "finish"),
+    )
+    pending = sorted(
+        (
+            request
+            for request in requests
+            if request.thread_id not in committed_thread_ids
+        ),
+        key=lambda request: request.thread_id,
+    )
+    records = [
+        factory.build(
+            operation_id=operation_id,
+            record_type="thread_terminal",
+            payload=ThreadTerminalV1(
+                status=request.status,
+                end_reason=request.end_reason,
+                stable_error=request.stable_error,
+            ),
+            ordinal=ordinal,
+            thread_id=request.thread_id,
+        )
+        for ordinal, request in enumerate(pending)
+    ]
+    records.append(
+        factory.build(
+            operation_id=operation_id,
+            record_type="session_ended",
+            payload=SessionEndedV1(
+                status=status,
+                reason=reason,
+                audit_complete=True,
+            ),
+        )
+    )
+    return tuple(records)
 
 
 __all__ = [

@@ -16,6 +16,7 @@ from taifeng.conversation.journal import (
 )
 from taifeng.loop.audit import (
     AcceptedWork,
+    AuditHealth,
     SessionAuditCoordinator,
     SessionAuditFrozenError,
     SessionFinishingError,
@@ -83,6 +84,36 @@ class _LifecycleCore:
         self.close_calls.append(lease)
         if self.close_failure is not None:
             raise self.close_failure
+
+
+class _StatefulLifecycleCore(_LifecycleCore):
+    """共享 registry 的最小 stateful core，用于证明 per-Session close 隔离。"""
+
+    def __init__(self, *session_ids: str) -> None:
+        """登记多个 live Session。"""
+        super().__init__()
+        self.live_sessions = set(session_ids)
+
+    async def append_batch(
+        self,
+        records: tuple[JournalRecord, ...],
+        *,
+        lease: SessionLease,
+        expected_seq: int,
+    ) -> JournalAck:
+        """只允许仍 live 的目标 Session append。"""
+        if lease.session_id not in self.live_sessions:
+            raise RuntimeError("session writer closed")
+        return await super().append_batch(
+            records,
+            lease=lease,
+            expected_seq=expected_seq,
+        )
+
+    async def close_session(self, lease: SessionLease) -> None:
+        """仅移除目标 Session writer。"""
+        await super().close_session(lease)
+        self.live_sessions.remove(lease.session_id)
 
 
 def _lease(session_id: str = "ses_1") -> SessionLease:
@@ -179,8 +210,10 @@ async def test_finish_snapshots_durable_accepted_work_and_closes_admission() -> 
 
     assert result is not None
     assert result.audit_complete
-    assert coordinator.snapshot().lifecycle is SessionLifecycle.CLOSED
-    assert coordinator.snapshot().audit_complete is True
+    successful = coordinator.snapshot()
+    assert successful.lifecycle is SessionLifecycle.CLOSED
+    assert successful.audit_complete is True
+    assert successful.accepted_work_ids == ()
 
     accepted = False
     with pytest.raises(SessionFinishingError):
@@ -231,6 +264,57 @@ async def test_finish_cannot_cut_between_durable_accept_and_work_registration() 
 
 
 @pytest.mark.anyio
+async def test_duplicate_pending_work_id_is_rejected_without_waiting_or_accepting() -> None:
+    """pending reservation 已占用 work id，duplicate 不得等待或执行 durable callback。"""
+    core = _LifecycleCore()
+    coordinator = _coordinator(core)
+    accept_entered = anyio.Event()
+    release_accept = anyio.Event()
+    first_done = anyio.Event()
+    duplicate_done = anyio.Event()
+    first_work: AcceptedWork | None = None
+    duplicate_error: BaseException | None = None
+    duplicate_called = False
+
+    async def first_accept() -> None:
+        accept_entered.set()
+        await release_accept.wait()
+
+    async def first() -> None:
+        nonlocal first_work
+        first_work = await coordinator.admit_work("sub_same", first_accept)
+        first_done.set()
+
+    async def duplicate_accept() -> None:
+        nonlocal duplicate_called
+        duplicate_called = True
+
+    async def duplicate() -> None:
+        nonlocal duplicate_error
+        try:
+            await coordinator.admit_work("sub_same", duplicate_accept)
+        except BaseException as error:
+            duplicate_error = error
+        finally:
+            duplicate_done.set()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(first)
+        await accept_entered.wait()
+        tasks.start_soon(duplicate)
+        with anyio.move_on_after(0.05) as deadline:
+            await duplicate_done.wait()
+        release_accept.set()
+        await first_done.wait()
+
+    assert not deadline.cancel_called
+    assert isinstance(duplicate_error, ValueError)
+    assert not duplicate_called
+    assert first_work is not None
+    first_work.complete()
+
+
+@pytest.mark.anyio
 async def test_concurrent_finish_callers_share_result_terminal_batch_and_close() -> None:
     """并发与成功后的 finish 必须复用同一结果，且只 append/close 一次。"""
     core = _LifecycleCore(pause_terminal=True)
@@ -269,6 +353,29 @@ async def test_concurrent_finish_callers_share_result_terminal_batch_and_close()
         "ses_1:lifecycle:end:session_ended:none:0",
     ]
     assert terminal[-1].payload["audit_complete"] is True
+
+
+@pytest.mark.anyio
+async def test_close_failure_after_terminal_ack_fails_closed_and_preserves_ack() -> None:
+    """terminal 已 definite ack 时 close 失败必须 freeze、保留 ids 且不重试 close。"""
+    core = _LifecycleCore(close_failure=OSError("close-secret"))
+    coordinator = _coordinator(core)
+
+    result = await coordinator.finish(thread_terminals=_threads(), reason="released")
+
+    expected_ids = tuple(
+        record.record_id for record in core.append_calls[0].records
+    )
+    assert not result.audit_complete
+    assert result.terminal_record_ids == expected_ids
+    assert result.failure is not None
+    assert result.failure.code == "journal_io_error"
+    assert coordinator.expected_seq == 6
+    snapshot = coordinator.snapshot()
+    assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
+    assert not snapshot.effect_gate_open
+    assert snapshot.root_cancelled
+    assert core.close_calls == [_lease()]
 
 
 @pytest.mark.anyio
@@ -403,10 +510,67 @@ async def test_finish_owner_cancellation_cannot_strand_shared_future() -> None:
 
 
 @pytest.mark.anyio
-async def test_unfinished_accepted_work_times_out_to_incomplete_emergency_close() -> None:
-    """accepted work 永不收敛时，bounded finish 不得永久停在 FINISHING。"""
+async def test_pending_durable_accept_cannot_hold_finish_lock_past_deadline() -> None:
+    """pending reservation 必须让 cancelled finish 在 deadline 内 fail-closed 收敛。"""
     core = _LifecycleCore()
     coordinator = _coordinator(core, finish_timeout=0.01)
+    accept_entered = anyio.Event()
+    release_accept = anyio.Event()
+    admission_done = anyio.Event()
+    finish_done = anyio.Event()
+    admission_error: BaseException | None = None
+    finish_result = None
+
+    async def durable_accept() -> None:
+        accept_entered.set()
+        await release_accept.wait()
+
+    async def admit() -> None:
+        nonlocal admission_error
+        try:
+            await coordinator.admit_work("sub_pending_accept", durable_accept)
+        except BaseException as error:
+            admission_error = error
+        finally:
+            admission_done.set()
+
+    async def finish() -> None:
+        nonlocal finish_result
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            finish_result = await coordinator.finish(
+                thread_terminals=_threads(),
+                reason="released",
+            )
+        finish_done.set()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(admit)
+        await accept_entered.wait()
+        tasks.start_soon(finish)
+        with anyio.move_on_after(0.05) as deadline:
+            await finish_done.wait()
+        release_accept.set()
+        await admission_done.wait()
+
+    assert not deadline.cancel_called
+    assert finish_result is not None
+    assert not finish_result.audit_complete
+    snapshot = coordinator.snapshot()
+    assert snapshot.lifecycle is SessionLifecycle.CLOSED
+    assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
+    assert snapshot.root_cancelled
+    assert snapshot.accepted_work_ids == ("sub_pending_accept",)
+    assert isinstance(admission_error, SessionFinishingError)
+    assert core.close_calls == [_lease()]
+
+
+@pytest.mark.anyio
+async def test_unfinished_work_timeout_fails_closed_and_preserves_incomplete_snapshot() -> None:
+    """work timeout 必须 freeze/root cancel，并保留未收敛 work introspection。"""
+    core = _LifecycleCore()
+    coordinator = _coordinator(core, finish_timeout=0.01)
+    target = coordinator.register_target("turn_in_flight")
 
     async def durable_accept() -> None:
         return None
@@ -417,9 +581,71 @@ async def test_unfinished_accepted_work_times_out_to_incomplete_emergency_close(
         result = await coordinator.finish(thread_terminals=_threads(), reason="released")
 
     assert not result.audit_complete
+    assert result.failure is not None
+    assert result.failure.code == "accepted_work_convergence_timeout"
     assert not core.append_calls
     assert core.close_calls == [_lease()]
-    assert coordinator.snapshot().lifecycle is SessionLifecycle.CLOSED
+    snapshot = coordinator.snapshot()
+    assert snapshot.lifecycle is SessionLifecycle.CLOSED
+    assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
+    assert not snapshot.effect_gate_open
+    assert snapshot.root_cancelled
+    assert target.is_cancelled
+    assert snapshot.first_failure == result.failure
+    assert snapshot.accepted_work_ids == ("sub_never_done",)
+
+
+@pytest.mark.anyio
+async def test_external_freeze_during_terminal_append_cannot_publish_success() -> None:
+    """definite terminal ack 可推进 seq，但 append 期间 freeze 必须发布 incomplete。"""
+    core = _LifecycleCore(pause_terminal=True)
+    coordinator = _coordinator(core)
+    result = None
+
+    async def finish() -> None:
+        nonlocal result
+        result = await coordinator.finish(thread_terminals=_threads(), reason="released")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(finish)
+        await core.terminal_entered.wait()
+        frozen = coordinator.freeze(OSError("external-freeze-secret"))
+        core.release_terminal.set()
+
+    assert result is not None
+    assert not result.audit_complete
+    assert result.terminal_record_ids == tuple(
+        record.record_id for record in core.append_calls[0].records
+    )
+    assert result.failure == frozen.cause
+    assert result.failure.code == "journal_io_error"
+    assert coordinator.expected_seq == 6
+    assert coordinator.snapshot().audit_complete is False
+    assert core.close_calls == [_lease()]
+
+
+@pytest.mark.anyio
+async def test_terminal_append_timeout_fails_closed_before_emergency_close() -> None:
+    """terminal append raw cancel/timeout 也必须统一 freeze，不能 CLOSED+healthy。"""
+    core = _LifecycleCore(pause_terminal=True)
+    coordinator = _coordinator(core, finish_timeout=0.01)
+
+    with anyio.fail_after(1):
+        result = await coordinator.finish(
+            thread_terminals=_threads(),
+            reason="released",
+        )
+
+    assert not result.audit_complete
+    assert result.terminal_record_ids == ()
+    snapshot = coordinator.snapshot()
+    assert snapshot.lifecycle is SessionLifecycle.CLOSED
+    assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
+    assert not snapshot.effect_gate_open
+    assert snapshot.root_cancelled
+    assert snapshot.first_failure == result.failure
+    assert coordinator.expected_seq == 3
+    assert core.close_calls == [_lease()]
 
 
 @pytest.mark.anyio
@@ -452,3 +678,20 @@ async def test_finishing_one_session_does_not_mutate_another_session() -> None:
     assert first.snapshot().lifecycle is SessionLifecycle.CLOSED
     assert first_core.close_calls == [_lease("ses_1")]
     assert second_core.close_calls == [_lease("ses_2")]
+
+
+@pytest.mark.anyio
+async def test_shared_stateful_core_close_removes_only_target_session() -> None:
+    """共享 core 中一个 coordinator finish 不得关闭另一个 Session writer。"""
+    core = _StatefulLifecycleCore("ses_1", "ses_2")
+    first = _coordinator(core, session_id="ses_1")
+    second = _coordinator(core, session_id="ses_2")
+
+    first_result = await first.finish(thread_terminals=(), reason="released")
+
+    assert first_result.audit_complete
+    assert core.live_sessions == {"ses_2"}
+    second_result = await second.finish(thread_terminals=(), reason="released")
+    assert second_result.audit_complete
+    assert core.live_sessions == set()
+    assert core.close_calls == [_lease("ses_1"), _lease("ses_2")]
