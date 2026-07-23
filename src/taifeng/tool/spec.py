@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from taifeng.llm.types import ToolSpecRef
 
@@ -81,15 +81,6 @@ class ToolSpec:
     用于「内部批量调用」类内置工具（对标 hermes execute_code 的 refund 语义）。
     仅 spec 静态声明 + 内核 dispatch 路径生效，不暴露为 LLM 可触发语义；
     失败轮照常计费。本内核不为任何既有内置工具默认开启（使用方决策）。"""
-
-    effect_kind: Literal["read", "write", "external"] | None = None
-    """审计 effect 分类；legacy 可缺省，strict audit 要求显式声明。"""
-
-    reconciliation: Literal["none", "idempotency_key", "manual"] | None = None
-    """审计恢复策略；legacy 可缺省，strict audit 要求显式声明。"""
-
-    can_suspend: bool | None = None
-    """是否可能挂起；legacy 可缺省，strict audit 仅接受显式 ``False``。"""
 
     def to_ref(self) -> ToolSpecRef:
         return ToolSpecRef(

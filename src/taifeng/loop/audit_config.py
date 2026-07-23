@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from types import MemberDescriptorType
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
@@ -13,9 +16,9 @@ if TYPE_CHECKING:
         SessionDescriptor,
         SessionLease,
     )
-    from taifeng.llm.client import ModelClient
+    from taifeng.llm.client import ModelClient, ModelClientSession
+    from taifeng.loop.cancellation import CancellationToken
     from taifeng.skill.registry import SkillSnapshot
-    from taifeng.tool.spec import ToolSpec
 
 
 class AuditJournalCore(Protocol):
@@ -43,57 +46,41 @@ class AuditJournalCore(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
-class ModelAttemptCapability:
-    """绑定具体 ModelClient 的静态 attempt 边界声明。
+class AttemptObservableModelClient(ABC):
+    """Task 7 observer adapter 必须 nominal 实现的静态 client 边界。
 
-    本类型只表达 provider 已知的“一次 stream 对应一次网络 attempt”边界，不实现
-    observer、dispatch 或网络逻辑。Task 7 接入 observer 后将消费同一显式边界。
+    Task 5 只声明 observer-aware session 注入点，不实现 observer、dispatch 或网络逻辑。
+    普通 ModelClient 即使拥有同名属性，也不会自动满足这个 nominal 边界。
     """
 
-    client: ModelClient
-    mode: Literal["one_attempt_per_stream"] = "one_attempt_per_stream"
+    @abstractmethod
+    def session(
+        self,
+        *,
+        cancel: CancellationToken,
+        model: str | None = None,
+    ) -> ModelClientSession:
+        """创建普通 turn 级 session。"""
 
-    @classmethod
-    def declare_single_attempt(cls, client: ModelClient) -> ModelAttemptCapability:
-        """为一个具体 client 显式声明单 attempt stream 能力。"""
-        return cls(client=client)
-
-
-@dataclass(frozen=True, slots=True)
-class AuditCapabilities:
-    """EnginePool 后续可从全部注入依赖构造的不可变静态能力快照。"""
-
-    model_client: ModelClient
-    skill_snapshot: SkillSnapshot
-    model_attempt: ModelAttemptCapability | None = None
-    tools: tuple[ToolSpec, ...] = ()
-    resume_thread_id: str | None = None
-    custom_store: object | None = None
-    custom_directory: object | None = None
-    index_hook: object | None = None
-    hooks: object | None = None
-    permission_policy: object | None = None
-    hitl_prompter: object | None = None
-    compressor: object | None = None
-    memory_store: object | None = None
-    memory_query_builder: object | None = None
-    pinned_state_sources: tuple[object, ...] = ()
-    instruction_layers: tuple[object, ...] = ()
-    detached_spawn_enabled: bool = False
-    barrier_enabled: bool = False
-    peer_messaging_enabled: bool = False
+    @abstractmethod
+    def session_with_attempt_observer(
+        self,
+        *,
+        cancel: CancellationToken,
+        attempt_observer: object,
+        model: str | None = None,
+    ) -> ModelClientSession:
+        """创建显式绑定 attempt observer 的 turn 级 session。"""
 
 
 @dataclass(frozen=True, slots=True)
 class AuditConfig:
-    """strict audit bootstrap 的全部显式注入配置。"""
+    """调用方注入的 strict audit per-pool 配置。"""
 
     journal_core: AuditJournalCore
     writer_id: str
     max_attachment_bytes: int
     max_total_attachment_bytes: int
-    capabilities: AuditCapabilities
 
     def __post_init__(self) -> None:
         """拒绝不能形成稳定 bootstrap/附件边界的基础配置。"""
@@ -103,6 +90,36 @@ class AuditConfig:
             raise ValueError("audit_attachment_limit_invalid")
         if self.max_total_attachment_bytes <= 0:
             raise ValueError("audit_total_attachment_limit_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditStaticInputs:
+    """EnginePool 调用点提供的实际 resolved dependencies 快照。"""
+
+    model_client: ModelClient
+    skill_snapshot: SkillSnapshot
+    tools: tuple[object, ...] = ()
+    custom_store: object | None = None
+    custom_directory: object | None = None
+    index_hook: object | None = None
+    hooks: object | None = None
+    permission_policy: object | None = None
+    permission_prompter: object | None = None
+    hitl_enabled: bool = False
+    compressor: object | None = None
+    memory_store: object | None = None
+    memory_query_builder: object | None = None
+    pinned_state_sources: tuple[object, ...] = ()
+    instruction_layers: tuple[object, ...] = ()
+    detached_spawn_enabled: bool = False
+    barrier_enabled: bool = False
+    peer_messaging_enabled: bool = False
+    failure_policy: object | None = None
+    failure_suspension_enabled: bool = True
+    failure_suspend_ttl_seconds: int | None = None
+    failure_suspend_max_auto_retries: int | None = None
+    failure_suspend_on_expire: Literal["abort", "retry"] = "abort"
+    skill_suspension_enabled: bool = True
 
 
 class AuditCapabilityError(ValueError):
@@ -115,16 +132,16 @@ class AuditCapabilityError(ValueError):
 
 
 _OBJECT_CAPABILITY_RULES = (
-    ("resume_thread_id", "audit_resume_unsupported"),
     ("custom_store", "audit_custom_store_unsupported"),
     ("custom_directory", "audit_custom_directory_unsupported"),
     ("index_hook", "audit_index_hook_unsupported"),
     ("hooks", "audit_hooks_unsupported"),
     ("permission_policy", "audit_permission_unsupported"),
-    ("hitl_prompter", "audit_hitl_unsupported"),
+    ("permission_prompter", "audit_hitl_unsupported"),
     ("compressor", "audit_compressor_unsupported"),
     ("memory_store", "audit_memory_unsupported"),
     ("memory_query_builder", "audit_memory_query_builder_unsupported"),
+    ("failure_policy", "audit_failure_policy_unsupported"),
 )
 
 _COLLECTION_CAPABILITY_RULES = (
@@ -133,91 +150,137 @@ _COLLECTION_CAPABILITY_RULES = (
 )
 
 _BOOLEAN_CAPABILITY_RULES = (
+    ("hitl_enabled", "audit_hitl_unsupported"),
     ("detached_spawn_enabled", "audit_spawn_unsupported"),
     ("barrier_enabled", "audit_barrier_unsupported"),
     ("peer_messaging_enabled", "audit_peer_unsupported"),
+    ("failure_suspension_enabled", "audit_failure_suspension_unsupported"),
+    ("skill_suspension_enabled", "audit_skill_suspension_unsupported"),
 )
 
 _SPAWN_TOOL_NAMES = frozenset({"spawn_skill", "kill_skill", "run_in_background"})
 _BARRIER_TOOL_NAMES = frozenset({"await_skills", "join_skill", "wait_for_task"})
 _PEER_TOOL_NAMES = frozenset({"send_message", "wait_peer"})
-_EFFECT_KINDS = frozenset({"read", "write", "external"})
-_RECONCILIATION_MODES = frozenset({"none", "idempotency_key", "manual"})
+_HITL_TOOL_NAMES = frozenset({"request_user_input"})
+_EFFECT_KINDS = frozenset(
+    {"pure", "idempotent", "reconcilable", "external_non_idempotent"}
+)
+_MISSING = object()
 
 
-def validate_audit_config(config: AuditConfig | None) -> None:
-    """验证 strict audit 静态能力；``None`` 保持 legacy 路径无变化。"""
+def validate_audit_config(
+    config: AuditConfig | None,
+    *,
+    static_inputs: AuditStaticInputs | None = None,
+) -> None:
+    """验证调用点传入的 resolved dependencies；不访问 Journal core。"""
     if config is None:
         return
-    capabilities = config.capabilities
-    _validate_unsupported_fields(capabilities)
-    _validate_model_capability(capabilities)
-    _validate_skill_capability(capabilities)
-    _validate_tool_capabilities(capabilities.tools)
+    if static_inputs is None:
+        raise AuditCapabilityError("audit_static_inputs_required")
+    _validate_unsupported_fields(static_inputs)
+    _validate_model_capability(static_inputs)
+    _validate_skill_capability(static_inputs)
+    _validate_tool_capabilities(static_inputs.tools)
 
 
-def _validate_unsupported_fields(capabilities: AuditCapabilities) -> None:
-    """按稳定优先级拒绝未接入的 store/context/spawn 能力。"""
+def validate_audit_session_request(
+    config: AuditConfig | None,
+    *,
+    resume_thread_id: str | None,
+) -> None:
+    """在 per-session get_or_create 边界拒绝 strict audit resume。"""
+    if config is not None and resume_thread_id is not None:
+        raise AuditCapabilityError("audit_resume_unsupported")
+
+
+def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
+    """按稳定优先级拒绝未接入的 store/context/suspension 能力。"""
     for field_name, code in _OBJECT_CAPABILITY_RULES:
-        if getattr(capabilities, field_name) is not None:
+        if getattr(inputs, field_name) is not None:
             raise AuditCapabilityError(code)
     for field_name, code in _COLLECTION_CAPABILITY_RULES:
-        if getattr(capabilities, field_name):
+        if getattr(inputs, field_name):
             raise AuditCapabilityError(code)
     for field_name, code in _BOOLEAN_CAPABILITY_RULES:
-        if getattr(capabilities, field_name) is True:
+        if getattr(inputs, field_name) is True:
             raise AuditCapabilityError(code)
+    if (
+        inputs.failure_suspend_ttl_seconds is not None
+        or inputs.failure_suspend_max_auto_retries is not None
+        or inputs.failure_suspend_on_expire != "abort"
+    ):
+        raise AuditCapabilityError("audit_failure_suspension_unsupported")
 
 
-def _validate_model_capability(capabilities: AuditCapabilities) -> None:
-    """只接受绑定当前 client 的显式静态 attempt 声明。"""
-    marker = capabilities.model_attempt
-    if not isinstance(marker, ModelAttemptCapability):
+def _validate_model_capability(inputs: AuditStaticInputs) -> None:
+    """只接受 nominal observer-aware ModelClient 边界。"""
+    if not isinstance(inputs.model_client, AttemptObservableModelClient):
         raise AuditCapabilityError("audit_model_attempt_unobservable")
-    if marker.client is not capabilities.model_client:
-        raise AuditCapabilityError("audit_model_attempt_client_mismatch")
 
 
-def _validate_skill_capability(capabilities: AuditCapabilities) -> None:
+def _validate_skill_capability(inputs: AuditStaticInputs) -> None:
     """拒绝 snapshot 中任一已加载的声明式 orchestration。"""
-    if any(skill.orchestration is not None for skill in capabilities.skill_snapshot.skills):
+    if any(skill.orchestration is not None for skill in inputs.skill_snapshot.skills):
         raise AuditCapabilityError("audit_orchestration_unsupported")
 
 
-def _validate_tool_capabilities(tools: tuple[ToolSpec, ...]) -> None:
-    """拒绝 spawn/peer Tool，并校验 strict audit metadata。"""
-    names = frozenset(tool.name for tool in tools)
-    if names & _SPAWN_TOOL_NAMES:
-        raise AuditCapabilityError("audit_spawn_unsupported")
-    if names & _BARRIER_TOOL_NAMES:
-        raise AuditCapabilityError("audit_barrier_unsupported")
-    if names & _PEER_TOOL_NAMES:
-        raise AuditCapabilityError("audit_peer_unsupported")
+def _validate_tool_capabilities(tools: tuple[object, ...]) -> None:
+    """拒绝静态 Tool 能力并 fail-closed 校验内部 audit metadata view。"""
     for tool in tools:
+        name = _static_tool_attribute(tool, "name")
+        if not isinstance(name, str):
+            raise AuditCapabilityError("audit_tool_metadata_incomplete")
+        if name in _SPAWN_TOOL_NAMES:
+            raise AuditCapabilityError("audit_spawn_unsupported")
+        if name in _BARRIER_TOOL_NAMES:
+            raise AuditCapabilityError("audit_barrier_unsupported")
+        if name in _PEER_TOOL_NAMES:
+            raise AuditCapabilityError("audit_peer_unsupported")
+        if name in _HITL_TOOL_NAMES:
+            raise AuditCapabilityError("audit_hitl_unsupported")
         _validate_tool_metadata(tool)
 
 
-def _validate_tool_metadata(tool: ToolSpec) -> None:
-    """校验单个 Tool 的 effect/reconciliation/suspension 声明。"""
-    if tool.effect_kind is None:
-        raise AuditCapabilityError("audit_tool_effect_kind_missing")
-    if tool.effect_kind not in _EFFECT_KINDS:
+def _validate_tool_metadata(tool: object) -> None:
+    """按 ADR 0025 校验单个 Tool metadata，不执行任意 descriptor。"""
+    effect_kind = _static_tool_attribute(tool, "effect_kind")
+    idempotency_key = _static_tool_attribute(tool, "idempotency_key")
+    reconciliation = _static_tool_attribute(tool, "reconciliation")
+    can_suspend = _static_tool_attribute(tool, "can_suspend")
+    if any(
+        value is _MISSING
+        for value in (effect_kind, idempotency_key, reconciliation, can_suspend)
+    ):
+        raise AuditCapabilityError("audit_tool_metadata_incomplete")
+    if not isinstance(effect_kind, str) or effect_kind not in _EFFECT_KINDS:
         raise AuditCapabilityError("audit_tool_effect_kind_invalid")
-    if tool.reconciliation is None:
-        raise AuditCapabilityError("audit_tool_reconciliation_missing")
-    if tool.reconciliation not in _RECONCILIATION_MODES:
-        raise AuditCapabilityError("audit_tool_reconciliation_invalid")
-    if tool.can_suspend is None:
-        raise AuditCapabilityError("audit_tool_suspension_metadata_missing")
-    if tool.can_suspend is not False:
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str) or not idempotency_key
+    ):
+        raise AuditCapabilityError("audit_tool_metadata_incomplete")
+    if not isinstance(reconciliation, str) or not reconciliation:
+        raise AuditCapabilityError("audit_tool_metadata_incomplete")
+    if can_suspend is not False:
         raise AuditCapabilityError("audit_tool_suspension_unsupported")
 
 
+def _static_tool_attribute(tool: object, attribute: str) -> object:
+    """静态读取实例字段；property/任意 descriptor 不执行并视为缺失。"""
+    value = inspect.getattr_static(tool, attribute, _MISSING)
+    if isinstance(value, MemberDescriptorType):
+        return value.__get__(tool, type(tool))
+    if isinstance(value, property) or inspect.isroutine(value):
+        return _MISSING
+    return value
+
+
 __all__ = [
-    "AuditCapabilities",
+    "AttemptObservableModelClient",
     "AuditCapabilityError",
     "AuditConfig",
     "AuditJournalCore",
-    "ModelAttemptCapability",
+    "AuditStaticInputs",
     "validate_audit_config",
+    "validate_audit_session_request",
 ]
