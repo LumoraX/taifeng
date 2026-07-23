@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from taifeng.conversation.models import ResponseItem
     from taifeng.conversation.store import MessageStore
+    from taifeng.conversation.transcript import JsonlMessageStore
     from taifeng.loop.audit_config import AuditConfig
     from taifeng.loop.engine import AgentEngine
     from taifeng.loop.pool import EnginePool
@@ -39,6 +40,7 @@ async def prepare_pool_session(
     *,
     audit: AuditConfig | None,
     store: MessageStore,
+    projection_store: JsonlMessageStore | None,
     session_id: str,
     entry_skill_id: str,
     cwd: str | None,
@@ -48,7 +50,7 @@ async def prepare_pool_session(
     if audit is not None:
         state = await bootstrap_audited_session(
             config=audit,
-            store=store,
+            projection_store=projection_store,
             session_id=session_id,
             entry_skill_id=entry_skill_id,
             cwd=cwd,
@@ -143,7 +145,11 @@ async def create_started_pool_engine(
         task = asyncio.create_task(engine.run(engine_cancel))
     except BaseException as exc:
         if state is not None:
-            await fail_audited_bootstrap(state, exc)
+            await fail_audited_bootstrap(
+                state,
+                exc,
+                reason="engine_bootstrap_failed",
+            )
         raise
     return engine, task
 

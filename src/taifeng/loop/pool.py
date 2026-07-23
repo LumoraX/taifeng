@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -19,10 +20,13 @@ from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
 from taifeng.conversation.store import MessageStore
 from taifeng.conversation.transcript import JsonlMessageStore
 from taifeng.loop.audit_bootstrap import (
+    AuditSessionReleaseError,
+    AuditStoreBinding,
     ensure_legacy_resume_allowed,
     validate_pool_audit,
 )
 from taifeng.loop.audit_config import AuditConfig, validate_audit_session_request
+from taifeng.loop.audit_lifecycle import ThreadTerminalRequest
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.pool_session import (
@@ -78,13 +82,8 @@ class _HookEmittingStore(MessageStore):
         self._inner = inner
         self._runner = runner
         self._directory = directory
-        self.audit_custom_directory = custom_directory
-        self.audit_index_hook = index_hook
-
-    @property
-    def audit_projection_store(self) -> JsonlMessageStore | None:
-        """返回内建 wrapper 包裹的默认 JSONL 投影 store。"""
-        return self._inner if isinstance(self._inner, JsonlMessageStore) else None
+        self._audit_custom_directory = custom_directory
+        self._audit_index_hook = index_hook
 
     async def create_thread(
         self,
@@ -143,14 +142,63 @@ class _HookEmittingStore(MessageStore):
 
     async def audited_projection_marker(self, thread_id: str) -> object | None:
         """把 metadata-only audited marker 检查委派给默认 JSONL store。"""
-        store = self.audit_projection_store
-        if store is None:
+        if type(self._inner) is not JsonlMessageStore:
             return None
-        return await store.audited_projection_marker(thread_id)
+        return await self._inner.audited_projection_marker(thread_id)
 
     async def close(self) -> None:
         # 不在此处 shutdown runner —— 由 pool.close 统一调度（先 await hook，后关 store）
         await self._inner.close()
+
+
+def _resolve_store_binding(
+    audit: AuditConfig | None,
+    store: MessageStore,
+) -> AuditStoreBinding:
+    """只从 exact nominal 类型冻结 store 能力，不执行任意 descriptor。"""
+    if audit is None:
+        legacy_projection: JsonlMessageStore | None = None
+        if isinstance(store, JsonlMessageStore):
+            legacy_projection = store
+        elif (
+            type(store) is _HookEmittingStore
+            and isinstance(store._inner, JsonlMessageStore)  # noqa: SLF001
+        ):
+            legacy_projection = store._inner  # noqa: SLF001
+        return AuditStoreBinding(legacy_projection, None, None, None)
+    projection_store: JsonlMessageStore | None = None
+    if type(store) is JsonlMessageStore:
+        projection_store = store
+    elif (
+        type(store) is _HookEmittingStore
+        and type(store._inner) is JsonlMessageStore  # noqa: SLF001
+    ):
+        projection_store = store._inner  # noqa: SLF001
+    if projection_store is None:
+        return AuditStoreBinding(None, store, None, None)
+    if type(store) is _HookEmittingStore:
+        return AuditStoreBinding(
+            projection_store,
+            None,
+            store._audit_custom_directory,  # noqa: SLF001
+            store._audit_index_hook,  # noqa: SLF001
+        )
+    return AuditStoreBinding(projection_store, None, None, None)
+
+
+async def _cleanup_failed_factory(
+    *,
+    store: MessageStore,
+    hook_runner: HookRunner,
+    owned_directory: SqliteThreadDirectory | None,
+) -> None:
+    """构造期静态门禁失败时尽力释放本 factory 新建的全部资源。"""
+    cleanup = [hook_runner.shutdown(grace_seconds=5.0), store.close()]
+    if owned_directory is not None:
+        cleanup.append(owned_directory.close())
+    for operation in cleanup:
+        with suppress(BaseException):
+            await operation
 
 
 class EnginePool:
@@ -323,12 +371,13 @@ class EnginePool:
         # 透传到每个 AgentEngine → TurnRunner（驱动 prompt 文本 + 工具裁剪）。
         self._recall_threshold = recall_threshold
         self._audit = audit
+        self._audit_store_binding = _resolve_store_binding(audit, store)
         validate_pool_audit(
             audit,
             model_client=self._model_client,
             skill_snapshot=self._registry.snapshot(),
             tools=self._tool_registry,
-            store=self._store,
+            store_binding=self._audit_store_binding,
             compressors=self._compressors,
             hooks=self._hooks,
             permission_policy=self._permission_policy,
@@ -442,16 +491,18 @@ class EnginePool:
         # 这里 thread_directory 主要用于 hook proxy 的 metadata 查询
         # （_HookEmittingStore.create_thread）。
         directory: ThreadDirectory
+        owned_directory: SqliteThreadDirectory | None = None
         if thread_directory is not None:
             directory = thread_directory
         else:
             # 默认从 storage_dir 推 SqliteThreadDirectory
             # （与 JsonlMessageStore 内部用同一个 db_path）。
-            directory = SqliteThreadDirectory(
+            owned_directory = SqliteThreadDirectory(
                 resolved_storage / "taifeng-index.db",
                 threads_dir=resolved_storage,
                 sink=sink,
             )
+            directory = owned_directory
 
         # 构造 HookRunner（若用户传了 index_hook，则真正发挥作用；否则用 NoopIndexHook 等价空操作）
         actual_hook = index_hook if index_hook is not None else NoopIndexHook()
@@ -505,54 +556,60 @@ class EnginePool:
                 SlidingWindowStrategy(),
             ]
 
-        pool = cls(
-            skill_registry=registry,
-            model_client=model_client,
-            store=wrapped_store,
-            tool_registry=tools,
-            compressors=compressors,
-            budget=budget,
-            dispatch_policy=dispatch_policy,
-            outcome_judge=outcome_judge,
-            hooks=hooks,
-            max_iterations=max_iterations,
-            denial_breaker_config=denial_breaker_config,
-            doom_loop_config=doom_loop_config,
-            failure_policy=failure_policy,
-            failure_suspend_ttl_seconds=failure_suspend_ttl_seconds,
-            failure_suspend_max_auto_retries=failure_suspend_max_auto_retries,
-            failure_suspend_on_expire=failure_suspend_on_expire,
-            now_factory=now_factory,
-            max_parallel_tool_calls=max_parallel_tool_calls,
-            reasoning_passback=reasoning_passback,
-            enable_request_capture=enable_request_capture,
-            instruction_layers=instruction_layers,
-            hook_runner=hook_runner,
-            script_executors=script_executors,
-            event_queue_size=event_queue_size,
-            event_high_water_ratio=event_high_water_ratio,
-            event_low_water_ratio=event_low_water_ratio,
-            event_warn_cooldown_sec=event_warn_cooldown_sec,
-            submission_queue_size=submission_queue_size,
-            permission_policy=permission_policy,
-            request_metadata=request_metadata,
-            max_concurrent_spawns=max_concurrent_spawns,
-            max_total_spawns=max_total_spawns,
-            max_session_tokens=max_session_tokens,
-            memory_store=memory_store,
-            memory_query_builder=memory_query_builder,
-            pinned_state_sources=pinned_state_sources,
-            pinned_total_max_chars=pinned_total_max_chars,
-            skill_recall=resolved_recall,
-            recall_default_top_k=recall_default_top_k,
-            recall_max_top_k=recall_max_top_k,
-            recall_threshold=recall_threshold,
-            enable_auto_discovery=enable_auto_discovery,
-            # 传已解析的 verifier（与上方 skill_recall=resolved_recall 对称，
-            # 避免 __init__ 二次兜底/字段口径漂移；M1 修复）
-            skill_verifier=resolved_verifier,
-            audit=audit,
-        )
+        try:
+            pool = cls(
+                skill_registry=registry,
+                model_client=model_client,
+                store=wrapped_store,
+                tool_registry=tools,
+                compressors=compressors,
+                budget=budget,
+                dispatch_policy=dispatch_policy,
+                outcome_judge=outcome_judge,
+                hooks=hooks,
+                max_iterations=max_iterations,
+                denial_breaker_config=denial_breaker_config,
+                doom_loop_config=doom_loop_config,
+                failure_policy=failure_policy,
+                failure_suspend_ttl_seconds=failure_suspend_ttl_seconds,
+                failure_suspend_max_auto_retries=failure_suspend_max_auto_retries,
+                failure_suspend_on_expire=failure_suspend_on_expire,
+                now_factory=now_factory,
+                max_parallel_tool_calls=max_parallel_tool_calls,
+                reasoning_passback=reasoning_passback,
+                enable_request_capture=enable_request_capture,
+                instruction_layers=instruction_layers,
+                hook_runner=hook_runner,
+                script_executors=script_executors,
+                event_queue_size=event_queue_size,
+                event_high_water_ratio=event_high_water_ratio,
+                event_low_water_ratio=event_low_water_ratio,
+                event_warn_cooldown_sec=event_warn_cooldown_sec,
+                submission_queue_size=submission_queue_size,
+                permission_policy=permission_policy,
+                request_metadata=request_metadata,
+                max_concurrent_spawns=max_concurrent_spawns,
+                max_total_spawns=max_total_spawns,
+                max_session_tokens=max_session_tokens,
+                memory_store=memory_store,
+                memory_query_builder=memory_query_builder,
+                pinned_state_sources=pinned_state_sources,
+                pinned_total_max_chars=pinned_total_max_chars,
+                skill_recall=resolved_recall,
+                recall_default_top_k=recall_default_top_k,
+                recall_max_top_k=recall_max_top_k,
+                recall_threshold=recall_threshold,
+                enable_auto_discovery=enable_auto_discovery,
+                skill_verifier=resolved_verifier,
+                audit=audit,
+            )
+        except BaseException:
+            await _cleanup_failed_factory(
+                store=wrapped_store,
+                hook_runner=hook_runner,
+                owned_directory=owned_directory,
+            )
+            raise
 
         await start_skill_watcher(
             pool,
@@ -606,10 +663,17 @@ class EnginePool:
                 详见 spec ``jsonl-transcript`` / change ``engine-resume-by-thread-id``。
         """
         if self._audit is None and resume_thread_id is not None:
-            await ensure_legacy_resume_allowed(self._store, resume_thread_id)
+            await ensure_legacy_resume_allowed(
+                self._audit_store_binding.projection_store,
+                resume_thread_id,
+            )
         async with self._lock:
             if self._closed:
                 raise RuntimeError("EnginePool closed")
+            validate_audit_session_request(
+                self._audit,
+                resume_thread_id=resume_thread_id,
+            )
             if session_id in self._engines:
                 # 既有 cache 命中：忽略 resume_thread_id（与既有语义一致）
                 return self._engines[session_id]
@@ -620,14 +684,10 @@ class EnginePool:
                 raise ValueError(f"unknown skill: {entry_skill_id}")
             if not entry.entry:
                 raise ValueError(f"skill {entry_skill_id!r} is not entry-eligible")
-            validate_audit_session_request(
-                self._audit,
-                resume_thread_id=resume_thread_id,
-            )
-
             prepared = await prepare_pool_session(
                 audit=self._audit,
                 store=self._store,
+                projection_store=self._audit_store_binding.projection_store,
                 session_id=session_id,
                 entry_skill_id=entry_skill_id,
                 cwd=cwd,
@@ -677,6 +737,7 @@ class EnginePool:
                 return
             engine = self._engines.pop(session_id, None)
             task = self._engine_tasks.pop(session_id, None)
+            audit_state = self._audit_sessions.pop(session_id, None)
         if engine is not None:
             await engine.shutdown()
         if task is not None:
@@ -684,14 +745,35 @@ class EnginePool:
                 await asyncio.wait_for(task, timeout=5.0)
             except TimeoutError:
                 task.cancel()
+        if audit_state is not None:
+            result = await audit_state.coordinator.finish(
+                thread_terminals=(
+                    ThreadTerminalRequest(
+                        thread_id=audit_state.thread_id,
+                        status="complete",
+                        end_reason="session_released",
+                    ),
+                ),
+                reason="session_released",
+                status="complete",
+            )
+            if not result.audit_complete or not result.lease_released:
+                raise AuditSessionReleaseError(
+                    session_id,
+                    finish_result=result,
+                )
 
     async def close(self) -> None:
         async with self._lock:
             self._closed = True
             ids = list(self._engines.keys())
+        release_error: AuditSessionReleaseError | None = None
         for sid in ids:
             # 全局拆除：force 释放，无视保活闸（进程退出时 detached spawn 也应随之停）。
-            await self.release(sid, force=True)
+            try:
+                await self.release(sid, force=True)
+            except AuditSessionReleaseError as exc:
+                release_error = release_error or exc
         # 停止 watcher
         if self._watcher_task is not None and not self._watcher_task.done():
             watcher = getattr(self, "_watcher", None)
@@ -707,3 +789,5 @@ class EnginePool:
         if self._hook_runner is not None:
             await self._hook_runner.shutdown(grace_seconds=5.0)
         await self._store.close()
+        if release_error is not None:
+            raise release_error

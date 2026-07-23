@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import taifeng.loop.audit_bootstrap as audit_bootstrap_module
 import taifeng.loop.pool as pool_module
 from taifeng.conversation.journal.canonical import canonical_bytes
 from taifeng.conversation.journal.models import (
@@ -142,7 +143,11 @@ class _JournalCore:
                 session_id=descriptor.session_id,
                 first_seq=1,
                 last_seq=3,
-                record_ids=("started", "created", "bound"),
+                record_ids=(
+                    f"{descriptor.creation_operation_id}:session_started",
+                    f"{descriptor.creation_operation_id}:thread_created",
+                    f"{descriptor.creation_operation_id}:thread_bound",
+                ),
                 tail_hash=_HASH,
                 writer_epoch=1,
                 durability=Durability.COMMITTED,
@@ -250,6 +255,7 @@ class _EngineSpy:
 
     async def shutdown(self) -> None:
         """测试 teardown 无额外效果。"""
+        self._events.append("engine_shutdown")
 
     def introspect(self) -> dict[str, object]:
         """返回最小 pool introspection。"""
@@ -275,7 +281,7 @@ def _pool(
     hooks: object | None = None,
 ) -> EnginePool:
     """直接构造无 built-in tools 的合法最小 audited pool。"""
-    actual_store = store or _SpyStore(tmp_path / "threads", events)
+    actual_store = store or JsonlMessageStore(tmp_path / "threads")
     return EnginePool(
         skill_registry=_Registry(),  # type: ignore[arg-type]
         model_client=_ObservedClient(),
@@ -299,6 +305,20 @@ async def test_audited_bootstrap_is_journal_first_and_injects_owned_state(
         pool_module,
         "AgentEngine",
         lambda **kwargs: _EngineSpy(events=events, **kwargs),
+    )
+    original_bootstrap = JournalConversationProjector.bootstrap_thread
+
+    async def _spy_bootstrap(
+        projector: JournalConversationProjector,
+        **kwargs: Any,
+    ) -> str:
+        events.append("projection")
+        return await original_bootstrap(projector, **kwargs)
+
+    monkeypatch.setattr(
+        audit_bootstrap_module.JournalConversationProjector,
+        "bootstrap_thread",
+        _spy_bootstrap,
     )
     pool = _pool(tmp_path, core, events)
 
@@ -333,14 +353,13 @@ async def test_audited_bootstrap_is_journal_first_and_injects_owned_state(
     assert engine._audit_state.coordinator.expected_seq == 3  # noqa: SLF001
     assert engine._audit_state.projector is not None  # noqa: SLF001
     assert pool._audit_sessions["ses-1"].thread_id == engine.thread_id  # noqa: SLF001
-    assert (
+    with pytest.raises(AuditCapabilityError) as caught:
         await pool.get_or_create(
             session_id="ses-1",
             entry_skill_id="entry",
-            resume_thread_id="ignored-on-cache-hit",
+            resume_thread_id="rejected-on-audited-cache-hit",
         )
-        is engine
-    )
+    assert caught.value.code == "audit_resume_unsupported"
     assert events.count("journal_create") == 1
     await pool.close()
     assert core.global_close_calls == 0
@@ -451,15 +470,24 @@ async def test_projection_failure_uses_unique_finish_and_single_lease_close(
     events: list[str] = []
     projection_failure = OSError("secret=projection-token")
     core = _JournalCore(events, fail_terminal=terminal_failure)
-    store = _SpyStore(
-        tmp_path / "threads",
-        events,
-        fail_projection=projection_failure,
-    )
+    store = JsonlMessageStore(tmp_path / "threads")
     monkeypatch.setattr(
         pool_module,
         "AgentEngine",
         lambda **kwargs: _EngineSpy(events=events, **kwargs),
+    )
+    async def _fail_projection(
+        projector: JournalConversationProjector,
+        **kwargs: Any,
+    ) -> str:
+        del projector, kwargs
+        events.append("projection")
+        raise projection_failure
+
+    monkeypatch.setattr(
+        audit_bootstrap_module.JournalConversationProjector,
+        "bootstrap_thread",
+        _fail_projection,
     )
     pool = _pool(tmp_path, core, events, store=store)
 
@@ -486,6 +514,11 @@ async def test_projection_failure_uses_unique_finish_and_single_lease_close(
         "session_ended",
     ]
     assert core.appended[0][0].payload["status"] == "error"
+    assert core.appended[0][0].payload["end_reason"] == "projection_bootstrap_failed"
+    assert (
+        core.appended[0][0].payload["stable_error"]["code"]
+        == "projection_bootstrap_failed"
+    )
     assert "ses-proj-fail" not in pool._engines  # noqa: SLF001
     assert "ses-proj-fail" not in pool._audit_sessions  # noqa: SLF001
     await pool.close()
