@@ -726,6 +726,7 @@ async def test_stale_watermark_is_isolated_per_thread() -> None:
     )
     envelopes_2, ack_2 = _encoded((record_2,))
     store = _MemoryProjectionStore()
+    store.expected_session_ids["thr_2"] = "ses_2"
     store.fail_threads.add("thr_1")
     projector = JournalConversationProjector(store)
 

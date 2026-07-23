@@ -77,6 +77,7 @@ class _PhysicalProjectionTarget:
         self.thread_locks: dict[str, anyio.Lock] = {}
         self.states: dict[str, tuple[ProjectionResult, int | None]] = {}
         self.first_sequences: dict[str, int] = {}
+        self.session_ids: dict[str, str] = {}
         self.replay_windows: dict[str, ProjectionReplayWindow] = {}
         self.snapshots: dict[str, ProjectionSnapshot] = {}
         self.scan_counts: dict[str, int] = {}
@@ -102,12 +103,27 @@ class _PhysicalProjectionTarget:
         with self._guard:
             return self.thread_locks.setdefault(thread_id, anyio.Lock())
 
+    def session_id_for(self, thread_id: str) -> str | None:
+        """返回已绑定的 Journal Session identity。"""
+        with self._guard:
+            return self.session_ids.get(thread_id)
+
+    def bind_session_id(self, thread_id: str, session_id: str) -> None:
+        """为 thread 绑定唯一 Journal Session identity。"""
+        with self._guard:
+            existing = self.session_ids.setdefault(thread_id, session_id)
+            if existing != session_id:
+                raise ProjectionLifecycleError(
+                    "projection target is bound to another Journal Session"
+                )
+
     def clear(self) -> None:
         """最终 handle 释放时清除所有 backend-bound 派生状态。"""
         self.backend_token = None
         self.thread_locks.clear()
         self.states.clear()
         self.first_sequences.clear()
+        self.session_ids.clear()
         self.replay_windows.clear()
         self.snapshots.clear()
         self.scan_counts.clear()
@@ -446,6 +462,14 @@ class ProjectionTargetHandle:
     def record_first_sequence(self, thread_id: str, seq: int) -> None:
         """只记录一次最早健康 seq，供 generation reset 校验 replay 起点。"""
         self._target.first_sequences.setdefault(thread_id, seq)
+
+    def expected_session_id(self, thread_id: str) -> str | None:
+        """返回 physical target 已绑定的 Journal Session identity。"""
+        return self._target.session_id_for(thread_id)
+
+    def bind_expected_session_id(self, thread_id: str, session_id: str) -> None:
+        """把 audited bootstrap/directory identity 绑定到 physical target。"""
+        self._target.bind_session_id(thread_id, session_id)
 
     def replay_window(self, thread_id: str) -> ProjectionReplayWindow | None:
         """返回 generation reset 的共享 replay 窗口。"""

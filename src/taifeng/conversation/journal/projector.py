@@ -65,6 +65,10 @@ class ConversationProjectionStore(Protocol):
         """读取 store-owned result 与 blocked seq。"""
         ...
 
+    async def expected_projection_session_id(self, thread_id: str) -> str:
+        """返回 physical target/bootstrap 绑定的 Journal Session identity。"""
+        ...
+
     def update_projection_state(
         self,
         thread_id: str,
@@ -384,7 +388,25 @@ class JournalConversationProjector:
         projected = _validate_batch(envelopes, ack)
         thread_id = projected[0].item.thread_id
         async with self._store.projection_scope(thread_id):
+            await self._validate_projection_session(thread_id, ack.session_id)
             return await self._materialize(thread_id, projected)
+
+    async def _validate_projection_session(
+        self,
+        thread_id: str,
+        session_id: str,
+    ) -> None:
+        """在 snapshot repair/write 前验证 transcript 的 Journal Session 绑定。"""
+        try:
+            expected = await self._store.expected_projection_session_id(thread_id)
+        except Exception as exc:  # noqa: BLE001  # identity 缺失必须稳定 fail closed
+            raise ProjectionOrderError(
+                "expected Journal Session identity is unavailable"
+            ) from exc
+        if expected != session_id:
+            raise ProjectionOrderError(
+                "batch Journal Session does not match transcript identity"
+            )
 
     async def _materialize(
         self,

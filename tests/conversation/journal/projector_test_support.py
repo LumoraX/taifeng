@@ -90,6 +90,8 @@ class _MemoryProjectionStore:
         self._projection_states: dict[str, tuple[ProjectionResult, int | None]] = {}
         self._projection_first_sequences: dict[str, int] = {}
         self._projection_replay_windows: dict[str, ProjectionReplayWindow] = {}
+        self.expected_session_ids: dict[str, str] = {}
+        self.default_expected_session_id: str | None = "ses_1"
 
     def projection_lock(self, thread_id: str) -> anyio.Lock:
         """让同一 fake store 上的多个 projector 共享 thread 锁。"""
@@ -155,6 +157,16 @@ class _MemoryProjectionStore:
         if observed_seq >= window.ceiling:
             self._projection_replay_windows.pop(thread_id, None)
 
+    async def expected_projection_session_id(self, thread_id: str) -> str:
+        """返回 fake physical target 预先配置的 Journal Session identity。"""
+        session_id = self.expected_session_ids.get(
+            thread_id,
+            self.default_expected_session_id,
+        )
+        if session_id is None:
+            raise FileNotFoundError(f"projection session identity not found: {thread_id}")
+        return session_id
+
     async def create_projection_thread(
         self,
         *,
@@ -169,6 +181,9 @@ class _MemoryProjectionStore:
         if thread_id in self.items:
             raise FileExistsError(thread_id)
         self.items[thread_id] = []
+        session_id = extra.get("journal_session_id")
+        if isinstance(session_id, str) and session_id:
+            self.expected_session_ids[thread_id] = session_id
         return thread_id
 
     async def append_batch(self, items: list[ResponseItem]) -> None:

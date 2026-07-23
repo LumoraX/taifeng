@@ -383,6 +383,24 @@ class JsonlMessageStore(MessageStore):
         """返回物理 target 最早健康观察的 conversation seq。"""
         return self._projection_target.first_sequence(thread_id)
 
+    async def expected_projection_session_id(self, thread_id: str) -> str:
+        """返回 bootstrap 绑定或只读 directory 恢复的 Journal Session identity。"""
+        bound = self._projection_target.expected_session_id(thread_id)
+        if bound is not None:
+            return bound
+        meta = await self._directory.get_metadata(thread_id)
+        if meta is None or not _is_audited_metadata(meta.extra):
+            raise FileNotFoundError(
+                f"audited projection session identity not found: {thread_id}"
+            )
+        session_id = meta.extra["journal_session_id"]
+        if not isinstance(session_id, str):
+            raise FileNotFoundError(
+                f"audited projection session identity not found: {thread_id}"
+            )
+        self._projection_target.bind_expected_session_id(thread_id, session_id)
+        return session_id
+
     def record_projection_first_seq(self, thread_id: str, seq: int) -> None:
         """首次健康投影后记录 generation replay 起点。"""
         self._projection_target.record_first_sequence(thread_id, seq)
@@ -429,6 +447,10 @@ class JsonlMessageStore(MessageStore):
             extra=merged_extra,
         )
         await self._directory.upsert_metadata(meta)
+        if _is_audited_metadata(merged_extra):
+            session_id = merged_extra["journal_session_id"]
+            if isinstance(session_id, str):
+                self._projection_target.bind_expected_session_id(thread_id, session_id)
         self._projection_target.invalidate(thread_id)
         return tid
 
