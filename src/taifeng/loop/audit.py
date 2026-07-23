@@ -392,6 +392,7 @@ class SessionAuditCoordinator:
             raise
         work, lifecycle = await self._settle_admission(reservation, accepted=True)
         assert work is not None
+        self._raise_if_frozen()
         if lifecycle is SessionLifecycle.CLOSED:
             raise SessionFinishingError(self.session_id, lifecycle)
         return work
@@ -541,6 +542,7 @@ class SessionAuditCoordinator:
                 _failure=_copy_stable_error(failure) if failure is not None else None,
             )
             self._audit_complete = result.audit_complete
+            self._effect_gate_open = False
             self._lifecycle = SessionLifecycle.CLOSED
             if result.audit_complete:
                 self._admissions.clear()
@@ -571,6 +573,8 @@ class SessionAuditCoordinator:
     async def ensure_effect_allowed(self) -> None:
         """effect 前 fail-closed 检查；冻结后永远返回同一稳定错误。"""
         self._raise_if_frozen()
+        if self._lifecycle is SessionLifecycle.CLOSED:
+            raise SessionFinishingError(self.session_id, self._lifecycle)
 
     def freeze(
         self,

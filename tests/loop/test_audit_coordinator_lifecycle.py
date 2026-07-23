@@ -42,17 +42,21 @@ class _LifecycleCore:
         self,
         *,
         pause_terminal: bool = False,
+        pause_close: bool = False,
         append_failure: BaseException | None = None,
         close_failure: BaseException | None = None,
     ) -> None:
         """配置 terminal append/close 的确定性边界行为。"""
         self.pause_terminal = pause_terminal
+        self.pause_close = pause_close
         self.append_failure = append_failure
         self.close_failure = close_failure
         self.append_calls: list[_AppendCall] = []
         self.close_calls: list[SessionLease] = []
         self.terminal_entered = anyio.Event()
         self.release_terminal = anyio.Event()
+        self.close_entered = anyio.Event()
+        self.release_close = anyio.Event()
 
     async def append_batch(
         self,
@@ -82,6 +86,9 @@ class _LifecycleCore:
     async def close_session(self, lease: SessionLease) -> None:
         """记录 per-Session close，并按配置抛稳定测试异常。"""
         self.close_calls.append(lease)
+        self.close_entered.set()
+        if self.pause_close:
+            await self.release_close.wait()
         if self.close_failure is not None:
             raise self.close_failure
 
@@ -206,6 +213,7 @@ async def test_finish_snapshots_durable_accepted_work_and_closes_admission() -> 
         with pytest.raises(SessionFinishingError):
             await coordinator.admit_work("sub_2", rejected_accept)
         assert not rejected_called
+        await coordinator.ensure_effect_allowed()
         work.complete()
 
     assert result is not None
@@ -561,7 +569,7 @@ async def test_pending_durable_accept_cannot_hold_finish_lock_past_deadline() ->
     assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
     assert snapshot.root_cancelled
     assert snapshot.accepted_work_ids == ("sub_pending_accept",)
-    assert isinstance(admission_error, SessionFinishingError)
+    assert isinstance(admission_error, SessionAuditFrozenError)
     assert core.close_calls == [_lease()]
 
 
