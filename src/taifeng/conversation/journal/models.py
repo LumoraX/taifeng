@@ -146,10 +146,11 @@ class JournalModel(BaseModel):
         update: Mapping[str, Any] | None = None,
         deep: bool = False,
     ) -> Self:
-        """copy/update 后重新校验并深冻，隔离调用方持有的嵌套容器。"""
-        copied = super().model_copy(update=update, deep=deep)
-        values = copied.model_dump(mode="python", round_trip=True)
-        return type(self).model_validate(values)
+        """从声明字段重建并深冻，避免直接 deepcopy 冻结容器。"""
+        values = self.model_dump(mode="python", round_trip=True)
+        if update is not None:
+            values.update(update)
+        return type(self).model_validate(values, by_name=True)
 
 
 class Durability(StrEnum):

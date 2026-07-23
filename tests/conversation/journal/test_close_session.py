@@ -145,3 +145,49 @@ async def test_close_session_rejects_append_queued_after_close(
     assert outcomes == ["closed", "writer closed"]
     records = [item async for item in journal.load("ses_1")]
     assert len(records) == 3
+
+
+@pytest.mark.anyio
+async def test_close_cancellation_releases_all_previously_acquired_writer_locks(
+    tmp_path: Path,
+) -> None:
+    """close 等第二个 writer lock 被取消时必须释放已取得的第一个锁。"""
+    journal = JsonlSessionJournalCore(tmp_path)
+    first = await journal.create_session(_descriptor("ses_1"))
+    second = await journal.create_session(_descriptor("ses_2"))
+    first_writer = journal._writers["ses_1"]  # noqa: SLF001
+    second_writer = journal._writers["ses_2"]  # noqa: SLF001
+    await second_writer.lock.acquire()
+    scope = anyio.CancelScope()
+
+    async def close_while_second_locked() -> None:
+        """在独立 cancel scope 内执行多 writer close。"""
+        with scope:
+            await journal.close()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(close_while_second_locked)
+        while second_writer.lock.statistics().tasks_waiting == 0:
+            await anyio.lowlevel.checkpoint()
+        assert first_writer.lock.locked()
+        scope.cancel()
+
+    second_writer.lock.release()
+    with anyio.fail_after(0.5):
+        async with first_writer.lock:
+            pass
+    first_ack = await journal.append(
+        _record("ses_1"),
+        lease=first.lease,
+        expected_seq=3,
+    )
+    second_ack = await journal.append(
+        _record("ses_2"),
+        lease=second.lease,
+        expected_seq=3,
+    )
+    with anyio.fail_after(0.5):
+        await journal.close()
+
+    assert first_ack.last_seq == 4
+    assert second_ack.last_seq == 4

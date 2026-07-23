@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
+from taifeng.conversation.journal.framing import BatchBegin
 from taifeng.conversation.journal.models import (
     ActorRef,
     Durability,
@@ -145,6 +146,63 @@ def test_model_copy_update_detaches_and_freezes_nested_json() -> None:
     assert isinstance(values, list)
     with pytest.raises(TypeError, match="frozen JsonValue"):
         values.append(3)
+
+
+def test_model_copy_deep_rebuilds_frozen_nested_json_without_aliasing() -> None:
+    """deep=True 不得 deepcopy 冻结容器，也必须产生独立 payload。"""
+    record = JournalRecord(
+        session_id="ses_1",
+        record_id="rec_1",
+        record_type="test",
+        actor=ActorRef(kind="user", source="test"),
+        payload={"nested": {"values": [1]}},
+    )
+
+    copied = record.model_copy(deep=True)
+
+    assert copied == record
+    assert copied.payload is not record.payload
+    copied_nested = copied.payload["nested"]
+    original_nested = record.payload["nested"]
+    assert isinstance(copied_nested, dict)
+    assert isinstance(original_nested, dict)
+    assert copied_nested is not original_nested
+
+
+def test_model_copy_supports_alias_models_and_field_name_updates() -> None:
+    """alias model 的无 update 与 field-name update 都必须重新校验成功。"""
+    begin = BatchBegin(
+        batch_id="batch_1",
+        record_count=1,
+        expected_seq=3,
+        batch_payload_hash="a" * 64,
+    )
+
+    copied = begin.model_copy()
+    updated = begin.model_copy(
+        update={
+            "frame_kind": "BEGIN",
+            "batch_id": "batch_2",
+        }
+    )
+
+    assert copied == begin
+    assert updated.batch_id == "batch_2"
+    assert updated.frame_kind == "BEGIN"
+
+
+def test_model_copy_rejects_unknown_update_as_extra_field() -> None:
+    """未知 update 必须遵守 extra=forbid，不能经 model_dump 静默丢失。"""
+    record = JournalRecord(
+        session_id="ses_1",
+        record_id="rec_1",
+        record_type="test",
+        actor=ActorRef(kind="user", source="test"),
+        payload={"value": 1},
+    )
+
+    with pytest.raises(ValidationError, match="extra"):
+        record.model_copy(update={"unknown_field": True})
 
 
 def test_record_envelope_ack_and_verification_shapes() -> None:

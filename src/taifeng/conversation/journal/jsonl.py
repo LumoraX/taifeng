@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -103,8 +104,12 @@ class DefaultSyncFileAdapter:
 
     def create_exclusive(self, path: Path, payload: bytes) -> None:
         """以 ``xb`` 独占创建，并在返回前完成 file/directory fsync。"""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("xb") as stream:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stream = path.open("xb")
+        except OSError as exc:
+            raise CommitNotStartedError(exc) from None
+        with stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -190,6 +195,7 @@ class JsonlSessionJournalCore:
         self._commit_timeout = commit_timeout
         self._registry_lock = anyio.Lock()
         self._writers: dict[str, _LiveWriter] = {}
+        self._creation_recovery_required: set[str] = set()
 
     def _session_path(self, session_id: str) -> Path:
         """把安全 session id 映射为 root 下的单一文件。"""
@@ -206,6 +212,8 @@ class JsonlSessionJournalCore:
         path = self._session_path(descriptor.session_id)
         fingerprint = canonical_hash(model_canonical_data(descriptor))
         async with self._registry_lock:
+            if descriptor.session_id in self._creation_recovery_required:
+                raise self._creation_recovery_error(descriptor.session_id)
             live = self._writers.get(descriptor.session_id)
             if live is not None:
                 if (
@@ -233,15 +241,16 @@ class JsonlSessionJournalCore:
                 recorded_at=datetime.now(UTC),
             )
             try:
-                await self._run_sync_commit(
+                await self._execute_commit(
                     self._sync_file_adapter.create_exclusive,
                     path,
                     b"".join(encoded.lines),
+                    on_outcome_unknown=lambda: self._freeze_creation(
+                        descriptor.session_id
+                    ),
                 )
             except FileExistsError as exc:
                 raise JournalAlreadyExistsError(descriptor.session_id) from exc
-            except TimeoutError as exc:
-                raise JournalRecoveryRequiredError(descriptor.session_id, 0) from exc
             result = SessionCreateResult(lease=lease, ack=encoded.ack)
             self._writers[descriptor.session_id] = _LiveWriter(
                 descriptor_fingerprint=fingerprint,
@@ -289,15 +298,12 @@ class JsonlSessionJournalCore:
         """等待在途写完成并清理 live leases，不追加领域 record。"""
         async with self._registry_lock:
             writers = tuple(self._writers.values())
-            for writer in writers:
-                await writer.lock.acquire()
-            try:
+            async with AsyncExitStack() as stack:
+                for writer in writers:
+                    await stack.enter_async_context(writer.lock)
                 for writer in writers:
                     writer.closed = True
                 self._writers.clear()
-            finally:
-                for writer in reversed(writers):
-                    writer.lock.release()
 
     async def append_batch(
         self,
@@ -405,6 +411,28 @@ class JsonlSessionJournalCore:
             cause=writer.recovery_cause or "physical_state_unknown",
         )
 
+    def _creation_recovery_error(
+        self,
+        session_id: str,
+    ) -> JournalRecoveryRequiredError:
+        """构造初始化结果未知的稳定、脱敏恢复错误。"""
+        return JournalRecoveryRequiredError(
+            session_id,
+            0,
+            cause="commit_outcome_unknown",
+        )
+
+    def _freeze_creation(self, session_id: str) -> JournalRecoveryRequiredError:
+        """冻结尚未注册 writer 的 Session create，并返回稳定错误。"""
+        self._creation_recovery_required.add(session_id)
+        return self._creation_recovery_error(session_id)
+
+    def _freeze_writer(self, writer: _LiveWriter) -> JournalRecoveryRequiredError:
+        """冻结已 dispatch 的 append writer，并返回稳定错误。"""
+        writer.recovery_required = True
+        writer.recovery_cause = "commit_outcome_unknown"
+        return self._writer_recovery_error(writer)
+
     async def _commit_new_batch(
         self,
         snapshot: _AppendSnapshot,
@@ -422,21 +450,12 @@ class JsonlSessionJournalCore:
             record_fingerprints=snapshot.fingerprints,
         )
         path = self._session_path(lease.session_id)
-        outcome_unknown = False
-        try:
-            await self._run_sync_commit(
-                self._sync_file_adapter.append_durable,
-                path,
-                b"".join(encoded.lines),
-            )
-        except CommitNotStartedError as exc:
-            raise exc.error from None
-        except BaseException:
-            outcome_unknown = True
-        if outcome_unknown:
-            writer.recovery_required = True
-            writer.recovery_cause = "commit_outcome_unknown"
-            raise self._writer_recovery_error(writer) from None
+        await self._execute_commit(
+            self._sync_file_adapter.append_durable,
+            path,
+            b"".join(encoded.lines),
+            on_outcome_unknown=lambda: self._freeze_writer(writer),
+        )
         for record, fingerprint in zip(
             snapshot.records,
             snapshot.fingerprints,
@@ -449,6 +468,32 @@ class JsonlSessionJournalCore:
         writer.committed_tail_seq = encoded.ack.last_seq
         writer.committed_tail_hash = encoded.ack.tail_hash
         return encoded.ack
+
+    async def _execute_commit(
+        self,
+        function: Callable[..., None],
+        *args: object,
+        on_outcome_unknown: Callable[[], JournalRecoveryRequiredError],
+    ) -> None:
+        """统一分类 prewrite、fatal 与普通 post-dispatch commit 结果。"""
+        prewrite_error: BaseException | None = None
+        recovery_error: JournalRecoveryRequiredError | None = None
+        fatal_error: KeyboardInterrupt | SystemExit | None = None
+        try:
+            await self._run_sync_commit(function, *args)
+        except CommitNotStartedError as exc:
+            prewrite_error = exc.error
+        except (KeyboardInterrupt, SystemExit) as exc:
+            recovery_error = on_outcome_unknown()
+            fatal_error = exc
+        except BaseException:
+            recovery_error = on_outcome_unknown()
+        if prewrite_error is not None:
+            raise prewrite_error from None
+        if fatal_error is not None:
+            raise fatal_error from None
+        if recovery_error is not None:
+            raise recovery_error from None
 
     async def _run_sync_commit(
         self,

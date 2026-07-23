@@ -256,11 +256,12 @@ async def test_initialization_write_failure_returns_no_lease_or_records(
         sync_file_adapter=_PartialCreateFailureAdapter(),
     )
 
-    with pytest.raises(OSError, match="injected create failure"):
+    with pytest.raises(JournalRecoveryRequiredError) as raised:
         await journal.create_session(_descriptor())
 
     records = [item async for item in journal.load("ses_1")]
     verification = await journal.verify("ses_1")
+    assert raised.value.cause == "commit_outcome_unknown"
     assert records == []
     assert verification.health is JournalHealth.RECOVERY_REQUIRED
     assert verification.committed_tail_seq == 0
