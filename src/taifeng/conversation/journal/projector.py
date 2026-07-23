@@ -39,6 +39,28 @@ class ProjectionResult:
     failure_class: str | None = None
     failure_record_id: str | None = None
 
+    def __post_init__(self) -> None:
+        """拒绝无法表达可信 projector 结果的类型、负水位与 failure 组合。"""
+        if not isinstance(self.thread_id, str) or not self.thread_id:
+            raise ValueError("projection thread_id must be a non-empty string")
+        if (
+            isinstance(self.projected_seq, bool)
+            or not isinstance(self.projected_seq, int)
+            or self.projected_seq < 0
+        ):
+            raise ValueError("projection projected_seq must be a non-negative integer")
+        if not isinstance(self.stale, bool):
+            raise ValueError("projection stale must be a boolean")
+        if self.failure_record_id is not None and (
+            not isinstance(self.failure_record_id, str) or not self.failure_record_id
+        ):
+            raise ValueError("projection failure_record_id must be non-empty when present")
+        if self.stale:
+            if not isinstance(self.failure_class, str) or not self.failure_class:
+                raise ValueError("stale projection requires a non-empty failure_class")
+        elif self.failure_class is not None or self.failure_record_id is not None:
+            raise ValueError("healthy projection cannot carry failure fields")
+
 
 class ConversationProjectionStore(Protocol):
     """Journal projector 所需的最窄 transcript store 协议。"""

@@ -326,8 +326,7 @@ async def test_projection_stale_is_per_thread_and_does_not_freeze_execution() ->
     root = CancellationToken(name="session:ses_1")
     coordinator = _coordinator(_RecordingCore(), root=root)
 
-    first = coordinator.mark_projection_stale(
-        "thr_1",
+    first = coordinator.update_projection(
         ProjectionResult(
             thread_id="thr_1",
             projected_seq=4,
@@ -335,9 +334,13 @@ async def test_projection_stale_is_per_thread_and_does_not_freeze_execution() ->
             failure_class="OSError",
         ),
     )
-    second = coordinator.mark_projection_stale(
-        "thr_2",
-        failure=RuntimeError("secret=projection-token"),
+    second = coordinator.update_projection(
+        ProjectionResult(
+            thread_id="thr_2",
+            projected_seq=0,
+            stale=True,
+            failure_class="RuntimeError",
+        )
     )
 
     await coordinator.ensure_effect_allowed()
@@ -345,7 +348,6 @@ async def test_projection_stale_is_per_thread_and_does_not_freeze_execution() ->
     assert first.failure is not None
     assert second.stale is True and second.projected_seq == 0
     assert second.failure is not None
-    assert "secret" not in str(second.failure)
     assert coordinator.health is AuditHealth.HEALTHY
     assert coordinator.effect_gate_open is True
     assert coordinator.expected_seq == 3
@@ -355,8 +357,7 @@ async def test_projection_stale_is_per_thread_and_does_not_freeze_execution() ->
 def test_healthy_projection_replay_across_seq_gap_clears_without_regression() -> None:
     """Journal 可含 domain seq gap；可信 healthy 同水位可清 stale，旧水位不得回退。"""
     coordinator = _coordinator(_RecordingCore())
-    coordinator.mark_projection_stale(
-        "thr_1",
+    coordinator.update_projection(
         ProjectionResult(
             thread_id="thr_1",
             projected_seq=4,
@@ -386,13 +387,21 @@ def test_introspection_returns_frozen_snapshot_not_mutable_internal_state() -> N
     coordinator = _coordinator(_RecordingCore())
     coordinator.register_target("turn_b")
     coordinator.register_target("turn_a")
-    coordinator.mark_projection_stale(
-        "thr_b",
-        failure=OSError("secret=b"),
+    coordinator.update_projection(
+        ProjectionResult(
+            thread_id="thr_b",
+            projected_seq=0,
+            stale=True,
+            failure_class="OSError",
+        )
     )
-    coordinator.mark_projection_stale(
-        "thr_a",
-        failure=OSError("secret=a"),
+    coordinator.update_projection(
+        ProjectionResult(
+            thread_id="thr_a",
+            projected_seq=0,
+            stale=True,
+            failure_class="OSError",
+        )
     )
 
     snapshot = coordinator.snapshot()
@@ -402,3 +411,44 @@ def test_introspection_returns_frozen_snapshot_not_mutable_internal_state() -> N
     assert tuple(item.thread_id for item in snapshot.projections) == ("thr_a", "thr_b")
     with pytest.raises((AttributeError, TypeError)):
         snapshot.expected_seq = 99  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("thread_id", ""),
+        ("projected_seq", -1),
+        ("stale", False),
+    ],
+)
+def test_coordinator_defensively_rejects_tampered_projection_result(
+    field: str,
+    value: object,
+) -> None:
+    """即使调用方绕过 frozen dataclass，协调器也必须在状态 mutation 前重验 DTO。"""
+    coordinator = _coordinator(_RecordingCore())
+    malformed = ProjectionResult(
+        thread_id="thr_1",
+        projected_seq=4,
+        stale=True,
+        failure_class="OSError",
+    )
+    object.__setattr__(malformed, field, value)
+
+    with pytest.raises((TypeError, ValueError)):
+        coordinator.update_projection(malformed)
+
+    assert coordinator.snapshot().projections == ()
+
+
+def test_coordinator_rejects_non_result_and_healthy_stale_api_without_mutation() -> None:
+    """coordinator 只消费可信 ProjectionResult，stale 专用入口拒绝 healthy。"""
+    coordinator = _coordinator(_RecordingCore())
+    healthy = ProjectionResult(thread_id="thr_1", projected_seq=4, stale=False)
+
+    with pytest.raises(TypeError):
+        coordinator.update_projection(object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="stale"):
+        coordinator.mark_projection_stale(healthy)
+
+    assert coordinator.snapshot().projections == ()

@@ -22,13 +22,12 @@ from taifeng.conversation.journal.models import (
     JournalRecord,
     SessionLease,
 )
-from taifeng.conversation.journal.records import StableErrorV1, stable_error
+from taifeng.conversation.journal.projector import ProjectionResult
+from taifeng.conversation.journal.records import StableErrorV1
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from taifeng.conversation.journal.projector import ProjectionResult
 
 
 class AuditHealth(StrEnum):
@@ -120,19 +119,12 @@ def _journal_failure(error: BaseException) -> StableErrorV1:
     )
 
 
-def _projection_failure(
-    result: ProjectionResult | None,
-    failure: StableErrorV1 | BaseException | None,
-) -> StableErrorV1:
-    """从 projector 结果或异常构造不含原文的稳定 stale 原因。"""
-    if isinstance(failure, StableErrorV1):
-        return failure
-    if failure is not None:
-        return stable_error(failure)
-    class_name = result.failure_class if result and result.failure_class else "ProjectionFailure"
+def _projection_failure(result: ProjectionResult) -> StableErrorV1:
+    """从已验证 projector stale 结果构造不含任意异常原文的稳定原因。"""
+    assert result.failure_class is not None
     return StableErrorV1(
         code="projection_stale",
-        class_name=class_name,
+        class_name=result.failure_class,
         failure_class="projection",
         retryable=True,
     )
@@ -340,24 +332,21 @@ class SessionAuditCoordinator:
 
     def mark_projection_stale(
         self,
-        thread_id: str,
-        result: ProjectionResult | None = None,
-        *,
-        failure: StableErrorV1 | BaseException | None = None,
+        result: ProjectionResult,
     ) -> ProjectionAuditSnapshot:
-        """只标记一个 thread stale；不触碰 health、effect gate 或 root token。"""
-        if not thread_id:
-            raise ValueError("thread_id must be non-empty")
-        if result is not None and result.thread_id != thread_id:
-            raise ValueError("projection result belongs to another thread")
-        if result is not None and not result.stale:
-            raise ValueError("healthy projection result must use update_projection")
-        current = self._projections.get(thread_id)
-        incoming_seq = (
-            result.projected_seq
-            if result is not None
-            else current.projected_seq if current is not None else 0
-        )
+        """只镜像可信 stale 结果；不接收 raw exception 或猜测水位。"""
+        validated = self._validated_projection_result(result)
+        if not validated.stale:
+            raise ValueError("mark_projection_stale requires a stale result")
+        return self._mark_projection_stale(validated)
+
+    def _mark_projection_stale(
+        self,
+        result: ProjectionResult,
+    ) -> ProjectionAuditSnapshot:
+        """把已重验 stale 结果单调写入目标 thread 状态。"""
+        current = self._projections.get(result.thread_id)
+        incoming_seq = result.projected_seq
         if current is not None and not current.stale and incoming_seq < current.projected_seq:
             return current
         projected_seq = max(
@@ -365,31 +354,45 @@ class SessionAuditCoordinator:
             incoming_seq,
         )
         state = ProjectionAuditSnapshot(
-            thread_id=thread_id,
+            thread_id=result.thread_id,
             projected_seq=projected_seq,
             stale=True,
             failure=current.failure
             if current is not None and current.stale
-            else _projection_failure(result, failure),
+            else _projection_failure(result),
         )
-        self._projections[thread_id] = state
+        self._projections[result.thread_id] = state
         return state
 
     def update_projection(self, result: ProjectionResult) -> ProjectionAuditSnapshot:
-        """接收 projector 结果；健康 replay 单调推进并按失败水位清 stale。"""
-        if result.stale:
-            return self.mark_projection_stale(result.thread_id, result)
-        current = self._projections.get(result.thread_id)
+        """重验并镜像 projector 结果；健康 replay 单调推进或清 stale。"""
+        validated = self._validated_projection_result(result)
+        if validated.stale:
+            return self._mark_projection_stale(validated)
+        current = self._projections.get(validated.thread_id)
         if current is None:
             state = ProjectionAuditSnapshot(
-                thread_id=result.thread_id,
-                projected_seq=result.projected_seq,
+                thread_id=validated.thread_id,
+                projected_seq=validated.projected_seq,
                 stale=False,
             )
         else:
-            state = self._healthy_projection_state(current, result.projected_seq)
-        self._projections[result.thread_id] = state
+            state = self._healthy_projection_state(current, validated.projected_seq)
+        self._projections[validated.thread_id] = state
         return state
+
+    @staticmethod
+    def _validated_projection_result(result: ProjectionResult) -> ProjectionResult:
+        """拒绝错误类型，并重建 frozen DTO 以防 object.__setattr__ 绕过构造校验。"""
+        if not isinstance(result, ProjectionResult):
+            raise TypeError("coordinator accepts only ProjectionResult")
+        return ProjectionResult(
+            thread_id=result.thread_id,
+            projected_seq=result.projected_seq,
+            stale=result.stale,
+            failure_class=result.failure_class,
+            failure_record_id=result.failure_record_id,
+        )
 
     @staticmethod
     def _healthy_projection_state(
