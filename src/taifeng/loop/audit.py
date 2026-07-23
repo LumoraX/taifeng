@@ -3,20 +3,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 import anyio
 
-from taifeng.conversation.journal.errors import (
-    JournalConflictError,
-    JournalError,
-    JournalIntegrityError,
-    JournalLeaseError,
-    JournalRecoveryRequiredError,
-    NonCanonicalValueError,
-)
 from taifeng.conversation.journal.models import (
     Durability,
     JournalAck,
@@ -27,13 +17,24 @@ from taifeng.conversation.journal.projector import ProjectionResult
 from taifeng.conversation.journal.records import StableErrorV1
 from taifeng.loop.audit_lifecycle import (
     AcceptedWork,
-    AdmissionReservation,
-    FinishFuture,
     SessionFinishingError,
     SessionFinishResult,
     SessionLifecycle,
     ThreadTerminalRequest,
-    build_terminal_records,
+    _AdmissionReservation,
+    _build_terminal_records,
+    _FinishFuture,
+)
+from taifeng.loop.audit_support import (
+    AuditHealth,
+    ProjectionAuditSnapshot,
+    SessionAuditFrozenError,
+    SessionAuditSnapshot,
+    _copy_projection_snapshot,
+    _copy_stable_error,
+    _InvalidJournalAckError,
+    _journal_failure,
+    _projection_failure,
 )
 from taifeng.loop.cancellation import CancellationToken
 
@@ -41,58 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
 _HASH_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-
-
-class AuditHealth(StrEnum):
-    """Session 审计协调器的可执行健康状态。"""
-
-    HEALTHY = "healthy"
-    RECOVERY_REQUIRED = "recovery_required"
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectionAuditSnapshot:
-    """单 thread 的只读投影水位与稳定失败快照。"""
-
-    thread_id: str
-    projected_seq: int
-    stale: bool
-    failure: StableErrorV1 | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SessionAuditSnapshot:
-    """协调器的只读、不可变 introspection 快照。"""
-
-    session_id: str
-    expected_seq: int
-    health: AuditHealth
-    effect_gate_open: bool
-    root_cancelled: bool
-    first_failure: StableErrorV1 | None
-    active_target_ids: tuple[str, ...]
-    projections: tuple[ProjectionAuditSnapshot, ...]
-    lifecycle: SessionLifecycle
-    audit_complete: bool | None
-    accepted_work_ids: tuple[str, ...]
-
-
-class SessionAuditFrozenError(RuntimeError):
-    """Session 已因第一个 Journal 不确定性进入 recovery-required。"""
-
-    def __init__(self, session_id: str, cause: StableErrorV1) -> None:
-        """只保存稳定 DTO，不复制底层异常文本或 repr。"""
-        super().__init__(
-            "session audit frozen: "
-            f"session={session_id}, code={cause.code}, class={cause.class_name}"
-        )
-        self.session_id = session_id
-        self._cause = _copy_stable_error(cause)
-
-    @property
-    def cause(self) -> StableErrorV1:
-        """返回稳定首因副本，避免异常接收方篡改 coordinator 内部状态。"""
-        return _copy_stable_error(self._cause)
 
 
 class _JournalAppendCore(Protocol):
@@ -114,79 +63,6 @@ class _JournalAppendCore(Protocol):
 
     async def close_session(self, lease: SessionLease) -> None:
         """释放且只释放 coordinator 绑定的 per-Session writer。"""
-
-
-class _InvalidJournalAckError(Exception):
-    """core 返回的 ack 不能证明当前 batch durable。"""
-
-
-def _journal_failure(error: BaseException) -> StableErrorV1:
-    """把 Journal 边界异常映射为不读取原文的稳定失败 DTO。"""
-    if isinstance(error, _InvalidJournalAckError):
-        code, failure_class = "journal_ack_invalid", "journal_uncertain"
-    elif isinstance(error, JournalRecoveryRequiredError):
-        code, failure_class = "journal_recovery_required", "journal_uncertain"
-    elif isinstance(error, JournalIntegrityError):
-        code, failure_class = "journal_integrity_error", "journal_integrity"
-    elif isinstance(error, JournalLeaseError):
-        code, failure_class = "journal_lease_error", "journal_fencing"
-    elif isinstance(error, JournalConflictError):
-        code, failure_class = "journal_conflict", "journal_invariant"
-    elif isinstance(error, NonCanonicalValueError):
-        code, failure_class = "journal_noncanonical_runtime", "journal_invariant"
-    elif isinstance(error, OSError):
-        code, failure_class = "journal_io_error", "journal_io"
-    elif isinstance(error, JournalError):
-        code, failure_class = "journal_error", "journal_invariant"
-    else:
-        code, failure_class = "journal_core_error", "journal_uncertain"
-    return StableErrorV1(
-        code=code,
-        class_name=type(error).__name__,
-        failure_class=failure_class,
-        retryable=False,
-    )
-
-
-def _projection_failure(result: ProjectionResult) -> StableErrorV1:
-    """从已验证 projector stale 结果构造不含任意异常原文的稳定原因。"""
-    assert result.failure_class is not None
-    return StableErrorV1(
-        code="projection_stale",
-        class_name=result.failure_class,
-        failure_class="projection",
-        retryable=True,
-    )
-
-
-def _copy_stable_error(error: StableErrorV1) -> StableErrorV1:
-    """重建稳定错误，阻断调用方用 object.__setattr__ 篡改内部状态。"""
-    return StableErrorV1(
-        payload_version=error.payload_version,
-        code=error.code,
-        class_name=error.class_name,
-        failure_class=error.failure_class,
-        safe_message=error.safe_message,
-        descriptor_hash=error.descriptor_hash,
-        retryable=error.retryable,
-    )
-
-
-def _copy_projection_snapshot(
-    snapshot: ProjectionAuditSnapshot,
-) -> ProjectionAuditSnapshot:
-    """深复制 projection snapshot 及其可绕过 frozen 的 Pydantic failure。"""
-    return ProjectionAuditSnapshot(
-        thread_id=snapshot.thread_id,
-        projected_seq=snapshot.projected_seq,
-        stale=snapshot.stale,
-        failure=(
-            _copy_stable_error(snapshot.failure)
-            if snapshot.failure is not None
-            else None
-        ),
-    )
-
 
 class SessionAuditCoordinator:
     """串行化一个 Session 的 Journal append，并隔离其 fail-closed 状态。"""
@@ -222,9 +98,11 @@ class SessionAuditCoordinator:
         self._projections: dict[str, ProjectionAuditSnapshot] = {}
         self._lifecycle = SessionLifecycle.OPEN
         self._audit_complete: bool | None = None
-        self._admissions: dict[str, AdmissionReservation] = {}
-        self._finish_future: FinishFuture | None = None
+        self._lease_released: bool | None = None
+        self._admissions: dict[str, _AdmissionReservation] = {}
+        self._finish_future: _FinishFuture | None = None
         self._committed_terminal_threads: set[str] = set()
+        self._terminal_sealed = False
 
     @property
     def session_id(self) -> str:
@@ -268,14 +146,21 @@ class SessionAuditCoordinator:
     ) -> JournalAck:
         """串行追加 batch，只以覆盖当前 batch 的 durable ack 推进 seq。"""
         self._raise_if_frozen()
+        self._raise_if_append_sealed()
         snapshot = self._validate_records(records)
         if cancel is not None:
             cancel.raise_if_cancelled()
         async with self._append_lock:
             self._raise_if_frozen()
+            self._raise_if_append_sealed()
             if cancel is not None:
                 cancel.raise_if_cancelled()
             return await self._append_locked(snapshot)
+
+    def _raise_if_append_sealed(self) -> None:
+        """terminal seal 或 CLOSED 后在 core dispatch 前稳定拒绝普通 append。"""
+        if self._terminal_sealed or self._lifecycle is SessionLifecycle.CLOSED:
+            raise SessionFinishingError(self.session_id, self._lifecycle)
 
     async def _append_locked(
         self,
@@ -381,9 +266,10 @@ class SessionAuditCoordinator:
             if self._lifecycle is not SessionLifecycle.OPEN:
                 raise SessionFinishingError(self.session_id, self._lifecycle)
             self._raise_if_frozen()
+            self._prune_completed_admissions()
             if work_id in self._admissions:
                 raise ValueError(f"work already accepted: {work_id}")
-            reservation = AdmissionReservation(work_id)
+            reservation = _AdmissionReservation(work_id)
             self._admissions[work_id] = reservation
         try:
             await durable_accept()
@@ -399,7 +285,7 @@ class SessionAuditCoordinator:
 
     async def _settle_admission(
         self,
-        reservation: AdmissionReservation,
+        reservation: _AdmissionReservation,
         *,
         accepted: bool,
     ) -> tuple[AcceptedWork | None, SessionLifecycle]:
@@ -439,9 +325,10 @@ class SessionAuditCoordinator:
                     requests = self._validated_terminal_requests(thread_terminals)
                     if not reason or not status:
                         raise ValueError("finish status and reason must be non-empty")
-                    future = FinishFuture()
+                    future = _FinishFuture()
                     self._finish_future = future
                     self._lifecycle = SessionLifecycle.FINISHING
+                    self._prune_completed_admissions()
                     reservations = tuple(self._admissions.values())
                 else:
                     requests, reservations = (), ()
@@ -451,6 +338,14 @@ class SessionAuditCoordinator:
             result = await future.wait()
         assert result is not None
         return result
+
+    def _prune_completed_admissions(self) -> None:
+        """在 lifecycle lock 内只保留 pending 或 accepted-incomplete reservation。"""
+        self._admissions = {
+            work_id: reservation
+            for work_id, reservation in self._admissions.items()
+            if reservation.is_incomplete
+        }
 
     @staticmethod
     def _validated_terminal_requests(
@@ -480,68 +375,144 @@ class SessionAuditCoordinator:
 
     async def _drive_finish(
         self,
-        future: FinishFuture,
-        reservations: tuple[AdmissionReservation, ...],
+        future: _FinishFuture,
+        reservations: tuple[_AdmissionReservation, ...],
         requests: tuple[ThreadTerminalRequest, ...],
         status: str,
         reason: str,
     ) -> None:
         """在 shield 内有界收敛 work、terminal batch 与唯一 close。"""
         terminal_record_ids: tuple[str, ...] = ()
+        terminal_acked = False
         close_attempted = False
+        lease_released = False
         failure: StableErrorV1 | None = None
-        accepted: tuple[AcceptedWork, ...] = ()
+        fatal_to_raise: KeyboardInterrupt | SystemExit | None = None
         try:
             with anyio.fail_after(self._finish_timeout):
-                for reservation in reservations:
-                    await reservation.wait_settled()
-                accepted = tuple(
-                    work
-                    for reservation in reservations
-                    if (work := reservation.accepted_work) is not None
-                )
-                for work in accepted:
-                    await work.wait_completed()
-                self._raise_if_frozen()
-                records = build_terminal_records(
-                    session_id=self.session_id,
+                await self._await_accepted_work(reservations)
+                ack = await self._append_terminal_batch(
                     requests=requests,
-                    committed_thread_ids=self._committed_terminal_threads,
                     status=status,
                     reason=reason,
                 )
-                ack = await self.append_batch(records)
                 terminal_record_ids = ack.record_ids
+                terminal_acked = True
                 self._raise_if_frozen()
                 close_attempted = True
                 await self._core.close_session(self._lease)
+                lease_released = True
                 self._raise_if_frozen()
         except BaseException as error:
-            incomplete = tuple(
-                reservation for reservation in reservations if reservation.is_incomplete
-            )
-            if isinstance(error, TimeoutError) and incomplete:
-                failure = StableErrorV1(
-                    code="accepted_work_convergence_timeout",
-                    class_name="AcceptedWorkConvergenceTimeout",
-                    failure_class="lifecycle",
-                    retryable=False,
+            failure, fatal_to_raise, emergency_released = (
+                await self._settle_finish_failure(
+                    error=error,
+                    reservations=reservations,
+                    close_attempted=close_attempted,
                 )
-            else:
-                failure = self._finish_failure(error)
-            self.freeze(failure)
+            )
             if not close_attempted:
-                await self._emergency_close()
+                lease_released = emergency_released
+        await self._publish_finish_result(
+            future=future,
+            failure=failure,
+            audit_complete=terminal_acked,
+            lease_released=lease_released,
+            terminal_record_ids=terminal_record_ids,
+        )
+        if fatal_to_raise is not None:
+            raise fatal_to_raise
+
+    async def _await_accepted_work(
+        self,
+        reservations: tuple[_AdmissionReservation, ...],
+    ) -> None:
+        """等待 finish 快照内 reservation 结算及 accepted work 收敛。"""
+        for reservation in reservations:
+            await reservation.wait_settled()
+        accepted = tuple(
+            work
+            for reservation in reservations
+            if (work := reservation.accepted_work) is not None
+        )
+        for work in accepted:
+            await work.wait_completed()
+
+    async def _append_terminal_batch(
+        self,
+        *,
+        requests: tuple[ThreadTerminalRequest, ...],
+        status: str,
+        reason: str,
+    ) -> JournalAck:
+        """在 append lock 内读取最新去重集合、封口并提交 terminal batch。"""
+        async with self._append_lock:
+            self._raise_if_frozen()
+            if self._terminal_sealed or self._lifecycle is SessionLifecycle.CLOSED:
+                raise SessionFinishingError(self.session_id, self._lifecycle)
+            self._terminal_sealed = True
+            records = _build_terminal_records(
+                session_id=self.session_id,
+                requests=requests,
+                committed_thread_ids=self._committed_terminal_threads,
+                status=status,
+                reason=reason,
+            )
+            return await self._append_locked(records)
+
+    async def _settle_finish_failure(
+        self,
+        *,
+        error: BaseException,
+        reservations: tuple[_AdmissionReservation, ...],
+        close_attempted: bool,
+    ) -> tuple[StableErrorV1, KeyboardInterrupt | SystemExit | None, bool]:
+        """稳定化 finish 首因、尝试 emergency close，并选定待重抛 fatal。"""
+        fatal = error if isinstance(error, (KeyboardInterrupt, SystemExit)) else None
+        incomplete = tuple(
+            reservation for reservation in reservations if reservation.is_incomplete
+        )
+        if isinstance(error, TimeoutError) and incomplete:
+            failure = StableErrorV1(
+                code="accepted_work_convergence_timeout",
+                class_name="AcceptedWorkConvergenceTimeout",
+                failure_class="lifecycle",
+                retryable=False,
+            )
+        else:
+            failure = self._finish_failure(error)
+        self.freeze(failure)
+        if close_attempted:
+            return failure, fatal, False
+        try:
+            lease_released = await self._emergency_close()
+        except (KeyboardInterrupt, SystemExit) as emergency_fatal:
+            fatal = fatal or emergency_fatal
+            lease_released = False
+        return failure, fatal, lease_released
+
+    async def _publish_finish_result(
+        self,
+        *,
+        future: _FinishFuture,
+        failure: StableErrorV1 | None,
+        audit_complete: bool,
+        lease_released: bool,
+        terminal_record_ids: tuple[str, ...],
+    ) -> None:
+        """在 lifecycle lock 内一次性发布共享结果并关闭 intake/effect gate。"""
         async with self._lifecycle_lock:
             if failure is None and self._frozen_error is not None:
                 failure = self._finish_failure(self._frozen_error)
             result = SessionFinishResult(
                 session_id=self.session_id,
-                audit_complete=failure is None,
+                audit_complete=audit_complete,
+                lease_released=lease_released,
                 terminal_record_ids=terminal_record_ids,
                 _failure=_copy_stable_error(failure) if failure is not None else None,
             )
             self._audit_complete = result.audit_complete
+            self._lease_released = result.lease_released
             self._effect_gate_open = False
             self._lifecycle = SessionLifecycle.CLOSED
             if result.audit_complete:
@@ -562,13 +533,16 @@ class SessionAuditCoordinator:
             return error.cause
         return _journal_failure(error)
 
-    async def _emergency_close(self) -> None:
-        """终结不完整时最多尝试一次 bounded per-Session close，并吞掉任意细节。"""
-        with anyio.move_on_after(self._finish_timeout, shield=True):
+    async def _emergency_close(self) -> bool:
+        """终结不完整时 bounded close；返回确定释放结论，fatal 原样传播。"""
+        with anyio.move_on_after(self._finish_timeout, shield=True) as scope:
             try:
                 await self._core.close_session(self._lease)
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except BaseException:
-                return
+                return False
+        return not scope.cancel_called
 
     async def ensure_effect_allowed(self) -> None:
         """effect 前 fail-closed 检查；冻结后永远返回同一稳定错误。"""
@@ -751,6 +725,7 @@ class SessionAuditCoordinator:
             ),
             lifecycle=self._lifecycle,
             audit_complete=self._audit_complete,
+            lease_released=self._lease_released,
             accepted_work_ids=tuple(sorted(self._admissions)),
         )
 

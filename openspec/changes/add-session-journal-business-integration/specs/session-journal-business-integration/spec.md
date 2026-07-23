@@ -196,10 +196,10 @@ The system SHALL give each active turn a target cancellation subtree, SHALL rese
 
 #### Scenario: Frozen Session receives emergency cancellation
 - **WHEN** Journal is unavailable and CancelTurn or Shutdown is required as a safe degradation action
-- **THEN** cancellation/close may proceed without fabricated durable records and introspection reports `audit_complete=false`
+- **THEN** cancellation/close may proceed without fabricated durable records, introspection reports `audit_complete=false`, and `lease_released` reflects only a definite close result
 
 ### Requirement: Session lifecycle finish is unique and deterministic
-The system SHALL coordinate admission and lifecycle through `OPEN → FINISHING → CLOSED`, SHALL use one finish future, stable terminal record ids, and exactly one per-Session close operation.
+The system SHALL coordinate admission and lifecycle through `OPEN → FINISHING → CLOSED`, SHALL use one canonical finish value with defensive per-caller result copies, stable terminal record ids, an append-lock-protected terminal seal, and exactly one per-Session close operation. The result and snapshot SHALL report durable terminal acknowledgement as `audit_complete` independently from definite resource release as `lease_released`.
 
 #### Scenario: release and Shutdown race
 - **WHEN** release, close, or Shutdown concurrently attempts to move an OPEN Session to FINISHING
@@ -213,9 +213,29 @@ The system SHALL coordinate admission and lifecycle through `OPEN → FINISHING 
 - **WHEN** a UserMessage received durable acceptance before intake closed but remains in the actor queue
 - **THEN** finish converges it before committing `session_ended`
 
+#### Scenario: Completed admission history is pruned
+- **WHEN** a long-lived OPEN Session repeatedly admits and completes work
+- **THEN** the lifecycle coordinator prunes settled completed reservations before the next admission and finish snapshot, retaining only pending or accepted-incomplete work
+
 #### Scenario: Normal finish completes
 - **WHEN** all accepted work and thread terminals have converged
-- **THEN** deterministic thread terminal records and one session ended record commit before `close_session(lease)` is called exactly once
+- **THEN** deterministic thread terminal records and one session ended record commit under the terminal seal before `close_session(lease)` is called exactly once, and the result reports `audit_complete=true, lease_released=true`
+
+#### Scenario: Append races with terminal sealing
+- **WHEN** an ordinary append races with finish after accepted work convergence
+- **THEN** finish reads the latest committed thread-terminal set while holding the append lock, seals before terminal dispatch, deduplicates thread terminals, and rejects every later append before core dispatch so `session_ended` remains the final durable record
+
+#### Scenario: Terminal ack succeeds but close fails
+- **WHEN** the terminal batch receives a definite durable ack and `close_session` fails
+- **THEN** result and snapshot report `audit_complete=true, lease_released=false`, preserve definite terminal record ids, and expose recovery-required health with a stable release failure
+
+#### Scenario: Terminal append fails but emergency close succeeds
+- **WHEN** the terminal batch does not receive a definite durable ack and emergency close definitely releases the lease
+- **THEN** result and snapshot report `audit_complete=false, lease_released=true` and do not fabricate terminal record ids
+
+#### Scenario: Finish callers mutate returned values
+- **WHEN** one caller mutates its returned finish result or nested stable failure through low-level attribute access
+- **THEN** concurrent and later callers receive equal canonical values in distinct result and failure objects without observing that mutation
 
 ### Requirement: Unsupported audit capabilities are rejected before effect
 The system SHALL allow only new Session, UserMessage, CancelTurn, Shutdown, default JSONL materialization, no hooks/permission/compression/memory/instruction update, atomic/composite synchronous Skill execution, no spawn/peer, an attempt-observable ModelClient, and metadata-complete non-suspending Tools.

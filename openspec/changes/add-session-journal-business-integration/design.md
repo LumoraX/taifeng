@@ -117,14 +117,27 @@ EnginePool 是 Session 生命周期唯一 owner。`Shutdown`、`release()`、`cl
   唯一 finish future。
 - FINISHING 后的新请求既不 durable accept 也不入队，返回 `SessionFinishingError`。
 - accepted-but-queued submission 必须在 `session_ended` 前收敛。
+- settled 且 completed 的 reservation 在下一次 admission 与 finish 快照前剪枝；只保留 pending 或
+  accepted-incomplete work，历史重复 identity 仍由 durable Journal 判定。
 
 `CancelTurn` 只触发目标 turn 及 child effect subtree 的 target token，不触发 Session root。freeze 和
 Shutdown 才取消 Session root。首个 Shutdown 可在同一 lock 内赢得 FINISHING，登记唯一 shutdown id，
 写 acceptance 后进入 finish；并发其他 Shutdown 在 acceptance 前拒绝。
 
 生命周期 operation id 固定为 `{session_id}:lifecycle:end`；thread terminal 按 thread id 排序并使用稳定
-ordinal，session ended 使用 ordinal 0。finish 成功只 close 一次；terminal commit 失败时执行 emergency
-close 并报告 `audit_complete=false`，不能把结果缓存成成功。
+ordinal，session ended 使用 ordinal 0。finish 在 append lock 内读取最新 terminal-thread 集合并设置不可逆
+terminal seal；seal/CLOSED 后的普通 append 在 core dispatch 前拒绝，保证 `session_ended` 是最终 durable
+record。
+
+finish future 保存 canonical value，但每次 wait 重建独立 result/failure，防止 caller 篡改污染后续调用。
+结果与 snapshot 分别报告：
+
+- `audit_complete`：terminal batch 是否收到 definite durable ack；
+- `lease_released`：normal 或 emergency close 是否确定成功。
+
+因此 terminal ack 后 close 失败为 `true/false`，terminal 失败但 emergency close 成功为 `false/true`，
+两者成功为 `true/true`，两者失败为 `false/false`。close 失败不推翻 durable terminal 事实，并保留 definite
+terminal record ids；failure/health 仍报告资源释放失败。
 
 ### 6. MessageStore 只作为 durable-ack 驱动的可重建投影
 
@@ -148,7 +161,8 @@ audit 配置通过依赖注入提供 core、writer id、附件上限等，不从
 5. 成功后才构造、warmup 并启动 AgentEngine。
 
 projector bootstrap 失败时由 EnginePool 调用唯一 finish 路径写 terminal/session end 后释放 lease；若终结
-也失败则 emergency close 并暴露 `audit_complete=false`。
+也失败则 emergency close 并暴露 `audit_complete=false`，同时按实际 close 结果独立暴露
+`lease_released`。
 
 ### 8. 每个真实 LLM attempt 都经过 observer；checkpoint 先于 delta
 

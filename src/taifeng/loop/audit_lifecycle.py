@@ -1,4 +1,4 @@
-"""Session audit admission/lifecycle 的不可变公开 primitives。"""
+"""Session audit lifecycle DTO 与内部同步 primitives。"""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class AcceptedWork:
         await self._completed.wait()
 
 
-class AdmissionReservation:
+class _AdmissionReservation:
     """shared lock 内登记、锁外 durable accept、再回锁结算的 reservation。"""
 
     __slots__ = ("_accepted_work", "_settled", "work_id")
@@ -124,10 +124,11 @@ class ThreadTerminalRequest:
 
 @dataclass(frozen=True, slots=True)
 class SessionFinishResult:
-    """所有 lifecycle caller 共享的稳定终结结果。"""
+    """单个 lifecycle caller 持有的防御性终结结果。"""
 
     session_id: str
     audit_complete: bool
+    lease_released: bool
     terminal_record_ids: tuple[str, ...]
     _failure: StableErrorV1 | None = None
 
@@ -137,8 +138,19 @@ class SessionFinishResult:
         return self._failure.model_copy() if self._failure is not None else None
 
 
-class FinishFuture:
-    """anyio 后端无关的一次性共享 finish result。"""
+def _copy_finish_result(result: SessionFinishResult) -> SessionFinishResult:
+    """重建 finish DTO 及嵌套 failure，隔离 object.__setattr__ 篡改。"""
+    return SessionFinishResult(
+        session_id=result.session_id,
+        audit_complete=result.audit_complete,
+        lease_released=result.lease_released,
+        terminal_record_ids=tuple(result.terminal_record_ids),
+        _failure=result.failure,
+    )
+
+
+class _FinishFuture:
+    """anyio 后端无关的一次性共享 canonical finish value。"""
 
     def __init__(self) -> None:
         """创建未完成 future。"""
@@ -146,20 +158,20 @@ class FinishFuture:
         self._result: SessionFinishResult | None = None
 
     def set_result(self, result: SessionFinishResult) -> None:
-        """只允许 owner 发布一次结果。"""
+        """只允许 owner 发布一次防御性副本。"""
         if self._result is not None:
             raise RuntimeError("finish result already set")
-        self._result = result
+        self._result = _copy_finish_result(result)
         self._completed.set()
 
     async def wait(self) -> SessionFinishResult:
-        """等待并返回 owner 发布的同一个不可变结果对象。"""
+        """等待并为每个 caller 重建独立 result/failure。"""
         await self._completed.wait()
         assert self._result is not None
-        return self._result
+        return _copy_finish_result(self._result)
 
 
-def build_terminal_records(
+def _build_terminal_records(
     *,
     session_id: str,
     requests: tuple[ThreadTerminalRequest, ...],

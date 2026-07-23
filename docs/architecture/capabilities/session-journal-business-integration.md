@@ -122,12 +122,28 @@ lifecycle 是 `OPEN → FINISHING → CLOSED`：
 - 进入 FINISHING 的胜者关闭 intake、快照全部 durable-accepted queued/in-flight submissions，并创建唯一
   finish future；
 - accepted-but-queued work 必须在 `session_ended` 前收敛；
+- 下一次 admission 与 finish 快照前剪枝 settled 且 completed 的 reservation，只跟踪 pending 或
+  accepted-incomplete work；
 - FINISHING/CLOSED 后的新请求不得 durable accept 或 enqueue，返回 `SessionFinishingError`；
-- 并发 release/close 只等待同一 future；并发不同 Shutdown id 在 acceptance 前拒绝。
+- 并发 release/close 只等待同一 canonical future value，但每个 caller 得到对象与嵌套 failure 独立的
+  防御性副本；并发不同 Shutdown id 在 acceptance 前拒绝。
+
+accepted work 收敛后，finish 持有 append lock，重读最新 committed thread-terminal 集合，设置不可逆
+terminal seal 并直接提交去重后的 `thread_terminal* + session_ended`。seal 或 CLOSED 后的普通 append 必须
+在 core dispatch 前拒绝，因此 `session_ended` 是最终 durable record。
+
+finish result 与 `SessionAuditSnapshot` 分开报告两个事实：
+
+- `audit_complete`：terminal batch 收到 definite durable ack；
+- `lease_released`：normal/emergency close 已确定释放 lease。
+
+两者成功为 `true/true`；terminal ack 后 close 失败为 `true/false`，保留 terminal ids 且 health 为
+recovery-required；terminal 失败但 emergency close 成功为 `false/true`；两者失败为 `false/false`。
+`close_session()` 只释放资源，不能推翻或制造 `session_ended` 事实。
 
 CancelTurn 只取消 target turn 及其 child effect subtree。freeze 和 Shutdown 才取消 Session root。Journal
 不可用时 CancelTurn/Shutdown 可作为安全降级动作执行，但不得伪造 durable record，health/introspection
-必须报告 `audit_complete=false`。
+必须报告 `audit_complete=false`；若 emergency close 确定成功则独立报告 `lease_released=true`。
 
 ## 8. LLM checkpoint-before-delta
 

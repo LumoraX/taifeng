@@ -63,7 +63,9 @@ async def close_session(self, lease: SessionLease) -> None:
 
 Journal core 由调用方创建并注入 EnginePool，所有权仍属于调用方；EnginePool 只调用
 `close_session`，不调用全局 `close()`。正常终结必须先 durable 写 `session_ended`，再释放 lease。
-紧急关闭若无法写终结记录，只释放 lease并记录 `audit_complete=false` 到 logger/introspection。
+finish result 与 introspection 分别暴露 `audit_complete` 和 `lease_released`：前者只表示 terminal batch
+收到 definite durable ack，后者只表示 `close_session`/emergency close 已确定释放 lease。紧急关闭若无法写
+终结记录，即使资源释放成功也必须报告 `audit_complete=false, lease_released=true`。
 
 本变更不增加 `open_existing`，因此关闭后的同一 Journal 不能重新执行。
 
@@ -292,7 +294,8 @@ EnginePool 构造期验证静态配置和 tool/provider capability；Submission 
 4. projector 用该 id 创建带 audit marker 的空 transcript。
 5. projector 失败：EnginePool 调用唯一的 `coordinator.finish(reason=projection_bootstrap_failed)`，追加
    `thread_terminal + session_ended(audit_complete=true)` 后 close_session，Engine 创建失败。若终结记录也
-   失败，finish 执行紧急 close，audit_complete=false 只进日志。
+   失败，finish 执行紧急 close；introspection 报告 `audit_complete=false`，并按实际 close 结果报告
+   `lease_released`。
 6. 成功后才启动并返回 Engine。
 
 ### UserMessage
@@ -381,16 +384,23 @@ outcome 或 unknown。Journal finalization 使用独立 shield，不能复用已
 - lifecycle 与 admission 共用同一 per-session lock，执行 `OPEN → FINISHING → CLOSED`。从 OPEN 进入
   FINISHING 的胜者原子关闭 intake、快照所有 durable-accepted queued/in-flight submission，并创建唯一
   finish future；后续
-  release/close 只 await 它，后续不同 id 的 Shutdown 在 acceptance 前拒绝。已成功 finish 的重试返回同一
-  结果，不二次 append/close。
+  release/close 只 await 它，后续不同 id 的 Shutdown 在 acceptance 前拒绝。future 内部保存 canonical
+  value，每个 caller 得到值相等但对象与嵌套 failure 独立的防御性副本；重试不二次 append/close。
+- admission map 在下一次 admission 与 finish 快照前移除 settled 且 completed 的 reservation，只保留
+  pending 或 accepted-incomplete work；durable Journal identity 继续负责历史重复判定。
 - 生命周期 operation id 固定为 `{session_id}:lifecycle:end`。按 thread id 排序后，
   `thread_terminal.record_id = {operation_id}:thread_terminal:none:{thread_ordinal}`；
   `session_ended.record_id = {operation_id}:session_ended:none:0`。若首个胜者是 Shutdown，其
   `submission_applied` 仍使用该 submission 自身 operation id 与通用 factory 公式，并与 terminal records
   同 batch；release/close 胜出时不存在伪造的 Shutdown applied。
 - `finish()` 先收敛 turn，再原子提交全部尚未提交的 `thread_terminal` 与 `session_ended`（Shutdown 时同批含
-  `submission_applied`），最后只调用一次 `close_session(lease)`。terminal commit 失败则 emergency close，
-  future 返回 `audit_complete=false`；不得把它缓存成成功。
+  `submission_applied`）。finish 在 append lock 内读取最新 committed thread-terminal 集合并设置不可逆
+  terminal seal，再直接提交 terminal batch；seal/CLOSED 后的普通 append 必须在 core dispatch 前拒绝，
+  因而 `session_ended` 保持最终 durable record。随后只调用一次 `close_session(lease)`。
+- `audit_complete` 仅由 definite terminal ack 决定；`lease_released` 仅由 normal/emergency close 的确定成功
+  决定。terminal ack 后 close 失败为 `true/false`，terminal 失败而 emergency close 成功为
+  `false/true`，两者成功为 `true/true`，两者失败为 `false/false`。close 失败仍保留 definite terminal
+  record ids 与稳定 failure/health。
 - `EnginePool.close()` 对每个 Session 串行请求 finish；不调用外部 owner 的 core.close。
 
 ## 失败语义
@@ -404,6 +414,8 @@ outcome 或 unknown。Journal finalization 使用独立 shield，不能复用已
 | projection 任一点失败 | Journal/hot history 已提交；projection stale，可按 seq 重放，不冻结 |
 | EventMsg 失败 | 不影响 Journal；UI 可从 checkpoint/Timeline 补读 |
 | sibling tool 取消/超时 | 每个 intent 分别 cancelled 或 unknown；批量 durable 收敛 |
+| terminal ack 后 close 失败 | `audit_complete=true, lease_released=false`；保留 terminal ids，health recovery-required |
+| terminal commit 失败、emergency close 成功 | `audit_complete=false, lease_released=true`；不得伪造 terminal ids |
 
 第一次 Journal failure 原子关闭 effect gate并取消 root/children；其他 Session 不受影响。若
 `session_frozen` 无法写，内存 health 与 logger 仍 fail-closed。由于没有 open/recovery，本切片只保证当前

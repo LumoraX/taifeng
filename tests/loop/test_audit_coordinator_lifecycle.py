@@ -201,7 +201,7 @@ async def test_finish_snapshots_durable_accepted_work_and_closes_admission() -> 
 
         snapshot = coordinator.snapshot()
         assert snapshot.lifecycle is SessionLifecycle.FINISHING
-        assert snapshot.accepted_work_ids == ("sub_completed", "sub_in_flight")
+        assert snapshot.accepted_work_ids == ("sub_in_flight",)
         assert not core.append_calls
 
         rejected_called = False
@@ -344,7 +344,10 @@ async def test_concurrent_finish_callers_share_result_terminal_batch_and_close()
     later = await coordinator.finish(thread_terminals=_threads(), reason="released")
 
     assert len(results) == 2
-    assert results[0] is results[1] is later
+    assert results[0] == results[1] == later
+    assert results[0] is not results[1]
+    assert results[0] is not later
+    assert results[1] is not later
     assert len(core.append_calls) == 1
     assert core.close_calls == [_lease()]
 
@@ -374,7 +377,8 @@ async def test_close_failure_after_terminal_ack_fails_closed_and_preserves_ack()
     expected_ids = tuple(
         record.record_id for record in core.append_calls[0].records
     )
-    assert not result.audit_complete
+    assert result.audit_complete
+    assert not result.lease_released
     assert result.terminal_record_ids == expected_ids
     assert result.failure is not None
     assert result.failure.code == "journal_io_error"
@@ -433,8 +437,10 @@ async def test_terminal_failure_emergency_closes_and_all_callers_see_incomplete(
         tasks.start_soon(finish)
         core.release_terminal.set()
 
-    assert results[0] is results[1]
+    assert results[0] == results[1]
+    assert results[0] is not results[1]
     assert not results[0].audit_complete
+    assert results[0].lease_released
     assert results[0].terminal_record_ids == ()
     assert results[0].failure is not None
     assert results[0].failure.code == "journal_io_error"
@@ -604,8 +610,8 @@ async def test_unfinished_work_timeout_fails_closed_and_preserves_incomplete_sna
 
 
 @pytest.mark.anyio
-async def test_external_freeze_during_terminal_append_cannot_publish_success() -> None:
-    """definite terminal ack 可推进 seq，但 append 期间 freeze 必须发布 incomplete。"""
+async def test_external_freeze_during_terminal_append_preserves_terminal_fact() -> None:
+    """append 期间 freeze 不推翻 definite terminal ack，但仍发布稳定失败。"""
     core = _LifecycleCore(pause_terminal=True)
     coordinator = _coordinator(core)
     result = None
@@ -621,14 +627,15 @@ async def test_external_freeze_during_terminal_append_cannot_publish_success() -
         core.release_terminal.set()
 
     assert result is not None
-    assert not result.audit_complete
+    assert result.audit_complete
+    assert result.lease_released
     assert result.terminal_record_ids == tuple(
         record.record_id for record in core.append_calls[0].records
     )
     assert result.failure == frozen.cause
     assert result.failure.code == "journal_io_error"
     assert coordinator.expected_seq == 6
-    assert coordinator.snapshot().audit_complete is False
+    assert coordinator.snapshot().audit_complete is True
     assert core.close_calls == [_lease()]
 
 
