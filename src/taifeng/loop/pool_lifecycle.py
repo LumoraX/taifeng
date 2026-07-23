@@ -16,10 +16,12 @@ if TYPE_CHECKING:
     from taifeng.loop.pool import EnginePool
 
 type _ReleaseStage = Literal["engine_shutdown", "engine_task", "audit_finish"]
+type _EngineStage = Literal["engine_shutdown", "engine_task"]
 
 _ENGINE_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _ACTOR_CONVERGENCE_TIMEOUT_SECONDS = 5.0
-_BACKGROUND_DRAINS: set[asyncio.Task[None]] = set()
+_WATCHER_STOP_TIMEOUT_SECONDS = 3.0
+_CANCELLATION_GRACE_SECONDS = 1.0
 
 
 class EnginePoolReleaseError(RuntimeError):
@@ -50,6 +52,28 @@ class EnginePoolSessionReleasingError(RuntimeError):
         """只暴露稳定 code/session id。"""
         super().__init__(f"{self.code}: session={session_id}")
         self.session_id = session_id
+
+
+class EnginePoolUnresponsiveError(RuntimeError):
+    """内部 lifecycle task 违反 cooperative cancellation 契约。"""
+
+    code = "engine_pool_release_unresponsive"
+
+    def __init__(self, session_id: str, *, stage: _EngineStage) -> None:
+        """只暴露稳定 session/stage，不携带任意 task 异常文本。"""
+        super().__init__(f"{self.code}: session={session_id}, stage={stage}")
+        self.session_id = session_id
+        self.stage = stage
+
+
+class EnginePoolWatcherTimeoutError(RuntimeError):
+    """watcher 未在 stop/cancel deadline 内收敛。"""
+
+    code = "engine_pool_watcher_timeout"
+
+    def __init__(self) -> None:
+        """构造无任意异常文本的稳定 timeout failure。"""
+        super().__init__(self.code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +111,7 @@ async def release_pool_session(
                 _drive_release(pool, snapshot),
                 name=f"pool-release:{session_id}",
             )
-            _retain_background_task(worker)
+            worker.add_done_callback(_consume_task_exception)
             pool._release_tasks[session_id] = worker  # noqa: SLF001
     await asyncio.shield(worker)
 
@@ -110,8 +134,8 @@ def _claim_release_snapshot(
 
 
 async def _drive_release(pool: EnginePool, snapshot: _ReleaseSnapshot) -> None:
-    """无论 Engine 阶段如何失败，都尝试唯一 finish 后再移除 ownership。"""
-    first = await _stop_engine(snapshot)
+    """协作终结后 finish；不响应 invariant violation 原样保留 ownership。"""
+    first = await _stop_engine(pool, snapshot)
     finish_result: SessionFinishResult | None = None
     try:
         finish_result = await _finish_audited_session(snapshot, first)
@@ -133,8 +157,11 @@ async def _drive_release(pool: EnginePool, snapshot: _ReleaseSnapshot) -> None:
         )
 
 
-async def _stop_engine(snapshot: _ReleaseSnapshot) -> _FirstFailure | None:
-    """先观察已终结 actor，再有界 shutdown/等待存活 actor。"""
+async def _stop_engine(
+    pool: EnginePool,
+    snapshot: _ReleaseSnapshot,
+) -> _FirstFailure | None:
+    """先观察 actor，再按 graceful/cancel-grace 两阶段终结内部 task。"""
     actor_task = snapshot.actor_task
     actor_finished = actor_task is not None and actor_task.done()
     if actor_task is not None and actor_task.done():
@@ -142,39 +169,76 @@ async def _stop_engine(snapshot: _ReleaseSnapshot) -> _FirstFailure | None:
         if actor_failure is not None:
             return actor_failure
     first: _FirstFailure | None = None
+    unresponsive: EnginePoolUnresponsiveError | None = None
     if snapshot.engine is not None:
-        first = await _bounded_engine_shutdown(snapshot.engine)
+        try:
+            first = await _bounded_engine_shutdown(pool, snapshot)
+        except EnginePoolUnresponsiveError as exc:
+            unresponsive = exc
     if actor_task is not None and not actor_finished:
-        actor_failure = await _bounded_actor_convergence(
-            actor_task,
-            cancel_first=first is not None,
-        )
-        first = first or actor_failure
+        try:
+            actor_failure = await _bounded_actor_convergence(
+                actor_task,
+                session_id=snapshot.session_id,
+                cancel_first=first is not None or unresponsive is not None,
+            )
+            first = first or actor_failure
+        except EnginePoolUnresponsiveError as exc:
+            unresponsive = unresponsive or exc
+    if unresponsive is not None:
+        raise unresponsive
     return first
 
 
-async def _bounded_engine_shutdown(engine: AgentEngine) -> _FirstFailure | None:
-    """在独立 task 内执行 shutdown，超时后取消但不无界等待。"""
-    task = asyncio.create_task(engine.shutdown(), name="pool-engine-shutdown")
+async def _bounded_engine_shutdown(
+    pool: EnginePool,
+    snapshot: _ReleaseSnapshot,
+) -> _FirstFailure | None:
+    """由 session supervisor 持有 shutdown，超时后执行 cancel-grace。"""
+    assert snapshot.engine is not None
+    task = asyncio.create_task(
+        snapshot.engine.shutdown(),
+        name=f"pool-engine-shutdown:{snapshot.session_id}",
+    )
+    _supervise_teardown_task(pool, snapshot.session_id, task)
     done, _ = await asyncio.wait(
         {task},
         timeout=_ENGINE_SHUTDOWN_TIMEOUT_SECONDS,
     )
     if task in done:
+        _forget_teardown_task(pool, snapshot.session_id, task)
         return _done_task_failure(task, stage="engine_shutdown")
     task.cancel()
-    _retain_background_task(task)
-    return _FirstFailure("engine_shutdown", TimeoutError())
+    done, _ = await asyncio.wait({task}, timeout=_CANCELLATION_GRACE_SECONDS)
+    if task not in done:
+        raise EnginePoolUnresponsiveError(
+            snapshot.session_id,
+            stage="engine_shutdown",
+        )
+    _forget_teardown_task(pool, snapshot.session_id, task)
+    return _done_task_failure(task, stage="engine_shutdown") or _FirstFailure(
+        "engine_shutdown",
+        TimeoutError(),
+    )
 
 
 async def _bounded_actor_convergence(
     task: asyncio.Task[None],
     *,
+    session_id: str,
     cancel_first: bool,
 ) -> _FirstFailure | None:
     """有界观察 actor；超时取消后由 callback 回收最终异常。"""
     if cancel_first:
         task.cancel()
+        done, _ = await asyncio.wait(
+            {task},
+            timeout=_CANCELLATION_GRACE_SECONDS,
+        )
+        if task not in done:
+            task.add_done_callback(_consume_task_exception)
+            raise EnginePoolUnresponsiveError(session_id, stage="engine_task")
+        return _done_task_failure(task, stage="engine_task")
     done, _ = await asyncio.wait(
         {task},
         timeout=_ACTOR_CONVERGENCE_TIMEOUT_SECONDS,
@@ -182,8 +246,14 @@ async def _bounded_actor_convergence(
     if task in done:
         return _done_task_failure(task, stage="engine_task")
     task.cancel()
-    _retain_background_task(task)
-    return _FirstFailure("engine_task", TimeoutError())
+    done, _ = await asyncio.wait({task}, timeout=_CANCELLATION_GRACE_SECONDS)
+    if task not in done:
+        task.add_done_callback(_consume_task_exception)
+        raise EnginePoolUnresponsiveError(session_id, stage="engine_task")
+    return _done_task_failure(task, stage="engine_task") or _FirstFailure(
+        "engine_task",
+        TimeoutError(),
+    )
 
 
 def _done_task_failure(
@@ -269,7 +339,7 @@ async def close_engine_pool(pool: EnginePool) -> None:
                 _drive_pool_close(pool),
                 name="engine-pool-close",
             )
-            _retain_background_task(worker)
+            worker.add_done_callback(_consume_task_exception)
             pool._close_task = worker  # noqa: SLF001
     await asyncio.shield(worker)
 
@@ -332,47 +402,93 @@ async def _stop_watcher(
     if task is None:
         return first
     if task.done():
-        failure = _done_task_failure(task, stage="engine_task")
-        return first or (failure.cause if failure is not None else None)
+        pool._watcher_task = None  # noqa: SLF001
+        return first or _done_task_exception(task)
     try:
         if pool._watcher is not None:  # noqa: SLF001
             pool._watcher.stop()  # noqa: SLF001
     except BaseException as exc:  # noqa: BLE001
         first = first or exc
-    done, _ = await asyncio.wait({task}, timeout=3.0)
+    done, _ = await asyncio.wait(
+        {task},
+        timeout=_WATCHER_STOP_TIMEOUT_SECONDS,
+    )
+    if task in done:
+        pool._watcher_task = None  # noqa: SLF001
+        return first or _done_task_exception(task)
+    timeout_failure = EnginePoolWatcherTimeoutError()
+    first = first or timeout_failure
+    task.cancel()
+    done, _ = await asyncio.wait(
+        {task},
+        timeout=_CANCELLATION_GRACE_SECONDS,
+    )
     if task not in done:
-        task.cancel()
-        _retain_background_task(task)
+        task.add_done_callback(lambda done: _forget_watcher_task(pool, done))
         return first
-    failure = _done_task_failure(task, stage="engine_task")
-    if failure is not None:
-        first = first or failure.cause
+    pool._watcher_task = None  # noqa: SLF001
+    _consume_task_exception(task)
     return first
 
 
 def _consume_task_exception(task: asyncio.Task[None]) -> None:
     """取走后台 worker 异常，避免 caller 已取消时产生未检索告警。"""
-    if not task.cancelled():
-        task.exception()
+    _done_task_exception(task)
 
 
-def _retain_background_task(task: asyncio.Task[None]) -> None:
-    """强持有 cancellation-resistant task 到终结并检索最终异常。"""
-    _BACKGROUND_DRAINS.add(task)
-    task.add_done_callback(_consume_and_forget_background_task)
-
-
-def _consume_and_forget_background_task(task: asyncio.Task[None]) -> None:
-    """完成后先检索异常，再释放 module-level 强 ownership。"""
+def _done_task_exception(task: asyncio.Task[None]) -> BaseException | None:
+    """检索 done task 的非取消异常。"""
+    if task.cancelled():
+        return None
     try:
-        _consume_task_exception(task)
-    finally:
-        _BACKGROUND_DRAINS.discard(task)
+        task.result()
+    except asyncio.CancelledError:
+        return None
+    except BaseException as exc:  # noqa: BLE001
+        return exc
+    return None
+
+
+def _supervise_teardown_task(
+    pool: EnginePool,
+    session_id: str,
+    task: asyncio.Task[None],
+) -> None:
+    """由 pool/session supervisor 强持有 teardown task 到确定终态。"""
+    tasks = pool._teardown_tasks.setdefault(session_id, set())  # noqa: SLF001
+    tasks.add(task)
+    task.add_done_callback(
+        lambda done: _forget_teardown_task(pool, session_id, done)
+    )
+
+
+def _forget_teardown_task(
+    pool: EnginePool,
+    session_id: str,
+    task: asyncio.Task[None],
+) -> None:
+    """检索异常并从明确的 pool/session ownership 中移除 done task。"""
+    _consume_task_exception(task)
+    tasks = pool._teardown_tasks.get(session_id)  # noqa: SLF001
+    if tasks is None:
+        return
+    tasks.discard(task)
+    if not tasks:
+        pool._teardown_tasks.pop(session_id, None)  # noqa: SLF001
+
+
+def _forget_watcher_task(pool: EnginePool, task: asyncio.Task[None]) -> None:
+    """检索 late watcher 终态并释放 pool ownership。"""
+    _consume_task_exception(task)
+    if pool._watcher_task is task:  # noqa: SLF001
+        pool._watcher_task = None  # noqa: SLF001
 
 
 __all__ = [
     "EnginePoolReleaseError",
     "EnginePoolSessionReleasingError",
+    "EnginePoolUnresponsiveError",
+    "EnginePoolWatcherTimeoutError",
     "close_engine_pool",
     "release_pool_session",
 ]

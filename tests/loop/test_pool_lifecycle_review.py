@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -88,26 +87,27 @@ class _ResistantActorEngine(_EngineSpy):
             await self._actor_escape.wait()
 
 
-class _OrphaningShutdownEngine(_EngineSpy):
-    """shutdown 吞取消后等待无外部 owner 的 Future。"""
+class _LateCancelShutdownEngine(_EngineSpy):
+    """shutdown 超时后协作响应 task cancellation。"""
 
-    def __init__(self, *, actor_exit: asyncio.Event, **kwargs: Any) -> None:
+    def __init__(self, *, shutdown_cancelled: asyncio.Event, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._actor_exit = actor_exit
+        self._shutdown_cancelled = shutdown_cancelled
 
     async def run(self, cancel: CancellationToken) -> None:
-        """保持 actor 存活到 release 进入 shutdown。"""
+        """保持 actor 存活，等待 teardown cancel。"""
         del cancel
         self._events.append("actor_run")
-        await self._actor_exit.wait()
+        await asyncio.Event().wait()
 
     async def shutdown(self) -> None:
-        """吞掉取消后永久等待，暴露 background task 强 ownership 缺口。"""
+        """捕获取消后让出一次调度并正常退出。"""
         self._events.append("engine_shutdown")
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            await asyncio.Event().wait()
+            self._shutdown_cancelled.set()
+            await asyncio.sleep(0)
 
 
 async def _release_exception(task: asyncio.Task[None]) -> BaseException | None:
@@ -120,11 +120,11 @@ async def _release_exception(task: asyncio.Task[None]) -> BaseException | None:
 
 
 @pytest.mark.asyncio
-async def test_shutdown_timeout_is_bounded_when_shutdown_suppresses_cancel(
+async def test_unresponsive_shutdown_preserves_session_and_audit_ownership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """shutdown 不响应取消时，release 仍须有界终结并释放审计 ownership。"""
+    """内部 task 不响应取消时，不得 finish/close/drop 或重建同 Session。"""
     events: list[str] = []
     core = _JournalCore(events)
     shutdown_started = asyncio.Event()
@@ -156,6 +156,12 @@ async def test_shutdown_timeout_is_bounded_when_shutdown_suppresses_cancel(
         0.01,
         raising=False,
     )
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_CANCELLATION_GRACE_SECONDS",
+        0.01,
+        raising=False,
+    )
     pool = _pool(tmp_path, core, events)
     await pool.get_or_create(session_id="ses-stuck-shutdown", entry_skill_id="entry")
     release = asyncio.create_task(pool.release("ses-stuck-shutdown"))
@@ -163,43 +169,53 @@ async def test_shutdown_timeout_is_bounded_when_shutdown_suppresses_cancel(
 
     done, _ = await asyncio.wait({release}, timeout=0.2)
     completed_in_bound = release in done
-    shutdown_escape.set()
-    actor_exit.set()
-    actor_task = pool._engine_tasks.get("ses-stuck-shutdown")  # noqa: SLF001
-    if actor_task is not None and not actor_task.done():
-        actor_task.cancel()
     error = await asyncio.wait_for(_release_exception(release), timeout=1.0)
-    shutdown_task = created[0].shutdown_task
-    if shutdown_task is not None and shutdown_task is not release:
-        await asyncio.wait({shutdown_task}, timeout=1.0)
 
     assert completed_in_bound is True
-    assert isinstance(error, EnginePoolReleaseError)
-    assert error.stage == "engine_shutdown"
-    assert core.close_calls == 1
-    assert "ses-stuck-shutdown" not in pool._audit_sessions  # noqa: SLF001
-    await pool.close()
+    assert getattr(error, "code", None) == "engine_pool_release_unresponsive"
+    assert getattr(error, "stage", None) == "engine_shutdown"
+    assert events.count("journal_terminal") == 0
+    assert core.close_calls == 0
+    assert "ses-stuck-shutdown" in pool._engines  # noqa: SLF001
+    assert "ses-stuck-shutdown" in pool._engine_tasks  # noqa: SLF001
+    assert "ses-stuck-shutdown" in pool._audit_sessions  # noqa: SLF001
+    assert "ses-stuck-shutdown" in pool._release_tasks  # noqa: SLF001
+    assert "ses-stuck-shutdown" in pool.introspect()
+    with pytest.raises(RuntimeError) as rebuilding:
+        await pool.get_or_create(
+            session_id="ses-stuck-shutdown",
+            entry_skill_id="entry",
+        )
+    assert getattr(rebuilding.value, "code", None) == "engine_pool_session_releasing"
+    assert getattr(lifecycle_module, "_BACKGROUND_DRAINS", set()) == set()
 
+    shutdown_escape.set()
+    actor_exit.set()
+    shutdown_task = created[0].shutdown_task
+    if shutdown_task is not None:
+        await asyncio.wait({shutdown_task}, timeout=1.0)
+    with pytest.raises(RuntimeError) as close_error:
+        await pool.close()
+    assert getattr(close_error.value, "code", None) == "engine_pool_release_unresponsive"
+    assert events.count("journal_terminal") == 0
+    assert core.close_calls == 0
 
 @pytest.mark.asyncio
-async def test_timed_out_shutdown_task_is_retained_until_it_finishes(
+async def test_cooperative_late_cancelled_shutdown_is_reaped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """测试侧无强引用时，超时 shutdown task 也不能被 GC 提前销毁。"""
+    """超时后在 grace 内响应取消的 shutdown task 被检索并释放 ownership。"""
     events: list[str] = []
     core = _JournalCore(events)
-    actor_exit = asyncio.Event()
-    contexts: list[dict[str, Any]] = []
-    loop = asyncio.get_running_loop()
-    previous_handler = loop.get_exception_handler()
+    shutdown_cancelled = asyncio.Event()
 
     monkeypatch.setattr(
         pool_module,
         "AgentEngine",
-        lambda **kwargs: _OrphaningShutdownEngine(
+        lambda **kwargs: _LateCancelShutdownEngine(
             events=events,
-            actor_exit=actor_exit,
+            shutdown_cancelled=shutdown_cancelled,
             **kwargs,
         ),
     )
@@ -213,38 +229,34 @@ async def test_timed_out_shutdown_task_is_retained_until_it_finishes(
         "_ACTOR_CONVERGENCE_TIMEOUT_SECONDS",
         0.01,
     )
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_CANCELLATION_GRACE_SECONDS",
+        0.05,
+        raising=False,
+    )
     pool = _pool(tmp_path, core, events)
-    await pool.get_or_create(session_id="ses-orphan-shutdown", entry_skill_id="entry")
-    loop.set_exception_handler(lambda unused_loop, context: contexts.append(context))
-    try:
-        with pytest.raises(EnginePoolReleaseError):
-            await pool.release("ses-orphan-shutdown")
-        for _ in range(3):
-            gc.collect()
-            await asyncio.sleep(0)
-    finally:
-        loop.set_exception_handler(previous_handler)
-        actor_exit.set()
+    await pool.get_or_create(session_id="ses-late-shutdown", entry_skill_id="entry")
 
-    destroyed = [
-        context
-        for context in contexts
-        if context.get("message") == "Task was destroyed but it is pending!"
-    ]
-    assert destroyed == []
-    drains = tuple(lifecycle_module._BACKGROUND_DRAINS)  # noqa: SLF001
-    for task in drains:
-        task.cancel()
-    await asyncio.gather(*drains, return_exceptions=True)
+    with pytest.raises(EnginePoolReleaseError) as caught:
+        await pool.release("ses-late-shutdown")
+
+    assert caught.value.stage == "engine_shutdown"
+    assert shutdown_cancelled.is_set()
+    assert core.close_calls == 1
+    assert "ses-late-shutdown" not in pool._audit_sessions  # noqa: SLF001
+    assert hasattr(pool, "_teardown_tasks")
+    assert getattr(pool, "_teardown_tasks", {}) == {}
+    assert getattr(lifecycle_module, "_BACKGROUND_DRAINS", set()) == set()
     await pool.close()
 
 
 @pytest.mark.asyncio
-async def test_actor_timeout_is_bounded_when_actor_suppresses_cancel(
+async def test_unresponsive_actor_preserves_session_and_audit_ownership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """actor 不响应取消时，release 不得在取消等待上失去时间上界。"""
+    """actor 在 cancel grace 后仍存活时，不得关闭审计 lease 或丢 ownership。"""
     events: list[str] = []
     core = _JournalCore(events)
     actor_cancelled = asyncio.Event()
@@ -266,6 +278,12 @@ async def test_actor_timeout_is_bounded_when_actor_suppresses_cancel(
         0.01,
         raising=False,
     )
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_CANCELLATION_GRACE_SECONDS",
+        0.01,
+        raising=False,
+    )
     pool = _pool(tmp_path, core, events)
     await pool.get_or_create(session_id="ses-stuck-actor", entry_skill_id="entry")
     actor_task = pool._engine_tasks["ses-stuck-actor"]  # noqa: SLF001
@@ -273,19 +291,24 @@ async def test_actor_timeout_is_bounded_when_actor_suppresses_cancel(
 
     done, _ = await asyncio.wait({release}, timeout=0.2)
     completed_in_bound = release in done
-    actor_escape.set()
-    if not actor_task.done():
-        actor_task.cancel()
     error = await asyncio.wait_for(_release_exception(release), timeout=1.0)
-    await asyncio.wait({actor_task}, timeout=1.0)
 
     assert completed_in_bound is True
     assert actor_cancelled.is_set()
-    assert isinstance(error, EnginePoolReleaseError)
-    assert error.stage == "engine_task"
-    assert core.close_calls == 1
-    assert "ses-stuck-actor" not in pool._audit_sessions  # noqa: SLF001
-    await pool.close()
+    assert getattr(error, "code", None) == "engine_pool_release_unresponsive"
+    assert getattr(error, "stage", None) == "engine_task"
+    assert events.count("journal_terminal") == 0
+    assert core.close_calls == 0
+    assert "ses-stuck-actor" in pool._engines  # noqa: SLF001
+    assert "ses-stuck-actor" in pool._engine_tasks  # noqa: SLF001
+    assert "ses-stuck-actor" in pool._audit_sessions  # noqa: SLF001
+
+    actor_escape.set()
+    await asyncio.wait({actor_task}, timeout=1.0)
+    with pytest.raises(RuntimeError):
+        await pool.close()
+    assert events.count("journal_terminal") == 0
+    assert core.close_calls == 0
 
 
 class _DirectorySpy:
@@ -313,6 +336,17 @@ class _HookRunnerSpy:
         """记录关闭次数。"""
         del grace_seconds
         self.shutdown_calls += 1
+
+
+class _WatcherStopSpy:
+    """记录 watcher.stop 调用。"""
+
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    def stop(self) -> None:
+        """记录同步 stop。"""
+        self.stop_calls += 1
 
 
 @pytest.mark.asyncio
@@ -530,4 +564,70 @@ async def test_close_consumes_already_failed_watcher_and_keeps_cleaning(
     assert caught.value is failure
     assert retrieved_by_close is True
     assert pool._root_cancel.is_cancelled is True  # noqa: SLF001
+    assert root not in _TARGETS
+
+
+@pytest.mark.asyncio
+async def test_watcher_timeout_is_stable_failure_and_other_resources_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """watcher 未在 deadline 停止时 close 抛稳定首错但继续清理。"""
+    root = (tmp_path / "stuck-watcher").resolve()
+    store = JsonlMessageStore(root)
+    pool = EnginePool(
+        skill_registry=_Registry(),  # type: ignore[arg-type]
+        model_client=SimClient(turns=[]),
+        store=store,
+        tool_registry=ToolRegistry(),
+        compressors=[],
+    )
+    hook = _HookRunnerSpy()
+    owned = _DirectorySpy()
+    watcher = _WatcherStopSpy()
+    cancelled = asyncio.Event()
+    escape = asyncio.Event()
+
+    async def _stuck_watcher() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await escape.wait()
+
+    task = asyncio.create_task(_stuck_watcher())
+    pool._watcher_task = task  # noqa: SLF001
+    pool._watcher = watcher  # type: ignore[assignment]  # noqa: SLF001
+    pool._hook_runner = hook  # type: ignore[assignment]  # noqa: SLF001
+    pool._owned_directory = owned  # type: ignore[assignment]  # noqa: SLF001
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_WATCHER_STOP_TIMEOUT_SECONDS",
+        0.01,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_CANCELLATION_GRACE_SECONDS",
+        0.01,
+        raising=False,
+    )
+
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await pool.close()
+        owned_after_close = pool._watcher_task is task  # noqa: SLF001
+    finally:
+        escape.set()
+        await asyncio.wait({task}, timeout=1.0)
+        await asyncio.sleep(0)
+
+    assert getattr(caught.value, "code", None) == "engine_pool_watcher_timeout"
+    assert watcher.stop_calls == 1
+    assert cancelled.is_set()
+    assert owned_after_close is True
+    assert pool._watcher_task is None  # noqa: SLF001
+    assert pool._root_cancel.is_cancelled is True  # noqa: SLF001
+    assert hook.shutdown_calls == 1
+    assert owned.close_calls == 1
     assert root not in _TARGETS

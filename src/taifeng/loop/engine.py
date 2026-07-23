@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.budget import ContextBudget
 from taifeng.context.cache_stats import PromptCacheStats
-from taifeng.context.compressor import CompressionOrchestrator
 from taifeng.conversation.models import (
     ResponseItem,
     function_call,
@@ -22,7 +21,6 @@ from taifeng.conversation.models import (
     user_message,
 )
 from taifeng.conversation.reconstruct import reconstruct_logical_history
-from taifeng.conversation.store import MessageStore
 from taifeng.instructions.resolver import InstructionResolver
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import (
@@ -30,7 +28,6 @@ from taifeng.instructions.types import (
     InstructionLayer,
     ResolvedInstruction,
 )
-from taifeng.llm.client import ModelClient
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
     EngineLog,
@@ -57,7 +54,6 @@ from taifeng.loop.event import (
 from taifeng.loop.event import Shutdown as ShutdownMsg
 from taifeng.loop.rewind import RewindCheckpoint, count_turns, derive_rewind_log
 from taifeng.loop.spawn_driver import SpawnDriver
-from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
 from taifeng.loop.submission import (
     CancelTurn,
     CompactNow,
@@ -76,11 +72,19 @@ from taifeng.loop.submission import (
     UserMessage,
 )
 from taifeng.loop.turn import TurnOutcome, TurnRunner
-from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import DispatchPolicy
-from taifeng.skill.registry import SkillSnapshot
 from taifeng.suspend.record import SuspensionRecord
-from taifeng.tool.runtime import ToolCallRuntime
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Coroutine
+
+    from taifeng.context.compressor import CompressionOrchestrator
+    from taifeng.conversation.store import MessageStore
+    from taifeng.llm.client import ModelClient
+    from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
+    from taifeng.skill.definition import SkillDefinition
+    from taifeng.skill.registry import SkillSnapshot
+    from taifeng.tool.runtime import ToolCallRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +275,9 @@ class AgentEngine:
         # suspension-ttl：record_id → 到期定时任务。挂起落盘(turn_suspended)武装,
         # 人工 Resume 核销(suspension_resolved)/ shutdown 取消;先核销者胜。
         self._ttl_timers: dict[str, asyncio.Task[None]] = {}
+        # actor 派发出的 turn/resume/rewind 与 TTL 均属于 Engine 生命周期；
+        # run() 任何退出路径必须取消并等待它们收敛，才能交还持久化 ownership。
+        self._operation_tasks: set[asyncio.Task[None]] = set()
         # multi-pending-partial-resume:per-record 结算锁——并发续跑链(双子同时
         # Resume/到期)对同一父 record 的「判定剩余 → 落 marker → 续跑」必须串行,
         # 否则可能双双判 partial(无人续跑)或双双 settle(双重续跑)
@@ -581,10 +588,8 @@ class AgentEngine:
                 if env.event.msg.kind == "shutdown":
                     return
         finally:
-            try:
+            with suppress(ValueError):
                 self._all_subs.remove(sub)
-            except ValueError:
-                pass
 
     async def subscribe_all(self) -> AsyncIterator[EventMsg]:
         """订阅本 engine 的全部事件（向后兼容：产出裸 ``EventMsg``）。
@@ -764,6 +769,56 @@ class AgentEngine:
     # suspension-ttl：挂起到期自动裁决（热武装 / 到期触发 / 冷重武装）
     # -----------------------------------------------------------------
 
+    def _start_operation(
+        self,
+        coroutine: Coroutine[Any, Any, None],
+        *,
+        name: str,
+    ) -> asyncio.Task[None]:
+        """创建并登记 Engine-owned operation，终态总会检索异常。"""
+        task = asyncio.create_task(
+            coroutine,
+            name=f"engine-operation:{self._session_id}:{name}",
+        )
+        self._operation_tasks.add(task)
+        task.add_done_callback(self._forget_operation)
+        return task
+
+    def _forget_operation(self, task: asyncio.Task[None]) -> None:
+        """检索 operation 终态并释放 Engine 显式 ownership。"""
+        self._operation_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except BaseException as exc:  # noqa: BLE001
+            logger.error(
+                "engine operation task failed: %s",
+                task.get_name(),
+                exc_info=exc,
+            )
+
+    async def _converge_operations(self) -> asyncio.CancelledError | None:
+        """取消并等待所有 operation；actor 自身取消也不得截断收敛。"""
+        actor_cancellation: asyncio.CancelledError | None = None
+        while self._operation_tasks:
+            tasks = tuple(self._operation_tasks)
+            for task in tasks:
+                task.cancel()
+            waiter = asyncio.gather(*tasks, return_exceptions=True)
+            while not waiter.done():
+                try:
+                    await asyncio.shield(waiter)
+                except asyncio.CancelledError as exc:
+                    actor_cancellation = actor_cancellation or exc
+                    current = asyncio.current_task()
+                    if current is not None:
+                        current.uncancel()
+                    for task in tasks:
+                        task.cancel()
+            waiter.result()
+        return actor_cancellation
+
     def _arm_ttl_timer(self, data: dict[str, Any]) -> None:
         """按 turn_suspended 事件武装到期定时器(expires_at 为 None 则不武装)。
 
@@ -778,8 +833,9 @@ class AgentEngine:
         if record_id in self._ttl_timers:
             return
         delay = max(0, int(expires_at) - int(self._now_factory()))
-        self._ttl_timers[record_id] = asyncio.create_task(
-            self._ttl_expire_after(delay, str(thread_id), str(record_id))
+        self._ttl_timers[record_id] = self._start_operation(
+            self._ttl_expire_after(delay, str(thread_id), str(record_id)),
+            name=f"ttl:{record_id}",
         )
 
     async def _ttl_record_active(
@@ -1004,13 +1060,14 @@ class AgentEngine:
 
     async def run(self, cancel: CancellationToken) -> None:
         self._running = True
+        shutdown_requested = False
         # detached-spawn：记下根取消 token，供 spawn 的分离 task 派生子 token（R4 可取消）。
         self._root_cancel = cancel
         # suspension-ttl 冷重武装(R5):装载的历史里有带 ttl 的活跃挂起 →
         # 已过期立即裁决、未过期按剩余时长武装。pool 冷恢复在 run 启动前已
         # rebuild spawn 句柄,此处可一并枚举挂起态 spawn 子 thread。
-        await self._rearm_ttl_timers_cold()
         try:
+            await self._rearm_ttl_timers_cold()
             while self._running:
                 if cancel.is_cancelled:
                     break
@@ -1020,10 +1077,9 @@ class AgentEngine:
                     continue
                 if isinstance(sub.op, Shutdown):
                     self._running = False
+                    shutdown_requested = True
                     # suspension-ttl:取消全部到期定时器(R4,定时器挂 engine 生命周期)
                     self._cancel_ttl_timers()
-                    # K3 on_session_end（teardown）：会话结束最终 flush。best-effort。
-                    await self._memory_session_end()
                     await self._emit(
                         EventMsg(submission_id=sub.id, msg=ShutdownMsg())
                     )
@@ -1130,7 +1186,10 @@ class AgentEngine:
                 if isinstance(sub.op, Rewind):
                     # 与 Resume 同理用 create_task：重推会跑完整 turn(采样 + 派发),
                     # 不阻塞主 run 循环,且给 subscribe(submission_id) 留注册窗口。
-                    asyncio.create_task(self._handle_rewind(sub, cancel))
+                    self._start_operation(
+                        self._handle_rewind(sub, cancel),
+                        name=f"rewind:{sub.id}",
+                    )
                     continue
                 if isinstance(sub.op, Resume):
                     # detached spawn 续跑优先判定：Resume.thread_id 命中某个【挂起】的
@@ -1139,22 +1198,36 @@ class AgentEngine:
                     # 不命中（根 thread / call_skill 子链）→ 维持既有 _handle_resume。
                     spawn_handle = self._match_suspended_spawn(sub.op.thread_id)
                     if spawn_handle is not None:
-                        asyncio.create_task(self._resume_spawn(sub, spawn_handle))
+                        self._start_operation(
+                            self._resume_spawn(sub, spawn_handle),
+                            name=f"resume-spawn:{sub.id}",
+                        )
                         continue
                     # 与 UserMessage 一致用 create_task 异步派发：让续跑链（可能跨子/根
                     # 多个 turn）不阻塞主 run 循环，且给 subscribe(submission_id) 留出在
                     # 事件流出前注册队列的窗口（子 thread resume 续跑链 emit 多个事件，
                     # 内联执行会与"submit 后再 subscribe"的消费者抢跑导致丢首批事件→挂死）。
-                    asyncio.create_task(self._handle_resume(sub, cancel))
+                    self._start_operation(
+                        self._handle_resume(sub, cancel),
+                        name=f"resume:{sub.id}",
+                    )
                     continue
                 if isinstance(sub.op, UserMessage):
-                    asyncio.create_task(self._run_turn_for(sub, cancel))
+                    self._start_operation(
+                        self._run_turn_for(sub, cancel),
+                        name=f"turn:{sub.id}",
+                    )
                     continue
         finally:
             self._running = False
+            cancel.cancel()
             # R4:任何退出路径(Shutdown / root-cancel break / 异常)统一取消全部
             # TTL 定时器——孤儿定时器到期后会向无人消费的队列 submit(可能永久阻塞)
             self._cancel_ttl_timers()
+            actor_cancellation = await self._converge_operations()
+            if shutdown_requested:
+                # K3 teardown 必须在所有会话 operation 收敛后再最终 flush。
+                await self._memory_session_end()
             # 通知所有 subscriber 退出：经统一投递路径，shutdown 也获全局 seq +
             # per-subscriber delivery_seq（保持两个序号在退出事件上同样连续可自检）。
             shutdown_ev = EventMsg(submission_id="*", msg=ShutdownMsg())
@@ -1162,6 +1235,8 @@ class AgentEngine:
             self._seq += 1
             for subscriber in list(self._all_subs):
                 self._deliver(subscriber, shutdown_ev)
+            if actor_cancellation is not None:
+                raise actor_cancellation
 
     async def _run_turn_for(self, sub: Submission, root_cancel: CancellationToken) -> None:
         assert isinstance(sub.op, UserMessage)

@@ -450,6 +450,7 @@ class EnginePool:
         self._engine_tasks: dict[str, asyncio.Task[None]] = {}
         self._audit_sessions: dict[str, AuditedSessionState] = {}
         self._release_tasks: dict[str, asyncio.Task[None]] = {}
+        self._teardown_tasks: dict[str, set[asyncio.Task[None]]] = {}
         self._lock = asyncio.Lock()
         self._root_cancel = CancellationToken(name="pool")
         self._closed = False
