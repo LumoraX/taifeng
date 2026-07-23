@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,10 @@ import anyio
 import pytest
 
 from taifeng.conversation.journal import (
+    ActorRef,
+    ConversationItemV1,
+    JournalAck,
+    JournalEnvelope,
     ProjectionResult,
     RootThreadDescriptor,
     SessionDescriptor,
@@ -18,7 +23,12 @@ from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.projector import JournalConversationProjector
 from taifeng.conversation.transcript import JsonlMessageStore
 from taifeng.llm.providers.sim import SimClient
-from taifeng.loop.audit import AuditHealth, SessionAuditCoordinator
+from taifeng.loop.audit import (
+    AuditHealth,
+    SessionAuditCoordinator,
+    SessionAuditFrozenError,
+)
+from taifeng.loop.audit_admission import admit_user_message
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.submission import Submission, UserMessage
@@ -31,8 +41,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from taifeng.conversation.journal import (
-        JournalAck,
-        JournalEnvelope,
         JournalRecord,
         SessionLease,
     )
@@ -73,6 +81,78 @@ class _PausingJournalCore:
         """委托真实 core strict scan。"""
         async for envelope in self.inner.load(session_id, after_seq=after_seq):
             yield envelope
+
+    async def close_session(self, lease: SessionLease) -> None:
+        """委托真实 per-Session close。"""
+        await self.inner.close_session(lease)
+
+
+class _AdversarialJournalCore:
+    """返回 protocol-compatible 但与刚提交 records 不一致的 receipt。"""
+
+    def __init__(
+        self,
+        inner: JsonlSessionJournalCore,
+        corruption: str,
+    ) -> None:
+        self.inner = inner
+        self.corruption = corruption
+        self.returned_ack: JournalAck | None = None
+
+    async def append_batch(
+        self,
+        records: tuple[JournalRecord, ...],
+        *,
+        lease: SessionLease,
+        expected_seq: int,
+    ) -> JournalAck:
+        """真实提交后仅伪造测试指定的 ack 字段。"""
+        ack = await self.inner.append_batch(
+            records,
+            lease=lease,
+            expected_seq=expected_seq,
+        )
+        if self.corruption == "tail":
+            ack = ack.model_copy(update={"tail_hash": "f" * 64})
+        self.returned_ack = ack
+        return ack
+
+    async def load(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+    ) -> AsyncIterator[JournalEnvelope]:
+        """从真实 strict scan 读取，再只篡改一个 authoritative 字段。"""
+        envelopes = [
+            envelope
+            async for envelope in self.inner.load(session_id, after_seq=after_seq)
+        ]
+        if self.corruption != "tail":
+            envelopes = self._corrupt(envelopes)
+        for envelope in envelopes:
+            yield envelope
+
+    def _corrupt(
+        self,
+        envelopes: list[JournalEnvelope],
+    ) -> list[JournalEnvelope]:
+        """构造仍满足 JournalEnvelope DTO 的单字段伪 receipt。"""
+        target = 1
+        envelope = envelopes[target]
+        if self.corruption == "thread":
+            changed = envelope.model_copy(update={"thread_id": "thr_forged"})
+        elif self.corruption == "source":
+            changed = envelope.model_copy(
+                update={"actor": ActorRef(kind="user", source="forged")}
+            )
+        elif self.corruption == "type":
+            changed = envelope.model_copy(update={"record_type": "turn_started"})
+        else:
+            payload = dict(envelope.payload)
+            payload["item_id"] = "item_forged"
+            changed = envelope.model_copy(update={"payload": payload})
+        return [*envelopes[:target], changed, *envelopes[target + 1 :]]
 
     async def close_session(self, lease: SessionLease) -> None:
         """委托真实 per-Session close。"""
@@ -120,7 +200,7 @@ async def _engine_with_audit(
     tmp_path: Path,
     skills_dir: Path,
     *,
-    core_override: _PausingJournalCore | None = None,
+    core_override: _PausingJournalCore | _AdversarialJournalCore | None = None,
     model_client: object | None = None,
 ) -> tuple[AgentEngine, SessionAuditCoordinator, JsonlSessionJournalCore]:
     """使用真实 Engine、Coordinator、Journal 和 projector 建立审计会话。"""
@@ -229,8 +309,10 @@ async def test_audited_submit_waits_for_durable_ack_before_enqueue(
     token = engine._submissions.get_nowait()  # noqa: SLF001
     assert token.submission_id == submission_id
     assert token.ack.record_ids == token.accepted_record_ids
-    assert [envelope.record_type for envelope in token.conversation_envelopes] == [
-        "conversation_item"
+    assert [envelope.record_type for envelope in token.envelopes] == [
+        "submission_accepted",
+        "conversation_item",
+        "submission_applied",
     ]
     envelopes = [item async for item in real_core.load("ses_audit_submission")]
     assert [item.record_type for item in envelopes[3:]] == [
@@ -255,7 +337,7 @@ async def test_actor_applies_only_acknowledged_user_envelope_then_completes_work
     submission_id = await engine.submit(UserMessage(text="apply acknowledged"))
     token = engine._submissions.get_nowait()  # noqa: SLF001
     engine._submissions.put_nowait(token)  # noqa: SLF001
-    user_envelope = token.conversation_envelopes[0]
+    user_envelope = token.envelopes[1]
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
     try:
@@ -356,3 +438,113 @@ async def test_legacy_submit_keeps_raw_submission_queue_behavior(
     assert isinstance(queued, Submission)
     assert queued.id == submission_id
     assert queued.op == UserMessage(text="legacy")
+
+
+@pytest.mark.anyio
+async def test_same_logical_submission_retries_with_exact_idempotent_ack(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """相同 id/op/submitted_at 重建三记录必须得到原 ack，且 coordinator 不冻结。"""
+    engine, coordinator, core = await _engine_with_audit(tmp_path, skills_dir)
+    submitted_at = datetime(2026, 7, 24, 8, 30, tzinfo=UTC)
+    submission = Submission(
+        id="sub_stable_retry",
+        submitted_at=submitted_at,
+        op=UserMessage(text="same logical input"),
+    )
+    state = engine._audit_state  # type: ignore[attr-defined]  # noqa: SLF001
+
+    first = await admit_user_message(state, submission, turn_index=0)
+    await first.accepted_work.complete()
+    second = await admit_user_message(state, submission, turn_index=0)
+
+    assert second.ack == first.ack
+    assert second.conversation_envelopes == first.conversation_envelopes
+    committed = [envelope async for envelope in core.load("ses_audit_submission")]
+    assert len(committed) == 6
+    assert ConversationItemV1.model_validate(committed[4].payload).created_at == submitted_at
+    assert coordinator.expected_seq == first.ack.last_seq
+    assert coordinator.health is AuditHealth.HEALTHY
+    await second.accepted_work.complete()
+
+
+def test_submission_timestamp_roundtrips_without_changing_legacy_op() -> None:
+    """内部稳定时间参与 retry，但 legacy Op 判别与字段保持原语义。"""
+    submitted_at = datetime(2026, 7, 24, 8, 30, tzinfo=UTC)
+    submission = Submission(
+        id="sub_roundtrip",
+        submitted_at=submitted_at,
+        op=UserMessage(text="legacy shape"),
+    )
+
+    restored = Submission.model_validate_json(submission.model_dump_json())
+
+    assert restored == submission
+    assert restored.submitted_at == submitted_at
+    assert restored.op == UserMessage(text="legacy shape")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("corruption", ["thread", "source", "tail", "type", "payload"])
+async def test_forged_acknowledged_receipt_freezes_before_enqueue(
+    tmp_path: Path,
+    skills_dir: Path,
+    corruption: str,
+) -> None:
+    """ack/tail 或 envelope 与 expected records 不一致时不得产生 queue token。"""
+    real_core = JsonlSessionJournalCore(tmp_path / "journal")
+    core = _AdversarialJournalCore(real_core, corruption)
+    engine, coordinator, _ = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        core_override=core,
+    )
+
+    with pytest.raises(SessionAuditFrozenError):
+        await engine.submit(UserMessage(text="reject forged receipt"))
+
+    assert engine._submissions.empty()  # noqa: SLF001
+    assert engine._history == []  # noqa: SLF001
+    assert engine._audit_state.projector.state(engine.thread_id).projected_seq == 0  # type: ignore[attr-defined]  # noqa: SLF001
+    assert coordinator.health is AuditHealth.RECOVERY_REQUIRED
+    assert coordinator.effect_gate_open is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("corruption", ["source_link", "mismatched_thread"])
+async def test_actor_revalidates_full_token_before_hot_history_mutation(
+    tmp_path: Path,
+    skills_dir: Path,
+    corruption: str,
+) -> None:
+    """即使内部 token 被低层篡改，actor 也先冻结且不更新 hot/projection。"""
+    engine, coordinator, _ = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=_BlockingClient(),
+    )
+    await engine.submit(UserMessage(text="valid durable input"))
+    token = engine._submissions.get_nowait()  # noqa: SLF001
+    envelopes = list(token.envelopes)
+    if corruption == "source_link":
+        payload = dict(envelopes[1].payload)
+        payload["source_record_id"] = "forged-source"
+        envelopes[1] = envelopes[1].model_copy(update={"payload": payload})
+    else:
+        envelopes[2] = envelopes[2].model_copy(update={"thread_id": "thr_forged"})
+    object.__setattr__(token, "envelopes", tuple(envelopes))
+    engine._submissions.put_nowait(token)  # noqa: SLF001
+    cancel = CancellationToken(name="test-root")
+    actor = asyncio.create_task(engine.run(cancel))
+    try:
+        with anyio.fail_after(1):
+            while not token.accepted_work.is_completed:
+                await anyio.lowlevel.checkpoint()
+    finally:
+        cancel.cancel()
+        await actor
+
+    assert engine._history == []  # noqa: SLF001
+    assert engine._audit_state.projector.state(engine.thread_id).projected_seq == 0  # type: ignore[attr-defined]  # noqa: SLF001
+    assert coordinator.health is AuditHealth.RECOVERY_REQUIRED

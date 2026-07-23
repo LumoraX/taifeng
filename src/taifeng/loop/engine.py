@@ -1297,13 +1297,15 @@ class AgentEngine:
     ) -> None:
         """应用 ack conversation envelope，并始终退休 accepted-work ownership。"""
         try:
-            item = token.response_item()
+            assert self._audit_state is not None
+            try:
+                item, conversation_envelopes = token.validated_application()
+            except BaseException as error:
+                raise self._audit_state.coordinator.freeze(error) from None
             async with self._lock:
                 self._history.append(item)
-            assert self._audit_state is not None
             result = await self._audit_state.projector.project(
-                token.conversation_envelopes,
-                token.ack,
+                conversation_envelopes, token.ack
             )
             self._audit_state.coordinator.update_projection(result)
             await self._run_turn_for(

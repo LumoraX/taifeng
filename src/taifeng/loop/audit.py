@@ -10,6 +10,7 @@ import anyio
 from taifeng.conversation.journal.models import (
     Durability,
     JournalAck,
+    JournalEnvelope,
     JournalRecord,
     SessionLease,
 )
@@ -40,8 +41,6 @@ from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-
-    from taifeng.conversation.journal.models import JournalEnvelope
 
 _HASH_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -170,31 +169,62 @@ class SessionAuditCoordinator:
     async def load_acknowledged(
         self,
         ack: JournalAck,
+        expected_records: Sequence[JournalRecord],
     ) -> tuple[JournalEnvelope, ...]:
-        """从 authoritative Journal strict 读取并重验 covering ack 的真实 envelopes。"""
-        envelopes = tuple([
-            envelope
-            async for envelope in self._core.load(
-                self.session_id,
-                after_seq=ack.first_seq - 1,
+        """strict 读取 receipt，并与刚提交的 records/covering ack 做 exact 比对。"""
+        records = self._validate_records(expected_records)
+        try:
+            loaded = tuple([
+                envelope
+                async for envelope in self._core.load(
+                    self.session_id,
+                    after_seq=ack.first_seq - 1,
+                )
+                if envelope.seq <= ack.last_seq
+            ])
+            envelopes = tuple(
+                JournalEnvelope.model_validate(envelope.model_dump(mode="python"))
+                for envelope in loaded
+                if type(envelope) is JournalEnvelope
             )
-            if envelope.seq <= ack.last_seq
-        ])
+        except (KeyboardInterrupt, SystemExit) as error:
+            self.freeze(error)
+            raise
+        except BaseException as error:
+            raise self.freeze(error) from None
         valid = (
-            len(envelopes) == len(ack.record_ids)
+            len(envelopes) == len(loaded)
+            and len(envelopes) == len(ack.record_ids)
+            and len(envelopes) == len(records)
             and tuple(envelope.seq for envelope in envelopes)
             == tuple(range(ack.first_seq, ack.last_seq + 1))
             and tuple(envelope.record_id for envelope in envelopes) == ack.record_ids
+            and ack.tail_hash == envelopes[-1].record_hash
             and all(
                 envelope.session_id == ack.session_id
                 and envelope.writer_epoch == ack.writer_epoch
                 for envelope in envelopes
             )
+            and all(
+                self._envelope_matches_record(envelope, record)
+                for envelope, record in zip(envelopes, records, strict=True)
+            )
         )
         if not valid:
-            self.freeze(_InvalidJournalAckError())
-            self._raise_if_frozen()
+            raise self.freeze(_InvalidJournalAckError()) from None
         return envelopes
+
+    @staticmethod
+    def _envelope_matches_record(
+        envelope: JournalEnvelope,
+        record: JournalRecord,
+    ) -> bool:
+        """比较 writer 之外的全部 JournalRecord 字段，不接受 payload-only 相似。"""
+        restored = JournalRecord.model_validate({
+            field: getattr(envelope, field)
+            for field in JournalRecord.model_fields
+        })
+        return restored == record
 
     def _raise_if_append_sealed(self) -> None:
         """terminal seal 或 CLOSED 后在 core dispatch 前稳定拒绝普通 append。"""
@@ -225,7 +255,7 @@ class SessionAuditCoordinator:
             self.freeze(failure)
             failure = None
             self._raise_if_frozen()
-        self._expected_seq = ack.last_seq
+        self._expected_seq = max(self._expected_seq, ack.last_seq)
         self._remember_terminal_threads(records)
         return ack
 
@@ -271,15 +301,19 @@ class SessionAuditCoordinator:
         ):
             raise _InvalidJournalAckError
         expected_record_ids = tuple(record.record_id for record in records)
-        expected_first_seq = self._expected_seq + 1
-        expected_last_seq = self._expected_seq + len(records)
+        contiguous = ack.last_seq - ack.first_seq + 1 == len(records)
+        advances_tail = (
+            ack.first_seq == self._expected_seq + 1
+            and ack.last_seq == self._expected_seq + len(records)
+        )
+        historical_retry = ack.last_seq <= self._expected_seq
         valid = (
             ack.session_id == self.session_id
             and ack.writer_epoch == self._lease.writer_epoch
             and ack.durability is Durability.COMMITTED
             and ack.record_ids == expected_record_ids
-            and ack.first_seq == expected_first_seq
-            and ack.last_seq == expected_last_seq
+            and contiguous
+            and (advances_tail or historical_retry)
         )
         if not valid:
             raise _InvalidJournalAckError
