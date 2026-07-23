@@ -25,9 +25,9 @@
 
 ## 4. SessionAuditCoordinator
 
-- [ ] 4.1 Write failing tests for expected-seq serialization, first-failure stability, effect gate freeze, root/target cancellation, and two-Session isolation
-- [ ] 4.2 Implement coordinator append/batch methods that advance seq only from durable ack and atomically freeze on Journal uncertainty
-- [ ] 4.3 Implement projection-stale tracking independent of Journal health
+- [x] 4.1 Write failing tests for expected-seq serialization, first-failure stability, effect gate freeze, root/target cancellation, and two-Session isolation
+- [x] 4.2 Implement coordinator append/batch methods that advance seq only from durable ack and atomically freeze on Journal uncertainty
+- [x] 4.3 Implement projection-stale tracking independent of Journal health
 - [ ] 4.4 Write failing lifecycle tests for OPEN/FINISHING/CLOSED, accepted work snapshots, concurrent finish callers, deterministic terminal ids, and single close
 - [ ] 4.5 Implement the shared admission/lifecycle lock, one finish future, terminal batch, emergency close, and `audit_complete` introspection
 - [ ] 4.6 Run coordinator tests, focused Ruff/mypy, and commit the coordinator slice
