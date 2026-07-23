@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -19,14 +17,24 @@ from taifeng.conversation.models import ResponseItem, ThreadInfo, ThreadMetadata
 from taifeng.conversation.protocols import IndexHook, NoopIndexHook, ThreadDirectory
 from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
 from taifeng.conversation.store import MessageStore
-from taifeng.conversation.transcript import JsonlMessageStore, JsonlMessageWriter
-from taifeng.llm.client import ModelClient
+from taifeng.conversation.transcript import JsonlMessageStore
+from taifeng.loop.audit_bootstrap import (
+    ensure_legacy_resume_allowed,
+    validate_pool_audit,
+)
+from taifeng.loop.audit_config import AuditConfig, validate_audit_session_request
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
+from taifeng.loop.pool_session import (
+    create_started_pool_engine,
+    finalize_resumed_engine,
+    prepare_pool_session,
+    start_skill_watcher,
+)
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.skill.recall import LlmSkillRecall, SkillRecall
-from taifeng.skill.verify import LlmSkillVerifier, SkillVerifier
 from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry
+from taifeng.skill.verify import LlmSkillVerifier, SkillVerifier
 from taifeng.tool.builtins import (
     make_call_skill_tool,
     make_read_skill_tool,
@@ -35,14 +43,15 @@ from taifeng.tool.builtins import (
 )
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
-from taifeng.tool.spec import ToolSpec
 
 if TYPE_CHECKING:
-    from taifeng.skill.registry import SkillSnapshot
+    from collections.abc import AsyncIterator
+
+    from taifeng.llm.client import ModelClient
+    from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.skill.watcher import SkillFileWatcher
     from taifeng.telemetry.sink import TelemetrySink
-
-logger = logging.getLogger(__name__)
+    from taifeng.tool.spec import ToolSpec
 
 
 # -----------------------------------------------------------------
@@ -63,10 +72,19 @@ class _HookEmittingStore(MessageStore):
         inner: MessageStore,
         runner: HookRunner,
         directory: ThreadDirectory,
+        custom_directory: object | None = None,
+        index_hook: object | None = None,
     ) -> None:
         self._inner = inner
         self._runner = runner
         self._directory = directory
+        self.audit_custom_directory = custom_directory
+        self.audit_index_hook = index_hook
+
+    @property
+    def audit_projection_store(self) -> JsonlMessageStore | None:
+        """返回内建 wrapper 包裹的默认 JSONL 投影 store。"""
+        return self._inner if isinstance(self._inner, JsonlMessageStore) else None
 
     async def create_thread(
         self,
@@ -79,7 +97,8 @@ class _HookEmittingStore(MessageStore):
         thread_id = await self._inner.create_thread(
             cwd=cwd, entry_skill_id=entry_skill_id, source=source, extra=extra
         )
-        # 拉取刚写入的 metadata 作为 hook 入参（兼容封装内 JsonlMessageStore 已 upsert 到 directory）
+        # 拉取刚写入的 metadata 作为 hook 入参（兼容封装内 JsonlMessageStore
+        # 已 upsert 到 directory）。
         meta = await self._directory.get_metadata(thread_id)
         if meta is None:
             # 极少数情况（用户传入自定义 store 不 upsert 元数据）：合成最小 metadata
@@ -121,6 +140,13 @@ class _HookEmittingStore(MessageStore):
 
     async def select_resume_path(self, cwd: str) -> str | None:
         return await self._inner.select_resume_path(cwd)
+
+    async def audited_projection_marker(self, thread_id: str) -> object | None:
+        """把 metadata-only audited marker 检查委派给默认 JSONL store。"""
+        store = self.audit_projection_store
+        if store is None:
+            return None
+        return await store.audited_projection_marker(thread_id)
 
     async def close(self) -> None:
         # 不在此处 shutdown runner —— 由 pool.close 统一调度（先 await hook，后关 store）
@@ -176,6 +202,7 @@ class EnginePool:
         recall_threshold: int = 50,
         enable_auto_discovery: bool = False,
         skill_verifier: SkillVerifier | None = None,
+        audit: AuditConfig | None = None,
     ) -> None:
         self._registry = skill_registry
         self._model_client = model_client
@@ -224,7 +251,8 @@ class EnginePool:
         self._enable_request_capture = enable_request_capture
         # Phase 0: instruction_layers 仅占位存储 + 透传到 AgentEngine
         self._instruction_layers: list[Any] = list(instruction_layers or [])
-        # store-protocol-decoupling: hook_runner 由 EnginePool.create 注入；用户没传 index_hook 时为 None
+        # store-protocol-decoupling: hook_runner 由 EnginePool.create 注入；
+        # 用户没传 index_hook 时为 None。
         self._hook_runner = hook_runner
         # T5 scripts-runtime: ScriptLanguage → ScriptExecutor 映射
         self._script_executors: dict[str, Any] = dict(script_executors or {})
@@ -294,9 +322,29 @@ class EnginePool:
         # T6 deferred 暴露：auto 模式下「可见 child 数 > 此值」切 deferred 召回，
         # 透传到每个 AgentEngine → TurnRunner（驱动 prompt 文本 + 工具裁剪）。
         self._recall_threshold = recall_threshold
+        self._audit = audit
+        validate_pool_audit(
+            audit,
+            model_client=self._model_client,
+            skill_snapshot=self._registry.snapshot(),
+            tools=self._tool_registry,
+            store=self._store,
+            compressors=self._compressors,
+            hooks=self._hooks,
+            permission_policy=self._permission_policy,
+            memory_store=self._memory_store,
+            memory_query_builder=self._memory_query_builder,
+            pinned_state_sources=self._pinned_state_sources,
+            instruction_layers=self._instruction_layers,
+            failure_policy=self._failure_policy,
+            failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
+            failure_suspend_max_auto_retries=self._failure_suspend_max_auto_retries,
+            failure_suspend_on_expire=self._failure_suspend_on_expire,
+        )
 
         self._engines: dict[str, AgentEngine] = {}
         self._engine_tasks: dict[str, asyncio.Task[None]] = {}
+        self._audit_sessions: dict[str, AuditedSessionState] = {}
         self._lock = asyncio.Lock()
         self._root_cancel = CancellationToken(name="pool")
         self._closed = False
@@ -339,7 +387,7 @@ class EnginePool:
         storage_dir: str | Path | None = None,
         thread_directory: ThreadDirectory | None = None,
         index_hook: IndexHook | None = None,
-        sink: "TelemetrySink | None" = None,
+        sink: TelemetrySink | None = None,
         # config-consistency-fixes C2: 透传到 AgentEngine
         # 审计可观测 层1：默认 65536（有界大容量）+ 高/低水位比例 + 告警限频秒数
         event_queue_size: int = 65536,
@@ -364,35 +412,41 @@ class EnginePool:
         recall_threshold: int = 50,
         enable_auto_discovery: bool = False,
         skill_verifier: SkillVerifier | None = None,
+        audit: AuditConfig | None = None,
     ) -> EnginePool:
         """便捷构造。
 
         ``threads_dir`` (旧名) 与 ``storage_dir`` (新名) 等价，至少需提供一个：
 
-        - 旧调用方式：``EnginePool.create(threads_dir=...)`` 走默认 JsonlMessageStore（含 SQLite 索引）
+        - 旧调用方式：``EnginePool.create(threads_dir=...)`` 走默认
+          JsonlMessageStore（含 SQLite 索引）
         - 新调用方式：``EnginePool.create(storage_dir=...)`` 同上，命名更准确
         - 显式注入：``thread_directory=`` 替换默认 SqliteThreadDirectory（Redis / PG / Null）
         - 业务事件：``index_hook=`` 订阅 thread 生命周期（fire-and-forget）
         - 事件总线：``sink=`` 接收 hook 失败 / 持久化层事件
         """
         # 统一为 storage_dir
-        resolved_storage = Path(storage_dir or threads_dir or "").expanduser().resolve() if (storage_dir or threads_dir) else None
+        storage = storage_dir or threads_dir
+        resolved_storage = Path(storage).expanduser().resolve() if storage else None  # noqa: ASYNC240
         if resolved_storage is None:
             raise ValueError("必须提供 storage_dir 或 threads_dir 之一")
 
         registry = await FilesystemSkillRegistry.load(skills_dir)
 
-        # 默认 store：JsonlMessageStore（内部已是 writer + SqliteThreadDirectory + NoopIndexHook 兼容封装）
+        # 默认 store：JsonlMessageStore（内部已是 writer + SqliteThreadDirectory
+        # + NoopIndexHook 兼容封装）。
         store: MessageStore = JsonlMessageStore(resolved_storage)
 
         # 显式覆盖 thread_directory（业务侧 Redis / PG / Null）
         # 注：当前实现下，覆盖 directory 需要业务侧自己构造适配 JsonlMessageWriter 的组合
-        # 这里 thread_directory 主要用于 hook proxy 的 metadata 查询（_HookEmittingStore.create_thread）
+        # 这里 thread_directory 主要用于 hook proxy 的 metadata 查询
+        # （_HookEmittingStore.create_thread）。
         directory: ThreadDirectory
         if thread_directory is not None:
             directory = thread_directory
         else:
-            # 默认从 storage_dir 推 SqliteThreadDirectory（与 JsonlMessageStore 内部用同一个 db_path）
+            # 默认从 storage_dir 推 SqliteThreadDirectory
+            # （与 JsonlMessageStore 内部用同一个 db_path）。
             directory = SqliteThreadDirectory(
                 resolved_storage / "taifeng-index.db",
                 threads_dir=resolved_storage,
@@ -405,7 +459,11 @@ class EnginePool:
 
         # 用 _HookEmittingStore 包装真实 store，所有写完成后自动 spawn hook 后台 task
         wrapped_store: MessageStore = _HookEmittingStore(
-            inner=store, runner=hook_runner, directory=directory
+            inner=store,
+            runner=hook_runner,
+            directory=directory,
+            custom_directory=thread_directory,
+            index_hook=index_hook,
         )
 
         # 相位 2 召回后端解析（与 __init__ 同口径，见 enable_auto_discovery 总闸注释）：
@@ -493,27 +551,15 @@ class EnginePool:
             # 传已解析的 verifier（与上方 skill_recall=resolved_recall 对称，
             # 避免 __init__ 二次兜底/字段口径漂移；M1 修复）
             skill_verifier=resolved_verifier,
+            audit=audit,
         )
 
-        if auto_watch_skills:
-            from taifeng.skill.watcher import SkillFileWatcher
-
-            async def _on_change(snap: SkillSnapshot) -> None:
-                logger.info("skill snapshot refreshed via watcher → version=%d", snap.version)
-                # 通知所有活跃 engine（lock-in 语义：当前 turn 不变；下个 turn 取新 snapshot）
-                async with pool._lock:
-                    for eng in pool._engines.values():
-                        from taifeng.loop.submission import RefreshSnapshot
-                        await eng.submit(RefreshSnapshot())
-
-            watcher = SkillFileWatcher(
-                registry,
-                poll_interval_seconds=watch_poll_interval_seconds,
-                on_change=_on_change,
-            )
-            pool._watcher_task = asyncio.create_task(watcher.run())
-            pool._watcher = watcher
-
+        await start_skill_watcher(
+            pool,
+            registry,
+            enabled=auto_watch_skills,
+            poll_interval_seconds=watch_poll_interval_seconds,
+        )
         return pool
 
     # ------------------------------------------------------------------
@@ -559,6 +605,8 @@ class EnginePool:
                 已有 cached engine 时本参数被忽略（既有 cache 命中优先）。
                 详见 spec ``jsonl-transcript`` / change ``engine-resume-by-thread-id``。
         """
+        if self._audit is None and resume_thread_id is not None:
+            await ensure_legacy_resume_allowed(self._store, resume_thread_id)
         async with self._lock:
             if self._closed:
                 raise RuntimeError("EnginePool closed")
@@ -572,117 +620,42 @@ class EnginePool:
                 raise ValueError(f"unknown skill: {entry_skill_id}")
             if not entry.entry:
                 raise ValueError(f"skill {entry_skill_id!r} is not entry-eligible")
-
-            # === engine-resume-by-thread-id ===
-            # 分支：resume 已有 thread vs. 新建 thread
-            initial_history: list[ResponseItem] = []
-            if resume_thread_id is not None:
-                # 物化 store 中的历史
-                gen = await self._store.load_thread(resume_thread_id)
-                initial_history = [it async for it in gen]
-                if not initial_history:
-                    # 不存在 / 空 thread 都拒绝静默回退，避免业务以为 resume 成功
-                    raise ValueError(
-                        f"resume_thread_id {resume_thread_id!r} not found "
-                        f"or empty thread"
-                    )
-                thread_id = resume_thread_id
-            else:
-                thread_id = await self._store.create_thread(
-                    cwd=cwd,
-                    entry_skill_id=entry_skill_id,
-                    source=f"session:{session_id}",
-                )
-
-            engine = AgentEngine(
-                entry_skill=entry,
-                skill_snapshot=snapshot,
-                tool_runtime=self._tool_runtime,
-                model_client=self._model_client,
-                store=self._store,
-                thread_id=thread_id,
-                session_id=session_id,
-                compressors=self._compressors,
-                dispatch_policy=self._dispatch_policy,
-                outcome_judge=self._outcome_judge,
-                budget=self._budget,
-                hooks=self._hooks,
-                max_iterations=self._max_iterations,
-                denial_breaker_config=self._denial_breaker_config,
-                doom_loop_config=self._doom_loop_config,
-                failure_policy=self._failure_policy,
-                failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
-                failure_suspend_max_auto_retries=self._failure_suspend_max_auto_retries,
-                failure_suspend_on_expire=self._failure_suspend_on_expire,
-                now_factory=self._now_factory,
-                max_parallel_tool_calls=self._max_parallel_tool_calls,
-                reasoning_passback=self._reasoning_passback,
-                enable_request_capture=self._enable_request_capture,
-                instruction_layers=self._instruction_layers,
-                script_executors=self._script_executors,
-                event_queue_size=self._event_queue_size,
-                event_high_water_ratio=self._event_high_water_ratio,
-                event_low_water_ratio=self._event_low_water_ratio,
-                event_warn_cooldown_sec=self._event_warn_cooldown_sec,
-                submission_queue_size=self._submission_queue_size,
-                initial_history=initial_history if resume_thread_id else None,
-                permission_policy=self._permission_policy,
-                request_metadata=self._request_metadata,
-                max_concurrent_spawns=self._max_concurrent_spawns,
-                max_total_spawns=self._max_total_spawns,
-                max_session_tokens=self._max_session_tokens,
-                memory_store=self._memory_store,
-                memory_query_builder=self._memory_query_builder,
-                pinned_state_sources=self._pinned_state_sources,
-                pinned_total_max_chars=self._pinned_total_max_chars,
-                recall_threshold=self._recall_threshold,
-                # 召回后端是否注入：驱动 effective_child_recall 的 inline/deferred 门控
-                # （无后端 → 恒 inline，即便 child 很多也不走 deferred）。
-                # 总闸语义扩展：开 enable_auto_discovery 后 _skill_recall 已被自动兜底
-                # 为 LlmSkillRecall（非 None），故 `_skill_recall is not None` 即为真；
-                # 显式 `or self._enable_auto_discovery` 把意图写明（即便未来兜底实现变动
-                # 也保证开总闸 → has_recall_backend=True → auto 超阈值自动 deferred、
-                # 且显式 deferred 不再因「无后端」抛错）。
-                has_recall_backend=(
-                    self._skill_recall is not None or self._enable_auto_discovery
-                ),
+            validate_audit_session_request(
+                self._audit,
+                resume_thread_id=resume_thread_id,
             )
-            # 让 engine 能在收到 RefreshSnapshot 时拉最新快照
-            engine._registry_ref = self._registry  # type: ignore[attr-defined]
-            # T4: 启动期一次性 resolve engine scope（fail-fast；失败抛给业务侧）
-            await engine.warmup_engine_scope()
-            engine_cancel = self._root_cancel.child(f"session:{session_id}")
-            task = asyncio.create_task(engine.run(engine_cancel))
+
+            prepared = await prepare_pool_session(
+                audit=self._audit,
+                store=self._store,
+                session_id=session_id,
+                entry_skill_id=entry_skill_id,
+                cwd=cwd,
+                resume_thread_id=resume_thread_id,
+            )
+            audit_state = prepared.audit_state
+            initial_history = prepared.initial_history
+
+            engine, task = await create_started_pool_engine(
+                self,
+                engine_factory=AgentEngine,
+                entry=entry,
+                snapshot=snapshot,
+                prepared=prepared,
+                session_id=session_id,
+                resume_thread_id=resume_thread_id,
+            )
             self._engines[session_id] = engine
             self._engine_tasks[session_id] = task
+            if audit_state is not None:
+                self._audit_sessions[session_id] = audit_state
 
-            # detached-spawn 冷恢复:resume 已有 thread 时,从 parent thread 持久项
-            # 重建 spawn 句柄表 / barrier / fired 守卫集(R5 可 resume)。仅 resume 路径
-            # 走此重建(新建 thread 无 prior spawn),恰好一次。重建内部会 _check_barriers
-            # 补触发未 fired 的全终态 barrier;已 fired 的因守卫集存在被幂等跳过。
-            # 放在 run() 任务起后:_root_cancel 已就绪,补触发的聚合 turn 可派生子 token。
-            if resume_thread_id is not None:
-                await engine._rebuild_spawn_state_from_history()  # noqa: SLF001
-                # 冷重建完成后补发 rewind_table_rebuilt（R3 可观测）；
-                # _emit 要求事件循环已就绪（run() task 已起）——此处满足。
-                await engine._emit_rewind_table_rebuilt()  # noqa: SLF001
-
-            # engine-resume-by-thread-id: resume 路径 emit ThreadResumed
-            # 在 engine.run 启动 task 之后投递，让订阅者（业务可在 pool.get_or_create
-            # 返回后立刻 subscribe_all）能消费。订阅者尚未 attach 的事件会丢
-            # —— 既有 emit 语义，可接受。
-            if resume_thread_id is not None:
-                from taifeng.loop.event import EventMsg, ThreadResumed
-                await engine._emit(EventMsg(  # noqa: SLF001
-                    submission_id="*",
-                    msg=ThreadResumed(data={
-                        "thread_id": resume_thread_id,
-                        "item_count": len(initial_history),
-                        "entry_skill_id_at_resume": entry_skill_id,
-                        # 暂不查 directory metadata（首版简化；后续可加 directory ref）
-                        "entry_skill_id_recorded": None,
-                    }),
-                ))
+            await finalize_resumed_engine(
+                engine,
+                resume_thread_id=resume_thread_id,
+                entry_skill_id=entry_skill_id,
+                initial_history=initial_history,
+            )
             return engine
 
     async def release(self, session_id: str, *, force: bool = False) -> None:

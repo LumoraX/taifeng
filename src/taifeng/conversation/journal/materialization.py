@@ -50,6 +50,14 @@ class ProjectionSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class AuditedProjectionMarker:
+    """legacy resume 门禁所需的最小 audited transcript identity。"""
+
+    session_id: str
+    schema_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectionReplayWindow:
     """generation reset 后恢复旧 healthy snapshot 的共享窗口。"""
 
@@ -163,6 +171,25 @@ def safe_thread_path(root: Path, thread_id: str) -> Path:
     return path
 
 
+def audited_projection_marker_from_extra(
+    extra: object,
+) -> AuditedProjectionMarker | None:
+    """只解析完整 audit marker；声明 audit 却不完整时 fail-closed。"""
+    if not isinstance(extra, dict) or extra.get("audit_required") is not True:
+        return None
+    session_id = extra.get("journal_session_id")
+    schema_version = extra.get("journal_schema_version")
+    if (
+        not isinstance(session_id, str)
+        or not session_id
+        or isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version < 1
+    ):
+        raise ProjectionLifecycleError("incomplete audited projection marker")
+    return AuditedProjectionMarker(session_id, schema_version)
+
+
 def _identity(stat_result: os.stat_result) -> ProjectionFileIdentity:
     """把平台 stat 结果收窄成稳定的投影身份。"""
     raw_changed_ns = getattr(stat_result, "st_ctime_ns", None)
@@ -257,6 +284,30 @@ def _read_stable_file(path: Path) -> tuple[bytes, ProjectionFileIdentity]:
         return b"".join(chunks), after
     finally:
         os.close(fd)
+
+
+async def read_audited_projection_marker(
+    root: Path,
+    thread_id: str,
+) -> AuditedProjectionMarker | None:
+    """只读 JSONL 自包含首行，不加载 execution history。"""
+    path = safe_thread_path(root, thread_id)
+    if _stat_identity(path) is None:
+        return None
+    raw, _ = await anyio.to_thread.run_sync(_read_stable_file, path)
+    first_line = raw.splitlines()[0] if raw else b""
+    try:
+        metadata = json.loads(first_line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(metadata, dict) or metadata.get("__meta__") is not True:
+        return None
+    if metadata.get("thread_id") != thread_id:
+        extra = metadata.get("extra")
+        if isinstance(extra, dict) and extra.get("audit_required") is True:
+            raise ProjectionLifecycleError("audited projection thread identity mismatch")
+        return None
+    return audited_projection_marker_from_extra(metadata.get("extra"))
 
 
 def _existing_file_session_id(path: Path, thread_id: str) -> str | None:

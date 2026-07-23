@@ -35,10 +35,13 @@ import anyio
 from pydantic import ValidationError
 
 from taifeng.conversation.journal.materialization import (
+    AuditedProjectionMarker,
     ProjectionFileIdentity,
     ProjectionReplayWindow,
     ProjectionSnapshot,
     ProjectionTargetHandle,
+    audited_projection_marker_from_extra,
+    read_audited_projection_marker,
     safe_thread_path,
 )
 from taifeng.conversation.models import (
@@ -407,6 +410,26 @@ class JsonlMessageStore(MessageStore):
             )
         self._projection_target.bind_expected_session_id(thread_id, session_id)
         return session_id
+
+    async def audited_projection_marker(
+        self,
+        thread_id: str,
+    ) -> AuditedProjectionMarker | None:
+        """metadata-only 检查 directory 与自包含 JSONL marker。"""
+        meta = await self._directory.get_metadata(thread_id)
+        directory_marker = (
+            audited_projection_marker_from_extra(meta.extra)
+            if meta is not None
+            else None
+        )
+        file_marker = await read_audited_projection_marker(self._root, thread_id)
+        if (
+            directory_marker is not None
+            and file_marker is not None
+            and directory_marker != file_marker
+        ):
+            raise ValueError("audited projection marker identities differ")
+        return file_marker or directory_marker
 
     def record_projection_first_seq(self, thread_id: str, seq: int) -> None:
         """首次健康投影后记录 generation replay 起点。"""
