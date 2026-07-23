@@ -36,10 +36,10 @@
 
 - [x] 5.1 Write failing configuration tests for resume, custom store/directory, IndexHook, hooks, permission/HITL, compressor, memory, instructions, orchestration, spawn/peer, unobserved client, and incomplete Tool metadata
 - [x] 5.2 Implement injected `AuditConfig` and static capability validation without reading environment variables
-- [ ] 5.3 Write failing EnginePool tests proving Journal initialization and projection bootstrap precede Engine construction/start
-- [ ] 5.4 Implement preallocated root thread identity, `create_session`, coordinator construction, audited projection bootstrap, and failure cleanup
-- [ ] 5.5 Add audited transcript marker downgrade protection to legacy resume
-- [ ] 5.6 Run capability/bootstrap plus legacy EnginePool/resume tests and commit the bootstrap slice
+- [x] 5.3 Write failing EnginePool tests proving Journal initialization and projection bootstrap precede Engine construction/start
+- [x] 5.4 Implement preallocated root thread identity, `create_session`, coordinator construction, audited projection bootstrap, and failure cleanup
+- [x] 5.5 Add audited transcript marker downgrade protection to legacy resume
+- [x] 5.6 Run capability/bootstrap plus legacy EnginePool/resume tests and commit the bootstrap slice
 
 ## 6. Journal-first submissions and lifecycle operations
 
