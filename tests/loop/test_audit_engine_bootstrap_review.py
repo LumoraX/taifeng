@@ -484,6 +484,12 @@ class _ShutdownFailureEngine(_EngineSpy):
         self._events.append("engine_shutdown")
         raise self._failure
 
+    async def run(self, cancel: object) -> None:
+        """保持 actor 存活，让测试真正到达 shutdown failure。"""
+        del cancel
+        self._events.append("actor_run")
+        await asyncio.Event().wait()
+
 
 class _ActorFailureEngine(_EngineSpy):
     """actor task 立即失败的 Engine spy。"""
@@ -512,12 +518,20 @@ class _BlockingShutdownEngine(_EngineSpy):
         super().__init__(**kwargs)
         self._shutdown_started = shutdown_started
         self._shutdown_continue = shutdown_continue
+        self._actor_continue = asyncio.Event()
+
+    async def run(self, cancel: object) -> None:
+        """保持 actor 存活到 shutdown 成功返回。"""
+        del cancel
+        self._events.append("actor_run")
+        await self._actor_continue.wait()
 
     async def shutdown(self) -> None:
         """等待测试放行，模拟 caller cancel 时仍在收敛。"""
         self._events.append("engine_shutdown")
         self._shutdown_started.set()
         await self._shutdown_continue.wait()
+        self._actor_continue.set()
 
 
 @pytest.mark.asyncio
@@ -556,6 +570,13 @@ async def test_release_failure_still_finishes_before_stable_error(
     assert caught.value.stage == expected_stage
     assert "secret" not in str(caught.value)
     assert events.count("journal_terminal") == 1
+    terminal = core.appended[0][0]
+    expected_reason = f"{expected_stage}_failed"
+    assert terminal.payload["status"] == "error"
+    assert terminal.payload["end_reason"] == expected_reason
+    assert terminal.payload["stable_error"]["code"] == expected_reason
+    if failure_point == "actor":
+        assert events.count("engine_shutdown") == 0
     assert core.close_calls == 1
     assert f"ses-{failure_point}-failure" not in pool._audit_sessions  # noqa: SLF001
     await pool.close()

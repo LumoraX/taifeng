@@ -191,17 +191,67 @@ def _resolve_store_binding(
 
 async def _cleanup_failed_factory(
     *,
-    store: MessageStore,
-    hook_runner: HookRunner,
+    store: MessageStore | None,
+    hook_runner: HookRunner | None,
     owned_directory: SqliteThreadDirectory | None,
 ) -> None:
-    """构造期静态门禁失败时尽力释放本 factory 新建的全部资源。"""
-    cleanup = [hook_runner.shutdown(grace_seconds=5.0), store.close()]
-    if owned_directory is not None:
-        cleanup.append(owned_directory.close())
-    for operation in cleanup:
+    """构造失败时逐项释放已成功创建的 factory-owned 资源。"""
+    if hook_runner is not None:
         with suppress(BaseException):
-            await operation
+            await hook_runner.shutdown(grace_seconds=5.0)
+    if store is not None:
+        with suppress(BaseException):
+            await store.close()
+    if owned_directory is not None:
+        with suppress(BaseException):
+            await owned_directory.close()
+
+
+def _prepare_factory_components(
+    *,
+    model_client: ModelClient,
+    skill_recall: SkillRecall | None,
+    skill_verifier: SkillVerifier | None,
+    enable_auto_discovery: bool,
+    recall_default_top_k: int,
+    recall_max_top_k: int,
+    extra_tools: list[ToolSpec] | None,
+    compressors: list[CompressionStrategy] | None,
+) -> tuple[
+    SkillRecall | None,
+    SkillVerifier | None,
+    ToolRegistry,
+    list[CompressionStrategy],
+]:
+    """解析 factory 能力组件；调用方负责失败时释放已创建资源。"""
+    resolved_recall = skill_recall
+    if resolved_recall is None and enable_auto_discovery:
+        resolved_recall = LlmSkillRecall(model_client)
+    resolved_verifier = skill_verifier
+    if resolved_verifier is None and enable_auto_discovery:
+        resolved_verifier = LlmSkillVerifier(model_client)
+    tools = ToolRegistry()
+    tools.register(make_read_skill_tool())
+    tools.register(make_call_skill_tool())
+    tools.register(make_run_script_tool())
+    if resolved_recall is not None:
+        tools.register(
+            make_search_skills_tool(
+                resolved_recall,
+                default_top_k=recall_default_top_k,
+                max_top_k=recall_max_top_k,
+                verifier=resolved_verifier,
+            )
+        )
+    for tool in extra_tools or []:
+        tools.register(tool)
+    resolved_compressors = compressors
+    if resolved_compressors is None:
+        resolved_compressors = [
+            HandoffCompactionStrategy(model_client=model_client),
+            SlidingWindowStrategy(),
+        ]
+    return resolved_recall, resolved_verifier, tools, resolved_compressors
 
 
 class EnginePool:
@@ -305,6 +355,8 @@ class EnginePool:
         # store-protocol-decoupling: hook_runner 由 EnginePool.create 注入；
         # 用户没传 index_hook 时为 None。
         self._hook_runner = hook_runner
+        # 仅 public factory 创建的额外 metadata directory 归 pool 所有。
+        self._owned_directory: SqliteThreadDirectory | None = None
         # T5 scripts-runtime: ScriptLanguage → ScriptExecutor 映射
         self._script_executors: dict[str, Any] = dict(script_executors or {})
         # config-consistency-fixes C2: 透传到 AgentEngine 让 event_queue_size 真正生效
@@ -487,87 +539,61 @@ class EnginePool:
 
         registry = await FilesystemSkillRegistry.load(skills_dir)
 
-        # 默认 store：JsonlMessageStore（内部已是 writer + SqliteThreadDirectory
-        # + NoopIndexHook 兼容封装）。
-        store: MessageStore = JsonlMessageStore(resolved_storage)
-
-        # 显式覆盖 thread_directory（业务侧 Redis / PG / Null）
-        # 注：当前实现下，覆盖 directory 需要业务侧自己构造适配 JsonlMessageWriter 的组合
-        # 这里 thread_directory 主要用于 hook proxy 的 metadata 查询
-        # （_HookEmittingStore.create_thread）。
-        directory: ThreadDirectory
+        store: MessageStore | None = None
+        hook_runner: HookRunner | None = None
         owned_directory: SqliteThreadDirectory | None = None
-        if thread_directory is not None:
-            directory = thread_directory
-        else:
-            # 默认从 storage_dir 推 SqliteThreadDirectory
-            # （与 JsonlMessageStore 内部用同一个 db_path）。
-            owned_directory = SqliteThreadDirectory(
-                resolved_storage / "taifeng-index.db",
-                threads_dir=resolved_storage,
-                sink=sink,
+        try:
+            # 默认 store 内部拥有 writer 与自己的 SQLite 索引。
+            store = JsonlMessageStore(resolved_storage)
+            directory: ThreadDirectory
+            if thread_directory is not None:
+                directory = thread_directory
+            else:
+                # hook metadata 查询使用的额外 directory 由 pool 单独持有。
+                owned_directory = SqliteThreadDirectory(
+                    resolved_storage / "taifeng-index.db",
+                    threads_dir=resolved_storage,
+                    sink=sink,
+                )
+                directory = owned_directory
+
+            actual_hook = index_hook if index_hook is not None else NoopIndexHook()
+            hook_runner = HookRunner(hook=actual_hook, sink=sink)
+            wrapped_store: MessageStore = _HookEmittingStore(
+                inner=store,
+                runner=hook_runner,
+                directory=directory,
+                custom_directory=thread_directory,
+                index_hook=index_hook,
             )
-            directory = owned_directory
+        except BaseException:
+            await _cleanup_failed_factory(
+                store=store,
+                hook_runner=hook_runner,
+                owned_directory=owned_directory,
+            )
+            raise
 
-        # 构造 HookRunner（若用户传了 index_hook，则真正发挥作用；否则用 NoopIndexHook 等价空操作）
-        actual_hook = index_hook if index_hook is not None else NoopIndexHook()
-        hook_runner = HookRunner(hook=actual_hook, sink=sink)
-
-        # 用 _HookEmittingStore 包装真实 store，所有写完成后自动 spawn hook 后台 task
-        wrapped_store: MessageStore = _HookEmittingStore(
-            inner=store,
-            runner=hook_runner,
-            directory=directory,
-            custom_directory=thread_directory,
-            index_hook=index_hook,
-        )
-
-        # 相位 2 召回后端解析（与 __init__ 同口径，见 enable_auto_discovery 总闸注释）：
-        # 显式注入优先；没注入且开了总闸 → 自动兜底 LlmSkillRecall；都没有 → None=inline。
-        # 在此解析是因为 search_skills 工具注册条件依赖 resolved_recall，且要把同一实例
-        # 透给构造函数，避免「工具持一个实例、构造函数另一个」漂移。
-        resolved_recall: SkillRecall | None = skill_recall
-        if resolved_recall is None and enable_auto_discovery:
-            resolved_recall = LlmSkillRecall(model_client)
-
-        # verifier 同口径解析（与 __init__ 一致）：显式注入优先；没注入且开总闸 →
-        # 自动兜底 LlmSkillVerifier。把同一实例透给 search_skills 工具，让召回后接精验。
-        resolved_verifier: SkillVerifier | None = skill_verifier
-        if resolved_verifier is None and enable_auto_discovery:
-            resolved_verifier = LlmSkillVerifier(model_client)
-
-        tools = ToolRegistry()
-        tools.register(make_read_skill_tool())
-        tools.register(make_call_skill_tool())
-        tools.register(make_run_script_tool())
-        # search_skills：相位 2 deferred 召回入口。**仅在注入召回后端时注册**——
-        # 无后端（默认）即不暴露 search 工具（与「默认 inline，LLM 自己找」一致；
-        # 每 entry 的 deferred 暴露裁剪是 T6，在此之上按 effective_child_recall 再裁）。
-        if resolved_recall is not None:
-            tools.register(
-                make_search_skills_tool(
-                    resolved_recall,
-                    default_top_k=recall_default_top_k,
-                    max_top_k=recall_max_top_k,
-                    verifier=resolved_verifier,
+        pool: EnginePool | None = None
+        try:
+            resolved_recall, resolved_verifier, tools, resolved_compressors = (
+                _prepare_factory_components(
+                    model_client=model_client,
+                    skill_recall=skill_recall,
+                    skill_verifier=skill_verifier,
+                    enable_auto_discovery=enable_auto_discovery,
+                    recall_default_top_k=recall_default_top_k,
+                    recall_max_top_k=recall_max_top_k,
+                    extra_tools=extra_tools,
+                    compressors=compressors,
                 )
             )
-        for t in extra_tools or []:
-            tools.register(t)
-
-        if compressors is None:
-            compressors = [
-                HandoffCompactionStrategy(model_client=model_client),
-                SlidingWindowStrategy(),
-            ]
-
-        try:
             pool = cls(
                 skill_registry=registry,
                 model_client=model_client,
                 store=wrapped_store,
                 tool_registry=tools,
-                compressors=compressors,
+                compressors=resolved_compressors,
                 budget=budget,
                 dispatch_policy=dispatch_policy,
                 outcome_judge=outcome_judge,
@@ -608,20 +634,24 @@ class EnginePool:
                 skill_verifier=resolved_verifier,
                 audit=audit,
             )
-        except BaseException:
-            await _cleanup_failed_factory(
-                store=wrapped_store,
-                hook_runner=hook_runner,
-                owned_directory=owned_directory,
+            pool._owned_directory = owned_directory
+            await start_skill_watcher(
+                pool,
+                registry,
+                enabled=auto_watch_skills,
+                poll_interval_seconds=watch_poll_interval_seconds,
             )
+        except BaseException:
+            if pool is not None:
+                with suppress(BaseException):
+                    await pool.close()
+            else:
+                await _cleanup_failed_factory(
+                    store=wrapped_store,
+                    hook_runner=hook_runner,
+                    owned_directory=owned_directory,
+                )
             raise
-
-        await start_skill_watcher(
-            pool,
-            registry,
-            enabled=auto_watch_skills,
-            poll_interval_seconds=watch_poll_interval_seconds,
-        )
         return pool
 
     # ------------------------------------------------------------------
