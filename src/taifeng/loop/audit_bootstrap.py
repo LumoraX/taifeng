@@ -44,6 +44,8 @@ class AuditedSessionState:
     thread_id: str
     coordinator: SessionAuditCoordinator
     projector: JournalConversationProjector
+    max_attachment_bytes: int
+    max_total_attachment_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +203,13 @@ async def bootstrap_audited_session(
         expected_seq=created.ack.last_seq,
     )
     projector = JournalConversationProjector(projection_store)
-    state = AuditedSessionState(thread_id, coordinator, projector)
+    state = AuditedSessionState(
+        thread_id=thread_id,
+        coordinator=coordinator,
+        projector=projector,
+        max_attachment_bytes=config.max_attachment_bytes,
+        max_total_attachment_bytes=config.max_total_attachment_bytes,
+    )
     try:
         projected_thread_id = await projector.bootstrap_thread(
             thread_id=thread_id,

@@ -39,7 +39,9 @@ from taifeng.loop.audit_support import (
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+
+    from taifeng.conversation.journal.models import JournalEnvelope
 
 _HASH_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -63,6 +65,14 @@ class _JournalAppendCore(Protocol):
 
     async def close_session(self, lease: SessionLease) -> None:
         """释放且只释放 coordinator 绑定的 per-Session writer。"""
+
+    def load(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+    ) -> AsyncIterator[JournalEnvelope]:
+        """strict 读取已 durable committed envelopes。"""
 
 class SessionAuditCoordinator:
     """串行化一个 Session 的 Journal append，并隔离其 fail-closed 状态。"""
@@ -156,6 +166,35 @@ class SessionAuditCoordinator:
             if cancel is not None:
                 cancel.raise_if_cancelled()
             return await self._append_locked(snapshot)
+
+    async def load_acknowledged(
+        self,
+        ack: JournalAck,
+    ) -> tuple[JournalEnvelope, ...]:
+        """从 authoritative Journal strict 读取并重验 covering ack 的真实 envelopes。"""
+        envelopes = tuple([
+            envelope
+            async for envelope in self._core.load(
+                self.session_id,
+                after_seq=ack.first_seq - 1,
+            )
+            if envelope.seq <= ack.last_seq
+        ])
+        valid = (
+            len(envelopes) == len(ack.record_ids)
+            and tuple(envelope.seq for envelope in envelopes)
+            == tuple(range(ack.first_seq, ack.last_seq + 1))
+            and tuple(envelope.record_id for envelope in envelopes) == ack.record_ids
+            and all(
+                envelope.session_id == ack.session_id
+                and envelope.writer_epoch == ack.writer_epoch
+                for envelope in envelopes
+            )
+        )
+        if not valid:
+            self.freeze(_InvalidJournalAckError())
+            self._raise_if_frozen()
+        return envelopes
 
     def _raise_if_append_sealed(self) -> None:
         """terminal seal 或 CLOSED 后在 core dispatch 前稳定拒绝普通 append。"""

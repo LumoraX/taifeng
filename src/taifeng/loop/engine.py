@@ -28,6 +28,10 @@ from taifeng.instructions.types import (
     InstructionLayer,
     ResolvedInstruction,
 )
+from taifeng.loop.audit_admission import (
+    AcceptedUserMessage,
+    admit_user_message,
+)
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
     EngineLog,
@@ -81,6 +85,7 @@ if TYPE_CHECKING:
     from taifeng.context.compressor import CompressionOrchestrator
     from taifeng.conversation.store import MessageStore
     from taifeng.llm.client import ModelClient
+    from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.registry import SkillSnapshot
@@ -139,6 +144,14 @@ class _PendingTurn:
     # B1 midturn-input-steering：注入队列。engine 处理 InjectUserInput Op 时 append，
     # 与对应活跃 TurnRunner.pending_input 共享同一 list 引用，runner 迭代边界 drain。
     pending_input: list[ResponseItem] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class _AppliedUserSubmission:
+    """actor 已从 durable envelope 应用的 UserMessage 路由视图。"""
+
+    id: str
+    text: str
 
 
 class AgentEngine:
@@ -350,10 +363,12 @@ class AgentEngine:
         # 根取消 token —— 由 run() 入口捕获；spawn 的分离 task 据此派生子 token（R4）。
         # run() 启动前为 None（spawn_skill 在 engine.run 已起的前提下被调用）。
         self._root_cancel: CancellationToken | None = None
+        # strict audit ownership 由 EnginePool 在 actor 启动前注入；None 保持 legacy。
+        self._audit_state: AuditedSessionState | None = None
 
         # K4 入站背压：bounded submission 队列；submit() await put，满则业务侧阻塞
         # （flow control）。<=0 视为不限（保留逃生口）。
-        self._submissions: asyncio.Queue[Submission] = asyncio.Queue(
+        self._submissions: asyncio.Queue[Submission | AcceptedUserMessage] = asyncio.Queue(
             maxsize=submission_queue_size if submission_queue_size > 0 else 0
         )
         # K4 出站丢弃计数：事件队列满时不再静默丢——累计 + 暴露（可观测）。
@@ -562,7 +577,15 @@ class AgentEngine:
     async def submit(self, op: Op) -> str:
         """业务侧入队接口。返回 submission_id。"""
         sub = Submission(op=op)
-        await self._submissions.put(sub)
+        if self._audit_state is not None and isinstance(op, UserMessage):
+            accepted = await admit_user_message(
+                self._audit_state,
+                sub,
+                turn_index=self._turn_index,
+            )
+            await self._submissions.put(accepted)
+        else:
+            await self._submissions.put(sub)
         return sub.id
 
     def _new_subscriber(self) -> _Subscriber:
@@ -1238,11 +1261,8 @@ class AgentEngine:
                         name=f"resume:{sub.id}",
                     )
                     continue
-                if isinstance(sub.op, UserMessage):
-                    self._start_operation(
-                        self._run_turn_for(sub, cancel),
-                        name=f"turn:{sub.id}",
-                    )
+                if self._is_queued_user_message(sub):
+                    self._start_queued_user_message(sub, cancel)
                     continue
         finally:
             await self._finalize_run_lifecycle(
@@ -1250,8 +1270,64 @@ class AgentEngine:
                 shutdown_requested=shutdown_requested,
             )
 
-    async def _run_turn_for(self, sub: Submission, root_cancel: CancellationToken) -> None:
-        assert isinstance(sub.op, UserMessage)
+    @staticmethod
+    def _is_queued_user_message(
+        sub: Submission | AcceptedUserMessage,
+    ) -> bool:
+        """统一识别 legacy UserMessage 与 durable accepted token。"""
+        return isinstance(sub, AcceptedUserMessage) or isinstance(sub.op, UserMessage)
+
+    def _start_queued_user_message(
+        self,
+        sub: Submission | AcceptedUserMessage,
+        root_cancel: CancellationToken,
+    ) -> None:
+        """按 queue item 类型选择 durable 或 legacy turn 入口。"""
+        operation = (
+            self._run_audited_turn_for(sub, root_cancel)
+            if isinstance(sub, AcceptedUserMessage)
+            else self._run_turn_for(sub, root_cancel)
+        )
+        self._start_operation(operation, name=f"turn:{sub.id}")
+
+    async def _run_audited_turn_for(
+        self,
+        token: AcceptedUserMessage,
+        root_cancel: CancellationToken,
+    ) -> None:
+        """应用 ack conversation envelope，并始终退休 accepted-work ownership。"""
+        try:
+            item = token.response_item()
+            async with self._lock:
+                self._history.append(item)
+            assert self._audit_state is not None
+            result = await self._audit_state.projector.project(
+                token.conversation_envelopes,
+                token.ack,
+            )
+            self._audit_state.coordinator.update_projection(result)
+            await self._run_turn_for(
+                _AppliedUserSubmission(
+                    id=token.submission_id,
+                    text=str(item.payload["text"]),
+                ),
+                root_cancel,
+            )
+        finally:
+            await token.accepted_work.complete()
+
+    async def _run_turn_for(
+        self,
+        sub: Submission | _AppliedUserSubmission,
+        root_cancel: CancellationToken,
+    ) -> None:
+        if isinstance(sub, Submission):
+            assert isinstance(sub.op, UserMessage)
+            user_text = sub.op.text
+            attachments = sub.op.attachments
+        else:
+            user_text = sub.text
+            attachments = None
 
         # 挂起态守卫(suspend-review-fixes):根 thread 有活跃挂起 → 在落史**之前**
         # 显式拒绝新 UserMessage。挂起 = turn 停在待裁决,裁决(Resume retry/abort)
@@ -1276,12 +1352,15 @@ class AgentEngine:
         self._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
 
         # 把 user 消息落 buffer + 持久化
-        item = user_message(
-            sub.op.text, thread_id=self._thread_id, attachments=sub.op.attachments
-        )
-        async with self._lock:
-            self._history.append(item)
-        await self._store.append(item)
+        if attachments is not None:
+            item = user_message(
+                user_text,
+                thread_id=self._thread_id,
+                attachments=attachments,
+            )
+            async with self._lock:
+                self._history.append(item)
+            await self._store.append(item)
 
         # === T4 instructions-injection ===
         # 在 turn 启动前 resolve 当前 turn 的 instructions（engine 已 warmup 过；
@@ -1332,7 +1411,7 @@ class AgentEngine:
             pre_decision = await self._hooks.run(
                 "pre_turn",
                 PreTurnHook(
-                    user_text=sub.op.text,
+                    user_text=user_text,
                     iteration=self._turn_index,
                 ),
                 HookContext(
@@ -1344,7 +1423,7 @@ class AgentEngine:
             if not pre_decision.allow:
                 # emit 两条事件：先 pre_turn_hook_denied（定位原因），
                 # 再 turn_failed（消费 subscribe(sub_id) 的 break 条件）
-                preview = (sub.op.text or "")[:200]
+                preview = user_text[:200]
                 await self._emit(EventMsg(
                     submission_id=sub.id,
                     msg=PreTurnHookDenied(data={

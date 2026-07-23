@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,9 +13,11 @@ import pytest
 import taifeng.loop.audit_bootstrap as audit_bootstrap_module
 import taifeng.loop.pool as pool_module
 from taifeng.conversation.journal.canonical import canonical_bytes
+from taifeng.conversation.journal.framing import encode_batch
 from taifeng.conversation.journal.models import (
     Durability,
     JournalAck,
+    JournalEnvelope,
     JournalRecord,
     SessionCreateResult,
     SessionDescriptor,
@@ -120,6 +123,8 @@ class _JournalCore:
         self.fail_terminal = fail_terminal
         self.descriptors: list[SessionDescriptor] = []
         self.appended: list[tuple[JournalRecord, ...]] = []
+        self.envelopes: list[JournalEnvelope] = []
+        self.tail_hash = _HASH
         self.close_calls = 0
         self.global_close_calls = 0
 
@@ -163,19 +168,36 @@ class _JournalCore:
     ) -> JournalAck:
         """记录 terminal batch，或注入 terminal uncertainty。"""
         del lease
-        self.events.append("journal_terminal")
+        self.events.append(
+            "journal_terminal"
+            if any(record.record_type == "session_ended" for record in records)
+            else "journal_append"
+        )
         self.appended.append(records)
         if self.fail_terminal is not None:
             raise self.fail_terminal
-        return JournalAck(
-            session_id=records[0].session_id,
-            first_seq=expected_seq + 1,
-            last_seq=expected_seq + len(records),
-            record_ids=tuple(record.record_id for record in records),
-            tail_hash=_HASH,
+        encoded = encode_batch(
+            records,
+            batch_id=f"batch-{len(self.appended)}",
+            expected_seq=expected_seq,
             writer_epoch=1,
-            durability=Durability.COMMITTED,
+            previous_hash=self.tail_hash,
+            recorded_at=datetime.now(UTC),
         )
+        self.envelopes.extend(encoded.envelopes)
+        self.tail_hash = encoded.ack.tail_hash
+        return encoded.ack
+
+    async def load(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+    ) -> AsyncIterator[JournalEnvelope]:
+        """返回 fake 已 durable ack 的真实 hash envelope。"""
+        for envelope in self.envelopes:
+            if envelope.session_id == session_id and envelope.seq > after_seq:
+                yield envelope
 
     async def close_session(self, lease: SessionLease) -> None:
         """只记录 per-session lease close。"""

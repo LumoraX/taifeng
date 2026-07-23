@@ -9,8 +9,11 @@ from types import MemberDescriptorType
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from taifeng.conversation.journal.models import (
         JournalAck,
+        JournalEnvelope,
         JournalRecord,
         SessionCreateResult,
         SessionDescriptor,
@@ -43,6 +46,15 @@ class AuditJournalCore(Protocol):
 
     async def close_session(self, lease: SessionLease) -> None:
         """只释放指定 Session 的 writer lease。"""
+        ...
+
+    def load(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+    ) -> AsyncIterator[JournalEnvelope]:
+        """strict 读取 durable committed envelopes。"""
         ...
 
 
