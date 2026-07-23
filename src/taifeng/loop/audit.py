@@ -18,17 +18,32 @@ from taifeng.conversation.journal.errors import (
     NonCanonicalValueError,
 )
 from taifeng.conversation.journal.models import (
+    ActorRef,
     Durability,
     JournalAck,
     JournalRecord,
     SessionLease,
 )
 from taifeng.conversation.journal.projector import ProjectionResult
-from taifeng.conversation.journal.records import StableErrorV1
+from taifeng.conversation.journal.records import (
+    JournalIdentities,
+    JournalRecordFactory,
+    SessionEndedV1,
+    StableErrorV1,
+    ThreadTerminalV1,
+)
+from taifeng.loop.audit_lifecycle import (
+    AcceptedWork,
+    FinishFuture,
+    SessionFinishingError,
+    SessionFinishResult,
+    SessionLifecycle,
+    ThreadTerminalRequest,
+)
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
 _HASH_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -62,6 +77,9 @@ class SessionAuditSnapshot:
     first_failure: StableErrorV1 | None
     active_target_ids: tuple[str, ...]
     projections: tuple[ProjectionAuditSnapshot, ...]
+    lifecycle: SessionLifecycle
+    audit_complete: bool | None
+    accepted_work_ids: tuple[str, ...]
 
 
 class SessionAuditFrozenError(RuntimeError):
@@ -98,6 +116,9 @@ class _JournalAppendCore(Protocol):
         mutation/dispatch 后的取消必须收敛为确定 ``JournalAck``，或抛
         ``JournalRecoveryRequiredError``。未知实现不得用 raw cancel 表达 post-dispatch 结果。
         """
+
+    async def close_session(self, lease: SessionLease) -> None:
+        """释放且只释放 coordinator 绑定的 per-Session writer。"""
 
 
 class _InvalidJournalAckError(Exception):
@@ -182,23 +203,33 @@ class SessionAuditCoordinator:
         lease: SessionLease,
         expected_seq: int,
         session_root_cancel: CancellationToken | None = None,
+        finish_timeout: float = 30.0,
     ) -> None:
-        """注入 core/lease/初始化 ack 尾序号与可选 Session root token。"""
+        """注入 core/lease、初始化尾序号、root token 与有界终结超时。"""
         if expected_seq < 0:
             raise ValueError("expected_seq must be non-negative")
+        if finish_timeout <= 0:
+            raise ValueError("finish_timeout must be positive")
         self._core = core
         self._lease = lease
         self._expected_seq = expected_seq
+        self._finish_timeout = finish_timeout
         self._session_root_cancel = session_root_cancel or CancellationToken(
             name=f"session:{lease.session_id}"
         )
         self._append_lock = anyio.Lock()
+        self._lifecycle_lock = anyio.Lock()
         self._health = AuditHealth.HEALTHY
         self._effect_gate_open = True
         self._frozen_error: SessionAuditFrozenError | None = None
         self._first_failure: StableErrorV1 | None = None
         self._targets: dict[str, CancellationToken] = {}
         self._projections: dict[str, ProjectionAuditSnapshot] = {}
+        self._lifecycle = SessionLifecycle.OPEN
+        self._audit_complete: bool | None = None
+        self._accepted_work: dict[str, AcceptedWork] = {}
+        self._finish_future: FinishFuture | None = None
+        self._committed_terminal_threads: set[str] = set()
 
     @property
     def session_id(self) -> str:
@@ -276,7 +307,14 @@ class SessionAuditCoordinator:
             failure = None
             self._raise_if_frozen()
         self._expected_seq = ack.last_seq
+        self._remember_terminal_threads(records)
         return ack
+
+    def _remember_terminal_threads(self, records: tuple[JournalRecord, ...]) -> None:
+        """只在 durable ack 后登记已提交的 thread terminal，供 finish 去重。"""
+        for record in records:
+            if record.record_type == "thread_terminal" and record.thread_id is not None:
+                self._committed_terminal_threads.add(record.thread_id)
 
     def _validate_records(
         self,
@@ -335,6 +373,184 @@ class SessionAuditCoordinator:
             writer_epoch=ack.writer_epoch,
             durability=ack.durability,
         )
+
+    async def admit_work(
+        self,
+        work_id: str,
+        durable_accept: Callable[[], Awaitable[None]],
+    ) -> AcceptedWork:
+        """在 shared lifecycle lock 内 durable accept 并登记待收敛 work。"""
+        if not work_id:
+            raise ValueError("work_id must be non-empty")
+        async with self._lifecycle_lock:
+            if self._lifecycle is not SessionLifecycle.OPEN:
+                raise SessionFinishingError(self.session_id, self._lifecycle)
+            self._raise_if_frozen()
+            if work_id in self._accepted_work:
+                raise ValueError(f"work already accepted: {work_id}")
+            await durable_accept()
+            work = AcceptedWork(work_id=work_id, _completed=anyio.Event())
+            self._accepted_work[work_id] = work
+            return work
+
+    async def finish(
+        self,
+        *,
+        thread_terminals: Sequence[ThreadTerminalRequest],
+        reason: str,
+        status: str = "complete",
+    ) -> SessionFinishResult:
+        """唯一胜者关闭 intake/快照 work；所有 caller 等待同一 bounded future。"""
+        result: SessionFinishResult | None = None
+        with anyio.CancelScope(shield=True):
+            async with self._lifecycle_lock:
+                future = self._finish_future
+                owner = future is None
+                if owner:
+                    requests = self._validated_terminal_requests(thread_terminals)
+                    if not reason or not status:
+                        raise ValueError("finish status and reason must be non-empty")
+                    future = FinishFuture()
+                    self._finish_future = future
+                    self._lifecycle = SessionLifecycle.FINISHING
+                    accepted = tuple(self._accepted_work.values())
+                else:
+                    requests, accepted = (), ()
+            assert future is not None
+            if owner:
+                await self._drive_finish(future, accepted, requests, status, reason)
+            result = await future.wait()
+        assert result is not None
+        return result
+
+    @staticmethod
+    def _validated_terminal_requests(
+        requests: Sequence[ThreadTerminalRequest],
+    ) -> tuple[ThreadTerminalRequest, ...]:
+        """快照、重建并拒绝非 DTO 或重复 thread id。"""
+        snapshot = tuple(requests)
+        if any(not isinstance(request, ThreadTerminalRequest) for request in snapshot):
+            raise TypeError("finish accepts only ThreadTerminalRequest values")
+        copied = tuple(
+            ThreadTerminalRequest(
+                thread_id=request.thread_id,
+                status=request.status,
+                end_reason=request.end_reason,
+                stable_error=(
+                    _copy_stable_error(request.stable_error)
+                    if request.stable_error is not None
+                    else None
+                ),
+            )
+            for request in snapshot
+        )
+        thread_ids = tuple(request.thread_id for request in copied)
+        if len(set(thread_ids)) != len(thread_ids):
+            raise ValueError("finish thread ids must be unique")
+        return copied
+
+    async def _drive_finish(
+        self,
+        future: FinishFuture,
+        accepted: tuple[AcceptedWork, ...],
+        requests: tuple[ThreadTerminalRequest, ...],
+        status: str,
+        reason: str,
+    ) -> None:
+        """在 shield 内有界收敛 work、terminal batch 与唯一 close。"""
+        terminal_record_ids: tuple[str, ...] = ()
+        close_attempted = False
+        failure: StableErrorV1 | None = None
+        try:
+            with anyio.fail_after(self._finish_timeout):
+                for work in accepted:
+                    await work.wait_completed()
+                self._raise_if_frozen()
+                records = self._terminal_records(requests, status=status, reason=reason)
+                ack = await self.append_batch(records)
+                terminal_record_ids = ack.record_ids
+                close_attempted = True
+                await self._core.close_session(self._lease)
+        except BaseException as error:
+            failure = self._finish_failure(error)
+            if not close_attempted:
+                await self._emergency_close()
+        result = SessionFinishResult(
+            session_id=self.session_id,
+            audit_complete=failure is None,
+            terminal_record_ids=terminal_record_ids if failure is None else (),
+            _failure=_copy_stable_error(failure) if failure is not None else None,
+        )
+        async with self._lifecycle_lock:
+            self._audit_complete = result.audit_complete
+            self._lifecycle = SessionLifecycle.CLOSED
+            self._accepted_work.clear()
+            future.set_result(result)
+
+    def _finish_failure(self, error: BaseException) -> StableErrorV1:
+        """保留 Journal 首因；其他 timeout/close 异常只映射稳定字段。"""
+        if self._first_failure is not None:
+            return _copy_stable_error(self._first_failure)
+        if isinstance(error, SessionAuditFrozenError):
+            return error.cause
+        return _journal_failure(error)
+
+    async def _emergency_close(self) -> None:
+        """终结不完整时最多尝试一次 bounded per-Session close，并吞掉任意细节。"""
+        with anyio.move_on_after(self._finish_timeout, shield=True):
+            try:
+                await self._core.close_session(self._lease)
+            except BaseException:
+                return
+
+    def _terminal_records(
+        self,
+        requests: tuple[ThreadTerminalRequest, ...],
+        *,
+        status: str,
+        reason: str,
+    ) -> tuple[JournalRecord, ...]:
+        """复用 V1 factory 生成排序、稳定 ordinal 的唯一 terminal batch。"""
+        operation_id = f"{self.session_id}:lifecycle:end"
+        factory = JournalRecordFactory(
+            session_id=self.session_id,
+            actor=ActorRef(kind="system", source="session_lifecycle"),
+            identities=JournalIdentities(self.session_id, "lifecycle", "finish"),
+        )
+        pending = sorted(
+            (
+                request
+                for request in requests
+                if request.thread_id not in self._committed_terminal_threads
+            ),
+            key=lambda request: request.thread_id,
+        )
+        records = [
+            factory.build(
+                operation_id=operation_id,
+                record_type="thread_terminal",
+                payload=ThreadTerminalV1(
+                    status=request.status,
+                    end_reason=request.end_reason,
+                    stable_error=request.stable_error,
+                ),
+                ordinal=ordinal,
+                thread_id=request.thread_id,
+            )
+            for ordinal, request in enumerate(pending)
+        ]
+        records.append(
+            factory.build(
+                operation_id=operation_id,
+                record_type="session_ended",
+                payload=SessionEndedV1(
+                    status=status,
+                    reason=reason,
+                    audit_complete=True,
+                ),
+            )
+        )
+        return tuple(records)
 
     async def ensure_effect_allowed(self) -> None:
         """effect 前 fail-closed 检查；冻结后永远返回同一稳定错误。"""
@@ -513,13 +729,21 @@ class SessionAuditCoordinator:
                 _copy_projection_snapshot(self._projections[thread_id])
                 for thread_id in sorted(self._projections)
             ),
+            lifecycle=self._lifecycle,
+            audit_complete=self._audit_complete,
+            accepted_work_ids=tuple(sorted(self._accepted_work)),
         )
 
 
 __all__ = [
+    "AcceptedWork",
     "AuditHealth",
     "ProjectionAuditSnapshot",
     "SessionAuditCoordinator",
     "SessionAuditFrozenError",
     "SessionAuditSnapshot",
+    "SessionFinishResult",
+    "SessionFinishingError",
+    "SessionLifecycle",
+    "ThreadTerminalRequest",
 ]
