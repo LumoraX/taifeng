@@ -20,8 +20,6 @@ from taifeng.llm.audit import (
     AttemptObservableClientAdapter,
     ModelAttemptRequest,
 )
-from taifeng.llm.client import OneNetworkAttemptModelClient
-from taifeng.llm.events import text_delta
 from taifeng.llm.providers.sim import RoutingSimClient, SimClient, SimTurn
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.audit import SessionAuditCoordinator
@@ -43,8 +41,6 @@ if TYPE_CHECKING:
         SessionCreateResult,
         SessionLease,
     )
-    from taifeng.llm.client import ModelClientSession
-    from taifeng.llm.events import ResponseEvent
 
 
 def _api_request(text: str = "hello") -> ApiRequest:
@@ -272,42 +268,6 @@ class _ObservedCore:
         await self.inner.close_session(lease)
 
 
-class _DispatchSession:
-    """记录底层 stream 真正开始的时刻。"""
-
-    def __init__(self, events: list[str]) -> None:
-        self.events = events
-        self.dispatched = False
-
-    async def __aenter__(self) -> _DispatchSession:
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        del exc
-
-    async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
-        del request
-        self.dispatched = True
-        self.events.append("dispatch")
-        yield text_delta("ok")
-
-
-class _DispatchClient(OneNetworkAttemptModelClient):
-    """返回唯一 dispatch spy session。"""
-
-    def __init__(self, events: list[str]) -> None:
-        self.session_spy = _DispatchSession(events)
-
-    def session(
-        self,
-        *,
-        cancel: CancellationToken,
-        model: str | None = None,
-    ) -> ModelClientSession:
-        del cancel, model
-        return self.session_spy
-
-
 async def _consume(
     client: AttemptObservableClientAdapter,
     observer: JournalModelAttemptObserver,
@@ -329,7 +289,7 @@ async def test_real_adapter_dispatch_waits_for_journal_ack(tmp_path: Path) -> No
     state, _ = await _state(tmp_path, core=core)
     core.block = True
     observer = _observer(state)
-    inner = _DispatchClient(core.events)
+    inner = SimClient(turns=[SimTurn(text="ok")])
     client = AttemptObservableClientAdapter(
         inner,
         provider="provider-a",
@@ -339,10 +299,11 @@ async def test_real_adapter_dispatch_waits_for_journal_ack(tmp_path: Path) -> No
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(_consume, client, observer)
         await core.entered.wait()
-        assert inner.session_spy.dispatched is False
+        assert inner.ledger.requests() == []
         core.allow.set()
 
-    assert core.events == ["append_enter", "ack", "dispatch"]
+    assert core.events == ["append_enter", "ack"]
+    assert len(inner.ledger.requests()) == 1
 
 
 @pytest.mark.anyio
@@ -351,7 +312,7 @@ async def test_append_failure_freezes_and_prevents_dispatch(tmp_path: Path) -> N
     core = _ObservedCore(fail=OSError("disk unavailable"))
     state, _ = await _state(tmp_path, core=core)
     observer = _observer(state)
-    inner = _DispatchClient(core.events)
+    inner = SimClient(turns=[SimTurn(text="must not dispatch")])
     client = AttemptObservableClientAdapter(
         inner,
         provider="provider-a",
@@ -361,7 +322,7 @@ async def test_append_failure_freezes_and_prevents_dispatch(tmp_path: Path) -> N
     with pytest.raises(SessionAuditFrozenError):
         await _consume(client, observer)
 
-    assert inner.session_spy.dispatched is False
+    assert inner.ledger.requests() == []
     assert state.coordinator.health is AuditHealth.RECOVERY_REQUIRED
     assert state.coordinator.effect_gate_open is False
 

@@ -11,13 +11,14 @@ import pytest
 
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.transcript import JsonlMessageStore
+from taifeng.llm.audit import AttemptObservableClientAdapter
+from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.loop.audit import SessionFinishingError
-from taifeng.loop.audit_config import AttemptObservableModelClient, AuditConfig
+from taifeng.loop.audit_config import AuditConfig
 from taifeng.loop.pool import EnginePool
 from taifeng.loop.submission import UserMessage
 from taifeng.tool.registry import ToolRegistry
 from tests.loop.test_audit_engine_bootstrap import _Registry
-from tests.loop.test_audit_submission_admission import _BlockingClient
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -33,38 +34,19 @@ if TYPE_CHECKING:
     )
     from taifeng.conversation.journal.materialization import ProjectionFileIdentity
     from taifeng.conversation.models import ResponseItem
-    from taifeng.llm.client import ModelClientSession
     from taifeng.loop.audit_bootstrap import AuditedSessionState
-    from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
 
 
-class _BlockingObservedClient(AttemptObservableModelClient):
-    """满足 audit nominal gate、但绝不访问网络的阻塞 client。"""
-
-    def __init__(self) -> None:
-        """复用可控的无网络阻塞 session。"""
-        self.inner = _BlockingClient()
-
-    def session(
-        self,
-        *,
-        cancel: CancellationToken,
-        model: str | None = None,
-    ) -> ModelClientSession:
-        """委托普通阻塞 session。"""
-        return self.inner.session(cancel=cancel, model=model)
-
-    def session_with_attempt_observer(
-        self,
-        *,
-        cancel: CancellationToken,
-        attempt_observer: object,
-        model: str | None = None,
-    ) -> ModelClientSession:
-        """Task 7 前 observer 只满足静态注入边界。"""
-        del attempt_observer
-        return self.inner.session(cancel=cancel, model=model)
+def _blocking_observed_client() -> AttemptObservableClientAdapter:
+    """用 exact reviewed Sim + signal 建立无网络阻塞 client。"""
+    return AttemptObservableClientAdapter(
+        SimClient(
+            turns=[SimTurn(text="unused", await_signal="release-blocked")],
+        ),
+        provider="sim",
+        default_model="sim-model",
+    )
 
 
 class _ObservedJournalCore:
@@ -168,7 +150,7 @@ def _build_release_scenario(
     gate = _ProjectionGate(store)
     pool = EnginePool(
         skill_registry=_Registry(),  # type: ignore[arg-type]
-        model_client=_BlockingObservedClient(),
+        model_client=_blocking_observed_client(),
         store=store,
         tool_registry=ToolRegistry(),
         compressors=[],
@@ -203,11 +185,14 @@ async def _begin_release_and_assert_application_convergence(
     await core.terminal_entered.wait()
     assert state.coordinator.snapshot().accepted_work_ids == ()
     assert len(engine._history) == 2  # noqa: SLF001
-    assert (
-        state.projector.state(engine.thread_id).projected_seq
-        == state.coordinator.expected_seq - 1
-    )
     before_late = [item async for item in real_core.load(session_id)]
+    projected = state.projector.state(engine.thread_id)
+    conversation_seqs = [
+        item.seq
+        for item in before_late
+        if item.record_type == "conversation_item"
+    ]
+    assert projected.projected_seq == max(conversation_seqs)
     with pytest.raises(SessionFinishingError):
         await engine.submit(UserMessage(text="late finishing"))
     assert [item async for item in real_core.load(session_id)] == before_late
@@ -222,7 +207,12 @@ def _assert_exact_committed_journal(
     thread_id: str,
 ) -> None:
     """断言两个 accepted submission 与 terminal 的精确 Journal 序列。"""
-    assert [item.record_type for item in committed] == [
+    business_records = [
+        item
+        for item in committed
+        if item.record_type != "llm_request_committed"
+    ]
+    assert [item.record_type for item in business_records] == [
         "session_started",
         "thread_created",
         "thread_bound",
@@ -236,7 +226,7 @@ def _assert_exact_committed_journal(
         "session_ended",
     ]
     for offset, submission_id in ((3, first_id), (6, second_id)):
-        batch = committed[offset : offset + 3]
+        batch = business_records[offset : offset + 3]
         assert [item.submission_id for item in batch] == [submission_id] * 3
         assert batch[0].record_id == (
             f"{submission_id}:submission_accepted:none:0"
@@ -245,8 +235,15 @@ def _assert_exact_committed_journal(
         assert batch[2].record_id == (
             f"{submission_id}:submission_applied:none:0"
         )
-    assert committed[-2].thread_id == thread_id
-    assert committed[-1].record_type == "session_ended"
+    attempts = [
+        item
+        for item in committed
+        if item.record_type == "llm_request_committed"
+    ]
+    assert len(attempts) == 1
+    assert attempts[0].submission_id == first_id
+    assert business_records[-2].thread_id == thread_id
+    assert business_records[-1].record_type == "session_ended"
 
 
 @pytest.mark.asyncio

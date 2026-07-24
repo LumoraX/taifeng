@@ -25,9 +25,9 @@ from taifeng.conversation.journal.models import (
 )
 from taifeng.conversation.journal.projector import JournalConversationProjector
 from taifeng.conversation.transcript import JsonlMessageStore
+from taifeng.llm.audit import AttemptObservableClientAdapter
 from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.loop.audit_config import (
-    AttemptObservableModelClient,
     AuditCapabilityError,
     AuditConfig,
 )
@@ -40,37 +40,18 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from taifeng.conversation.models import ResponseItem
-    from taifeng.llm.client import ModelClientSession
     from taifeng.loop.cancellation import CancellationToken
 
 _HASH = "0" * 64
 
 
-class _ObservedClient(AttemptObservableModelClient):
-    """显式满足 Task 5 nominal observer-aware 边界的无网络 client。"""
-
-    def __init__(self) -> None:
-        self._inner = SimClient(turns=[SimTurn(text="unused")])
-
-    def session(
-        self,
-        *,
-        cancel: CancellationToken,
-        model: str | None = None,
-    ) -> ModelClientSession:
-        """委派普通 Sim session。"""
-        return self._inner.session(cancel=cancel, model=model)
-
-    def session_with_attempt_observer(
-        self,
-        *,
-        cancel: CancellationToken,
-        attempt_observer: object,
-        model: str | None = None,
-    ) -> ModelClientSession:
-        """Task 7 前只证明 observer 注入点存在。"""
-        del attempt_observer
-        return self._inner.session(cancel=cancel, model=model)
+def _observed_client() -> AttemptObservableClientAdapter:
+    """返回由 exact reviewed Sim 签发的官方 observer adapter。"""
+    return AttemptObservableClientAdapter(
+        SimClient(turns=[SimTurn(text="unused")]),
+        provider="sim",
+        default_model="sim-model",
+    )
 
 
 class _Registry:
@@ -306,7 +287,7 @@ def _pool(
     actual_store = store or JsonlMessageStore(tmp_path / "threads")
     return EnginePool(
         skill_registry=_Registry(),  # type: ignore[arg-type]
-        model_client=_ObservedClient(),
+        model_client=_observed_client(),
         store=actual_store,
         tool_registry=ToolRegistry(),
         compressors=[],
@@ -414,7 +395,7 @@ async def test_public_create_validates_actual_unclassified_builtins(
         await EnginePool.create(
             skills_dir=skills_dir,
             threads_dir=tmp_path / "threads",
-            model_client=_ObservedClient(),
+            model_client=_observed_client(),
             compressors=[],
             audit=_config(core),
         )

@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from types import MemberDescriptorType
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from taifeng.llm.audit import AttemptObservableModelClient
+from taifeng.llm.audit import (
+    AttemptObservableClientAdapter,
+    AttemptObservableModelClient,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -237,28 +240,9 @@ def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
 
 
 def _validate_model_capability(inputs: AuditStaticInputs) -> None:
-    """只接受 nominal observer-aware ModelClient 边界。"""
-    client_type = type(inputs.model_client)
-    mro = type.__getattribute__(client_type, "__mro__")
-    if AttemptObservableModelClient not in mro:
+    """只接受不可覆盖的 exact 官方 observer adapter。"""
+    if type(inputs.model_client) is not AttemptObservableClientAdapter:
         raise AuditCapabilityError("audit_model_attempt_unobservable")
-    if not _has_concrete_observer_method(mro):
-        raise AuditCapabilityError("audit_model_attempt_unobservable")
-
-
-def _has_concrete_observer_method(mro: tuple[type, ...]) -> bool:
-    """静态确认 observer-aware method 由真实 subclass 函数实现。"""
-    method_name = "session_with_attempt_observer"
-    for owner in mro:
-        if owner is AttemptObservableModelClient:
-            return False
-        namespace = type.__getattribute__(owner, "__dict__")
-        implementation = namespace.get(method_name, _MISSING)
-        if implementation is not _MISSING:
-            return inspect.isfunction(implementation) and not bool(
-                getattr(implementation, "__isabstractmethod__", False)
-            )
-    return False
 
 
 def _validate_skill_capability(inputs: AuditStaticInputs) -> None:

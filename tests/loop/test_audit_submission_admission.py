@@ -23,12 +23,8 @@ from taifeng.conversation.journal import (
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.projector import JournalConversationProjector
 from taifeng.conversation.transcript import JsonlMessageStore
-from taifeng.llm.audit import (
-    AttemptObservableClientAdapter,
-    AttemptObservableModelClient,
-)
-from taifeng.llm.client import OneNetworkAttemptModelClient
-from taifeng.llm.providers.sim import SimClient, SimTurn
+from taifeng.llm.audit import AttemptObservableClientAdapter
+from taifeng.llm.providers.sim import RoutingSimClient, SimClient, SimTurn
 from taifeng.loop.audit import (
     AuditHealth,
     SessionAuditCoordinator,
@@ -55,8 +51,6 @@ if TYPE_CHECKING:
         JournalRecord,
         SessionLease,
     )
-    from taifeng.llm.events import ResponseEvent
-    from taifeng.llm.types import ApiRequest
 
 
 class _PausingJournalCore:
@@ -212,56 +206,43 @@ class _LoadRaisingJournalCore:
         await self.inner.close_session(lease)
 
 
-class _BlockingSession:
-    """让 actor 停在首个 LLM 调用，便于观察 admission 已应用状态。"""
-
-    def __init__(self) -> None:
-        self.release = anyio.Event()
-
-    async def __aenter__(self) -> _BlockingSession:
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        return None
-
-    async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
-        """在测试释放前不产生 provider 事件。"""
-        del request
-        await self.release.wait()
-        if False:
-            yield
+def _blocking_sim_client(*, signal: str = "release-blocked") -> SimClient:
+    """用 reviewed Sim signal 构造确定性阻塞的单次采样。"""
+    return SimClient(
+        turns=[SimTurn(text="unused", await_signal=signal)],
+    )
 
 
-class _BlockingClient(OneNetworkAttemptModelClient):
-    """每个 turn 返回同一可控阻塞 session。"""
-
-    def __init__(self) -> None:
-        self.blocking_session = _BlockingSession()
-
-    def session(
-        self,
-        *,
-        cancel: CancellationToken,
-        model: str | None = None,
-    ) -> _BlockingSession:
-        """忽略模型参数，返回无网络 effect 的测试 session。"""
-        del cancel, model
-        return self.blocking_session
+def _observed_test_client(model_client: object | None) -> AttemptObservableClientAdapter:
+    """只把 exact reviewed Sim client 转成官方 observer adapter。"""
+    if type(model_client) is AttemptObservableClientAdapter:
+        return cast("AttemptObservableClientAdapter", model_client)
+    selected = model_client if model_client is not None else SimClient(turns=[])
+    if type(selected) not in (SimClient, RoutingSimClient):
+        raise TypeError("audited test requires an exact reviewed Sim client")
+    return AttemptObservableClientAdapter(
+        cast("SimClient | RoutingSimClient", selected),
+        provider="test",
+        default_model="mock-model",
+    )
 
 
-async def _engine_with_audit(
+async def _create_audit_runtime(
     tmp_path: Path,
     skills_dir: Path,
     *,
     core_override: (
         _PausingJournalCore | _AdversarialJournalCore | _LoadRaisingJournalCore | None
-    ) = None,
-    model_client: object | None = None,
-    store_override: JsonlMessageStore | None = None,
-    finish_timeout: float = 30.0,
-    submission_queue_size: int = 256,
-) -> tuple[AgentEngine, SessionAuditCoordinator, JsonlSessionJournalCore]:
-    """使用真实 Engine、Coordinator、Journal 和 projector 建立审计会话。"""
+    ),
+    finish_timeout: float,
+) -> tuple[
+    object,
+    JsonlSessionJournalCore,
+    SessionAuditCoordinator,
+    str,
+    str,
+]:
+    """建立 entry、Journal session 与 coordinator。"""
     registry = await FilesystemSkillRegistry.load(skills_dir)
     entry = registry.get("code-reviewer")
     assert entry is not None
@@ -283,19 +264,28 @@ async def _engine_with_audit(
             config={"audit_required": True},
         )
     )
-    append_core = core_override or core
     coordinator = SessionAuditCoordinator(
-        core=append_core,
+        core=core_override or core,
         lease=created.lease,
         expected_seq=created.ack.last_seq,
         finish_timeout=finish_timeout,
     )
-    store = store_override or JsonlMessageStore(tmp_path / "threads")
+    return (registry, core, coordinator, thread_id, session_id)
+
+
+async def _create_projector(
+    store: JsonlMessageStore,
+    *,
+    thread_id: str,
+    session_id: str,
+    entry_skill_id: str,
+) -> JournalConversationProjector:
+    """建立 audited conversation projection target。"""
     projector = JournalConversationProjector(store)
     await projector.bootstrap_thread(
         thread_id=thread_id,
         cwd=None,
-        entry_skill_id=entry.id,
+        entry_skill_id=entry_skill_id,
         source=f"session:{session_id}",
         extra={
             "audit_required": True,
@@ -303,27 +293,42 @@ async def _engine_with_audit(
             "journal_schema_version": 1,
         },
     )
-    selected_model_client = (
-        model_client if model_client is not None else SimClient(turns=[])
+    return projector
+
+
+async def _engine_with_audit(
+    tmp_path: Path,
+    skills_dir: Path,
+    *,
+    core_override: (
+        _PausingJournalCore | _AdversarialJournalCore | _LoadRaisingJournalCore | None
+    ) = None,
+    model_client: object | None = None,
+    store_override: JsonlMessageStore | None = None,
+    finish_timeout: float = 30.0,
+    submission_queue_size: int = 256,
+) -> tuple[AgentEngine, SessionAuditCoordinator, JsonlSessionJournalCore]:
+    """使用真实 Engine、Coordinator、Journal 和 projector 建立审计会话。"""
+    registry, core, coordinator, thread_id, session_id = await _create_audit_runtime(
+        tmp_path,
+        skills_dir,
+        core_override=core_override,
+        finish_timeout=finish_timeout,
     )
-    selected_mro = type.__getattribute__(
-        type(selected_model_client),
-        "__mro__",
-    )
-    observed_model_client = (
-        selected_model_client
-        if AttemptObservableModelClient in selected_mro
-        else AttemptObservableClientAdapter(
-            cast("OneNetworkAttemptModelClient", selected_model_client),
-            provider="test",
-            default_model="mock-model",
-        )
+    entry = registry.get("code-reviewer")
+    assert entry is not None
+    store = store_override or JsonlMessageStore(tmp_path / "threads")
+    projector = await _create_projector(
+        store,
+        thread_id=thread_id,
+        session_id=session_id,
+        entry_skill_id=entry.id,
     )
     engine = AgentEngine(
         entry_skill=entry,
         skill_snapshot=registry.snapshot(),
         tool_runtime=ToolCallRuntime(ToolRegistry()),
-        model_client=observed_model_client,
+        model_client=_observed_test_client(model_client),
         store=store,
         thread_id=thread_id,
         session_id=session_id,
@@ -421,7 +426,7 @@ async def test_actor_applies_only_acknowledged_user_envelope_then_completes_work
     skills_dir: Path,
 ) -> None:
     """actor 消费 token 后才更新 hot history/projector，并在 finally 退休 work。"""
-    client = _BlockingClient()
+    client = _blocking_sim_client()
     engine, coordinator, core = await _engine_with_audit(
         tmp_path,
         skills_dir,
@@ -463,7 +468,7 @@ async def test_queued_user_messages_receive_unique_durable_turn_indexes(
     skills_dir: Path,
 ) -> None:
     """首 turn 阻塞时排队/并发 admission 仍必须按单一顺序点分配 index。"""
-    client = _BlockingClient()
+    client = _blocking_sim_client()
     engine, _, core = await _engine_with_audit(
         tmp_path,
         skills_dir,
@@ -737,7 +742,7 @@ async def test_actor_revalidates_full_token_before_hot_history_mutation(
     engine, coordinator, _ = await _engine_with_audit(
         tmp_path,
         skills_dir,
-        model_client=_BlockingClient(),
+        model_client=_blocking_sim_client(),
     )
     await engine.submit(UserMessage(text="valid durable input"))
     token = engine._submissions.get_nowait()  # noqa: SLF001

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections import UserDict
 from dataclasses import FrozenInstanceError
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import pytest
 
+from taifeng.conversation.journal.errors import NonCanonicalValueError
 from taifeng.llm.audit import (
     AttemptObservableClientAdapter,
     ModelAttemptPermit,
@@ -17,6 +19,7 @@ from taifeng.llm.audit import (
 from taifeng.llm.client import OneNetworkAttemptModelClient
 from taifeng.llm.events import text_delta
 from taifeng.llm.providers.anthropic_provider import AnthropicClient
+from taifeng.llm.providers.deepseek_provider import DeepSeekClient
 from taifeng.llm.providers.gemini_provider import GeminiClient
 from taifeng.llm.providers.litellm_provider import LiteLLMClient
 from taifeng.llm.providers.openai_compat import OpenAICompatClient
@@ -57,9 +60,11 @@ def _permit(ordinal: int = 0) -> ModelAttemptPermit:
 class _DispatchSpySession:
     """在开始迭代真实 stream 时记录 observer ack 状态。"""
 
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], *, event_count: int = 1) -> None:
         self.events = events
+        self.event_count = event_count
         self.dispatched = False
+        self.exit_calls = 0
         self.requests: list[ApiRequest] = []
 
     async def __aenter__(self) -> _DispatchSpySession:
@@ -68,19 +73,23 @@ class _DispatchSpySession:
 
     async def __aexit__(self, *exc: object) -> None:
         del exc
+        self.exit_calls += 1
+        self.events.append("exit")
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
         self.dispatched = True
         self.requests.append(request)
         self.events.append("dispatch")
-        yield text_delta("ok")
+        for index in range(self.event_count):
+            yield text_delta(f"ok-{index}")
 
 
 class _OneAttemptClient(OneNetworkAttemptModelClient):
     """每个 session 只进行一次真实 stream dispatch 的受控 client。"""
 
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], *, event_count: int = 1) -> None:
         self.events = events
+        self.event_count = event_count
         self.sessions: list[_DispatchSpySession] = []
         self.legacy_calls = 0
 
@@ -93,9 +102,25 @@ class _OneAttemptClient(OneNetworkAttemptModelClient):
         del cancel, model
         self.legacy_calls += 1
         self.events.append("session_construct")
-        session = _DispatchSpySession(self.events)
+        session = _DispatchSpySession(
+            self.events,
+            event_count=self.event_count,
+        )
         self.sessions.append(session)
         return session
+
+
+def _reviewed_spy_inner(
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[str],
+    *,
+    event_count: int = 1,
+) -> tuple[SimClient, _OneAttemptClient]:
+    """用 exact reviewed Sim 类型承载受控 session spy。"""
+    reviewed = SimClient(turns=[])
+    spy = _OneAttemptClient(events, event_count=event_count)
+    monkeypatch.setattr(reviewed, "session", spy.session)
+    return reviewed, spy
 
 
 class _BlockingObserver:
@@ -139,12 +164,14 @@ async def _consume(session: ModelClientSession, request: ApiRequest) -> list[str
 
 
 @pytest.mark.anyio
-async def test_durable_observer_ack_precedes_actual_dispatch() -> None:
+async def test_durable_observer_ack_precedes_actual_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """observer barrier 未放行时底层 stream 必须完全未开始。"""
     events: list[str] = []
-    inner = _OneAttemptClient(events)
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, events)
     client = AttemptObservableClientAdapter(
-        inner,
+        reviewed,
         provider="provider-a",
         default_model="model-a",
     )
@@ -166,9 +193,10 @@ async def test_durable_observer_ack_precedes_actual_dispatch() -> None:
         assert inner.sessions == []
         observer.allow.set()
 
-    assert result == ["ok"]
-    assert events == ["ack", "session_construct", "enter", "dispatch"]
+    assert result == ["ok-0"]
+    assert events == ["ack", "session_construct", "enter", "dispatch", "exit"]
     assert inner.sessions[0].dispatched is True
+    assert inner.sessions[0].exit_calls == 1
     assert observer.requests[0].provider == "provider-a"
     assert observer.requests[0].model == "model-a"
     assert observer.requests[0].api_request["model"] == "model-a"
@@ -176,11 +204,13 @@ async def test_durable_observer_ack_precedes_actual_dispatch() -> None:
 
 
 @pytest.mark.anyio
-async def test_observer_failure_prevents_dispatch() -> None:
+async def test_observer_failure_prevents_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """没有 definite durable permit 时不得调用底层 stream。"""
-    inner = _OneAttemptClient([])
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, [])
     client = AttemptObservableClientAdapter(
-        inner,
+        reviewed,
         provider="provider-a",
         default_model="model-a",
     )
@@ -196,11 +226,13 @@ async def test_observer_failure_prevents_dispatch() -> None:
 
 
 @pytest.mark.anyio
-async def test_target_cancel_during_observer_barrier_prevents_dispatch() -> None:
+async def test_target_cancel_during_observer_barrier_prevents_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """target token 在 durable permit 前取消时不得触发 provider。"""
-    inner = _OneAttemptClient([])
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, [])
     client = AttemptObservableClientAdapter(
-        inner,
+        reviewed,
         provider="provider-a",
         default_model="model-a",
     )
@@ -231,11 +263,13 @@ async def test_target_cancel_during_observer_barrier_prevents_dispatch() -> None
 
 
 @pytest.mark.anyio
-async def test_raw_caller_cancel_during_observer_barrier_prevents_dispatch() -> None:
+async def test_raw_caller_cancel_during_observer_barrier_prevents_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """caller task 原生取消时 adapter 不吞取消且不触发 provider。"""
-    inner = _OneAttemptClient([])
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, [])
     client = AttemptObservableClientAdapter(
-        inner,
+        reviewed,
         provider="provider-a",
         default_model="model-a",
     )
@@ -254,11 +288,13 @@ async def test_raw_caller_cancel_during_observer_barrier_prevents_dispatch() -> 
     assert inner.sessions == []
 
 
-def test_adapter_is_nominal_attempt_observable_client_and_legacy_is_untouched() -> None:
+def test_adapter_is_nominal_attempt_observable_client_and_legacy_is_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """真实 adapter 通过 nominal gate，普通 session 原样委派。"""
-    inner = _OneAttemptClient([])
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, [])
     client = AttemptObservableClientAdapter(
-        inner,
+        reviewed,
         provider="provider-a",
         default_model="model-a",
     )
@@ -288,6 +324,49 @@ def test_attempt_dtos_are_frozen_and_adapter_names_must_be_stable() -> None:
             provider="provider-a",
             default_model="",
         )
+
+
+@pytest.mark.parametrize(
+    "api_request",
+    [
+        UserDict({"model": "model-a"}),
+        cast("Any", (("model", "model-a"),)),
+        cast("Any", {1: "numeric-key"}),
+        cast("Any", {1: "numeric", "1": "string"}),
+        {"model": "model-a", "messages": ()},
+        {"model": "model-a", "temperature": float("nan")},
+        {"model": "model-a", "temperature": float("inf")},
+        {"model": "model-a", "nested": UserDict({"value": 1})},
+    ],
+)
+def test_attempt_request_rejects_non_plain_or_noncanonical_json(
+    api_request: Any,
+) -> None:
+    """observer snapshot 只接受无歧义的纯 JSON dict/list 树。"""
+    with pytest.raises(NonCanonicalValueError):
+        ModelAttemptRequest(
+            provider="provider-a",
+            model="model-a",
+            api_request=api_request,
+        )
+
+
+def test_attempt_request_deep_copies_before_freezing_nested_json() -> None:
+    """caller 后续修改 nested dict/list 不得改变 durable request snapshot。"""
+    original = {
+        "model": "model-a",
+        "metadata": {"tags": ["before"]},
+    }
+    request = ModelAttemptRequest(
+        provider="provider-a",
+        model="model-a",
+        api_request=original,
+    )
+
+    original["metadata"]["tags"].append("after")  # type: ignore[union-attr]
+
+    assert request.api_request["metadata"] == {"tags": ("before",)}
+    assert request.api_request_dict()["metadata"] == {"tags": ["before"]}
 
 
 class _UncontrolledMultiDispatchClient:
@@ -321,6 +400,30 @@ def test_adapter_rejects_uncontrolled_inner_before_session_construction() -> Non
     assert inner.session_calls == 0
 
 
+def test_adapter_rejects_unregistered_nominal_marker_client() -> None:
+    """公开 marker 的普通继承不能自行取得 strict dispatch 资格。"""
+    with pytest.raises(TypeError, match="reviewed one-attempt"):
+        AttemptObservableClientAdapter(
+            _OneAttemptClient([]),
+            provider="unregistered",
+            default_model="unregistered-model",
+        )
+
+
+def test_adapter_rejects_external_subclass_of_reviewed_client() -> None:
+    """仓库外 subclass 即使继承官方实现也必须重新经过 conformance 审核。"""
+
+    class _ExternalSimClient(SimClient):
+        """模拟仓库外可能覆盖 session/stream 的 subclass。"""
+
+    with pytest.raises(TypeError, match="reviewed one-attempt"):
+        AttemptObservableClientAdapter(
+            _ExternalSimClient(turns=[]),
+            provider="external",
+            default_model="external-model",
+        )
+
+
 def test_adapter_rejects_litellm_with_opaque_retry_and_fallback_surface() -> None:
     """LiteLLM 未显式实现受控 attempt 边界时必须 fail closed。"""
     inner = LiteLLMClient(
@@ -338,7 +441,13 @@ def test_adapter_rejects_litellm_with_opaque_retry_and_fallback_surface() -> Non
 
 @pytest.mark.parametrize(
     "client_type",
-    [SimClient, OpenAICompatClient, AnthropicClient, GeminiClient],
+    [
+        SimClient,
+        OpenAICompatClient,
+        AnthropicClient,
+        GeminiClient,
+        DeepSeekClient,
+    ],
 )
 def test_reviewed_direct_clients_nominally_declare_one_attempt(
     client_type: type[object],
@@ -350,3 +459,163 @@ def test_reviewed_direct_clients_nominally_declare_one_attempt(
 def test_litellm_does_not_nominally_declare_one_attempt() -> None:
     """LiteLLM opaque fallback/retry surface 不能拥有 nominal marker。"""
     assert OneNetworkAttemptModelClient not in LiteLLMClient.__mro__
+
+
+def test_reviewed_deepseek_exact_type_is_adapter_eligible() -> None:
+    """仓库审查过的 DeepSeek 薄封装必须显式列入 exact conformance 集合。"""
+    client = AttemptObservableClientAdapter(
+        DeepSeekClient(api_key="test"),
+        provider="deepseek",
+        default_model="deepseek-chat",
+    )
+
+    assert type(client) is AttemptObservableClientAdapter
+
+
+def test_adapter_forwards_cache_read_to_next_inner_session() -> None:
+    """两轮 adapter session 间必须保留 provider previous_cache_read telemetry。"""
+    inner = OpenAICompatClient(
+        base_url="https://example.invalid",
+        api_key="test",
+        model="model-a",
+    )
+    client = AttemptObservableClientAdapter(
+        inner,
+        provider="openai-compatible",
+        default_model="model-a",
+    )
+
+    first = client.session(cancel=CancellationToken(name="first"))
+    client.record_cache_read(321)
+    second = client.session(cancel=CancellationToken(name="second"))
+
+    assert first._previous_cache_read == 0  # noqa: SLF001
+    assert second._previous_cache_read == 321  # noqa: SLF001
+
+
+def test_adapter_cache_read_proxy_is_safe_when_inner_has_no_telemetry() -> None:
+    """无 record_cache_read 的 reviewed client 仍可安全使用统一 adapter API。"""
+    client = AttemptObservableClientAdapter(
+        SimClient(turns=[]),
+        provider="sim",
+        default_model="sim-model",
+    )
+
+    client.record_cache_read(123)
+
+
+@pytest.mark.anyio
+async def test_outer_exit_closes_inner_after_early_break_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """consumer 提前 break 后，外层 context 退出必须立即释放 inner。"""
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, [], event_count=2)
+    client = AttemptObservableClientAdapter(
+        reviewed,
+        provider="provider-a",
+        default_model="model-a",
+    )
+    session = client.session_with_attempt_observer(
+        cancel=CancellationToken(name="turn"),
+        attempt_observer=_BlockingObserver([]),
+    )
+    observer = session._observer  # type: ignore[attr-defined]  # noqa: SLF001
+    observer.allow.set()
+
+    async with session as entered:
+        async for _ in entered.stream(_request()):
+            break
+
+    assert inner.sessions[0].exit_calls == 1
+
+
+@pytest.mark.anyio
+async def test_outer_exit_closes_inner_after_consumer_body_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """consumer 循环体异常不能把 active inner 留给 GC finalizer。"""
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, [], event_count=2)
+    client = AttemptObservableClientAdapter(
+        reviewed,
+        provider="provider-a",
+        default_model="model-a",
+    )
+    observer = _BlockingObserver([])
+    observer.allow.set()
+    session = client.session_with_attempt_observer(
+        cancel=CancellationToken(name="turn"),
+        attempt_observer=observer,
+    )
+
+    with pytest.raises(RuntimeError, match="consumer failed"):
+        async with session as entered:
+            async for _ in entered.stream(_request()):
+                raise RuntimeError("consumer failed")
+
+    assert inner.sessions[0].exit_calls == 1
+
+
+@pytest.mark.anyio
+async def test_outer_exit_closes_inner_when_consumer_is_cancelled_after_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """首事件后的 caller cancel 仍须同步关闭 inner context。"""
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, [], event_count=2)
+    client = AttemptObservableClientAdapter(
+        reviewed,
+        provider="provider-a",
+        default_model="model-a",
+    )
+    observer = _BlockingObserver([])
+    observer.allow.set()
+    session = client.session_with_attempt_observer(
+        cancel=CancellationToken(name="turn"),
+        attempt_observer=observer,
+    )
+    received = anyio.Event()
+
+    async def consume_then_wait() -> None:
+        async with session as entered:
+            async for _ in entered.stream(_request()):
+                received.set()
+                await anyio.sleep_forever()
+
+    task = asyncio.create_task(consume_then_wait())
+    await received.wait()
+    task.cancel("cancel after first event")
+    with pytest.raises(asyncio.CancelledError, match="cancel after first event"):
+        await task
+
+    assert inner.sessions[0].exit_calls == 1
+
+
+@pytest.mark.anyio
+async def test_observed_session_rejects_concurrent_and_repeated_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """一个 observed session 只允许启动一次 stream，避免资源所有权歧义。"""
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, [], event_count=2)
+    client = AttemptObservableClientAdapter(
+        reviewed,
+        provider="provider-a",
+        default_model="model-a",
+    )
+    observer = _BlockingObserver([])
+    observer.allow.set()
+    session = client.session_with_attempt_observer(
+        cancel=CancellationToken(name="turn"),
+        attempt_observer=observer,
+    )
+
+    async with session as entered:
+        first = entered.stream(_request())
+        await anext(first)
+        second = entered.stream(_request())
+        with pytest.raises(RuntimeError, match="stream already started"):
+            await anext(second)
+        await first.aclose()
+        repeated = entered.stream(_request())
+        with pytest.raises(RuntimeError, match="stream already started"):
+            await anext(repeated)
+
+    assert inner.sessions[0].exit_calls == 1

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 import anyio
 
@@ -13,13 +15,81 @@ from taifeng.conversation.journal.records import (
     LlmRequestCommittedV1,
 )
 from taifeng.llm.audit import (
+    AttemptObservableClientAdapter,
     ModelAttemptPermit,
     ModelAttemptRequest,
 )
 
 if TYPE_CHECKING:
+    from taifeng.llm.client import ModelClient, ModelClientSession
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.cancellation import CancellationToken
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class AuditedTurnInput:
+    """actor 从 durable UserMessage envelope 派生的 turn 输入。"""
+
+    id: str
+    text: str
+    accepted_turn_index: int
+
+
+class TurnModelContext(Protocol):
+    """构造 legacy/audited model session 所需的最小 TurnRunner 视图。"""
+
+    audit_state: AuditedSessionState | None
+    model_client: ModelClient
+    cancel: CancellationToken
+    thread_id: str
+    submission_id: str
+    turn_index: int
+
+
+def audited_turn_index(value: object) -> int | None:
+    """从 audited turn 输入提取 admission index；legacy 返回 None。"""
+    if isinstance(value, AuditedTurnInput):
+        return value.accepted_turn_index
+    return None
+
+
+def model_session_for_turn(
+    turn: TurnModelContext,
+    iteration: int,
+) -> ModelClientSession:
+    """为 audited turn 注入 observer；legacy 原样创建普通 session。"""
+    state = turn.audit_state
+    if state is None:
+        return turn.model_client.session(cancel=turn.cancel)
+    client = turn.model_client
+    if type(client) is not AttemptObservableClientAdapter:
+        error = RuntimeError("audit model attempt observer unavailable")
+        raise state.coordinator.freeze(error) from None
+    observer = JournalModelAttemptObserver(
+        state=state,
+        thread_id=turn.thread_id,
+        submission_id=turn.submission_id,
+        turn_index=turn.turn_index,
+        iteration=iteration,
+        cancel=turn.cancel,
+    )
+    return client.session_with_attempt_observer(
+        cancel=turn.cancel,
+        attempt_observer=observer,
+    )
+
+
+def record_model_cache_read(client: ModelClient, value: int) -> None:
+    """安全转发可选 cache-read telemetry，不影响 turn 主流程。"""
+    recorder = getattr(client, "record_cache_read", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(value)
+    except Exception:
+        logger.debug("record_cache_read on client failed", exc_info=True)
 
 
 class JournalModelAttemptObserver:
@@ -109,4 +179,10 @@ class JournalModelAttemptObserver:
         )
 
 
-__all__ = ["JournalModelAttemptObserver"]
+__all__ = [
+    "AuditedTurnInput",
+    "JournalModelAttemptObserver",
+    "audited_turn_index",
+    "model_session_for_turn",
+    "record_model_cache_read",
+]

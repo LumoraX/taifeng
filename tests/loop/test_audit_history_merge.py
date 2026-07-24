@@ -95,6 +95,7 @@ class _ConflictingRunner:
         self.last_prompt_fingerprint = {"after": "must-not-write"}
         self.compaction_count = 888
         self.total_usage = TokenUsage(total_tokens=999)
+        self.turn_index = 0
         self._seed_pending_call_id: str | None = None
 
     async def run(self) -> TurnOutcome:

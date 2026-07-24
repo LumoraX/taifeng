@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
+from taifeng.conversation.journal.canonical import validate_json_value
+from taifeng.conversation.journal.errors import NonCanonicalValueError
+
 if TYPE_CHECKING:
     from taifeng.llm.client import ModelClientSession, OneNetworkAttemptModelClient
     from taifeng.llm.events import ResponseEvent
@@ -19,7 +22,7 @@ def _freeze_json(value: object) -> object:
     """复制并冻结 observer 可见的 canonical JSON 树。"""
     if isinstance(value, dict):
         return MappingProxyType({
-            str(key): _freeze_json(item)
+            key: _freeze_json(item)
             for key, item in value.items()
         })
     if isinstance(value, list):
@@ -31,7 +34,7 @@ def _thaw_json(value: object) -> Any:
     """为 Journal payload 重建普通 JSON 容器。"""
     if isinstance(value, Mapping):
         return {
-            str(key): _thaw_json(item)
+            key: _thaw_json(item)
             for key, item in value.items()
         }
     if isinstance(value, tuple):
@@ -53,10 +56,13 @@ class ModelAttemptRequest:
             raise ValueError("attempt provider must be non-empty")
         if not self.model:
             raise ValueError("attempt model must be non-empty")
+        normalized = validate_json_value(self.api_request)
+        if not isinstance(normalized, dict):
+            raise NonCanonicalValueError("attempt request must be a dict")
         object.__setattr__(
             self,
             "api_request",
-            _freeze_json(dict(self.api_request)),
+            _freeze_json(normalized),
         )
 
     def api_request_dict(self) -> dict[str, Any]:
@@ -139,15 +145,27 @@ class _ObservedOneAttemptSession:
         self._provider = provider
         self._default_model = default_model
         self._session_model = session_model
+        self._stream_started = False
+        self._closed = False
+        self._active_context: ModelClientSession | None = None
+        self._active_stream: AsyncIterator[ResponseEvent] | None = None
 
     async def __aenter__(self) -> _ObservedOneAttemptSession:
+        if self._closed:
+            raise RuntimeError("observed session is closed")
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        del exc
+        self._closed = True
+        await self._close_active(*exc)
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
         """取得 definite permit 后才迭代底层 one-attempt stream。"""
+        if self._closed:
+            raise RuntimeError("observed session is closed")
+        if self._stream_started:
+            raise RuntimeError("observed session stream already started")
+        self._stream_started = True
         self._cancel.raise_if_cancelled()
         model = request.model or self._session_model or self._default_model
         dispatched_request = request.model_copy(update={"model": model})
@@ -160,12 +178,37 @@ class _ObservedOneAttemptSession:
         if type(permit) is not ModelAttemptPermit:
             raise TypeError("attempt observer returned no definite permit")
         self._cancel.raise_if_cancelled()
-        async with self._inner.session(
+        inner_context = self._inner.session(
             cancel=self._cancel,
             model=self._session_model,
-        ) as session:
-            async for event in session.stream(dispatched_request):
+        )
+        session = await inner_context.__aenter__()
+        active_stream = session.stream(dispatched_request).__aiter__()
+        self._active_context = inner_context
+        self._active_stream = active_stream
+        try:
+            async for event in active_stream:
                 yield event
+        except BaseException as error:
+            await self._close_active(type(error), error, error.__traceback__)
+            raise
+        else:
+            await self._close_active(None, None, None)
+
+    async def _close_active(self, *exc: object) -> None:
+        """摘除并 exactly-once 关闭当前 inner stream/context。"""
+        active_stream = self._active_stream
+        inner_context = self._active_context
+        self._active_stream = None
+        self._active_context = None
+        if active_stream is None or inner_context is None:
+            return
+        try:
+            close_stream = getattr(active_stream, "aclose", None)
+            if callable(close_stream):
+                await close_stream()
+        finally:
+            await inner_context.__aexit__(*exc)
 
 
 class AttemptObservableClientAdapter(AttemptObservableModelClient):
@@ -183,12 +226,11 @@ class AttemptObservableClientAdapter(AttemptObservableModelClient):
             raise ValueError("provider must be non-empty")
         if not default_model:
             raise ValueError("default model must be non-empty")
-        from taifeng.llm.client import OneNetworkAttemptModelClient
-
-        inner_type = type(inner)
-        mro = type.__getattribute__(inner_type, "__mro__")
-        if OneNetworkAttemptModelClient not in mro:
-            raise TypeError("inner client lacks nominal one-network-attempt capability")
+        if type(inner) not in _reviewed_one_attempt_client_types():
+            raise TypeError(
+                "inner client lacks reviewed one-attempt / "
+                "one-network-attempt conformance"
+            )
         self._inner = inner
         self._provider = provider
         self._default_model = default_model
@@ -201,6 +243,12 @@ class AttemptObservableClientAdapter(AttemptObservableModelClient):
     ) -> ModelClientSession:
         """legacy 调用原样委派，不注入 observer 或改变请求。"""
         return self._inner.session(cancel=cancel, model=model)
+
+    def record_cache_read(self, value: int) -> None:
+        """把跨轮 cache read telemetry 安全转发给支持它的 inner。"""
+        recorder = getattr(self._inner, "record_cache_read", None)
+        if callable(recorder):
+            recorder(value)
 
     def session_with_attempt_observer(
         self,
@@ -218,6 +266,24 @@ class AttemptObservableClientAdapter(AttemptObservableModelClient):
             default_model=self._default_model,
             session_model=model,
         )
+
+
+def _reviewed_one_attempt_client_types() -> tuple[type[object], ...]:
+    """返回仓库逐一审查过的 exact one-attempt client 类型。"""
+    from taifeng.llm.providers.anthropic_provider import AnthropicClient
+    from taifeng.llm.providers.deepseek_provider import DeepSeekClient
+    from taifeng.llm.providers.gemini_provider import GeminiClient
+    from taifeng.llm.providers.openai_compat import OpenAICompatClient
+    from taifeng.llm.providers.sim import RoutingSimClient, SimClient
+
+    return (
+        AnthropicClient,
+        DeepSeekClient,
+        GeminiClient,
+        OpenAICompatClient,
+        RoutingSimClient,
+        SimClient,
+    )
 
 
 __all__ = [

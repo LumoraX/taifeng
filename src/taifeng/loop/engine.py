@@ -48,6 +48,7 @@ from taifeng.loop.audit_history import (
     merge_audited_history,
 )
 from taifeng.loop.audit_lifecycle import SessionLifecycle
+from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
 from taifeng.loop.audit_mailbox import (
     AuditedApplicationCheckpoint,
     AuditedSubmissionMailbox,
@@ -166,18 +167,10 @@ class _Subscriber:
 class _PendingTurn:
     submission_id: str
     cancel: CancellationToken
+    turn_index: int | None = None
     # B1 midturn-input-steering：注入队列。engine 处理 InjectUserInput Op 时 append，
     # 与对应活跃 TurnRunner.pending_input 共享同一 list 引用，runner 迭代边界 drain。
     pending_input: list[ResponseItem] = field(default_factory=list)
-
-
-@dataclass(frozen=True, slots=True)
-class _AppliedUserSubmission:
-    """actor 已从 durable envelope 应用的 UserMessage 路由视图。"""
-
-    id: str
-    text: str
-    accepted_turn_index: int
 
 
 class AgentEngine:
@@ -1512,7 +1505,7 @@ class AgentEngine:
         )
         try:
             await self._run_turn_for(
-                _AppliedUserSubmission(
+                AuditedTurnInput(
                     id=token.submission_id,
                     text=str(item.payload["text"]),
                     accepted_turn_index=token.accepted_turn_index,
@@ -1544,7 +1537,7 @@ class AgentEngine:
 
     async def _run_turn_for(
         self,
-        sub: Submission | _AppliedUserSubmission,
+        sub: Submission | AuditedTurnInput,
         root_cancel: CancellationToken,
     ) -> None:
         if isinstance(sub, Submission):
@@ -1554,11 +1547,6 @@ class AgentEngine:
         else:
             user_text = sub.text
             attachments = None
-        accepted_turn_index = (
-            sub.accepted_turn_index
-            if isinstance(sub, _AppliedUserSubmission)
-            else None
-        )
 
         # 挂起态守卫(suspend-review-fixes):根 thread 有活跃挂起 → 在落史**之前**
         # 显式拒绝新 UserMessage。挂起 = turn 停在待裁决,裁决(Resume retry/abort)
@@ -1580,7 +1568,7 @@ class AgentEngine:
             return
 
         turn_cancel = root_cancel.child(f"sub:{sub.id}")
-        self._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
+        self._pending[sub.id] = _PendingTurn(sub.id, turn_cancel, audited_turn_index(sub))
 
         # 把 user 消息落 buffer + 持久化
         if attachments is not None:
@@ -1689,12 +1677,7 @@ class AgentEngine:
             self._turn_index += 1
             return
 
-        await self._build_and_run_runner(
-            sub.id,
-            turn_cancel,
-            resolved_for_turn,
-            turn_index=accepted_turn_index,
-        )
+        await self._build_and_run_runner(sub.id, turn_cancel, resolved_for_turn)
 
     async def _gate_session_tokens(self, submission_id: str) -> bool:
         """K2 引擎级闸门:触顶时按 policy 裁决终态 / 挂起。
@@ -1805,14 +1788,11 @@ class AgentEngine:
         resolved_for_turn: list[ResolvedInstruction],
         *,
         auto_retry_count: int = 0,
-        turn_index: int | None = None,
     ) -> TurnRunner:
         """从 Engine 当前快照构造单轮 runner。"""
-        pending_input = (
-            self._pending[submission_id].pending_input
-            if submission_id in self._pending
-            else []
-        )
+        pending = self._pending.get(submission_id)
+        pending_input = pending.pending_input if pending is not None else []
+        turn_index = pending.turn_index if pending is not None else None
         return TurnRunner(
             entry_skill=self._entry_skill,
             snapshot=self._snapshot,
@@ -1895,7 +1875,6 @@ class AgentEngine:
         seed_pending_call_id: str | None = None,
         cache_break_expected_reason: str | None = None,
         auto_retry_count: int = 0,
-        turn_index: int | None = None,
     ) -> None:
         """构造并运行一轮，最后一次性回写 Engine 状态。"""
         runner = self._new_turn_runner(
@@ -1903,7 +1882,6 @@ class AgentEngine:
             turn_cancel,
             resolved_for_turn,
             auto_retry_count=auto_retry_count,
-            turn_index=turn_index,
         )
         # turn-rewind retry_tool：让 runner 采样前先补跑被保留的悬空 call
         runner._seed_pending_call_id = seed_pending_call_id  # noqa: SLF001
@@ -1913,7 +1891,7 @@ class AgentEngine:
             runner._next_cache_break_reason = cache_break_expected_reason  # noqa: SLF001
         # post_turn 钩子需用「本 turn 的 index」(= +1 之前的值,与同 turn 的
         # pre_turn iteration 对齐),故在 finally 自增前先捕获。
-        fired_iteration = self._turn_index if turn_index is None else turn_index
+        fired_iteration = runner.turn_index
         try:
             outcome = await runner.run()
             if self._audit_state is not None:

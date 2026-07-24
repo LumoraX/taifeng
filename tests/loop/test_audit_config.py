@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
 
+from taifeng.llm.audit import AttemptObservableClientAdapter
 from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.loop.audit_config import (
     AttemptObservableModelClient,
@@ -179,7 +180,11 @@ def _skill(
 def _static_inputs() -> AuditStaticInputs:
     """构造 strict audit 可接受的 resolved 依赖快照。"""
     return AuditStaticInputs(
-        model_client=_ObservedClient(),
+        model_client=AttemptObservableClientAdapter(
+            SimClient(turns=[SimTurn(text="ok")]),
+            provider="sim",
+            default_model="sim-model",
+        ),
         skill_snapshot=SkillSnapshot(
             version=1,
             skills=(_skill("atomic"),),
@@ -350,6 +355,50 @@ def test_observer_aware_method_must_be_real_non_descriptor_implementation() -> N
     inputs = replace(
         _static_inputs(),
         model_client=cast("Any", _DescriptorObservedClient()),
+    )
+
+    with pytest.raises(AuditCapabilityError) as caught:
+        validate_audit_config(_config(), static_inputs=inputs)
+
+    assert caught.value.code == "audit_model_attempt_unobservable"
+
+
+def test_nominal_placeholder_that_discards_observer_is_rejected() -> None:
+    """旧 Task 5 placeholder 继承 ABC 但丢 observer，不能进入 strict mode。"""
+    inputs = replace(
+        _static_inputs(),
+        model_client=_ObservedClient(),
+    )
+
+    with pytest.raises(AuditCapabilityError) as caught:
+        validate_audit_config(_config(), static_inputs=inputs)
+
+    assert caught.value.code == "audit_model_attempt_unobservable"
+
+
+def test_official_adapter_subclass_cannot_override_and_drop_observer() -> None:
+    """strict gate 只接受不可覆盖的 exact 官方 adapter。"""
+
+    class _DroppingAdapter(AttemptObservableClientAdapter):
+        """模拟 subclass 覆盖 observer 路径后直接调用 inner。"""
+
+        def session_with_attempt_observer(
+            self,
+            *,
+            cancel: CancellationToken,
+            attempt_observer: object,
+            model: str | None = None,
+        ) -> ModelClientSession:
+            del attempt_observer
+            return self.session(cancel=cancel, model=model)
+
+    inputs = replace(
+        _static_inputs(),
+        model_client=_DroppingAdapter(
+            SimClient(turns=[SimTurn(text="dropped")]),
+            provider="sim",
+            default_model="sim-model",
+        ),
     )
 
     with pytest.raises(AuditCapabilityError) as caught:

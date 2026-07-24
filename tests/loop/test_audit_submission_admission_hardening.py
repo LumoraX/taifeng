@@ -21,7 +21,7 @@ from taifeng.loop.audit_admission import AcceptedUserMessage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import Shutdown, UserMessage
 from tests.loop.test_audit_submission_admission import (
-    _BlockingClient,
+    _blocking_sim_client,
     _engine_with_audit,
     _LoadRaisingJournalCore,
     _PausingJournalCore,
@@ -199,7 +199,7 @@ async def test_actor_rejects_coordinated_payload_tamper_with_stale_hashes(
     engine, coordinator, _ = await _engine_with_audit(
         tmp_path,
         skills_dir,
-        model_client=_BlockingClient(),
+        model_client=_blocking_sim_client(),
     )
     await engine.submit(UserMessage(text="durable original"))
     token = engine._submissions.get_nowait()  # noqa: SLF001
@@ -291,7 +291,7 @@ async def test_cancelled_projection_checkpoint_stops_before_next_token(
     engine, coordinator, _ = await _engine_with_audit(
         tmp_path,
         skills_dir,
-        model_client=_BlockingClient(),
+        model_client=_blocking_sim_client(),
         store_override=store,
     )
     first_id = await engine.submit(UserMessage(text="first projection blocks"))
@@ -326,7 +326,7 @@ async def test_cancelled_projection_checkpoint_stops_before_shutdown(
     engine, coordinator, core = await _engine_with_audit(
         tmp_path,
         skills_dir,
-        model_client=_BlockingClient(),
+        model_client=_blocking_sim_client(),
         store_override=store,
     )
     first_id = await engine.submit(UserMessage(text="projection before shutdown"))
@@ -360,7 +360,7 @@ async def test_projection_failure_marks_stale_without_freezing_or_losing_hot_his
     failure_point: str,
 ) -> None:
     """真实 target IO 失败只使投影 stale，Journal/hot history 仍是权威事实。"""
-    client = _BlockingClient()
+    client = _blocking_sim_client()
     store = (
         _ScopeFailingMessageStore(tmp_path / "threads")
         if failure_point == "scope"
@@ -404,7 +404,7 @@ async def test_projection_identity_invariant_freezes_before_effect_dispatch(
     engine, coordinator, _ = await _engine_with_audit(
         tmp_path,
         skills_dir,
-        model_client=_BlockingClient(),
+        model_client=_blocking_sim_client(),
         store_override=store,
     )
     await engine.submit(UserMessage(text="identity invariant"))
@@ -442,7 +442,7 @@ async def test_unclassified_projector_invariant_freezes_coordinator(
     engine, coordinator, _ = await _engine_with_audit(
         tmp_path,
         skills_dir,
-        model_client=_BlockingClient(),
+        model_client=_blocking_sim_client(),
         store_override=store,
     )
     await engine.submit(UserMessage(text="unclassified invariant"))
@@ -485,7 +485,7 @@ async def test_projector_cancel_and_fatal_errors_propagate_without_freeze(
     engine, coordinator, _ = await _engine_with_audit(
         tmp_path,
         skills_dir,
-        model_client=_BlockingClient(),
+        model_client=_blocking_sim_client(),
         store_override=store,
     )
     await engine.submit(UserMessage(text="boundary error"))

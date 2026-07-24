@@ -26,7 +26,7 @@ from tests.loop.test_audit_engine_bootstrap import (
     _config,
     _EngineSpy,
     _JournalCore,
-    _ObservedClient,
+    _observed_client,
     _pool,
     _Registry,
     _SpyStore,
@@ -354,7 +354,7 @@ def _direct_pool(
     """构造 store binding 测试 pool。"""
     return EnginePool(
         skill_registry=_Registry(),  # type: ignore[arg-type]
-        model_client=_ObservedClient() if core is not None else SimClient(turns=[]),
+        model_client=_observed_client() if core is not None else SimClient(turns=[]),
         store=store,
         tool_registry=ToolRegistry(),
         compressors=[],
@@ -407,7 +407,7 @@ async def test_public_create_static_failure_releases_projection_handle(
         await EnginePool.create(
             skills_dir=skills_dir,
             threads_dir=root,
-            model_client=_ObservedClient(),
+            model_client=_observed_client(),
             compressors=[],
             audit=_config(core),
         )
