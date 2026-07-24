@@ -57,8 +57,8 @@
 
 - [x] 7.1 Write failing tests proving `llm_request_committed` precedes actual dispatch and attempt identity increments deterministically
 - [x] 7.2 Implement the ModelAttemptObserver protocol and attempt-observable client adapter for current one-network-attempt streams
-- [ ] 7.3 Write failing tests proving complete/error checkpoints receive durable ack before visible deltas or another internal retry
-- [ ] 7.4 Implement ordered event buffering, cancellation-independent checkpoint finalization, ack-before-release, and UNKNOWN freeze on observer failure
+- [x] 7.3 Write failing tests proving complete/error checkpoints receive durable ack before visible deltas or another internal retry
+- [x] 7.4 Implement ordered event buffering, cancellation-independent checkpoint finalization, ack-before-release, and UNKNOWN freeze on observer failure
 - [ ] 7.5 Write failing TurnRunner tests for atomic final response plus ordered reasoning/assistant/function-call conversation items
 - [ ] 7.6 Implement `llm_response_committed` and acknowledged hot-history/projection application before Tool effect or terminal turn
 - [ ] 7.7 Run audited LLM, SimClient, and legacy LLM/engine tests; commit the LLM slice

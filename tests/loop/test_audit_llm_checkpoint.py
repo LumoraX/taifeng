@@ -240,15 +240,79 @@ async def _consume(
     client: AttemptObservableClientAdapter,
     observer,
     visible: list[str],
+    *,
+    cancel: CancellationToken | None = None,
 ) -> None:
     """消费 observed stream，并记录 checkpoint barrier 后的可见 kind。"""
     session = client.session_with_attempt_observer(
-        cancel=CancellationToken(name="turn"),
+        cancel=cancel or CancellationToken(name="turn"),
         attempt_observer=observer,
     )
     async with session as entered:
         async for event in entered.stream(_api_request()):
             visible.append(event.kind)
+
+
+class _CancelAfterRequestObserver:
+    """在 request durable ack 之后、真实 dispatch 之前触发一次取消。
+
+    用于锁死 spec「pre-dispatch 取消」语义：request intent 已 durable，但因未
+    发生任何网络 attempt，故合法地不产生 checkpoint（与 Tool「每个 intent 恰好
+    一个 outcome」的对称性差异，见 audit_llm.py retry_ordinal 注释）。
+    """
+
+    def __init__(self, inner, cancel: CancellationToken) -> None:
+        """包裹真实 observer，并持有待在 permit 后取消的 session token。"""
+        self._inner = inner
+        self._cancel = cancel
+
+    @property
+    def finalization_timeout(self) -> float:
+        """透传真实 observer 的 finalization 期限。"""
+        return self._inner.finalization_timeout
+
+    async def before_attempt(self, request):
+        """先落 durable request intent，再在 dispatch 前触发取消。"""
+        permit = await self._inner.before_attempt(request)
+        self._cancel.cancel()
+        return permit
+
+    async def after_attempt(self, outcome):
+        """dispatch 未发生时不应被调用；如被调用则如实委派。"""
+        return await self._inner.after_attempt(outcome)
+
+
+@pytest.mark.anyio
+async def test_pre_dispatch_cancel_commits_request_without_checkpoint(
+    tmp_path,
+) -> None:
+    """permit 后、dispatch 前取消：request durable、无 checkpoint、零 dispatch。"""
+    state, core = await _state(tmp_path)
+    token = CancellationToken(name="turn")
+    observer = _CancelAfterRequestObserver(_observer(state), token)
+    inner = SimClient(turns=[SimTurn(text="must stay hidden")])
+    client = AttemptObservableClientAdapter(
+        inner,
+        provider="sim",
+        default_model="model-a",
+    )
+    visible: list[str] = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await _consume(client, observer, visible, cancel=token)
+
+    committed = [envelope async for envelope in core.load("session_1")]
+    # request intent 已 durable 落账，且是最后一条 LLM 记录
+    assert committed[-1].record_type == "llm_request_committed"
+    # 未发生网络 attempt → 合法地没有 checkpoint 记录
+    assert all(
+        record.record_type != "llm_response_checkpoint" for record in committed
+    )
+    # dispatch spy 为零：底层 provider 从未收到请求
+    assert inner.ledger.requests() == []
+    # 无缓冲 delta 泄漏，且会话不因此 freeze（取消不是失败）
+    assert visible == []
+    assert state.coordinator.health is AuditHealth.HEALTHY
 
 
 @pytest.mark.anyio

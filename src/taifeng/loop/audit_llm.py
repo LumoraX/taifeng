@@ -133,6 +133,17 @@ class JournalModelAttemptObserver:
             iteration,
         )
         self._attempt_lock = anyio.Lock()
+        # retry ordinal 用于给「同一 logical LLM operation 的第 N 次真实网络
+        # 重试」签发互不冲突的 attempt/record id。当前 strict audit 能力面内它恒为
+        # 0，因为每个 operation 只发生一次：① inner 是官方 one-network-attempt
+        # client（adapter 拒绝任何自带 retry 的 wrapper，见 audit.py
+        # _reviewed_one_attempt_client_types）→ provider 不内部重试；② audit 静态
+        # 拒 compressor → 无 overflow reactive 重采样；③ audit 静态拒 failure_policy
+        # / failure_suspension → 可恢复错误走 TERMINAL 而非 SYSTEM_RETRY 重采样；
+        # ④ audit 静态拒 resume（audit_resume_unsupported）。四道闸都在 §5 静态
+        # 拒绝测试里锁死。**未来**若要放开 audit-mode resume/retry，必须把一个跨
+        # resume 持久化的 retry generation 穿进来推进本 ordinal，否则同一
+        # operation 的第二次 checkpoint 会与首次 record_id 撞车触发 JournalConflict。
         self._next_retry_ordinal = 0
 
     @property

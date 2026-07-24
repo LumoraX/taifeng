@@ -358,7 +358,18 @@ async def _await_checkpoint_owned(
     observer: ModelAttemptObserver,
     outcome: ModelAttemptOutcome,
 ) -> tuple[ModelAttemptCheckpoint, asyncio.CancelledError | None]:
-    """独立 task 收敛 checkpoint；重复 raw cancel 只延迟到 ack 后传播。"""
+    """独立 task 收敛 checkpoint；重复 raw cancel 只延迟到 ack 后传播。
+
+    参照 anyio 优先原则，差异：此处必须直接用 asyncio。anyio 未暴露
+    ``Task.cancelling()`` / ``uncancel()``，而「取消到达也要先落 durable ack
+    再传播」正依赖这两个原语区分外部取消与 worker 自身异常；因此这条 finalization
+    路径硬绑定 asyncio 后端（anyio-on-trio 不适用）。
+
+    取消传播优先级（M-2 记录）：仅当 worker 正常返回 checkpoint 时，才把首个
+    延迟到的 ``CancelledError`` 作为第二元素回传给调用点补抛；若 worker 自身抛出
+    （UNKNOWN freeze / finalization 超时），则以 worker 异常为准、丢弃已 uncancel
+    的取消——因为此时会话已进入 freeze/错误终态，取消语义被更强的失败覆盖。
+    """
     worker = asyncio.create_task(
         _run_after_attempt(observer, outcome),
         name=f"llm-checkpoint:{outcome.permit.attempt_id}",
@@ -425,6 +436,7 @@ class _ObservedOneAttemptSession:
         default_model: str,
         session_model: str | None,
     ) -> None:
+        """冻结 observer/provider/model 与初始 owner-task 无主的会话状态。"""
         self._inner = inner
         self._cancel = cancel
         self._observer = observer
@@ -444,6 +456,7 @@ class _ObservedOneAttemptSession:
         return self._last_attempt_checkpoint
 
     async def __aenter__(self) -> _ObservedOneAttemptSession:
+        """绑定唯一 owner task：进入后仅该 task 可 stream / 关闭本会话。"""
         if self._closed:
             raise RuntimeError("observed session is closed")
         current_task_id = anyio.get_current_task().id
@@ -453,6 +466,7 @@ class _ObservedOneAttemptSession:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        """由 owner task 幂等关闭：标记关闭并 exactly-once 摘除 inner 资源。"""
         self._require_owner_task("exit")
         self._closed = True
         await self._close_active(*exc)
