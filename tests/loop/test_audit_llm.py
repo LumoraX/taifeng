@@ -67,6 +67,7 @@ async def _state(
     tmp_path: Path,
     *,
     core: object | None = None,
+    finish_timeout: float = 30.0,
 ) -> tuple[AuditedSessionState, JsonlSessionJournalCore]:
     """建立带真实初始化 batch 的最小 audited state。"""
     real_core = JsonlSessionJournalCore(tmp_path / "journal")
@@ -89,6 +90,7 @@ async def _state(
         core=selected,  # type: ignore[arg-type]
         lease=created.lease,
         expected_seq=created.ack.last_seq,
+        finish_timeout=finish_timeout,
     )
     state = AuditedSessionState(
         thread_id="thread_1",
@@ -393,12 +395,16 @@ async def test_audited_turn_runner_injects_journal_observer(
     await runner._sample_once(0)  # noqa: SLF001
 
     committed = [envelope async for envelope in core.load("ses_audit_submission")]
-    request = committed[-1]
+    request, checkpoint = committed[-2:]
     assert request.record_type == "llm_request_committed"
     assert request.operation_id == (
         "thr_audit_submission:submission_1:turn:0:llm:0"
     )
     assert request.attempt_id == f"{request.operation_id}:attempt:0"
+    assert checkpoint.record_type == "llm_response_checkpoint"
+    assert checkpoint.operation_id == request.operation_id
+    assert checkpoint.attempt_id == request.attempt_id
+    assert checkpoint.causation_id == request.record_id
     assert len(inner.ledger.requests()) == 1
 
 

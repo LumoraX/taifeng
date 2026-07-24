@@ -210,7 +210,10 @@ def _assert_exact_committed_journal(
     business_records = [
         item
         for item in committed
-        if item.record_type != "llm_request_committed"
+        if item.record_type not in {
+            "llm_request_committed",
+            "llm_response_checkpoint",
+        }
     ]
     assert [item.record_type for item in business_records] == [
         "session_started",
@@ -242,6 +245,15 @@ def _assert_exact_committed_journal(
     ]
     assert len(attempts) == 1
     assert attempts[0].submission_id == first_id
+    checkpoints = [
+        item
+        for item in committed
+        if item.record_type == "llm_response_checkpoint"
+    ]
+    assert len(checkpoints) == 1
+    assert checkpoints[0].operation_id == attempts[0].operation_id
+    assert checkpoints[0].attempt_id == attempts[0].attempt_id
+    assert checkpoints[0].causation_id == attempts[0].record_id
     assert business_records[-2].thread_id == thread_id
     assert business_records[-1].record_type == "session_ended"
 

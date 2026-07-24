@@ -120,6 +120,11 @@ class SessionAuditCoordinator(ShutdownLifecycleMixin, TargetCancellationMixin):
         return self._effect_gate_open
 
     @property
+    def finalization_timeout(self) -> float:
+        """返回 runtime durable terminal/checkpoint 共用的有界收敛期限。"""
+        return self._finish_timeout
+
+    @property
     def session_root_cancel(self) -> CancellationToken:
         """返回 Session root token，供 Engine/Turn 派生取消 subtree。"""
         return self._session_root_cancel

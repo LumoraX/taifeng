@@ -13,9 +13,14 @@ from taifeng.conversation.journal.records import (
     JournalIdentities,
     JournalRecordFactory,
     LlmRequestCommittedV1,
+    LlmResponseCheckpointV1,
+    LlmStatus,
+    record_id,
 )
 from taifeng.llm.audit import (
     AttemptObservableClientAdapter,
+    ModelAttemptCheckpoint,
+    ModelAttemptOutcome,
     ModelAttemptPermit,
     ModelAttemptRequest,
 )
@@ -130,6 +135,11 @@ class JournalModelAttemptObserver:
         self._attempt_lock = anyio.Lock()
         self._next_retry_ordinal = 0
 
+    @property
+    def finalization_timeout(self) -> float:
+        """复用 Session coordinator 注入的 bounded finalization 期限。"""
+        return self._state.coordinator.finalization_timeout
+
     async def before_attempt(
         self,
         request: ModelAttemptRequest,
@@ -137,6 +147,24 @@ class JournalModelAttemptObserver:
         """durable 写完整 request intent，definite ack 后才消费 ordinal。"""
         async with self._attempt_lock:
             return await self._commit_attempt(request)
+
+    async def after_attempt(
+        self,
+        outcome: ModelAttemptOutcome,
+    ) -> ModelAttemptCheckpoint:
+        """durable 写 attempt checkpoint，并仅在 definite ack 后返回 lineage。"""
+        try:
+            async with self._attempt_lock:
+                checkpoint = await self._commit_checkpoint(outcome)
+        except (KeyboardInterrupt, SystemExit) as error:
+            self._state.coordinator.freeze(error)
+            raise
+        except BaseException as error:
+            raise self._state.coordinator.freeze(error) from None
+        if outcome.status is LlmStatus.UNKNOWN:
+            assert outcome.stable_error is not None
+            raise self._state.coordinator.freeze(outcome.stable_error) from None
+        return checkpoint
 
     async def _commit_attempt(
         self,
@@ -176,6 +204,66 @@ class JournalModelAttemptObserver:
             attempt_id=attempt_id,
             request_record_id=record.record_id,
             retry_ordinal=retry_ordinal,
+        )
+
+    async def _commit_checkpoint(
+        self,
+        outcome: ModelAttemptOutcome,
+    ) -> ModelAttemptCheckpoint:
+        """构造 attempt-specific checkpoint，并等待 exact durable ack。"""
+        permit = outcome.permit
+        if permit.operation_id != self._operation_id:
+            raise self._state.coordinator.freeze(
+                ValueError("attempt operation does not match observer")
+            )
+        expected_attempt = self._identities.attempt(
+            self._operation_id,
+            permit.retry_ordinal,
+        )
+        if permit.attempt_id != expected_attempt:
+            raise self._state.coordinator.freeze(
+                ValueError("attempt identity does not match observer")
+            )
+        expected_request_record_id = record_id(
+            permit.operation_id,
+            "llm_request_committed",
+            permit.attempt_id,
+            0,
+        )
+        if permit.request_record_id != expected_request_record_id:
+            raise self._state.coordinator.freeze(
+                ValueError("attempt request lineage does not match observer")
+            )
+        record = self._factory.build(
+            operation_id=permit.operation_id,
+            record_type="llm_response_checkpoint",
+            payload=LlmResponseCheckpointV1(
+                request_record_id=permit.request_record_id,
+                retry_ordinal=permit.retry_ordinal,
+                status=outcome.status,
+                normalized_items=outcome.normalized_items_list(),
+                usage=outcome.usage_dict(),
+                provider_request_id=outcome.provider_request_id,
+                stable_error=outcome.stable_error,
+            ),
+            attempt_id=permit.attempt_id,
+            submission_id=self._identities.submission_id,
+            thread_id=self._identities.thread_id,
+            turn_id=self._turn_id,
+            causation_id=permit.request_record_id,
+        )
+        await self._state.coordinator.append(record)
+        return ModelAttemptCheckpoint(
+            operation_id=permit.operation_id,
+            attempt_id=permit.attempt_id,
+            request_record_id=permit.request_record_id,
+            checkpoint_record_id=record.record_id,
+            retry_ordinal=permit.retry_ordinal,
+            status=outcome.status,
+            normalized_items=outcome.normalized_items,
+            usage=outcome.usage,
+            provider_request_id=outcome.provider_request_id,
+            stable_error=outcome.stable_error,
         )
 
 

@@ -13,18 +13,20 @@ import pytest
 from taifeng.conversation.journal.errors import NonCanonicalValueError
 from taifeng.llm.audit import (
     AttemptObservableClientAdapter,
+    ModelAttemptCheckpoint,
+    ModelAttemptOutcome,
     ModelAttemptPermit,
     ModelAttemptRequest,
 )
 from taifeng.llm.client import OneNetworkAttemptModelClient
-from taifeng.llm.events import text_delta
+from taifeng.llm.events import completed, text_delta
 from taifeng.llm.providers.anthropic_provider import AnthropicClient
 from taifeng.llm.providers.deepseek_provider import DeepSeekClient
 from taifeng.llm.providers.gemini_provider import GeminiClient
 from taifeng.llm.providers.litellm_provider import LiteLLMClient
 from taifeng.llm.providers.openai_compat import OpenAICompatClient
 from taifeng.llm.providers.sim import SimClient
-from taifeng.llm.types import ApiMessage, ApiRequest
+from taifeng.llm.types import ApiMessage, ApiRequest, TokenUsage
 from taifeng.loop.audit_config import AttemptObservableModelClient
 from taifeng.loop.cancellation import CancellationToken
 
@@ -82,6 +84,7 @@ class _DispatchSpySession:
         self.events.append("dispatch")
         for index in range(self.event_count):
             yield text_delta(f"ok-{index}")
+        yield completed(response_id=None, usage=TokenUsage())
 
 
 class _OneAttemptClient(OneNetworkAttemptModelClient):
@@ -126,6 +129,8 @@ def _reviewed_spy_inner(
 class _BlockingObserver:
     """显式 gate durable permit，便于证明 ack-before-dispatch。"""
 
+    finalization_timeout = 1.0
+
     def __init__(self, events: list[str]) -> None:
         self.events = events
         self.entered = anyio.Event()
@@ -142,9 +147,18 @@ class _BlockingObserver:
         self.events.append("ack")
         return _permit()
 
+    async def after_attempt(
+        self,
+        outcome: ModelAttemptOutcome,
+    ) -> ModelAttemptCheckpoint:
+        """返回与 outcome exact 一致的受控 checkpoint ack。"""
+        return _checkpoint(outcome)
+
 
 class _FailingObserver:
     """在 durable permit 前失败。"""
+
+    finalization_timeout = 1.0
 
     async def before_attempt(
         self,
@@ -153,6 +167,13 @@ class _FailingObserver:
         del request
         raise RuntimeError("journal unavailable")
 
+    async def after_attempt(
+        self,
+        outcome: ModelAttemptOutcome,
+    ) -> ModelAttemptCheckpoint:
+        """before 必失败，after 不应可达。"""
+        raise AssertionError(f"unexpected outcome: {outcome.status}")
+
 
 async def _consume(session: ModelClientSession, request: ApiRequest) -> list[str]:
     """完整消费 adapter stream。"""
@@ -160,7 +181,27 @@ async def _consume(session: ModelClientSession, request: ApiRequest) -> list[str
         return [
             str(event.data.get("text", ""))
             async for event in entered.stream(request)
+            if event.kind == "text_delta"
         ]
+
+
+def _checkpoint(outcome: ModelAttemptOutcome) -> ModelAttemptCheckpoint:
+    """构造与 outcome exact 一致的 definite checkpoint。"""
+    permit = outcome.permit
+    return ModelAttemptCheckpoint(
+        operation_id=permit.operation_id,
+        attempt_id=permit.attempt_id,
+        request_record_id=permit.request_record_id,
+        checkpoint_record_id=(
+            f"{permit.operation_id}:llm_response_checkpoint:{permit.attempt_id}:0"
+        ),
+        retry_ordinal=permit.retry_ordinal,
+        status=outcome.status,
+        normalized_items=outcome.normalized_items,
+        usage=outcome.usage,
+        provider_request_id=outcome.provider_request_id,
+        stable_error=outcome.stable_error,
+    )
 
 
 @pytest.mark.anyio
@@ -524,6 +565,7 @@ async def test_non_owner_exit_cannot_close_running_owner_stream(
         dispatch_started.set()
         await dispatch_allowed.wait()
         yield text_delta("ok-0")
+        yield completed(response_id=None, usage=TokenUsage())
 
     monkeypatch.setattr(_DispatchSpySession, "stream", blocking_stream)
     reviewed, inner = _reviewed_spy_inner(monkeypatch, events)

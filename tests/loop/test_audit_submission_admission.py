@@ -654,6 +654,7 @@ async def test_completed_actor_submission_replay_is_a_noop(
             "conversation_item",
             "submission_applied",
             "llm_request_committed",
+            "llm_response_checkpoint",
         ]
         assert committed[3].payload["turn_index"] == 0
         assert coordinator.health is AuditHealth.HEALTHY
