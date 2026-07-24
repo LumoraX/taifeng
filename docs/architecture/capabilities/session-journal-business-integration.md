@@ -162,9 +162,11 @@ lifecycle 是 `OPEN → FINISHING → CLOSED`：
 - definite ack 后的 queue handoff 若因 bounded backpressure cancellation、actor 已终止或其他异常未取得
   ownership，则以稳定 `accepted_work_handoff_failed` 进入 recovery-required，并在抛错前 shielded 退休
   未交付 work；fatal/cancel 原类型继续传播，已经成功入队的 token 不得同时按失败退休；
-- audited mailbox 在 `queue.put` 前登记 token；actor dequeue 后在同一 mailbox lock 内 claim 并把
-  ownership 原子转交 operation。actor finalizer 原子关闭 mailbox、唤醒 blocked put、快照全部未 claim
-  token，并 cancellation-independent 冻结/退休；已 claim token 只由 operation 收敛，双方不得双退；
+- audited mailbox 在 `queue.put` 前登记 token；actor dequeue 后先标记 claimed，但 mailbox 保留
+  reservation，直到 child outer retirement `finally` 已安装并在同一 lock 完成 started handshake。
+  actor finalizer 原子关闭 mailbox、唤醒 blocked put、快照全部 registered/claimed token 并
+  cancellation-independent 冻结/退休；started token 只由 operation finally 收敛。finalizer 与 child
+  handshake 只能有一方取得 retirement ownership，迟到 child 不得应用输入或双退；
 - EnginePool 的 graceful shutdown 与 admission sequencing lock 串行：先关闭 intake，再把内部 Shutdown
   排在此前 accepted token 之后；actor 在读取下一 queue item 前不仅安装 operation ownership，还等待该
   token 的 hot-history + projection application checkpoint，确保 terminal 不越过已 accepted input；并发

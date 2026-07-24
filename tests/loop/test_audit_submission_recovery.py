@@ -15,7 +15,10 @@ from taifeng.loop.audit import (
     SessionFinishingError,
     SessionLifecycle,
 )
-from taifeng.loop.audit_admission import InvalidAuditedSubmissionError
+from taifeng.loop.audit_admission import (
+    AcceptedUserMessage,
+    InvalidAuditedSubmissionError,
+)
 from taifeng.loop.audit_descriptor import (
     safe_user_message_input_descriptor,
     user_message_input_descriptor_hash,
@@ -558,6 +561,78 @@ async def test_actor_termination_after_dequeue_before_claim_retires_token(
     assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
     assert snapshot.effect_gate_open is False
     assert snapshot.accepted_work_ids == ()
+    assert engine._history == []  # noqa: SLF001
+    assert client.ledger.requests() == []
+
+
+@pytest.mark.anyio
+async def test_actor_termination_after_claim_before_child_start_retires_token(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """claim 后 child 零步执行时 finalizer 必须接管并唤醒 finish。"""
+    from taifeng.llm.providers.sim import SimClient
+
+    client = SimClient(turns=[])
+    engine, coordinator, _ = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=client,
+        finish_timeout=0.05,
+    )
+    submission_id = await engine.submit(UserMessage(text="claimed but unstarted"))
+    queued = engine._submissions._queue[0]  # type: ignore[attr-defined]  # noqa: SLF001
+    assert isinstance(queued, AcceptedUserMessage)
+    work = queued.accepted_work
+    child: asyncio.Task[None] | None = None
+    child_started = False
+    child_start = anyio.Event()
+    original_start = engine._start_operation  # noqa: SLF001
+
+    def start_then_cancel_actor(
+        coroutine: Any,
+        *,
+        name: str,
+    ) -> asyncio.Task[None]:
+        """create_task 返回后、child 首步前同步取消当前 actor。"""
+        nonlocal child, child_started
+
+        async def hold_child_start() -> None:
+            """精确阻止 run_owned 首步，并在取消时关闭未启动 coroutine。"""
+            nonlocal child_started
+            try:
+                await child_start.wait()
+                child_started = True
+                await coroutine
+            finally:
+                if not child_started:
+                    coroutine.close()
+
+        child = original_start(hold_child_start(), name=name)
+        actor = asyncio.current_task()
+        assert actor is not None
+        actor.cancel()
+        return child
+
+    engine._start_operation = start_then_cancel_actor  # type: ignore[method-assign]  # noqa: SLF001
+    actor = asyncio.create_task(engine.run(CancellationToken(name="test-root")))
+    with pytest.raises(asyncio.CancelledError):
+        await actor
+
+    assert child is not None
+    assert child.cancelled()
+    assert child_started is False
+    result = await coordinator.finish(
+        thread_terminals=(),
+        reason="claimed_unstarted_converged",
+    )
+    snapshot = coordinator.snapshot()
+    assert result.failure is not None
+    assert result.failure.code == "accepted_work_handoff_failed"
+    assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
+    assert snapshot.accepted_work_ids == ()
+    assert work.is_completed
+    assert submission_id not in snapshot.accepted_work_ids
     assert engine._history == []  # noqa: SLF001
     assert client.ledger.requests() == []
 

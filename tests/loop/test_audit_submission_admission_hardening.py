@@ -370,9 +370,10 @@ async def test_projector_cancel_and_fatal_errors_propagate_without_freeze(
     await engine.submit(UserMessage(text="boundary error"))
     token = engine._submissions.get_nowait()  # noqa: SLF001
     assert isinstance(token, AcceptedUserMessage)
+    assert await engine._audited_mailbox.claim(token)  # noqa: SLF001
 
     with pytest.raises(error_type):
-        await engine._run_audited_turn_for(  # noqa: SLF001
+        await engine._run_claimed_audited_turn(  # noqa: SLF001
             token,
             CancellationToken(name="test-root"),
         )

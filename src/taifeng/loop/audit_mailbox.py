@@ -15,7 +15,14 @@ if TYPE_CHECKING:
         AuditedAdmissionState,
     )
 
-type _ReservationState = Literal["registered", "claimed", "closed", "aborted"]
+type _ReservationState = Literal[
+    "registered",
+    "claimed",
+    "started",
+    "retired",
+    "closed",
+    "aborted",
+]
 
 
 class AcceptedUserMessageSink(Protocol):
@@ -83,7 +90,7 @@ class AuditedSubmissionMailbox:
             return error, await self._abort(reservation)
 
     async def claim(self, token: AcceptedUserMessage) -> bool:
-        """actor dequeue 后原子把 mailbox ownership 转交 operation。"""
+        """actor dequeue 后标记 claimed，ownership 保留到 child start handshake。"""
         async with self._lock:
             reservation = self._reservations.get(token.submission_id)
             if (
@@ -94,22 +101,54 @@ class AuditedSubmissionMailbox:
             ):
                 return False
             reservation.state = "claimed"
-            self._reservations.pop(token.submission_id, None)
             return True
 
+    async def start_claimed(self, token: AcceptedUserMessage) -> bool:
+        """child outer finally 安装后原子取得唯一 retirement ownership。"""
+        async with self._lock:
+            reservation = self._reservations.get(token.submission_id)
+            if (
+                self._closed
+                or reservation is None
+                or reservation.token is not token
+                or reservation.state != "claimed"
+            ):
+                return False
+            reservation.state = "started"
+            return True
+
+    async def take_started_retirement(self, token: AcceptedUserMessage) -> bool:
+        """operation finally 原子取得 started token 的实际 retirement 权。"""
+        with anyio.CancelScope(shield=True):
+            async with self._lock:
+                reservation = self._reservations.get(token.submission_id)
+                if (
+                    reservation is None
+                    or reservation.token is not token
+                    or reservation.state != "started"
+                ):
+                    return False
+                reservation.state = "retired"
+                self._reservations.pop(token.submission_id, None)
+                return True
+        return False
+
     async def close(self) -> tuple[AcceptedUserMessage, ...]:
-        """关闭 admission ownership，唤醒 put 并接管全部未 claim token。"""
+        """关闭 mailbox，接管 registered/claimed，保留 started 给 operation。"""
         async with self._lock:
             if self._closed:
                 return ()
             self._closed = True
-            reservations = tuple(self._reservations.values())
-            self._reservations.clear()
-            for reservation in reservations:
+            owned: list[AcceptedUserMessage] = []
+            for submission_id, reservation in tuple(self._reservations.items()):
+                if reservation.state == "started":
+                    continue
+                self._reservations.pop(submission_id, None)
                 reservation.state = "closed"
                 if reservation.put_scope is not None:
                     reservation.put_scope.cancel()
-            return tuple(reservation.token for reservation in reservations)
+                owned.append(reservation.token)
+            return tuple(owned)
 
     async def _register(
         self,
@@ -151,9 +190,14 @@ class AuditedSubmissionMailbox:
         return False
 
     async def _put_remains_valid(self, reservation: _MailboxReservation) -> bool:
-        """put 返回后只接受仍 registered 或已被 actor claimed 的线性化结果。"""
+        """put 返回后接受 mailbox/operation 已确定取得过 ownership。"""
         async with self._lock:
-            return reservation.state in ("registered", "claimed")
+            return reservation.state in (
+                "registered",
+                "claimed",
+                "started",
+                "retired",
+            )
 
 
 def _handoff_failure() -> StableErrorV1:
@@ -191,11 +235,30 @@ async def _retire_tokens(
         raise cancellation
 
 
-async def retire_claimed_audited_token(
+async def retire_started_audited_token(
+    mailbox: AuditedSubmissionMailbox,
     token: AcceptedUserMessage,
 ) -> None:
-    """operation 最终释放已 claim token，并在完成后恢复 caller 取消。"""
-    await _retire_tokens((token,))
+    """operation finally 仅在 handshake 胜出时 cancellation-independent 退休。"""
+    async def retire_if_owned() -> None:
+        """在独立 task 内仲裁并释放 started ownership。"""
+        with anyio.CancelScope(shield=True):
+            if await mailbox.take_started_retirement(token):
+                await token.accepted_work.complete()
+
+    worker = asyncio.create_task(retire_if_owned())
+    cancellation: asyncio.CancelledError | None = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as error:
+            cancellation = cancellation or error
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+    worker.result()
+    if cancellation is not None:
+        raise cancellation
 
 
 async def handoff_accepted_user_message(
@@ -234,7 +297,7 @@ async def finalize_audited_mailbox(
     state: AuditedAdmissionState,
     mailbox: AuditedSubmissionMailbox,
 ) -> None:
-    """actor 终止时冻结并退休所有未 claim token。"""
+    """actor 终止时冻结并退休所有未 start token。"""
     with anyio.CancelScope(shield=True):
         tokens = await mailbox.close()
         if not tokens:
@@ -248,5 +311,5 @@ __all__ = [
     "AuditedSubmissionMailbox",
     "finalize_audited_mailbox",
     "handoff_accepted_user_message",
-    "retire_claimed_audited_token",
+    "retire_started_audited_token",
 ]

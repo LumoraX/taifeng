@@ -42,7 +42,7 @@ from taifeng.loop.audit_mailbox import (
     AuditedSubmissionMailbox,
     finalize_audited_mailbox,
     handoff_accepted_user_message,
-    retire_claimed_audited_token,
+    retire_started_audited_token,
 )
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
@@ -1369,20 +1369,39 @@ class AgentEngine:
         if not await self._audited_mailbox.claim(sub):
             return
         application_converged = asyncio.Event()
-
-        async def run_owned() -> None:
-            """先收敛 durable user application，再继续独立 turn effect。"""
-            try:
-                await self._run_audited_turn_for(
-                    sub,
-                    root_cancel,
-                    application_converged=application_converged,
-                )
-            finally:
-                application_converged.set()
-
-        self._start_operation(run_owned(), name=f"turn:{sub.id}")
+        self._start_operation(
+            self._run_claimed_audited_turn(
+                sub,
+                root_cancel,
+                application_converged=application_converged,
+            ),
+            name=f"turn:{sub.id}",
+        )
         await application_converged.wait()
+
+    async def _run_claimed_audited_turn(
+        self,
+        token: AcceptedUserMessage,
+        root_cancel: CancellationToken,
+        *,
+        application_converged: asyncio.Event | None = None,
+    ) -> None:
+        """handshake 后收敛 application；outer finally 唯一退休 ownership。"""
+        try:
+            if not await self._audited_mailbox.start_claimed(token):
+                return
+            await self._run_audited_turn_for(
+                token,
+                root_cancel,
+                application_converged=application_converged,
+            )
+        finally:
+            if application_converged is not None:
+                application_converged.set()
+            await retire_started_audited_token(
+                self._audited_mailbox,
+                token,
+            )
 
     async def _run_audited_turn_for(
         self,
@@ -1391,36 +1410,33 @@ class AgentEngine:
         *,
         application_converged: asyncio.Event | None = None,
     ) -> None:
-        """应用 ack conversation envelope，并始终退休 accepted-work ownership。"""
+        """应用 ack conversation envelope；ownership 由外层 handshake/finally 管理。"""
+        assert self._audit_state is not None
+        await self._audit_state.coordinator.ensure_effect_allowed()
         try:
-            assert self._audit_state is not None
-            await self._audit_state.coordinator.ensure_effect_allowed()
-            try:
-                item, conversation_envelopes = token.validated_application()
-            except BaseException as error:
-                raise self._audit_state.coordinator.freeze(error) from None
-            async with self._lock:
-                self._history.append(item)
-            try:
-                result = await self._audit_state.projector.project(
-                    conversation_envelopes, token.ack
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:  # noqa: BLE001  # 普通未分类异常必须 fail closed
-                raise self._audit_state.coordinator.freeze(error) from None
-            self._audit_state.coordinator.update_projection(result)
-            if application_converged is not None:
-                application_converged.set()
-            await self._run_turn_for(
-                _AppliedUserSubmission(
-                    id=token.submission_id,
-                    text=str(item.payload["text"]),
-                ),
-                root_cancel,
+            item, conversation_envelopes = token.validated_application()
+        except BaseException as error:
+            raise self._audit_state.coordinator.freeze(error) from None
+        async with self._lock:
+            self._history.append(item)
+        try:
+            result = await self._audit_state.projector.project(
+                conversation_envelopes, token.ack
             )
-        finally:
-            await retire_claimed_audited_token(token)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001  # 普通未分类异常必须 fail closed
+            raise self._audit_state.coordinator.freeze(error) from None
+        self._audit_state.coordinator.update_projection(result)
+        if application_converged is not None:
+            application_converged.set()
+        await self._run_turn_for(
+            _AppliedUserSubmission(
+                id=token.submission_id,
+                text=str(item.payload["text"]),
+            ),
+            root_cancel,
+        )
 
     async def _run_turn_for(
         self,
