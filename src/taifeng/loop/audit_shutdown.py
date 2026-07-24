@@ -60,16 +60,12 @@ async def _submit_shutdown(
         if claim.fatal is None:
             await finish_owner()
         else:
-            from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
-            from taifeng.loop.pool_lifecycle import EnginePoolReleaseError
-
             try:
                 await finish_owner()
-            except AuditSessionReleaseError:
-                pass
-            except EnginePoolReleaseError as error:
-                if error.finish_result is None:
-                    state.coordinator.fail_shutdown_finish_handoff()
+            except BaseException:  # noqa: BLE001
+                # acceptance fatal 已是唯一首因：owner 的任何失败只能唤醒
+                # finish handoff，不能覆盖首因或改变普通非 fatal 路径。
+                state.coordinator.fail_shutdown_finish_handoff()
             raise claim.fatal
     else:
         result = await state.coordinator.wait_shutdown_finish(submission.id)

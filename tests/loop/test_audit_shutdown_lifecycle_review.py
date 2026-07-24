@@ -12,7 +12,10 @@ import pytest
 from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
 from taifeng.loop.audit_shutdown import _submit_shutdown
 from taifeng.loop.audit_support import SessionAuditFrozenError
-from taifeng.loop.pool_lifecycle import EnginePoolReleaseError
+from taifeng.loop.pool_lifecycle import (
+    EnginePoolReleaseError,
+    EnginePoolUnresponsiveError,
+)
 from taifeng.loop.submission import Shutdown, Submission
 from tests.loop.test_audit_shutdown_lifecycle import (
     _inject_shutdown_acceptance_failure,
@@ -250,6 +253,80 @@ async def test_unpublished_finish_wrapper_wakes_same_id_retry(
     with pytest.raises(AuditSessionReleaseError):
         await original_owner()
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_unresponsive_finish_owner_preserves_fatal_and_wakes_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 wrapper owner 失败也不得覆盖 acceptance fatal 或挂住 retry。"""
+    real_core, core, pool, _ = _build_release_scenario(tmp_path)
+    session_id = "ses_shutdown_unresponsive_finish"
+    engine = await pool.get_or_create(
+        session_id=session_id,
+        entry_skill_id="entry",
+    )
+    state = pool._audit_sessions[session_id]  # noqa: SLF001
+    fatal = SystemExit("shutdown-acceptance-fatal")
+    _inject_shutdown_acceptance_failure(core, fatal)
+    original_owner = engine._audit_finish_owner  # noqa: SLF001
+    assert original_owner is not None
+
+    async def unresponsive_owner() -> None:
+        """模拟真实 pool stop engine 超过 cooperative cancellation grace。"""
+        raise EnginePoolUnresponsiveError(
+            session_id,
+            stage="engine_shutdown",
+        )
+
+    monkeypatch.setattr(
+        "taifeng.loop.submission.secrets.token_hex",
+        lambda _size: "shutdown_unresponsive_finish",
+    )
+    submission = Submission(op=Shutdown())
+    first_error: BaseException | None = None
+    retry_error: BaseException | None = None
+
+    try:
+        await _submit_shutdown(
+            state,
+            submission,
+            engine._audited_admission_lock,  # noqa: SLF001
+            unresponsive_owner,
+        )
+    except BaseException as error:  # noqa: BLE001
+        first_error = error
+    with anyio.move_on_after(0.05) as retry_scope:
+        try:
+            await _submit_shutdown(
+                state,
+                submission,
+                engine._audited_admission_lock,  # noqa: SLF001
+                unresponsive_owner,
+            )
+        except BaseException as error:  # noqa: BLE001
+            retry_error = error
+
+    observed = (
+        type(first_error).__name__,
+        retry_scope.cancel_called,
+        type(retry_error).__name__,
+    )
+    snapshot = state.coordinator.snapshot()
+    close_calls = core.close_calls
+    records = [envelope async for envelope in real_core.load(session_id)][3:]
+    with pytest.raises(AuditSessionReleaseError):
+        await original_owner()
+    await pool.close()
+
+    assert first_error is fatal, f"observed={observed}"
+    assert not retry_scope.cancel_called, f"observed={observed}"
+    assert isinstance(retry_error, SessionAuditFrozenError), f"observed={observed}"
+    assert snapshot.audit_complete is None
+    assert snapshot.lease_released is None
+    assert close_calls == 0
+    assert records == []
 
 
 @pytest.mark.asyncio
