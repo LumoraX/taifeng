@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from taifeng.loop.cancellation import CancellationToken
 
 TargetCancelStatus = Literal["cancelled", "already_terminal", "not_found"]
+_CancellationOrigin = Literal["cancel_turn", "external"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +31,7 @@ class _TargetState:
     terminal_record_ids: tuple[str, ...] = ()
     execution_end_reason: str | None = None
     closed_without_terminal: bool = False
-    cancel_requested: bool = False
+    cancellation_origin: _CancellationOrigin | None = None
 
 
 @dataclass(slots=True)
@@ -82,12 +83,16 @@ class TargetCancellationRegistry:
         state = self._active.get(target_id)
         if state is None:
             return False
+        if state.cancellation_origin is None:
+            state.cancellation_origin = "external"
         state.token.cancel()
         return True
 
     def cancel_all(self) -> None:
         """freeze 时显式取消全部 active target，防御 parent edge 损坏。"""
         for state in tuple(self._active.values()):
+            if state.cancellation_origin is None:
+                state.cancellation_origin = "external"
             state.token.cancel()
             state.closed_without_terminal = True
             state.terminal.set()
@@ -146,7 +151,7 @@ class TargetCancellationRegistry:
         return (
             state is not None
             and state.token is token
-            and state.cancel_requested
+            and state.cancellation_origin == "cancel_turn"
         )
 
     async def resolve(
@@ -166,19 +171,26 @@ class TargetCancellationRegistry:
             assert resolution.target is not None
             await resolution.target.terminal.wait()
             if resolution.result is None:
-                target = resolution.target
-                resolution.result = (
-                    TargetCancelResult(
-                        result_status="not_found",
-                        terminal_record_ids=(),
-                    )
-                    if target.closed_without_terminal
-                    else TargetCancelResult(
-                        result_status="cancelled",
-                        terminal_record_ids=target.terminal_record_ids,
-                    )
-                )
+                resolution.result = self._settled_result(resolution.target)
         return self._copy_result(resolution.result)
+
+    @staticmethod
+    def _settled_result(target: _TargetState) -> TargetCancelResult:
+        """按 first-winner 来源解释 target 收敛，不覆盖既有取消归因。"""
+        if target.closed_without_terminal:
+            return TargetCancelResult(
+                result_status="not_found",
+                terminal_record_ids=(),
+            )
+        if target.cancellation_origin != "cancel_turn":
+            return TargetCancelResult(
+                result_status="already_terminal",
+                terminal_record_ids=target.terminal_record_ids,
+            )
+        return TargetCancelResult(
+            result_status="cancelled",
+            terminal_record_ids=target.terminal_record_ids,
+        )
 
     def _start_resolution(self, target_id: str) -> _CancelResolution:
         """在首个 await 前原子决定 missing/terminal/active 分支。"""
@@ -200,7 +212,11 @@ class TargetCancellationRegistry:
                     terminal_record_ids=(),
                 ),
             )
-        target.cancel_requested = True
+        if target.token.is_cancelled:
+            if target.cancellation_origin is None:
+                target.cancellation_origin = "external"
+            return _CancelResolution(target=target)
+        target.cancellation_origin = "cancel_turn"
         target.token.cancel()
         return _CancelResolution(target=target)
 

@@ -55,6 +55,7 @@ from taifeng.loop.audit_mailbox import (
     handoff_accepted_user_message,
     retire_started_audited_token,
 )
+from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
     EngineLog,
@@ -636,7 +637,7 @@ class AgentEngine:
         assert self._audit_state is not None
         assert isinstance(sub.op, CancelTurn)
         state = self._audit_state
-        if not state.coordinator.effect_gate_open:
+        if state.coordinator.health is AuditHealth.RECOVERY_REQUIRED:
             state.coordinator.cancel_target(sub.op.submission_id)
             await self._emit_cancel_turn_log(
                 sub.id,
@@ -644,6 +645,7 @@ class AgentEngine:
                 result_status="safe_degraded",
             )
             return sub.id
+        state.coordinator.ensure_intake_open()
         submission = AuditedCancelTurnSubmission(
             submission_id=sub.id,
             target_submission_id=sub.op.submission_id,

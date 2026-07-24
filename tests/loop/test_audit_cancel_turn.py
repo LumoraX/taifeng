@@ -415,6 +415,90 @@ async def test_engine_cancel_turn_is_durable_targeted_and_peer_can_continue(
         await _stop_actor(actor)
 
 
+def _applied_result(
+    envelopes: list[Any],
+    submission_id: str,
+) -> SubmissionAppliedV1:
+    """从完整 Journal 中读取指定 CancelTurn 的 applied payload。"""
+    payload = next(
+        envelope.payload
+        for envelope in envelopes
+        if envelope.submission_id == submission_id
+        and envelope.record_type == "submission_applied"
+    )
+    return SubmissionAppliedV1.model_validate(payload)
+
+
+async def _assert_missing_cancel_result(engine: Any, core: Any) -> None:
+    """验证 missing target 的稳定无终态结果。"""
+    missing_id = await engine.submit(CancelTurn(submission_id="sub_missing"))
+    records = await _wait_for_record(
+        core,
+        record_type="submission_applied",
+        submission_id=missing_id,
+    )
+    missing = _applied_result(records, missing_id)
+    assert missing.result_status == "not_found"
+    assert missing.terminal_record_ids == ()
+
+
+async def _submit_and_replay_cancel(
+    engine: Any,
+    core: Any,
+    *,
+    target_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SubmissionAppliedV1:
+    """验证相同 CancelTurn id 重放不重复 durable facts。"""
+    monkeypatch.setattr(
+        "taifeng.loop.submission.secrets.token_hex",
+        lambda _: "stablecancel",
+    )
+    first_id = await engine.submit(CancelTurn(submission_id=target_id))
+    first_records = await _wait_for_record(
+        core,
+        record_type="submission_applied",
+        submission_id=first_id,
+    )
+    first_applied = _applied_result(first_records, first_id)
+
+    second_id = await engine.submit(CancelTurn(submission_id=target_id))
+    assert first_id == second_id == "sub_stablecancel"
+    assert await _load_journal(core) == first_records
+    assert first_applied.result_status == "cancelled"
+    assert len(first_applied.terminal_record_ids) == 1
+    return first_applied
+
+
+async def _assert_already_terminal_result(
+    engine: Any,
+    core: Any,
+    *,
+    target_id: str,
+    first_applied: SubmissionAppliedV1,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证新 CancelTurn 对 durable terminal 返回 already_terminal。"""
+    monkeypatch.setattr(
+        "taifeng.loop.submission.secrets.token_hex",
+        lambda _: "terminalcancel",
+    )
+    terminal_id = await engine.submit(CancelTurn(submission_id=target_id))
+    records = await _wait_for_record(
+        core,
+        record_type="submission_applied",
+        submission_id=terminal_id,
+    )
+    terminal = _applied_result(records, terminal_id)
+    assert terminal.result_status == "already_terminal"
+    assert terminal.terminal_record_ids == first_applied.terminal_record_ids
+    assert sum(
+        envelope.record_type == "turn_cancelled"
+        and envelope.submission_id == target_id
+        for envelope in records
+    ) == 1
+
+
 @pytest.mark.anyio
 async def test_engine_cancel_results_are_durable_and_retry_idempotent(
     tmp_path: Path,
@@ -432,77 +516,23 @@ async def test_engine_cancel_results_are_durable_and_retry_idempotent(
         engine.run(CancellationToken(name="test-actor-root"))
     )
     try:
-        missing_id = await engine.submit(CancelTurn(submission_id="sub_missing"))
-        missing_records = await _wait_for_record(
-            core,
-            record_type="submission_applied",
-            submission_id=missing_id,
-        )
-        missing = SubmissionAppliedV1.model_validate(
-            next(
-                envelope.payload
-                for envelope in missing_records
-                if envelope.submission_id == missing_id
-                and envelope.record_type == "submission_applied"
-            )
-        )
-        assert missing.result_status == "not_found"
-        assert missing.terminal_record_ids == ()
-
+        await _assert_missing_cancel_result(engine, core)
         target_id = await engine.submit(UserMessage(text="cancel-me"))
         with anyio.fail_after(2):
             await client.target_entered.wait()
-        monkeypatch.setattr(
-            "taifeng.loop.submission.secrets.token_hex",
-            lambda _: "stablecancel",
-        )
-        first_id = await engine.submit(CancelTurn(submission_id=target_id))
-        first_records = await _wait_for_record(
+        first_applied = await _submit_and_replay_cancel(
+            engine,
             core,
-            record_type="submission_applied",
-            submission_id=first_id,
+            target_id=target_id,
+            monkeypatch=monkeypatch,
         )
-        first_applied = SubmissionAppliedV1.model_validate(
-            next(
-                envelope.payload
-                for envelope in first_records
-                if envelope.submission_id == first_id
-                and envelope.record_type == "submission_applied"
-            )
-        )
-
-        second_id = await engine.submit(CancelTurn(submission_id=target_id))
-        after_retry = await _load_journal(core)
-        assert first_id == second_id == "sub_stablecancel"
-        assert after_retry == first_records
-        assert first_applied.result_status == "cancelled"
-        assert len(first_applied.terminal_record_ids) == 1
-
-        monkeypatch.setattr(
-            "taifeng.loop.submission.secrets.token_hex",
-            lambda _: "terminalcancel",
-        )
-        terminal_id = await engine.submit(CancelTurn(submission_id=target_id))
-        terminal_records = await _wait_for_record(
+        await _assert_already_terminal_result(
+            engine,
             core,
-            record_type="submission_applied",
-            submission_id=terminal_id,
+            target_id=target_id,
+            first_applied=first_applied,
+            monkeypatch=monkeypatch,
         )
-        terminal = SubmissionAppliedV1.model_validate(
-            next(
-                envelope.payload
-                for envelope in terminal_records
-                if envelope.submission_id == terminal_id
-                and envelope.record_type == "submission_applied"
-            )
-        )
-        assert terminal.result_status == "already_terminal"
-        assert terminal.terminal_record_ids == first_applied.terminal_record_ids
-        assert sum(
-            envelope.record_type == "turn_cancelled"
-            and envelope.submission_id == target_id
-            for envelope in terminal_records
-        ) == 1
         assert coordinator.health is AuditHealth.HEALTHY
     finally:
         await _stop_actor(actor)
