@@ -505,6 +505,41 @@ def test_adapter_cache_read_proxy_is_safe_when_inner_has_no_telemetry() -> None:
 
 
 @pytest.mark.anyio
+async def test_observed_session_rejects_stream_from_non_owner_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """跨 task 消费须在 observer/inner 前失败，outer cleanup 不覆盖终态。"""
+    events: list[str] = []
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, events)
+    client = AttemptObservableClientAdapter(
+        reviewed,
+        provider="provider-a",
+        default_model="model-a",
+    )
+    observer = _BlockingObserver(events)
+    observer.allow.set()
+    session = client.session_with_attempt_observer(
+        cancel=CancellationToken(name="turn"),
+        attempt_observer=observer,
+    )
+
+    async with session as entered:
+        async def consume_one() -> ResponseEvent:
+            """在独立 task 中驱动 async iterator 的第一次消费。"""
+            return await anext(entered.stream(_request()))
+
+        task = asyncio.create_task(consume_one())
+        with pytest.raises(RuntimeError, match="owner task") as caught:
+            await task
+
+    assert str(caught.value) == "observed session stream must run in owner task"
+    await session.__aexit__(None, None, None)
+    assert observer.requests == []
+    assert inner.sessions == []
+    assert events == []
+
+
+@pytest.mark.anyio
 async def test_outer_exit_closes_inner_after_early_break_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -104,7 +105,11 @@ class ModelAttemptObserver(Protocol):
 
 
 class AttemptObservableModelClient(ABC):
-    """audit 模式要求 nominal 实现的 attempt-aware client 边界。"""
+    """attempt-aware client 的公开 API，不代表 strict audit 能力证明。
+
+    strict gate 仅接受仓库官方 exact ``AttemptObservableClientAdapter``；
+    nominal、virtual 或外部 subclass 均不能自行取得该能力。
+    """
 
     @abstractmethod
     def session(
@@ -147,12 +152,19 @@ class _ObservedOneAttemptSession:
         self._session_model = session_model
         self._stream_started = False
         self._closed = False
+        self._owner_task: asyncio.Task[Any] | None = None
         self._active_context: ModelClientSession | None = None
         self._active_stream: AsyncIterator[ResponseEvent] | None = None
 
     async def __aenter__(self) -> _ObservedOneAttemptSession:
         if self._closed:
             raise RuntimeError("observed session is closed")
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise RuntimeError("observed session requires an asyncio owner task")
+        if self._owner_task is not None and current_task is not self._owner_task:
+            raise RuntimeError("observed session context already has an owner task")
+        self._owner_task = current_task
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -161,6 +173,8 @@ class _ObservedOneAttemptSession:
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
         """取得 definite permit 后才迭代底层 one-attempt stream。"""
+        if asyncio.current_task() is not self._owner_task:
+            raise RuntimeError("observed session stream must run in owner task")
         if self._closed:
             raise RuntimeError("observed session is closed")
         if self._stream_started:
