@@ -10,6 +10,7 @@ import anyio
 import pytest
 
 from taifeng.conversation.journal import ConversationItemV1
+from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.materialization import ProjectionLifecycleError
 from taifeng.conversation.transcript import JsonlMessageStore
 from taifeng.loop.audit import (
@@ -22,6 +23,8 @@ from taifeng.loop.submission import UserMessage
 from tests.loop.test_audit_submission_admission import (
     _BlockingClient,
     _engine_with_audit,
+    _LoadRaisingJournalCore,
+    _PausingJournalCore,
 )
 
 if TYPE_CHECKING:
@@ -91,6 +94,143 @@ class _BoundaryRaisingMessageStore(JsonlMessageStore):
         """验证 Engine 不会把取消/fatal 误分类为普通不变量。"""
         del thread_id
         raise self.error
+
+
+@pytest.mark.anyio
+async def test_freeze_during_definite_accept_retires_hidden_work(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """definite ack 后若已冻结，未交付的 AcceptedWork 必须精确退休。"""
+    real_core = JsonlSessionJournalCore(tmp_path / "journal")
+    pausing_core = _PausingJournalCore(real_core)
+    engine, coordinator, _ = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        core_override=pausing_core,
+        finish_timeout=0.01,
+    )
+    submission_error: BaseException | None = None
+
+    async def submit() -> None:
+        nonlocal submission_error
+        try:
+            await engine.submit(UserMessage(text="definite before freeze"))
+        except BaseException as error:
+            submission_error = error
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(submit)
+        await pausing_core.append_entered.wait()
+        coordinator.freeze(OSError("external freeze"))
+        pausing_core.release_append.set()
+
+    committed = [
+        envelope async for envelope in real_core.load("ses_audit_submission")
+    ]
+    assert [item.record_type for item in committed[3:]] == [
+        "submission_accepted",
+        "conversation_item",
+        "submission_applied",
+    ]
+    assert isinstance(submission_error, SessionAuditFrozenError)
+    assert coordinator.snapshot().accepted_work_ids == ()
+
+    result = await coordinator.finish(thread_terminals=(), reason="frozen")
+
+    assert result.failure is not None
+    assert result.failure.class_name == "OSError"
+    assert coordinator.snapshot().accepted_work_ids == ()
+
+
+@pytest.mark.anyio
+async def test_actor_rejects_coordinated_payload_tamper_with_stale_hashes(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """三 envelope 业务字段即使协调一致，旧 hash receipt 也不得应用到 hot history。"""
+    engine, coordinator, _ = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=_BlockingClient(),
+    )
+    await engine.submit(UserMessage(text="durable original"))
+    token = engine._submissions.get_nowait()  # noqa: SLF001
+    assert isinstance(token, AcceptedUserMessage)
+    envelopes = list(token.envelopes)
+    accepted_payload = dict(envelopes[0].payload)
+    accepted_payload["text"] = "forged but coordinated"
+    envelopes[0] = envelopes[0].model_copy(update={"payload": accepted_payload})
+    conversation_payload = dict(envelopes[1].payload)
+    item_payload = dict(conversation_payload["payload"])
+    item_payload["text"] = "forged but coordinated"
+    conversation_payload["payload"] = item_payload
+    envelopes[1] = envelopes[1].model_copy(update={"payload": conversation_payload})
+    object.__setattr__(token, "envelopes", tuple(envelopes))
+    engine._submissions.put_nowait(token)  # noqa: SLF001
+    cancel = CancellationToken(name="test-root")
+    actor = asyncio.create_task(engine.run(cancel))
+    try:
+        with anyio.fail_after(1):
+            while not token.accepted_work.is_completed and not engine._history:  # noqa: SLF001
+                await anyio.lowlevel.checkpoint()
+    finally:
+        cancel.cancel()
+        await actor
+
+    assert engine._history == []  # noqa: SLF001
+    assert coordinator.health is AuditHealth.RECOVERY_REQUIRED
+    assert coordinator.effect_gate_open is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+async def test_strict_load_fatal_propagates_after_retiring_work(
+    tmp_path: Path,
+    skills_dir: Path,
+    error_type: type[BaseException],
+) -> None:
+    """strict load fatal 冻结首因并原样传播，不能被 admission 改写。"""
+    real_core = JsonlSessionJournalCore(tmp_path / "journal")
+    core = _LoadRaisingJournalCore(real_core, error_type)
+    engine, coordinator, _ = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        core_override=core,
+    )
+
+    with pytest.raises(error_type):
+        await engine.submit(UserMessage(text="fatal strict load"))
+
+    snapshot = coordinator.snapshot()
+    assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
+    assert snapshot.first_failure is not None
+    assert snapshot.first_failure.class_name == error_type.__name__
+    assert snapshot.accepted_work_ids == ()
+
+
+@pytest.mark.anyio
+async def test_strict_load_cancellation_propagates_after_retiring_work(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """strict load 取消原样传播，冻结恢复首因且不遗留 ownership。"""
+    real_core = JsonlSessionJournalCore(tmp_path / "journal")
+    core = _LoadRaisingJournalCore(real_core, asyncio.CancelledError)
+    engine, coordinator, _ = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        core_override=core,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await engine.submit(UserMessage(text="cancel strict load"))
+
+    snapshot = coordinator.snapshot()
+    assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
+    assert snapshot.first_failure is not None
+    assert snapshot.first_failure.class_name == "CancelledError"
+    assert snapshot.accepted_work_ids == ()
 
 
 @pytest.mark.anyio

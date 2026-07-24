@@ -92,7 +92,7 @@ async def test_late_accept_during_frozen_finishing_cannot_return_enqueueable_wor
     assert isinstance(admission_error, SessionAuditFrozenError)
     assert finish_result is not None
     assert not finish_result.audit_complete
-    assert coordinator.snapshot().accepted_work_ids == ("sub_late_accept",)
+    assert coordinator.snapshot().accepted_work_ids == ()
 
 
 @pytest.mark.anyio
@@ -134,4 +134,4 @@ async def test_late_accept_after_external_open_freeze_cannot_return_work() -> No
     snapshot = coordinator.snapshot()
     assert snapshot.lifecycle is SessionLifecycle.OPEN
     assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
-    assert snapshot.accepted_work_ids == ("sub_open_freeze",)
+    assert snapshot.accepted_work_ids == ()

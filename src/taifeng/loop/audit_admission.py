@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
+import anyio
+
 from taifeng.conversation.journal.canonical import model_canonical_data
+from taifeng.conversation.journal.errors import JournalIntegrityError
+from taifeng.conversation.journal.framing import validate_envelope_chain
 from taifeng.conversation.journal.models import (
     ActorRef,
     JournalAck,
@@ -184,6 +188,8 @@ class AcceptedUserMessage:
         """校验三记录顺序、covering ack、identity 与完整 record lineage。"""
         if len(envelopes) != 3:
             return False
+        if not self._hash_chain_is_valid(ack, envelopes):
+            return False
         accepted_id = envelopes[0].record_id
         expected_types = (
             "submission_accepted",
@@ -202,6 +208,23 @@ class AcceptedUserMessage:
             and envelopes[1].causation_id == accepted_id
             and envelopes[2].causation_id == accepted_id
         )
+
+    @staticmethod
+    def _hash_chain_is_valid(
+        ack: JournalAck,
+        envelopes: tuple[JournalEnvelope, ...],
+    ) -> bool:
+        """复用 Journal strict codec 重算三记录 payload/record/hash chain。"""
+        try:
+            validate_envelope_chain(
+                envelopes,
+                session_id=ack.session_id,
+                first_seq=ack.first_seq,
+                previous_hash=envelopes[0].previous_hash,
+            )
+        except JournalIntegrityError:
+            return False
+        return True
 
     def _common_envelope_identity(self, envelope: JournalEnvelope) -> bool:
         """校验 admission 三记录共有且不可省略的 stable identity 字段。"""
@@ -363,8 +386,14 @@ async def admit_user_message(
             envelopes=envelopes,
         )
         token.validated_application()
-    except BaseException as error:
-        await work.complete()
+    except BaseException as error:  # noqa: BLE001  # cancellation/fatal 必须先退休 ownership
+        with anyio.CancelScope(shield=True):
+            await work.complete()
+        if isinstance(
+            error,
+            (KeyboardInterrupt, SystemExit, anyio.get_cancelled_exc_class()),
+        ):
+            raise
         raise state.coordinator.freeze(error) from None
     if receipt.historical:
         await work.complete()

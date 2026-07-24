@@ -134,6 +134,10 @@ submission id、时间、文本和附件复制为内部 frozen snapshot；随后
 唯一 durable `turn_index`，并保持该锁直到 acceptance ack 与 enqueue 完成。该锁不持有 Session lifecycle
 lock，因此首 turn 阻塞时并发排队仍得到单调且不重复的 index。
 
+actor 应用 queue token 前必须重建完整三-envelope receipt，并复用 Journal strict codec 重算每条
+`payload_hash` / `record_hash` 与 batch `previous_hash` chain，同时核对 ack ids、连续 seq、tail hash、
+Session/writer identity 和业务 lineage；只协调修改业务 payload 而保留旧 hash 仍必须 fail-closed。
+
 lifecycle 是 `OPEN → FINISHING → CLOSED`：
 
 - 进入 FINISHING 的胜者关闭 intake、快照全部 durable-accepted queued/in-flight submissions，并创建唯一
@@ -143,6 +147,10 @@ lifecycle 是 `OPEN → FINISHING → CLOSED`：
   reservation/work identity、立即退休 map entry 并 set completion Event，只跟踪 pending 或
   accepted-incomplete work；已快照 finish waiter 不丢唤醒，double complete 幂等，CLOSED 后晚完成只清
   unresolved introspection、不复活 Session；
+- durable acceptance 已得到 definite ack、但并发 freeze/CLOSED 使 ownership 无法交给 caller 时，必须在
+  抛错前 shielded 精确退休该未交付 work；durable fact 仍保留供 recovery，finish 不得等待隐藏 token；
+- strict receipt load 的 `KeyboardInterrupt` / `SystemExit` / `CancelledError` 会先冻结稳定首因并
+  cancellation-independent 退休 work，再把原异常类型向上传播；不得改写成 `SessionAuditFrozenError`；
 - FINISHING/CLOSED 后的新请求不得 durable accept 或 enqueue，返回 `SessionFinishingError`；
 - 并发 release/close 只等待同一 canonical future value，但每个 caller 得到对象与嵌套 failure 独立的
   防御性副本；并发不同 Shutdown id 在 acceptance 前拒绝。

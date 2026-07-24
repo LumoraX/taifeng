@@ -165,6 +165,48 @@ class _AdversarialJournalCore:
         await self.inner.close_session(lease)
 
 
+class _LoadRaisingJournalCore:
+    """真实 append 后在 strict load 边界抛指定 BaseException。"""
+
+    def __init__(
+        self,
+        inner: JsonlSessionJournalCore,
+        error_type: type[BaseException],
+    ) -> None:
+        self.inner = inner
+        self.error_type = error_type
+
+    async def append_batch(
+        self,
+        records: tuple[JournalRecord, ...],
+        *,
+        lease: SessionLease,
+        expected_seq: int,
+    ) -> JournalAck:
+        """委托真实 core 产生 definite durable ack。"""
+        return await self.inner.append_batch(
+            records,
+            lease=lease,
+            expected_seq=expected_seq,
+        )
+
+    async def load(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+    ) -> AsyncIterator[JournalEnvelope]:
+        """在 strict receipt load 入口抛测试指定异常。"""
+        del session_id, after_seq
+        raise self.error_type("injected strict load boundary")
+        if False:  # pragma: no cover - 保持 async generator protocol
+            yield
+
+    async def close_session(self, lease: SessionLease) -> None:
+        """委托真实 per-Session close。"""
+        await self.inner.close_session(lease)
+
+
 class _BlockingSession:
     """让 actor 停在首个 LLM 调用，便于观察 admission 已应用状态。"""
 
@@ -206,9 +248,12 @@ async def _engine_with_audit(
     tmp_path: Path,
     skills_dir: Path,
     *,
-    core_override: _PausingJournalCore | _AdversarialJournalCore | None = None,
+    core_override: (
+        _PausingJournalCore | _AdversarialJournalCore | _LoadRaisingJournalCore | None
+    ) = None,
     model_client: object | None = None,
     store_override: JsonlMessageStore | None = None,
+    finish_timeout: float = 30.0,
 ) -> tuple[AgentEngine, SessionAuditCoordinator, JsonlSessionJournalCore]:
     """使用真实 Engine、Coordinator、Journal 和 projector 建立审计会话。"""
     registry = await FilesystemSkillRegistry.load(skills_dir)
@@ -237,6 +282,7 @@ async def _engine_with_audit(
         core=append_core,
         lease=created.lease,
         expected_seq=created.ack.last_seq,
+        finish_timeout=finish_timeout,
     )
     store = store_override or JsonlMessageStore(tmp_path / "threads")
     projector = JournalConversationProjector(store)

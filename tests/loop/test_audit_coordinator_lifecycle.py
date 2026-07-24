@@ -574,7 +574,7 @@ async def test_pending_durable_accept_cannot_hold_finish_lock_past_deadline() ->
     assert snapshot.lifecycle is SessionLifecycle.CLOSED
     assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
     assert snapshot.root_cancelled
-    assert snapshot.accepted_work_ids == ("sub_pending_accept",)
+    assert snapshot.accepted_work_ids == ()
     assert isinstance(admission_error, SessionAuditFrozenError)
     assert core.close_calls == [_lease()]
 

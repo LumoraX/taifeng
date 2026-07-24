@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import anyio
 
-from taifeng.conversation.journal.models import (
-    Durability,
-    JournalAck,
-    JournalEnvelope,
-    JournalRecord,
-    SessionLease,
-)
 from taifeng.conversation.journal.projector import ProjectionResult
 from taifeng.conversation.journal.records import StableErrorV1
+from taifeng.loop.audit_journal import (
+    JournalAppendCore,
+    JournalAppendReceipt,
+    validate_ack,
+    validate_acknowledged_envelopes,
+    validate_records,
+)
 from taifeng.loop.audit_lifecycle import (
     AcceptedWork,
     SessionFinishingError,
@@ -41,51 +39,14 @@ from taifeng.loop.audit_support import (
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
-_HASH_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-
-
-class _JournalAppendCore(Protocol):
-    """协调器依赖的最小 Journal append 边界。"""
-
-    async def append_batch(
-        self,
-        records: tuple[JournalRecord, ...],
-        *,
-        lease: SessionLease,
-        expected_seq: int,
-    ) -> JournalAck:
-        """以 caller expected seq 原子追加一个 batch。
-
-        契约：raw ``CancelledError`` 只能表示实现已证明 commit 未开始且无 mutation；
-        mutation/dispatch 后的取消必须收敛为确定 ``JournalAck``，或抛
-        ``JournalRecoveryRequiredError``。未知实现不得用 raw cancel 表达 post-dispatch 结果。
-        """
-
-    async def close_session(self, lease: SessionLease) -> None:
-        """释放且只释放 coordinator 绑定的 per-Session writer。"""
-
-    def load(
-        self,
-        session_id: str,
-        *,
-        after_seq: int = 0,
-    ) -> AsyncIterator[JournalEnvelope]:
-        """strict 读取已 durable committed envelopes。"""
-
-
-@dataclass(frozen=True, slots=True)
-class JournalAppendReceipt:
-    """协调器在 append lock 内裁定的新提交或 historical durable receipt。"""
-
-    ack: JournalAck
-    newly_committed: bool
-
-    @property
-    def historical(self) -> bool:
-        """返回本次 ack 是否只证明此前已提交的同一批 records。"""
-        return not self.newly_committed
+    from taifeng.conversation.journal.models import (
+        JournalAck,
+        JournalEnvelope,
+        JournalRecord,
+        SessionLease,
+    )
 
 
 class SessionAuditCoordinator:
@@ -94,7 +55,7 @@ class SessionAuditCoordinator:
     def __init__(
         self,
         *,
-        core: _JournalAppendCore,
+        core: JournalAppendCore,
         lease: SessionLease,
         expected_seq: int,
         session_root_cancel: CancellationToken | None = None,
@@ -181,7 +142,7 @@ class SessionAuditCoordinator:
         """串行追加并显式返回新提交或 historical ack 的 race-free 裁定。"""
         self._raise_if_frozen()
         self._raise_if_append_sealed()
-        snapshot = self._validate_records(records)
+        snapshot = validate_records(records, session_id=self.session_id)
         if cancel is not None:
             cancel.raise_if_cancelled()
         async with self._append_lock:
@@ -197,7 +158,7 @@ class SessionAuditCoordinator:
         expected_records: Sequence[JournalRecord],
     ) -> tuple[JournalEnvelope, ...]:
         """strict 读取 receipt，并与刚提交的 records/covering ack 做 exact 比对。"""
-        records = self._validate_records(expected_records)
+        records = validate_records(expected_records, session_id=self.session_id)
         try:
             loaded = tuple([
                 envelope
@@ -207,49 +168,22 @@ class SessionAuditCoordinator:
                 )
                 if envelope.seq <= ack.last_seq
             ])
-            envelopes = tuple(
-                JournalEnvelope.model_validate(envelope.model_dump(mode="python"))
-                for envelope in loaded
-                if type(envelope) is JournalEnvelope
-            )
         except (KeyboardInterrupt, SystemExit) as error:
             self.freeze(error)
             raise
         except BaseException as error:
+            if isinstance(error, anyio.get_cancelled_exc_class()):
+                self.freeze(error)
+                raise
             raise self.freeze(error) from None
-        valid = (
-            len(envelopes) == len(loaded)
-            and len(envelopes) == len(ack.record_ids)
-            and len(envelopes) == len(records)
-            and tuple(envelope.seq for envelope in envelopes)
-            == tuple(range(ack.first_seq, ack.last_seq + 1))
-            and tuple(envelope.record_id for envelope in envelopes) == ack.record_ids
-            and ack.tail_hash == envelopes[-1].record_hash
-            and all(
-                envelope.session_id == ack.session_id
-                and envelope.writer_epoch == ack.writer_epoch
-                for envelope in envelopes
+        try:
+            return validate_acknowledged_envelopes(
+                loaded,
+                ack=ack,
+                records=records,
             )
-            and all(
-                self._envelope_matches_record(envelope, record)
-                for envelope, record in zip(envelopes, records, strict=True)
-            )
-        )
-        if not valid:
+        except _InvalidJournalAckError:
             raise self.freeze(_InvalidJournalAckError()) from None
-        return envelopes
-
-    @staticmethod
-    def _envelope_matches_record(
-        envelope: JournalEnvelope,
-        record: JournalRecord,
-    ) -> bool:
-        """比较 writer 之外的全部 JournalRecord 字段，不接受 payload-only 相似。"""
-        restored = JournalRecord.model_validate({
-            field: getattr(envelope, field)
-            for field in JournalRecord.model_fields
-        })
-        return restored == record
 
     def _raise_if_append_sealed(self) -> None:
         """terminal seal 或 CLOSED 后在 core dispatch 前稳定拒绝普通 append。"""
@@ -269,7 +203,13 @@ class SessionAuditCoordinator:
                 lease=self._lease,
                 expected_seq=expected_seq,
             )
-            ack = self._validate_ack(ack, records)
+            ack = validate_ack(
+                ack,
+                records,
+                session_id=self.session_id,
+                writer_epoch=self._lease.writer_epoch,
+                expected_seq=self._expected_seq,
+            )
         except (KeyboardInterrupt, SystemExit) as error:
             self.freeze(error)
             raise
@@ -293,68 +233,6 @@ class SessionAuditCoordinator:
         for record in records:
             if record.record_type == "thread_terminal" and record.thread_id is not None:
                 self._committed_terminal_threads.add(record.thread_id)
-
-    def _validate_records(
-        self,
-        records: Sequence[JournalRecord],
-    ) -> tuple[JournalRecord, ...]:
-        """在 dispatch 前拒绝空、非 DTO 或跨 Session batch，不冻结 Journal。"""
-        snapshot = tuple(records)
-        if not snapshot:
-            raise ValueError("journal batch must contain at least one record")
-        if any(not isinstance(record, JournalRecord) for record in snapshot):
-            raise TypeError("journal batch accepts only JournalRecord values")
-        if any(record.session_id != self.session_id for record in snapshot):
-            raise ValueError("all records must belong to the same Session")
-        return snapshot
-
-    def _validate_ack(
-        self,
-        ack: object,
-        records: tuple[JournalRecord, ...],
-    ) -> JournalAck:
-        """以 exact type 重验并重建 ack，拒绝 coercion、子类与 caller 别名。"""
-        if type(ack) is not JournalAck:
-            raise _InvalidJournalAckError
-        assert isinstance(ack, JournalAck)
-        if (
-            type(ack.session_id) is not str
-            or type(ack.first_seq) is not int
-            or type(ack.last_seq) is not int
-            or type(ack.record_ids) is not tuple
-            or any(type(record_id) is not str or not record_id for record_id in ack.record_ids)
-            or type(ack.tail_hash) is not str
-            or _HASH_HEX_PATTERN.fullmatch(ack.tail_hash) is None
-            or type(ack.writer_epoch) is not int
-            or type(ack.durability) is not Durability
-        ):
-            raise _InvalidJournalAckError
-        expected_record_ids = tuple(record.record_id for record in records)
-        contiguous = ack.last_seq - ack.first_seq + 1 == len(records)
-        advances_tail = (
-            ack.first_seq == self._expected_seq + 1
-            and ack.last_seq == self._expected_seq + len(records)
-        )
-        historical_retry = ack.last_seq <= self._expected_seq
-        valid = (
-            ack.session_id == self.session_id
-            and ack.writer_epoch == self._lease.writer_epoch
-            and ack.durability is Durability.COMMITTED
-            and ack.record_ids == expected_record_ids
-            and contiguous
-            and (advances_tail or historical_retry)
-        )
-        if not valid:
-            raise _InvalidJournalAckError
-        return JournalAck(
-            session_id=ack.session_id,
-            first_seq=ack.first_seq,
-            last_seq=ack.last_seq,
-            record_ids=ack.record_ids,
-            tail_hash=ack.tail_hash,
-            writer_epoch=ack.writer_epoch,
-            durability=ack.durability,
-        )
 
     async def admit_work(
         self,
@@ -380,9 +258,14 @@ class SessionAuditCoordinator:
             raise
         work, lifecycle = await self._settle_admission(reservation, accepted=True)
         assert work is not None
-        self._raise_if_frozen()
-        if lifecycle is SessionLifecycle.CLOSED:
-            raise SessionFinishingError(self.session_id, lifecycle)
+        try:
+            self._raise_if_frozen()
+            if lifecycle is SessionLifecycle.CLOSED:
+                raise SessionFinishingError(self.session_id, lifecycle)
+        except (SessionAuditFrozenError, SessionFinishingError):
+            with anyio.CancelScope(shield=True):
+                await work.complete()
+            raise
         return work
 
     async def _settle_admission(

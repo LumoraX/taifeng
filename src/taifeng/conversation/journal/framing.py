@@ -260,6 +260,26 @@ def _validate_envelope(
     return record_fingerprint(_record_from_envelope(envelope))
 
 
+def validate_envelope_chain(
+    envelopes: Sequence[JournalEnvelope],
+    *,
+    session_id: str,
+    first_seq: int,
+    previous_hash: str,
+) -> None:
+    """复用 strict codec 规则验证一段连续 envelope 的 payload/record/hash chain。"""
+    expected_previous_hash = previous_hash
+    for offset, envelope in enumerate(envelopes):
+        _validate_envelope(
+            envelope,
+            session_id=session_id,
+            expected_seq=first_seq + offset,
+            expected_previous_hash=expected_previous_hash,
+            line_no=offset + 1,
+        )
+        expected_previous_hash = envelope.record_hash
+
+
 def _validate_commit(
     begin: BatchBegin,
     envelopes: tuple[JournalEnvelope, ...],
@@ -385,4 +405,5 @@ __all__ = [
     "EncodedBatch",
     "decode_committed_lines",
     "encode_batch",
+    "validate_envelope_chain",
 ]
