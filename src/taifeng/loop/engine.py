@@ -33,12 +33,17 @@ from taifeng.loop.audit_admission import (
     AuditedUserMessageSubmission,
     InvalidAuditedSubmissionError,
     admit_user_message,
-    handoff_accepted_user_message,
     prepare_user_message,
     reject_invalid_user_message,
     user_message_input_descriptor_hash,
 )
 from taifeng.loop.audit_lifecycle import SessionLifecycle
+from taifeng.loop.audit_mailbox import (
+    AuditedSubmissionMailbox,
+    finalize_audited_mailbox,
+    handoff_accepted_user_message,
+    retire_claimed_audited_token,
+)
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
     EngineLog,
@@ -378,6 +383,7 @@ class AgentEngine:
         self._submissions: asyncio.Queue[Submission | AcceptedUserMessage] = asyncio.Queue(
             maxsize=submission_queue_size if submission_queue_size > 0 else 0
         )
+        self._audited_mailbox = AuditedSubmissionMailbox()
         # K4 出站丢弃计数：事件队列满时不再静默丢——累计 + 暴露（可观测）。
         self._events_dropped: int = 0
         # 审计可观测 层1：订阅者从裸 Queue 升级为 _Subscriber（队列 + per-subscriber
@@ -386,7 +392,6 @@ class AgentEngine:
         self._all_subs: list[_Subscriber] = []
         self._pending: dict[str, _PendingTurn] = {}
         self._running = False
-        self._actor_terminated = False
         self._audited_shutdown_enqueued = False
         # 跨 turn 持久化的 history view（用于复用 + cache）
         # 冷加载（resume）场景：先把 raw transcript 重建为与热内存等价的逻辑 history
@@ -635,9 +640,9 @@ class AgentEngine:
             )
             await handoff_accepted_user_message(
                 self._audit_state,
+                self._audited_mailbox,
                 self._submissions,
                 admission,
-                actor_terminated=self._actor_terminated,
             )
         return sub.id
 
@@ -902,6 +907,11 @@ class AgentEngine:
                     for task in tasks:
                         task.cancel()
             waiter.result()
+            # Python 3.13 对全 done futures 的 gather 可 eager 完成，不保证让
+            # _forget_operation callback 先运行；此处同步释放 ownership，避免
+            # 因 done task 仍留在 set 中形成无 await 的 busy loop。
+            for task in tasks:
+                self._operation_tasks.discard(task)
         return actor_cancellation
 
     def _arm_ttl_timer(self, data: dict[str, Any]) -> None:
@@ -1147,7 +1157,11 @@ class AgentEngine:
     ) -> None:
         """按原顺序收敛 actor、operation、持久化 flush 与订阅者终态。"""
         self._running = False
-        self._actor_terminated = True
+        if self._audit_state is not None:
+            await finalize_audited_mailbox(
+                self._audit_state,
+                self._audited_mailbox,
+            )
         cancel.cancel()
         # R4:任何退出路径(Shutdown / root-cancel break / 异常)统一取消全部
         # TTL 定时器——孤儿定时器到期后会向无人消费的队列 submit(可能永久阻塞)
@@ -1352,20 +1366,30 @@ class AgentEngine:
                 name=f"turn:{sub.id}",
             )
             return
-        started = asyncio.Event()
+        if not await self._audited_mailbox.claim(sub):
+            return
+        application_converged = asyncio.Event()
 
         async def run_owned() -> None:
-            """在通知 actor 后执行已有 accepted-work finally ownership。"""
-            started.set()
-            await self._run_audited_turn_for(sub, root_cancel)
+            """先收敛 durable user application，再继续独立 turn effect。"""
+            try:
+                await self._run_audited_turn_for(
+                    sub,
+                    root_cancel,
+                    application_converged=application_converged,
+                )
+            finally:
+                application_converged.set()
 
         self._start_operation(run_owned(), name=f"turn:{sub.id}")
-        await started.wait()
+        await application_converged.wait()
 
     async def _run_audited_turn_for(
         self,
         token: AcceptedUserMessage,
         root_cancel: CancellationToken,
+        *,
+        application_converged: asyncio.Event | None = None,
     ) -> None:
         """应用 ack conversation envelope，并始终退休 accepted-work ownership。"""
         try:
@@ -1386,6 +1410,8 @@ class AgentEngine:
             except Exception as error:  # noqa: BLE001  # 普通未分类异常必须 fail closed
                 raise self._audit_state.coordinator.freeze(error) from None
             self._audit_state.coordinator.update_projection(result)
+            if application_converged is not None:
+                application_converged.set()
             await self._run_turn_for(
                 _AppliedUserSubmission(
                     id=token.submission_id,
@@ -1394,7 +1420,7 @@ class AgentEngine:
                 root_cancel,
             )
         finally:
-            await token.accepted_work.complete()
+            await retire_claimed_audited_token(token)
 
     async def _run_turn_for(
         self,
@@ -1744,8 +1770,16 @@ class AgentEngine:
 
         # 同步 turn 内的 history 变更回 engine
         async with self._lock:
-            # runner 直接改 history_buffer 引用 → 把 runner.history_buffer 倒回 engine
-            self._history = list(runner.history_buffer)
+            # audit path 的并发 runner 各自持有旧快照，只能把新增项合并回
+            # acknowledged hot history；整表覆盖会删除后来 durable apply 的用户项。
+            runner_history = list(runner.history_buffer)
+            if self._audit_state is None:
+                self._history = runner_history
+            else:
+                current_ids = {item.id for item in self._history}
+                self._history.extend(
+                    item for item in runner_history if item.id not in current_ids
+                )
             self._cache_anchor_index = runner.cache_anchor_index
             # turn-rewind：对当前全量逻辑 history 重算节点表(derive 为唯一产出方)。
             # 历史 turn 节点(冷加载推导的)+ 本 turn 新节点共存，turn 限定 id 不撞。

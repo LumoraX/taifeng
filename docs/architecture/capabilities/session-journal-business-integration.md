@@ -138,6 +138,9 @@ lock，因此首 turn 阻塞时并发排队仍得到单调且不重复的 index�
 `submission_rejected`，不保存非法原文、任意 `repr` 或 traceback，也不冻结 healthy Session。rejection
 append 失败仍按 Journal uncertainty 冻结；若 intake 已是 FINISHING/CLOSED，则 lifecycle 优先且不写
 rejection。pending rejection 与 finish 共用 lifecycle reservation，terminal seal 不会越过其 durable 结果。
+安全结构 walker 只读取 exact builtin，限制深度、全局节点数、单容器条目数与字符串/键长度，并把超出
+RFC 8785 safe-integer 域、超长值、超宽容器、环、深度溢出、非法键和 unsupported object 映射为稳定
+bounded marker；不得调用任意对象的 `repr` / `str` / `hash` / iterator hook。
 
 actor 应用 queue token 前必须重建完整三-envelope receipt，并复用 Journal strict codec 重算每条
 `payload_hash` / `record_hash` 与 batch `previous_hash` chain，同时核对 ack ids、连续 seq、tail hash、
@@ -159,9 +162,13 @@ lifecycle 是 `OPEN → FINISHING → CLOSED`：
 - definite ack 后的 queue handoff 若因 bounded backpressure cancellation、actor 已终止或其他异常未取得
   ownership，则以稳定 `accepted_work_handoff_failed` 进入 recovery-required，并在抛错前 shielded 退休
   未交付 work；fatal/cancel 原类型继续传播，已经成功入队的 token 不得同时按失败退休；
+- audited mailbox 在 `queue.put` 前登记 token；actor dequeue 后在同一 mailbox lock 内 claim 并把
+  ownership 原子转交 operation。actor finalizer 原子关闭 mailbox、唤醒 blocked put、快照全部未 claim
+  token，并 cancellation-independent 冻结/退休；已 claim token 只由 operation 收敛，双方不得双退；
 - EnginePool 的 graceful shutdown 与 admission sequencing lock 串行：先关闭 intake，再把内部 Shutdown
-  排在此前 accepted token 之后；actor 在读取下一 queue item 前确保 accepted operation 已安装 completion
-  ownership，避免连续非阻塞 dequeue 后 cancel 造成 lost wakeup；
+  排在此前 accepted token 之后；actor 在读取下一 queue item 前不仅安装 operation ownership，还等待该
+  token 的 hot-history + projection application checkpoint，确保 terminal 不越过已 accepted input；并发
+  audited runner 收尾按 item id append-only 合并，旧 history snapshot 不得覆盖后来 durable-applied 输入；
 - FINISHING/CLOSED 后的新请求不得 durable accept 或 enqueue，返回 `SessionFinishingError`；
 - 并发 release/close 只等待同一 canonical future value，但每个 caller 得到对象与嵌套 failure 独立的
   防御性副本；并发不同 Shutdown id 在 acceptance 前拒绝。

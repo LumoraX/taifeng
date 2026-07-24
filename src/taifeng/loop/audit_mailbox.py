@@ -1,0 +1,252 @@
+"""Audited accepted token 的 actor mailbox ownership 协调器。"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Literal, Protocol
+
+import anyio
+
+from taifeng.conversation.journal.records import StableErrorV1
+
+if TYPE_CHECKING:
+    from taifeng.loop.audit_admission import (
+        AcceptedUserMessage,
+        AuditedAdmissionState,
+    )
+
+type _ReservationState = Literal["registered", "claimed", "closed", "aborted"]
+
+
+class AcceptedUserMessageSink(Protocol):
+    """accepted token handoff 使用的最小有界 queue 协议。"""
+
+    async def put(self, item: AcceptedUserMessage) -> None:
+        """等待 queue 明确取得 token。"""
+
+
+class _MailboxClosedError(RuntimeError):
+    """actor mailbox 已关闭，不能再取得 accepted token。"""
+
+
+class _MailboxReservation:
+    """跨 register/put/claim/finalizer 的单 token ownership 状态。"""
+
+    __slots__ = ("put_scope", "state", "token")
+
+    def __init__(self, token: AcceptedUserMessage) -> None:
+        """初始化 caller-owned registered reservation。"""
+        self.token = token
+        self.state: _ReservationState = "registered"
+        self.put_scope: anyio.CancelScope | None = None
+
+
+class AuditedSubmissionMailbox:
+    """原子协调 accepted token 的 put、actor claim 与 actor finalizer。"""
+
+    def __init__(self) -> None:
+        """初始化 open mailbox 与空 reservation 表。"""
+        self._lock = asyncio.Lock()
+        self._closed = False
+        self._reservations: dict[str, _MailboxReservation] = {}
+
+    async def put_token(
+        self,
+        sink: AcceptedUserMessageSink,
+        token: AcceptedUserMessage,
+    ) -> tuple[BaseException | None, bool]:
+        """register-before-put；返回失败与 caller 是否仍应退休 token。"""
+        reservation: _MailboxReservation | None = None
+        try:
+            reservation = await self._register(token)
+            if reservation is None:
+                return _MailboxClosedError(), True
+            scope = anyio.CancelScope()
+            if not await self._attach_scope(reservation, scope):
+                return _MailboxClosedError(), False
+            error: BaseException | None = None
+            with scope:
+                try:
+                    await sink.put(token)
+                except BaseException as caught:  # noqa: BLE001
+                    error = caught
+            if scope.cancel_called:
+                return _MailboxClosedError(), False
+            if error is not None:
+                return error, await self._abort(reservation)
+            if await self._put_remains_valid(reservation):
+                return None, False
+            return _MailboxClosedError(), False
+        except BaseException as error:  # noqa: BLE001
+            if reservation is None:
+                return error, True
+            return error, await self._abort(reservation)
+
+    async def claim(self, token: AcceptedUserMessage) -> bool:
+        """actor dequeue 后原子把 mailbox ownership 转交 operation。"""
+        async with self._lock:
+            reservation = self._reservations.get(token.submission_id)
+            if (
+                self._closed
+                or reservation is None
+                or reservation.token is not token
+                or reservation.state != "registered"
+            ):
+                return False
+            reservation.state = "claimed"
+            self._reservations.pop(token.submission_id, None)
+            return True
+
+    async def close(self) -> tuple[AcceptedUserMessage, ...]:
+        """关闭 admission ownership，唤醒 put 并接管全部未 claim token。"""
+        async with self._lock:
+            if self._closed:
+                return ()
+            self._closed = True
+            reservations = tuple(self._reservations.values())
+            self._reservations.clear()
+            for reservation in reservations:
+                reservation.state = "closed"
+                if reservation.put_scope is not None:
+                    reservation.put_scope.cancel()
+            return tuple(reservation.token for reservation in reservations)
+
+    async def _register(
+        self,
+        token: AcceptedUserMessage,
+    ) -> _MailboxReservation | None:
+        """put 前登记唯一 token；closed 时不取得 caller ownership。"""
+        async with self._lock:
+            if self._closed:
+                return None
+            if token.submission_id in self._reservations:
+                raise ValueError(f"mailbox token already registered: {token.submission_id}")
+            reservation = _MailboxReservation(token)
+            self._reservations[token.submission_id] = reservation
+            return reservation
+
+    async def _attach_scope(
+        self,
+        reservation: _MailboxReservation,
+        scope: anyio.CancelScope,
+    ) -> bool:
+        """登记可由 finalizer 取消的 put scope。"""
+        async with self._lock:
+            if self._closed or reservation.state != "registered":
+                return False
+            reservation.put_scope = scope
+            return True
+
+    async def _abort(self, reservation: _MailboxReservation) -> bool:
+        """失败方仅在 ownership 未转交/未被 finalizer 接管时退休。"""
+        with anyio.CancelScope(shield=True):
+            async with self._lock:
+                if reservation.state != "registered":
+                    return False
+                reservation.state = "aborted"
+                current = self._reservations.get(reservation.token.submission_id)
+                if current is reservation:
+                    self._reservations.pop(reservation.token.submission_id, None)
+                return True
+        return False
+
+    async def _put_remains_valid(self, reservation: _MailboxReservation) -> bool:
+        """put 返回后只接受仍 registered 或已被 actor claimed 的线性化结果。"""
+        async with self._lock:
+            return reservation.state in ("registered", "claimed")
+
+
+def _handoff_failure() -> StableErrorV1:
+    """返回 accepted token ownership 不确定的稳定恢复原因。"""
+    return StableErrorV1(
+        code="accepted_work_handoff_failed",
+        class_name="AcceptedWorkHandoffFailure",
+        failure_class="lifecycle",
+        retryable=False,
+    )
+
+
+async def _retire_tokens(
+    tokens: tuple[AcceptedUserMessage, ...],
+) -> None:
+    """cancellation-independent 退休一组未转交 accepted work。"""
+    async def retire_all() -> None:
+        """在独立 task 内完整退休 ownership，避免 caller 取消截断首个 await。"""
+        with anyio.CancelScope(shield=True):
+            for token in tokens:
+                await token.accepted_work.complete()
+
+    worker = asyncio.create_task(retire_all())
+    cancellation: asyncio.CancelledError | None = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as error:
+            cancellation = cancellation or error
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+    worker.result()
+    if cancellation is not None:
+        raise cancellation
+
+
+async def retire_claimed_audited_token(
+    token: AcceptedUserMessage,
+) -> None:
+    """operation 最终释放已 claim token，并在完成后恢复 caller 取消。"""
+    await _retire_tokens((token,))
+
+
+async def handoff_accepted_user_message(
+    state: AuditedAdmissionState,
+    mailbox: AuditedSubmissionMailbox,
+    sink: AcceptedUserMessageSink,
+    token: AcceptedUserMessage,
+) -> None:
+    """把 definite accepted token 交给 mailbox；失败时精确冻结/退休。"""
+    try:
+        await state.coordinator.ensure_effect_allowed()
+    except BaseException as cause:
+        frozen = state.coordinator.freeze(_handoff_failure())
+        await _retire_tokens((token,))
+        if isinstance(
+            cause,
+            (KeyboardInterrupt, SystemExit, anyio.get_cancelled_exc_class()),
+        ):
+            raise
+        raise frozen from None
+    handoff_error, caller_owns = await mailbox.put_token(sink, token)
+    if handoff_error is None:
+        return
+    frozen = state.coordinator.freeze(_handoff_failure())
+    if caller_owns:
+        await _retire_tokens((token,))
+    if isinstance(
+        handoff_error,
+        (KeyboardInterrupt, SystemExit, anyio.get_cancelled_exc_class()),
+    ):
+        raise handoff_error
+    raise frozen from None
+
+
+async def finalize_audited_mailbox(
+    state: AuditedAdmissionState,
+    mailbox: AuditedSubmissionMailbox,
+) -> None:
+    """actor 终止时冻结并退休所有未 claim token。"""
+    with anyio.CancelScope(shield=True):
+        tokens = await mailbox.close()
+        if not tokens:
+            return
+        state.coordinator.freeze(_handoff_failure())
+        await _retire_tokens(tokens)
+
+
+__all__ = [
+    "AcceptedUserMessageSink",
+    "AuditedSubmissionMailbox",
+    "finalize_audited_mailbox",
+    "handoff_accepted_user_message",
+    "retire_claimed_audited_token",
+]
