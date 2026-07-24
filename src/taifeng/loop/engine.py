@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.budget import ContextBudget
 from taifeng.context.cache_stats import PromptCacheStats
+from taifeng.conversation.journal.projector import ProjectionOrderError
 from taifeng.conversation.models import (
     ResponseItem,
     function_call,
@@ -30,7 +31,9 @@ from taifeng.instructions.types import (
 )
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
+    AuditedUserMessageSubmission,
     admit_user_message,
+    prepare_user_message,
 )
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
@@ -401,6 +404,9 @@ class AgentEngine:
         self._lock = asyncio.Lock()
         # 单 engine 内 turn 序号累计（用于 InstructionContext.turn_index）
         self._turn_index: int = 0
+        # 审计 UserMessage admission 独立排序；不占用 Session lifecycle lock。
+        self._audited_admission_lock = asyncio.Lock()
+        self._next_audited_turn_index = 0
 
         # === instructions-injection T4 ===
         # 构造 resolver；emit 桥接到 engine 自己的 _emit（适配 EventMsg pydantic）
@@ -577,30 +583,35 @@ class AgentEngine:
     async def submit(self, op: Op) -> str:
         """业务侧入队接口。返回 submission_id。"""
         sub = Submission(op=op)
-        return await self._submit_frozen_submission(
-            sub,
-            accepted_turn_index=self._turn_index,
-        )
-
-    async def _submit_frozen_submission(
-        self,
-        sub: Submission,
-        *,
-        accepted_turn_index: int,
-    ) -> str:
-        """提交已冻结 identity，并显式保留首次 admission 的 turn 事实。"""
-        if accepted_turn_index < 0:
-            raise ValueError("accepted_turn_index must be non-negative")
         if self._audit_state is not None and isinstance(sub.op, UserMessage):
-            admission = await admit_user_message(
-                self._audit_state,
-                sub,
-                turn_index=accepted_turn_index,
+            prepared = prepare_user_message(self._audit_state, sub)
+            async with self._audited_admission_lock:
+                accepted = prepared.accept(self._next_audited_turn_index)
+                return await self._submit_audited_user_message_locked(accepted)
+        await self._submissions.put(sub)
+        return sub.id
+
+    async def _submit_audited_user_message(
+        self,
+        sub: AuditedUserMessageSubmission,
+    ) -> str:
+        """提交审计专用 frozen submission；historical receipt 不入队。"""
+        async with self._audited_admission_lock:
+            return await self._submit_audited_user_message_locked(sub)
+
+    async def _submit_audited_user_message_locked(
+        self,
+        sub: AuditedUserMessageSubmission,
+    ) -> str:
+        """在单一 admission 顺序点 durable accept，并推进下一 index。"""
+        assert self._audit_state is not None
+        admission = await admit_user_message(self._audit_state, sub)
+        if isinstance(admission, AcceptedUserMessage):
+            self._next_audited_turn_index = max(
+                self._next_audited_turn_index,
+                sub.accepted_turn_index + 1,
             )
-            if isinstance(admission, AcceptedUserMessage):
-                await self._submissions.put(admission)
-        else:
-            await self._submissions.put(sub)
+            await self._submissions.put(admission)
         return sub.id
 
     def _new_subscriber(self) -> _Subscriber:
@@ -1319,9 +1330,12 @@ class AgentEngine:
                 raise self._audit_state.coordinator.freeze(error) from None
             async with self._lock:
                 self._history.append(item)
-            result = await self._audit_state.projector.project(
-                conversation_envelopes, token.ack
-            )
+            try:
+                result = await self._audit_state.projector.project(
+                    conversation_envelopes, token.ack
+                )
+            except ProjectionOrderError as error:
+                raise self._audit_state.coordinator.freeze(error) from None
             self._audit_state.coordinator.update_projection(result)
             await self._run_turn_for(
                 _AppliedUserSubmission(

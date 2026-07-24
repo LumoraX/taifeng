@@ -6,10 +6,9 @@
 from __future__ import annotations
 
 import secrets
-from datetime import UTC, datetime
 from typing import Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, Field
 
 
 def _gen_sub_id() -> str:
@@ -214,18 +213,7 @@ Op = Union[
 
 
 class Submission(BaseModel):
-    """actor queue 内的不可变 submission identity 与接收时间。"""
-
-    model_config = ConfigDict(frozen=True)
+    """actor queue 内的 legacy submission identity 与用户意图。"""
 
     id: str = Field(default_factory=_gen_sub_id)
-    submitted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     op: Op = Field(discriminator="kind")
-
-    @field_validator("submitted_at")
-    @classmethod
-    def _require_aware_submitted_at(cls, value: datetime) -> datetime:
-        """durable conversation created_at 必须来自可重用的 aware 时间输入。"""
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("submitted_at must include timezone")
-        return value

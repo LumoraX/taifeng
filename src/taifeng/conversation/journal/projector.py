@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from json import JSONDecodeError
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import ValidationError
 
+from taifeng.conversation.journal.materialization import (
+    ProjectionIdentityError,
+    ProjectionLifecycleError,
+)
 from taifeng.conversation.journal.records import (
     ConversationItemV1,
     deserialize_response_item,
@@ -409,9 +414,18 @@ class JournalConversationProjector:
         """验证完整 batch 后按 Journal seq 物化；store 失败只返回 stale。"""
         projected = _validate_batch(envelopes, ack)
         thread_id = projected[0].item.thread_id
-        async with self._store.projection_scope(thread_id):
-            await self._validate_projection_session(thread_id, ack.session_id)
-            return await self._materialize(thread_id, projected)
+        try:
+            async with self._store.projection_scope(thread_id):
+                await self._validate_projection_session(thread_id, ack.session_id)
+                return await self._materialize(thread_id, projected)
+        except OSError as exc:
+            return self._set_stale(
+                thread_id,
+                self.state(thread_id).projected_seq,
+                type(exc).__name__,
+                projected[0].record_id,
+                projected[0].seq,
+            )
 
     async def _validate_projection_session(
         self,
@@ -421,7 +435,7 @@ class JournalConversationProjector:
         """在 snapshot repair/write 前验证 transcript 的 Journal Session 绑定。"""
         try:
             expected = await self._store.expected_projection_session_id(thread_id)
-        except Exception as exc:  # noqa: BLE001  # identity 缺失必须稳定 fail closed
+        except (FileNotFoundError, ProjectionIdentityError, ValueError) as exc:
             raise ProjectionOrderError(
                 "expected Journal Session identity is unavailable"
             ) from exc
@@ -476,7 +490,17 @@ class JournalConversationProjector:
                     list(plan.items),
                     snapshot.identity,
                 )
-        except Exception as exc:  # noqa: BLE001  # materialization 不得冻结 Journal
+        except ProjectionIdentityError as exc:
+            raise ProjectionOrderError(
+                "projection target identity invariant violated"
+            ) from exc
+        except (
+            JSONDecodeError,
+            OSError,
+            ProjectionLifecycleError,
+            UnicodeError,
+            ValidationError,
+        ) as exc:
             return self._set_stale(
                 thread_id,
                 _materialized_seq(current, replay_window),

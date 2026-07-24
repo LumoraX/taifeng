@@ -111,11 +111,25 @@ projector 只接受 durable ack 覆盖的 `conversation_item` envelope，按 Jou
 维护 projected seq。投影失败返回 stale；投影可以删除并从 Journal 重放。带 audited marker 的 transcript
 不得走 legacy resume。
 
+投影异常按事实边界分类：
+
+- scope 准入、metadata/directory IO、snapshot 解析以及 append target/path race 属于可重建物化层故障，
+  projector 返回稳定 stale；Journal health、hot history 和 effect gate 不变；
+- Journal Session、thread、audited metadata 或 envelope/ack 顺序不变量失败抛 `ProjectionOrderError`，
+  Engine 同步冻结 Session coordinator，关闭 effect gate，不得伪装成普通 stale；
+- `ProjectionIdentityError` 只表示前一类 audited identity 不变量；普通文件 inode/path 竞争仍是可恢复
+  `ProjectionLifecycleError`，避免把 derived target 的并发替换升级成 Journal 故障。
+
 ## 7. Submission 与 lifecycle
 
 audited `AgentEngine.submit()` 与 lifecycle 共用同一个 admission lock。UserMessage 必须先 canonicalize 并
 durable 提交 acceptance batch，再把携带 ack 的 token 入 actor queue；禁止 enqueue-first。队列内因此不
 存在未 accepted submission。
+
+公开 legacy `Submission` 保持可变的 `id + op` 序列化/schema。audit-required 路径在首次 await 前把
+submission id、时间、文本和附件复制为内部 frozen snapshot；随后在独立 admission sequencing lock 中分配
+唯一 durable `turn_index`，并保持该锁直到 acceptance ack 与 enqueue 完成。该锁不持有 Session lifecycle
+lock，因此首 turn 阻塞时并发排队仍得到单调且不重复的 index。
 
 lifecycle 是 `OPEN → FINISHING → CLOSED`：
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -15,9 +16,9 @@ from taifeng.conversation.journal import (
     ConversationItemV1,
     JournalAck,
     JournalEnvelope,
-    ProjectionResult,
     RootThreadDescriptor,
     SessionDescriptor,
+    SubmissionAcceptedV1,
 )
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.projector import JournalConversationProjector
@@ -30,6 +31,7 @@ from taifeng.loop.audit import (
 )
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
+    AuditedUserMessageSubmission,
     ReplayedUserMessage,
     admit_user_message,
 )
@@ -206,6 +208,7 @@ async def _engine_with_audit(
     *,
     core_override: _PausingJournalCore | _AdversarialJournalCore | None = None,
     model_client: object | None = None,
+    store_override: JsonlMessageStore | None = None,
 ) -> tuple[AgentEngine, SessionAuditCoordinator, JsonlSessionJournalCore]:
     """使用真实 Engine、Coordinator、Journal 和 projector 建立审计会话。"""
     registry = await FilesystemSkillRegistry.load(skills_dir)
@@ -235,7 +238,7 @@ async def _engine_with_audit(
         lease=created.lease,
         expected_seq=created.ack.last_seq,
     )
-    store = JsonlMessageStore(tmp_path / "threads")
+    store = store_override or JsonlMessageStore(tmp_path / "threads")
     projector = JournalConversationProjector(store)
     await projector.bootstrap_thread(
         thread_id=thread_id,
@@ -272,6 +275,23 @@ async def _wait_for_applied_history(engine: AgentEngine) -> None:
     with anyio.fail_after(1):
         while not engine._history:  # noqa: SLF001
             await anyio.lowlevel.checkpoint()
+
+
+def _audited_submission(
+    submission_id: str,
+    text: str,
+    *,
+    submitted_at: datetime,
+    turn_index: int = 0,
+) -> AuditedUserMessageSubmission:
+    """构造完整 audited-only frozen submission。"""
+    return AuditedUserMessageSubmission(
+        submission_id=submission_id,
+        submitted_at=submitted_at,
+        accepted_turn_index=turn_index,
+        text=text,
+        attachments=(),
+    )
 
 
 @pytest.mark.anyio
@@ -369,50 +389,43 @@ async def test_actor_applies_only_acknowledged_user_envelope_then_completes_work
 
 
 @pytest.mark.anyio
-async def test_projection_failure_marks_stale_without_freezing_or_losing_hot_history(
+async def test_queued_user_messages_receive_unique_durable_turn_indexes(
     tmp_path: Path,
     skills_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """投影 stale 不影响 durable user item 成为 hot history 权威事实。"""
+    """首 turn 阻塞时排队/并发 admission 仍必须按单一顺序点分配 index。"""
     client = _BlockingClient()
-    engine, coordinator, _ = await _engine_with_audit(
+    engine, _, core = await _engine_with_audit(
         tmp_path,
         skills_dir,
         model_client=client,
     )
-    captured: list[tuple[tuple[JournalEnvelope, ...], JournalAck]] = []
-
-    async def fail_projection(
-        projector: JournalConversationProjector,
-        envelopes: tuple[JournalEnvelope, ...],
-        ack: JournalAck,
-    ) -> ProjectionResult:
-        del projector
-        captured.append((envelopes, ack))
-        return ProjectionResult(
-            thread_id=engine.thread_id,
-            projected_seq=0,
-            stale=True,
-            failure_class="append_failed",
-            failure_record_id=envelopes[0].record_id,
-        )
-
-    monkeypatch.setattr(JournalConversationProjector, "project", fail_projection)
-    await engine.submit(UserMessage(text="hot history remains"))
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
+    queued_ids: list[str] = []
+
+    async def submit(text: str) -> None:
+        queued_ids.append(await engine.submit(UserMessage(text=text)))
+
     try:
+        await engine.submit(UserMessage(text="first"))
         await _wait_for_applied_history(engine)
-        with anyio.fail_after(1):
-            while coordinator.projection_snapshot(engine.thread_id) is None:
-                await anyio.lowlevel.checkpoint()
-        projection = coordinator.projection_snapshot(engine.thread_id)
-        assert projection is not None and projection.stale
-        assert coordinator.health is AuditHealth.HEALTHY
-        assert coordinator.effect_gate_open
-        assert engine._history[0].payload["text"] == "hot history remains"  # noqa: SLF001
-        assert captured[0][1].record_ids[1] == captured[0][0][0].record_id
+        assert engine._turn_index == 0  # noqa: SLF001
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(submit, "second")
+            tasks.start_soon(submit, "third")
+
+        committed = [
+            envelope async for envelope in core.load("ses_audit_submission")
+        ]
+        accepted = [
+            SubmissionAcceptedV1.model_validate(envelope.payload)
+            for envelope in committed
+            if envelope.record_type == "submission_accepted"
+        ]
+        assert len(queued_ids) == 2
+        assert [item.turn_index for item in accepted] == [0, 1, 2]
     finally:
         cancel.cancel()
         await actor
@@ -444,6 +457,42 @@ async def test_legacy_submit_keeps_raw_submission_queue_behavior(
     assert queued.op == UserMessage(text="legacy")
 
 
+def test_legacy_submission_dump_has_only_id_and_op() -> None:
+    """audit 内部字段不得扩张公开 Submission 的序列化外形。"""
+    submission = Submission(
+        id="sub_legacy_dump",
+        op=UserMessage(text="legacy dump"),
+    )
+
+    assert submission.model_dump(mode="json") == {
+        "id": "sub_legacy_dump",
+        "op": {
+            "kind": "user_message",
+            "text": "legacy dump",
+            "attachments": [],
+        },
+    }
+
+
+def test_legacy_submission_schema_has_only_id_and_op() -> None:
+    """公开 JSON schema 必须保留 audit 接入前的 id/op 字段集合。"""
+    schema = Submission.model_json_schema()
+
+    assert set(schema["properties"]) == {"id", "op"}
+    assert set(schema["required"]) == {"op"}
+
+
+def test_legacy_submission_remains_mutable() -> None:
+    """既有 caller 仍可更新 Submission identity 与 Op。"""
+    submission = Submission(op=UserMessage(text="before"))
+
+    submission.id = "sub_mutated"
+    submission.op = UserMessage(text="after")
+
+    assert submission.id == "sub_mutated"
+    assert submission.op == UserMessage(text="after")
+
+
 @pytest.mark.anyio
 async def test_same_logical_submission_retries_with_exact_idempotent_ack(
     tmp_path: Path,
@@ -452,17 +501,17 @@ async def test_same_logical_submission_retries_with_exact_idempotent_ack(
     """相同 id/op/submitted_at 重建三记录必须得到原 ack，且 coordinator 不冻结。"""
     engine, coordinator, core = await _engine_with_audit(tmp_path, skills_dir)
     submitted_at = datetime(2026, 7, 24, 8, 30, tzinfo=UTC)
-    submission = Submission(
-        id="sub_stable_retry",
+    submission = _audited_submission(
+        "sub_stable_retry",
+        "same logical input",
         submitted_at=submitted_at,
-        op=UserMessage(text="same logical input"),
     )
     state = engine._audit_state  # type: ignore[attr-defined]  # noqa: SLF001
 
-    first = await admit_user_message(state, submission, turn_index=0)
+    first = await admit_user_message(state, submission)
     assert isinstance(first, AcceptedUserMessage)
     await first.accepted_work.complete()
-    second = await admit_user_message(state, submission, turn_index=0)
+    second = await admit_user_message(state, submission)
 
     assert isinstance(second, ReplayedUserMessage)
     assert second.ack == first.ack
@@ -481,10 +530,10 @@ async def test_completed_actor_submission_replay_is_a_noop(
     skills_dir: Path,
 ) -> None:
     """真实 actor 完成后重放完整 frozen Submission 不得再次入队或执行。"""
-    submission = Submission(
-        id="sub_completed_replay",
+    submission = _audited_submission(
+        "sub_completed_replay",
+        "exact replay",
         submitted_at=datetime(2026, 7, 24, 9, 15, tzinfo=UTC),
-        op=UserMessage(text="exact replay"),
     )
     client = SimClient(turns=[SimTurn(text="first and only response")])
     engine, coordinator, core = await _engine_with_audit(
@@ -495,10 +544,7 @@ async def test_completed_actor_submission_replay_is_a_noop(
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
     try:
-        first_id = await engine._submit_frozen_submission(  # noqa: SLF001
-            submission,
-            accepted_turn_index=0,
-        )
+        first_id = await engine._submit_audited_user_message(submission)  # noqa: SLF001
         with anyio.fail_after(2):
             while (
                 coordinator.snapshot().accepted_work_ids
@@ -516,10 +562,7 @@ async def test_completed_actor_submission_replay_is_a_noop(
         assert len(client.ledger.requests()) == 1
         assert engine._submissions.empty()  # noqa: SLF001
 
-        second_id = await engine._submit_frozen_submission(  # noqa: SLF001
-            submission,
-            accepted_turn_index=0,
-        )
+        second_id = await engine._submit_audited_user_message(submission)  # noqa: SLF001
 
         assert second_id == first_id
         assert engine._submissions.empty()  # noqa: SLF001
@@ -551,17 +594,17 @@ async def test_incomplete_accepted_submission_cannot_execute_twice(
 ) -> None:
     """同 work_id 尚未 complete 时重试必须拒绝，且不生成第二份执行 token。"""
     engine, coordinator, core = await _engine_with_audit(tmp_path, skills_dir)
-    submission = Submission(
-        id="sub_incomplete_retry",
+    submission = _audited_submission(
+        "sub_incomplete_retry",
+        "still running",
         submitted_at=datetime(2026, 7, 24, 9, 30, tzinfo=UTC),
-        op=UserMessage(text="still running"),
     )
     state = engine._audit_state  # type: ignore[attr-defined]  # noqa: SLF001
-    first = await admit_user_message(state, submission, turn_index=0)
+    first = await admit_user_message(state, submission)
     assert isinstance(first, AcceptedUserMessage)
 
     with pytest.raises(ValueError, match="work already accepted"):
-        await admit_user_message(state, submission, turn_index=0)
+        await admit_user_message(state, submission)
 
     committed = [envelope async for envelope in core.load("ses_audit_submission")]
     assert len(committed) == 6
@@ -570,20 +613,21 @@ async def test_incomplete_accepted_submission_cannot_execute_twice(
     await first.accepted_work.complete()
 
 
-def test_submission_timestamp_roundtrips_without_changing_legacy_op() -> None:
-    """内部稳定时间参与 retry，但 legacy Op 判别与字段保持原语义。"""
+def test_audited_submission_timestamp_and_turn_index_are_frozen_internal_facts() -> None:
+    """审计时间/index 只存在于内部 immutable DTO。"""
     submitted_at = datetime(2026, 7, 24, 8, 30, tzinfo=UTC)
-    submission = Submission(
-        id="sub_roundtrip",
+    submission = _audited_submission(
+        "sub_roundtrip",
+        "legacy shape",
         submitted_at=submitted_at,
-        op=UserMessage(text="legacy shape"),
     )
 
-    restored = Submission.model_validate_json(submission.model_dump_json())
+    with pytest.raises(FrozenInstanceError):
+        submission.accepted_turn_index = 2  # type: ignore[misc]
 
-    assert restored == submission
-    assert restored.submitted_at == submitted_at
-    assert restored.op == UserMessage(text="legacy shape")
+    assert submission.submitted_at == submitted_at
+    assert submission.accepted_turn_index == 0
+    assert submission.text == "legacy shape"
 
 
 @pytest.mark.anyio

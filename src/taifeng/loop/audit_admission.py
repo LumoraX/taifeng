@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from taifeng.conversation.journal.canonical import model_canonical_data
@@ -55,6 +56,54 @@ class AuditedAdmissionState(Protocol):
     @property
     def max_total_attachment_bytes(self) -> int:
         """返回 submission 附件总上限。"""
+
+
+@dataclass(frozen=True, slots=True)
+class AuditedUserMessageSubmission:
+    """审计专用的完整 frozen submission 与首次 admission turn 事实。"""
+
+    submission_id: str
+    submitted_at: datetime
+    accepted_turn_index: int
+    text: str
+    attachments: tuple[AttachmentV1, ...]
+
+    def __post_init__(self) -> None:
+        """拒绝无法形成稳定 Journal identity 的内部值。"""
+        if not self.submission_id:
+            raise ValueError("submission_id must be non-empty")
+        if self.submitted_at.tzinfo is None or self.submitted_at.utcoffset() is None:
+            raise ValueError("submitted_at must include timezone")
+        if (
+            isinstance(self.accepted_turn_index, bool)
+            or self.accepted_turn_index < 0
+        ):
+            raise ValueError("accepted_turn_index must be non-negative")
+
+    @property
+    def id(self) -> str:
+        """提供 stable submission identity。"""
+        return self.submission_id
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedUserMessage:
+    """首次 await 前冻结的 audited UserMessage 输入。"""
+
+    submission_id: str
+    submitted_at: datetime
+    text: str
+    attachments: tuple[AttachmentV1, ...]
+
+    def accept(self, turn_index: int) -> AuditedUserMessageSubmission:
+        """在 admission 顺序点绑定唯一 turn index。"""
+        return AuditedUserMessageSubmission(
+            submission_id=self.submission_id,
+            submitted_at=self.submitted_at,
+            accepted_turn_index=turn_index,
+            text=self.text,
+            attachments=self.attachments,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,16 +257,28 @@ def _validated_attachments(
     return attachments
 
 
-def _submission_records(
+def prepare_user_message(
     state: AuditedAdmissionState,
     submission: Submission,
     *,
-    turn_index: int,
-) -> tuple[JournalRecord, ...]:
-    """构造 acceptance、user conversation item 与 applied 的原子三记录。"""
+    submitted_at: datetime | None = None,
+) -> _PreparedUserMessage:
+    """在 Engine 第一个 await 前复制并 canonicalize legacy Submission。"""
     if not isinstance(submission.op, UserMessage):
         raise TypeError("audited UserMessage admission requires UserMessage")
-    attachments = _validated_attachments(submission.op, state)
+    return _PreparedUserMessage(
+        submission_id=submission.id,
+        submitted_at=submitted_at or datetime.now(UTC),
+        text=submission.op.text,
+        attachments=_validated_attachments(submission.op, state),
+    )
+
+
+def _submission_records(
+    state: AuditedAdmissionState,
+    submission: AuditedUserMessageSubmission,
+) -> tuple[JournalRecord, ...]:
+    """构造 acceptance、user conversation item 与 applied 的原子三记录。"""
     identities = JournalIdentities(
         session_id=state.coordinator.session_id,
         thread_id=state.thread_id,
@@ -233,9 +294,9 @@ def _submission_records(
         record_type="submission_accepted",
         payload=SubmissionAcceptedV1(
             op_kind="user_message",
-            turn_index=turn_index,
-            text=submission.op.text,
-            attachments=attachments,
+            turn_index=submission.accepted_turn_index,
+            text=submission.text,
+            attachments=submission.attachments,
             source="user",
         ),
         submission_id=submission.id,
@@ -246,10 +307,10 @@ def _submission_records(
         id=f"item_{submission.id}",
         thread_id=state.thread_id,
         payload={
-            "text": submission.op.text,
+            "text": submission.text,
             "attachments": [
                 model_canonical_data(attachment)
-                for attachment in attachments
+                for attachment in submission.attachments
             ],
         },
         created_at=submission.submitted_at,
@@ -280,9 +341,7 @@ def _submission_records(
 
 async def admit_user_message(
     state: AuditedAdmissionState,
-    submission: Submission,
-    *,
-    turn_index: int,
+    submission: AuditedUserMessageSubmission,
 ) -> AcceptedUserMessage | ReplayedUserMessage:
     """在 coordinator admission lifecycle 内先 durable commit，再生成 queue token。"""
     receipt: JournalAppendReceipt | None = None
@@ -290,7 +349,7 @@ async def admit_user_message(
 
     async def durable_accept() -> None:
         nonlocal receipt, records
-        records = _submission_records(state, submission, turn_index=turn_index)
+        records = _submission_records(state, submission)
         receipt = await state.coordinator.append_batch_receipt(records)
 
     work = await state.coordinator.admit_work(submission.id, durable_accept)
@@ -320,6 +379,8 @@ async def admit_user_message(
 __all__ = [
     "AcceptedUserMessage",
     "AuditedAdmissionState",
+    "AuditedUserMessageSubmission",
     "ReplayedUserMessage",
     "admit_user_message",
+    "prepare_user_message",
 ]

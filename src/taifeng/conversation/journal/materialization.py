@@ -29,6 +29,10 @@ class ProjectionLifecycleError(RuntimeError):
     """投影 handle 已关闭或物理目标绑定到其他 async backend。"""
 
 
+class ProjectionIdentityError(ProjectionLifecycleError):
+    """投影 target 的 Journal Session/thread/audited metadata 身份不成立。"""
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectionFileIdentity:
     """用于 audited append compare-before-write 的物理文件身份。"""
@@ -122,7 +126,7 @@ class _PhysicalProjectionTarget:
         with self._guard:
             existing = self.session_ids.get(thread_id)
             if existing is not None and existing != session_id:
-                raise ProjectionLifecycleError(
+                raise ProjectionIdentityError(
                     "projection target is bound to another Journal Session"
                 )
             if existing is not None:
@@ -186,7 +190,7 @@ def audited_projection_marker_from_extra(
         or not isinstance(schema_version, int)
         or schema_version < 1
     ):
-        raise ProjectionLifecycleError("incomplete audited projection marker")
+        raise ProjectionIdentityError("incomplete audited projection marker")
     return AuditedProjectionMarker(session_id, schema_version)
 
 
@@ -305,7 +309,7 @@ async def read_audited_projection_marker(
     if metadata.get("thread_id") != thread_id:
         extra = metadata.get("extra")
         if isinstance(extra, dict) and extra.get("audit_required") is True:
-            raise ProjectionLifecycleError("audited projection thread identity mismatch")
+            raise ProjectionIdentityError("audited projection thread identity mismatch")
         return None
     return audited_projection_marker_from_extra(metadata.get("extra"))
 
@@ -319,7 +323,7 @@ def _existing_file_session_id(path: Path, thread_id: str) -> str | None:
     try:
         metadata = json.loads(first_line)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ProjectionLifecycleError(
+        raise ProjectionIdentityError(
             "projection file has invalid audited metadata"
         ) from exc
     extra = metadata.get("extra") if isinstance(metadata, dict) else None
@@ -337,7 +341,7 @@ def _existing_file_session_id(path: Path, thread_id: str) -> str | None:
         or not isinstance(schema_version, int)
         or schema_version < 1
     ):
-        raise ProjectionLifecycleError(
+        raise ProjectionIdentityError(
             "projection file has incomplete audited metadata"
         )
     return session_id
@@ -658,7 +662,7 @@ class ProjectionTargetHandle:
             expected_session is not None
             and directory_session != expected_session
         ):
-            raise ProjectionLifecycleError(
+            raise ProjectionIdentityError(
                 "projection directory changed Journal Session identity"
             )
         path = safe_thread_path(self._target.root, thread_id)
