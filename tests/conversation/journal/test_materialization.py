@@ -12,11 +12,10 @@ import anyio
 import pytest
 
 from taifeng.conversation.journal import materialization as materialization_module
-from taifeng.conversation.journal.materialization import (
-    ProjectionFileIdentity,
-    ProjectionLifecycleError,
+from taifeng.conversation.journal.projector import (
+    JournalConversationProjector,
+    ProjectionResult,
 )
-from taifeng.conversation.journal.projector import JournalConversationProjector
 from taifeng.conversation.models import user_message
 from taifeng.conversation.transcript import JsonlMessageStore, JsonlMessageWriter
 from tests.conversation.journal.projector_test_support import (
@@ -29,6 +28,7 @@ from tests.conversation.journal.projector_test_support import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from taifeng.conversation.journal.materialization import ProjectionFileIdentity
     from taifeng.conversation.models import ResponseItem
 
 
@@ -215,15 +215,20 @@ async def test_close_waits_for_admitted_projection(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_project_after_close_is_rejected(tmp_path: Path) -> None:
-    """CLOSED handle 不得准入新的投影。"""
+async def test_project_after_close_returns_stale(tmp_path: Path) -> None:
+    """CLOSED handle 准入失败必须返回可信 stale，不能伪装成 Journal 故障。"""
     store = JsonlMessageStore(tmp_path)
     await _create_explicit_projection(store)
     envelopes, ack = _one_item_batch()
+    path = tmp_path / "thr_explicit.jsonl"
+    before = path.read_bytes()
     await store.close()
 
-    with pytest.raises(RuntimeError, match="closed"):
-        await JournalConversationProjector(store).project(envelopes, ack)
+    result = await JournalConversationProjector(store).project(envelopes, ack)
+
+    assert result.stale is True
+    assert result.failure_class == "ProjectionLifecycleError"
+    assert path.read_bytes() == before
 
 
 @pytest.mark.anyio
@@ -402,19 +407,20 @@ async def test_external_mutation_invalidates_projection_snapshot(tmp_path: Path)
 
 
 @pytest.mark.anyio
-async def test_active_physical_target_rejects_different_event_loop(tmp_path: Path) -> None:
-    """同一活跃 target 不得把 anyio lock/cache 带到另一个 event loop。"""
+async def test_active_physical_target_cross_loop_returns_stale(tmp_path: Path) -> None:
+    """跨 loop 准入不得复用 anyio 状态，只返回可重建 target stale。"""
     first = JsonlMessageStore(tmp_path)
     await _create_explicit_projection(first)
     envelopes, ack = _one_item_batch()
     await JournalConversationProjector(first).project(envelopes, ack)
     second = JsonlMessageStore(tmp_path)
 
-    async def _cross_loop() -> None:
-        await JournalConversationProjector(second).project(envelopes, ack)
+    async def _cross_loop() -> ProjectionResult:
+        return await JournalConversationProjector(second).project(envelopes, ack)
 
-    with pytest.raises(ProjectionLifecycleError, match="different event loop/backend"):
-        await anyio.to_thread.run_sync(lambda: anyio.run(_cross_loop))
+    result = await anyio.to_thread.run_sync(lambda: anyio.run(_cross_loop))
+    assert result.stale is True
+    assert result.failure_class == "ProjectionLifecycleError"
     await first.close()
     await second.close()
 

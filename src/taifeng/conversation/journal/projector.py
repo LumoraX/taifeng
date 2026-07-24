@@ -418,7 +418,11 @@ class JournalConversationProjector:
             async with self._store.projection_scope(thread_id):
                 await self._validate_projection_session(thread_id, ack.session_id)
                 return await self._materialize(thread_id, projected)
-        except OSError as exc:
+        except ProjectionIdentityError as exc:
+            raise ProjectionOrderError(
+                "projection target identity invariant violated"
+            ) from exc
+        except (OSError, ProjectionLifecycleError) as exc:
             return self._set_stale(
                 thread_id,
                 self.state(thread_id).projected_seq,

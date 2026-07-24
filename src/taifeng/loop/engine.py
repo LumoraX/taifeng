@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.budget import ContextBudget
 from taifeng.context.cache_stats import PromptCacheStats
-from taifeng.conversation.journal.projector import ProjectionOrderError
 from taifeng.conversation.models import (
     ResponseItem,
     function_call,
@@ -1334,7 +1333,9 @@ class AgentEngine:
                 result = await self._audit_state.projector.project(
                     conversation_envelopes, token.ack
                 )
-            except ProjectionOrderError as error:
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001  # 普通未分类异常必须 fail closed
                 raise self._audit_state.coordinator.freeze(error) from None
             self._audit_state.coordinator.update_projection(result)
             await self._run_turn_for(

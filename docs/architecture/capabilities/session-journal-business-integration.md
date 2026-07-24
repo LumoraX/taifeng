@@ -113,12 +113,15 @@ projector 只接受 durable ack 覆盖的 `conversation_item` envelope，按 Jou
 
 投影异常按事实边界分类：
 
-- scope 准入、metadata/directory IO、snapshot 解析以及 append target/path race 属于可重建物化层故障，
-  projector 返回稳定 stale；Journal health、hot history 和 effect gate 不变；
+- scope 准入的非 identity `ProjectionLifecycleError`、metadata/directory IO、snapshot 解析以及 append
+  target/path race 属于可重建物化层故障，projector 返回稳定 stale；Journal health、hot history 和
+  effect gate 不变；
 - Journal Session、thread、audited metadata 或 envelope/ack 顺序不变量失败抛 `ProjectionOrderError`，
   Engine 同步冻结 Session coordinator，关闭 effect gate，不得伪装成普通 stale；
 - `ProjectionIdentityError` 只表示前一类 audited identity 不变量；普通文件 inode/path 竞争仍是可恢复
   `ProjectionLifecycleError`，避免把 derived target 的并发替换升级成 Journal 故障。
+- projector 若仍泄漏未分类的普通 `Exception`，Engine 也必须 fail-closed；`CancelledError` 原样传播且
+  不冻结，`KeyboardInterrupt` / `SystemExit` 作为进程级 fatal 不得被普通异常边界捕获。
 
 ## 7. Submission 与 lifecycle
 
