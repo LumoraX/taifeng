@@ -49,9 +49,9 @@
 - [x] 6.4 Implement invalid submission records, recovery-required enqueue failure handling, intake closure, and accepted work convergence
 - [x] 6.5 Write failing tests proving CancelTurn cancels only its target turn/child subtree while another turn remains effect-capable
 - [x] 6.6 Implement CancelTurn accepted/applied records and target cancellation semantics including not-found/already-terminal outcomes
-- [ ] 6.7 Write failing tests for release-vs-Shutdown, two Shutdown ids, one finish future, stable terminal ids, and one lease close
-- [ ] 6.8 Implement unique Shutdown admission, Session root cancellation, EnginePool-owned finish, and emergency safe degradation
-- [ ] 6.9 Run admission/cancellation/lifecycle plus legacy engine tests and commit the submission slice
+- [x] 6.7 Write failing tests for release-vs-Shutdown, two Shutdown ids, one finish future, stable terminal ids, and one lease close
+- [x] 6.8 Implement unique Shutdown admission, Session root cancellation, EnginePool-owned finish, and emergency safe degradation
+- [x] 6.9 Run admission/cancellation/lifecycle plus legacy engine tests and commit the submission slice
 
 ## 7. Audited LLM attempts and visible responses
 
