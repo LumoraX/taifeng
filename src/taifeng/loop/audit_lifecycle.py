@@ -13,6 +13,7 @@ from taifeng.conversation.journal.records import (
     JournalIdentities,
     JournalRecordFactory,
     SessionEndedV1,
+    SubmissionAppliedV1,
     ThreadTerminalV1,
 )
 
@@ -183,8 +184,9 @@ def _build_terminal_records(
     committed_thread_ids: Collection[str],
     status: str,
     reason: str,
+    shutdown_admission: tuple[str, str, str] | None = None,
 ) -> tuple[JournalRecord, ...]:
-    """复用 V1 factory 生成排序、稳定 ordinal 的唯一 terminal batch。"""
+    """生成可选 Shutdown applied 与排序、稳定 ordinal 的 terminal batch。"""
     operation_id = f"{session_id}:lifecycle:end"
     factory = JournalRecordFactory(
         session_id=session_id,
@@ -224,7 +226,32 @@ def _build_terminal_records(
             ),
         )
     )
-    return tuple(records)
+    if shutdown_admission is None:
+        return tuple(records)
+    submission_id, accepted_record_id, thread_id = shutdown_admission
+    shutdown_factory = JournalRecordFactory(
+        session_id=session_id,
+        actor=ActorRef(kind="system", source="engine"),
+        identities=JournalIdentities(
+            session_id=session_id,
+            thread_id=thread_id,
+            submission_id=submission_id,
+        ),
+    )
+    applied = shutdown_factory.build(
+        operation_id=submission_id,
+        record_type="submission_applied",
+        payload=SubmissionAppliedV1(
+            accepted_record_id=accepted_record_id,
+            result_status="applied",
+            conversation_item_ids=(),
+            terminal_record_ids=tuple(record.record_id for record in records),
+        ),
+        submission_id=submission_id,
+        thread_id=thread_id,
+        causation_id=accepted_record_id,
+    )
+    return (applied, *records)
 
 
 __all__ = [

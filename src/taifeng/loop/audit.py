@@ -25,6 +25,7 @@ from taifeng.loop.audit_lifecycle import (
     _build_terminal_records,
     _FinishFuture,
 )
+from taifeng.loop.audit_shutdown_lifecycle import ShutdownLifecycleMixin
 from taifeng.loop.audit_support import (
     AuditHealth,
     ProjectionAuditSnapshot,
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
     )
 
 
-class SessionAuditCoordinator(TargetCancellationMixin):
+class SessionAuditCoordinator(ShutdownLifecycleMixin, TargetCancellationMixin):
     """串行化一个 Session 的 Journal append，并隔离其 fail-closed 状态。"""
 
     def __init__(
@@ -96,6 +97,7 @@ class SessionAuditCoordinator(TargetCancellationMixin):
         self._finish_future: _FinishFuture | None = None
         self._committed_terminal_threads: set[str] = set()
         self._terminal_sealed = False
+        self._init_shutdown_lifecycle()
 
     @property
     def session_id(self) -> str:
@@ -387,6 +389,7 @@ class SessionAuditCoordinator(TargetCancellationMixin):
                         raise ValueError("finish status and reason must be non-empty")
                     future = _FinishFuture()
                     self._finish_future = future
+                    self._publish_shutdown_finish_started()
                     self._lifecycle = SessionLifecycle.FINISHING
                     self._prune_completed_admissions()
                     reservations = tuple(self._admissions.values())
@@ -517,6 +520,7 @@ class SessionAuditCoordinator(TargetCancellationMixin):
                 committed_thread_ids=self._committed_terminal_threads,
                 status=status,
                 reason=reason,
+                shutdown_admission=self._shutdown_admission(),
             )
             receipt = await self._append_locked(records)
             return receipt.ack

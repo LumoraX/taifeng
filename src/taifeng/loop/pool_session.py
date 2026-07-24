@@ -36,6 +36,24 @@ class PreparedPoolSession:
     audit_state: AuditedSessionState | None
 
 
+def _bind_audited_finish_owner(
+    pool: EnginePool,
+    engine: AgentEngine,
+    state: AuditedSessionState | None,
+    session_id: str,
+) -> None:
+    """把 audited state 与唯一 EnginePool release owner 注入 Engine。"""
+    if state is None:
+        return
+
+    async def finish_owner() -> None:
+        """把 audited Shutdown 收敛委托给唯一 EnginePool owner。"""
+        await pool.release(session_id)
+
+    engine._audit_state = state  # noqa: SLF001
+    engine._audit_finish_owner = finish_owner  # noqa: SLF001
+
+
 async def prepare_pool_session(
     *,
     audit: AuditConfig | None,
@@ -134,9 +152,7 @@ async def create_started_pool_engine(
                 or pool._enable_auto_discovery  # noqa: SLF001
             ),
         )
-        if state is not None:
-            # Task 5 只注入 frozen ownership view，不改变 submit/runtime。
-            engine._audit_state = state  # type: ignore[attr-defined]  # noqa: SLF001
+        _bind_audited_finish_owner(pool, engine, state, session_id)
         # 让 engine 能在收到 RefreshSnapshot 时拉最新快照。
         engine._registry_ref = pool._registry  # type: ignore[attr-defined]  # noqa: SLF001
         # 启动期一次性 resolve engine scope，失败时由 audited finish 收敛。

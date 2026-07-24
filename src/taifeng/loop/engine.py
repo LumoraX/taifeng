@@ -55,6 +55,7 @@ from taifeng.loop.audit_mailbox import (
     handoff_accepted_user_message,
     retire_started_audited_token,
 )
+from taifeng.loop.audit_shutdown import submit_audited_shutdown
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
@@ -104,7 +105,7 @@ from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.suspend.record import SuspensionRecord
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 
     from taifeng.context.compressor import CompressionOrchestrator
     from taifeng.conversation.store import MessageStore
@@ -389,6 +390,7 @@ class AgentEngine:
         self._root_cancel: CancellationToken | None = None
         # strict audit ownership 由 EnginePool 在 actor 启动前注入；None 保持 legacy。
         self._audit_state: AuditedSessionState | None = None
+        self._audit_finish_owner: Callable[[], Awaitable[None]] | None = None
 
         # K4 入站背压：bounded submission 队列；submit() await put，满则业务侧阻塞
         # （flow control）。<=0 视为不限（保留逃生口）。
@@ -629,6 +631,15 @@ class AgentEngine:
                 return await self._submit_audited_user_message_locked(accepted)
         if self._audit_state is not None and isinstance(sub.op, CancelTurn):
             return await self._submit_audited_cancel_turn(sub)
+        if self._audit_state is not None and isinstance(sub.op, Shutdown):
+            if self._audit_finish_owner is None:
+                raise RuntimeError("audited Shutdown owner is not configured")
+            return await submit_audited_shutdown(
+                self._audit_state,
+                sub,
+                self._audited_admission_lock,
+                self._audit_finish_owner,
+            )
         await self._submissions.put(sub)
         return sub.id
 
@@ -791,7 +802,13 @@ class AgentEngine:
             lifecycle = await self._audit_state.coordinator.close_intake()
             if lifecycle is SessionLifecycle.CLOSED or self._audited_shutdown_enqueued:
                 return
-            await self._submissions.put(Submission(op=Shutdown()))
+            shutdown_id = self._audit_state.coordinator.shutdown_submission_id
+            shutdown = (
+                Submission(id=shutdown_id, op=Shutdown())
+                if shutdown_id is not None
+                else Submission(op=Shutdown())
+            )
+            await self._submissions.put(shutdown)
             self._audited_shutdown_enqueued = True
 
     # -----------------------------------------------------------------
