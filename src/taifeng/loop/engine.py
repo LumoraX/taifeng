@@ -55,7 +55,7 @@ from taifeng.loop.audit_mailbox import (
     handoff_accepted_user_message,
     retire_started_audited_token,
 )
-from taifeng.loop.audit_shutdown import submit_audited_shutdown
+from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shutdown
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
@@ -391,7 +391,6 @@ class AgentEngine:
         # strict audit ownership 由 EnginePool 在 actor 启动前注入；None 保持 legacy。
         self._audit_state: AuditedSessionState | None = None
         self._audit_finish_owner: Callable[[], Awaitable[None]] | None = None
-
         # K4 入站背压：bounded submission 队列；submit() await put，满则业务侧阻塞
         # （flow control）。<=0 视为不限（保留逃生口）。
         self._submissions: asyncio.Queue[Submission | AcceptedUserMessage] = asyncio.Queue(
@@ -454,7 +453,6 @@ class AgentEngine:
     # -----------------------------------------------------------------
     # Public API
     # -----------------------------------------------------------------
-
     @property
     def thread_id(self) -> str:
         return self._thread_id
@@ -632,14 +630,8 @@ class AgentEngine:
         if self._audit_state is not None and isinstance(sub.op, CancelTurn):
             return await self._submit_audited_cancel_turn(sub)
         if self._audit_state is not None and isinstance(sub.op, Shutdown):
-            if self._audit_finish_owner is None:
-                raise RuntimeError("audited Shutdown owner is not configured")
             return await submit_audited_shutdown(
-                self._audit_state,
-                sub,
-                self._audited_admission_lock,
-                self._audit_finish_owner,
-            )
+                self._audit_state, sub, self._audited_admission_lock, self._audit_finish_owner)
         await self._submissions.put(sub)
         return sub.id
 
@@ -802,19 +794,11 @@ class AgentEngine:
             lifecycle = await self._audit_state.coordinator.close_intake()
             if lifecycle is SessionLifecycle.CLOSED or self._audited_shutdown_enqueued:
                 return
-            shutdown_id = self._audit_state.coordinator.shutdown_submission_id
-            shutdown = (
-                Submission(id=shutdown_id, op=Shutdown())
-                if shutdown_id is not None
-                else Submission(op=Shutdown())
-            )
-            await self._submissions.put(shutdown)
+            await self._submissions.put(shutdown_submission(self._audit_state))
             self._audited_shutdown_enqueued = True
-
     # -----------------------------------------------------------------
     # Instructions: emit bridge + engine scope warmup
     # -----------------------------------------------------------------
-
     # event kind → EventMsg 子类映射（resolver 用字符串 kind 触发；engine 包成 EventMsg）
     _INSTRUCTION_KIND_TO_MSG: dict[str, type] = {
         "instruction_fetched": InstructionFetched,
@@ -1246,7 +1230,6 @@ class AgentEngine:
                 self._audited_mailbox,
             )
         cancel.cancel()
-        # R4:任何退出路径统一取消 TTL，避免孤儿定时器向无人消费的队列 submit。
         self._cancel_ttl_timers()
         actor_cancellation = await self._converge_operations()
         spawn_cancellation = await self._spawn.converge_owned_tasks()

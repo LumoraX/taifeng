@@ -83,9 +83,11 @@ async def submit_audited_shutdown(
     state: AuditedSessionState,
     submission: Submission,
     admission_lock: asyncio.Lock,
-    finish_owner: Callable[[], Awaitable[None]],
+    finish_owner: Callable[[], Awaitable[None]] | None,
 ) -> str:
     """owned operation 不让 raw caller cancellation 截断 finish/close。"""
+    if finish_owner is None:
+        raise RuntimeError("audited Shutdown owner is not configured")
     result, cancellation = await _await_owned(
         _submit_shutdown(state, submission, admission_lock, finish_owner),
         name=f"audit-shutdown:{state.coordinator.session_id}:{submission.id}",
@@ -95,4 +97,14 @@ async def submit_audited_shutdown(
     return result
 
 
-__all__ = ["submit_audited_shutdown"]
+def shutdown_submission(state: AuditedSessionState) -> Submission:
+    """复用 durable acceptance id 构造 pool-owned shutdown submission。"""
+    submission_id = state.coordinator.shutdown_submission_id
+    return (
+        Submission(id=submission_id, op=Shutdown())
+        if submission_id is not None
+        else Submission(op=Shutdown())
+    )
+
+
+__all__ = ["shutdown_submission", "submit_audited_shutdown"]
