@@ -34,7 +34,9 @@ if TYPE_CHECKING:
     from taifeng.conversation.journal.materialization import ProjectionFileIdentity
     from taifeng.conversation.models import ResponseItem
     from taifeng.llm.client import ModelClientSession
+    from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.cancellation import CancellationToken
+    from taifeng.loop.engine import AgentEngine
 
 
 class _BlockingObservedClient(AttemptObservableModelClient):
@@ -114,6 +116,35 @@ class _ObservedJournalCore:
         await self.inner.close_session(lease)
 
 
+class _ProjectionGate:
+    """在第二次 projection 写入前建立确定竞态窗口。"""
+
+    def __init__(self, store: JsonlMessageStore) -> None:
+        """保存真实 projection 方法并安装可控 gate。"""
+        self.calls = 0
+        self.entered = anyio.Event()
+        self.allow = anyio.Event()
+        self._original = store.append_projection_batch
+        store.append_projection_batch = MethodType(  # type: ignore[method-assign]
+            self._pause_second_projection,
+            store,
+        )
+
+    async def _pause_second_projection(
+        self,
+        _store: JsonlMessageStore,
+        thread_id: str,
+        items: list[ResponseItem],
+        expected_identity: ProjectionFileIdentity,
+    ) -> None:
+        """第二次 accepted item 物化前等待测试放行。"""
+        self.calls += 1
+        if self.calls == 2:
+            self.entered.set()
+            await self.allow.wait()
+        await self._original(thread_id, items, expected_identity)
+
+
 async def _wait_until(predicate: object) -> None:
     """在测试 deadline 内等待同步谓词成立。"""
     assert callable(predicate)
@@ -122,37 +153,19 @@ async def _wait_until(predicate: object) -> None:
             await anyio.lowlevel.checkpoint()
 
 
-@pytest.mark.asyncio
-async def test_real_pool_release_waits_for_accepted_application_and_orders_journal(
+def _build_release_scenario(
     tmp_path: Path,
-) -> None:
-    """release 必须等 accepted projection 收敛后才 terminal/close。"""
+) -> tuple[
+    JsonlSessionJournalCore,
+    _ObservedJournalCore,
+    EnginePool,
+    _ProjectionGate,
+]:
+    """构建使用真实 Journal、projection store 与 release 的场景。"""
     real_core = JsonlSessionJournalCore(tmp_path / "journal")
     core = _ObservedJournalCore(real_core)
     store = JsonlMessageStore(tmp_path / "threads")
-    second_projection_entered = anyio.Event()
-    allow_second_projection = anyio.Event()
-    projection_calls = 0
-    original_projection = store.append_projection_batch
-
-    async def pause_second_projection(
-        _store: JsonlMessageStore,
-        thread_id: str,
-        items: list[ResponseItem],
-        expected_identity: ProjectionFileIdentity,
-    ) -> None:
-        """在第二个 accepted item 的物化写入前建立确定竞态窗口。"""
-        nonlocal projection_calls
-        projection_calls += 1
-        if projection_calls == 2:
-            second_projection_entered.set()
-            await allow_second_projection.wait()
-        await original_projection(thread_id, items, expected_identity)
-
-    store.append_projection_batch = MethodType(  # type: ignore[method-assign]
-        pause_second_projection,
-        store,
-    )
+    gate = _ProjectionGate(store)
     pool = EnginePool(
         skill_registry=_Registry(),  # type: ignore[arg-type]
         model_client=_BlockingObservedClient(),
@@ -167,23 +180,26 @@ async def test_real_pool_release_waits_for_accepted_application_and_orders_journ
             max_total_attachment_bytes=4096,
         ),
     )
-    session_id = "ses_release_queue"
-    engine = await pool.get_or_create(
-        session_id=session_id,
-        entry_skill_id="entry",
-    )
-    state = pool._audit_sessions[session_id]  # noqa: SLF001
-    first_id = await engine.submit(UserMessage(text="first accepted"))
-    await _wait_until(lambda: projection_calls == 1)
-    second_id = await engine.submit(UserMessage(text="second accepted"))
-    await second_projection_entered.wait()
+    return real_core, core, pool, gate
 
+
+async def _begin_release_and_assert_application_convergence(
+    *,
+    pool: EnginePool,
+    session_id: str,
+    engine: AgentEngine,
+    state: AuditedSessionState,
+    core: _ObservedJournalCore,
+    real_core: JsonlSessionJournalCore,
+    gate: _ProjectionGate,
+) -> asyncio.Task[None]:
+    """验证 release 等待 application 收敛且 FINISHING 拒绝新输入。"""
     release = asyncio.create_task(pool.release(session_id))
     await anyio.sleep(0.05)
     assert not release.done()
     assert not core.terminal_entered.is_set()
 
-    allow_second_projection.set()
+    gate.allow.set()
     await core.terminal_entered.wait()
     assert state.coordinator.snapshot().accepted_work_ids == ()
     assert len(engine._history) == 2  # noqa: SLF001
@@ -195,10 +211,17 @@ async def test_real_pool_release_waits_for_accepted_application_and_orders_journ
     with pytest.raises(SessionFinishingError):
         await engine.submit(UserMessage(text="late finishing"))
     assert [item async for item in real_core.load(session_id)] == before_late
+    return release
 
-    core.allow_terminal.set()
-    await release
-    committed = [item async for item in real_core.load(session_id)]
+
+def _assert_exact_committed_journal(
+    committed: list[JournalEnvelope],
+    *,
+    first_id: str,
+    second_id: str,
+    thread_id: str,
+) -> None:
+    """断言两个 accepted submission 与 terminal 的精确 Journal 序列。"""
     assert [item.record_type for item in committed] == [
         "session_started",
         "thread_created",
@@ -222,8 +245,45 @@ async def test_real_pool_release_waits_for_accepted_application_and_orders_journ
         assert batch[2].record_id == (
             f"{submission_id}:submission_applied:none:0"
         )
-    assert committed[-2].thread_id == engine.thread_id
+    assert committed[-2].thread_id == thread_id
     assert committed[-1].record_type == "session_ended"
+
+
+@pytest.mark.asyncio
+async def test_real_pool_release_waits_for_accepted_application_and_orders_journal(
+    tmp_path: Path,
+) -> None:
+    """release 必须等 accepted projection 收敛后才 terminal/close。"""
+    real_core, core, pool, gate = _build_release_scenario(tmp_path)
+    session_id = "ses_release_queue"
+    engine = await pool.get_or_create(
+        session_id=session_id,
+        entry_skill_id="entry",
+    )
+    state = pool._audit_sessions[session_id]  # noqa: SLF001
+    first_id = await engine.submit(UserMessage(text="first accepted"))
+    await _wait_until(lambda: gate.calls == 1)
+    second_id = await engine.submit(UserMessage(text="second accepted"))
+    await gate.entered.wait()
+    release = await _begin_release_and_assert_application_convergence(
+        pool=pool,
+        session_id=session_id,
+        engine=engine,
+        state=state,
+        core=core,
+        real_core=real_core,
+        gate=gate,
+    )
+
+    core.allow_terminal.set()
+    await release
+    committed = [item async for item in real_core.load(session_id)]
+    _assert_exact_committed_journal(
+        committed,
+        first_id=first_id,
+        second_id=second_id,
+        thread_id=engine.thread_id,
+    )
     assert state.coordinator.snapshot().accepted_work_ids == ()
     assert core.close_calls == 1
 
