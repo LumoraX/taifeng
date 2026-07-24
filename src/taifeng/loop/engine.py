@@ -31,9 +31,14 @@ from taifeng.instructions.types import (
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
+    InvalidAuditedSubmissionError,
     admit_user_message,
+    handoff_accepted_user_message,
     prepare_user_message,
+    reject_invalid_user_message,
+    user_message_input_descriptor_hash,
 )
+from taifeng.loop.audit_lifecycle import SessionLifecycle
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
     EngineLog,
@@ -381,6 +386,8 @@ class AgentEngine:
         self._all_subs: list[_Subscriber] = []
         self._pending: dict[str, _PendingTurn] = {}
         self._running = False
+        self._actor_terminated = False
+        self._audited_shutdown_enqueued = False
         # 跨 turn 持久化的 history view（用于复用 + cache）
         # 冷加载（resume）场景：先把 raw transcript 重建为与热内存等价的逻辑 history
         # （折叠压缩区间、截断 rewind/rollback 被回滚的尾段），再推导 rewind 节点表。
@@ -583,7 +590,23 @@ class AgentEngine:
         """业务侧入队接口。返回 submission_id。"""
         sub = Submission(op=op)
         if self._audit_state is not None and isinstance(sub.op, UserMessage):
-            prepared = prepare_user_message(self._audit_state, sub)
+            state = self._audit_state
+            state.coordinator.ensure_intake_open()
+            descriptor_hash = user_message_input_descriptor_hash(sub)
+            prepared = None
+            with suppress(TypeError, ValueError):
+                prepared = prepare_user_message(state, sub)
+            if prepared is None:
+                async with self._audited_admission_lock:
+                    await reject_invalid_user_message(
+                        state,
+                        submission_id=sub.id,
+                        descriptor_hash=descriptor_hash,
+                    )
+                raise InvalidAuditedSubmissionError(
+                    sub.id,
+                    descriptor_hash,
+                ) from None
             async with self._audited_admission_lock:
                 accepted = prepared.accept(self._next_audited_turn_index)
                 return await self._submit_audited_user_message_locked(accepted)
@@ -610,7 +633,12 @@ class AgentEngine:
                 self._next_audited_turn_index,
                 sub.accepted_turn_index + 1,
             )
-            await self._submissions.put(admission)
+            await handoff_accepted_user_message(
+                self._audit_state,
+                self._submissions,
+                admission,
+                actor_terminated=self._actor_terminated,
+            )
         return sub.id
 
     def _new_subscriber(self) -> _Subscriber:
@@ -685,7 +713,16 @@ class AgentEngine:
             yield env.event
 
     async def shutdown(self) -> None:
-        await self.submit(Shutdown())
+        """请求 actor 收敛；audit path 先与 admission 串行关闭 intake。"""
+        if self._audit_state is None:
+            await self.submit(Shutdown())
+            return
+        async with self._audited_admission_lock:
+            lifecycle = await self._audit_state.coordinator.close_intake()
+            if lifecycle is SessionLifecycle.CLOSED or self._audited_shutdown_enqueued:
+                return
+            await self._submissions.put(Submission(op=Shutdown()))
+            self._audited_shutdown_enqueued = True
 
     # -----------------------------------------------------------------
     # Instructions: emit bridge + engine scope warmup
@@ -1110,6 +1147,7 @@ class AgentEngine:
     ) -> None:
         """按原顺序收敛 actor、operation、持久化 flush 与订阅者终态。"""
         self._running = False
+        self._actor_terminated = True
         cancel.cancel()
         # R4:任何退出路径(Shutdown / root-cancel break / 异常)统一取消全部
         # TTL 定时器——孤儿定时器到期后会向无人消费的队列 submit(可能永久阻塞)
@@ -1287,7 +1325,7 @@ class AgentEngine:
                     )
                     continue
                 if self._is_queued_user_message(sub):
-                    self._start_queued_user_message(sub, cancel)
+                    await self._start_queued_user_message(sub, cancel)
                     continue
         finally:
             await self._finalize_run_lifecycle(
@@ -1302,18 +1340,27 @@ class AgentEngine:
         """统一识别 legacy UserMessage 与 durable accepted token。"""
         return isinstance(sub, AcceptedUserMessage) or isinstance(sub.op, UserMessage)
 
-    def _start_queued_user_message(
+    async def _start_queued_user_message(
         self,
         sub: Submission | AcceptedUserMessage,
         root_cancel: CancellationToken,
     ) -> None:
         """按 queue item 类型选择 durable 或 legacy turn 入口。"""
-        operation = (
-            self._run_audited_turn_for(sub, root_cancel)
-            if isinstance(sub, AcceptedUserMessage)
-            else self._run_turn_for(sub, root_cancel)
-        )
-        self._start_operation(operation, name=f"turn:{sub.id}")
+        if not isinstance(sub, AcceptedUserMessage):
+            self._start_operation(
+                self._run_turn_for(sub, root_cancel),
+                name=f"turn:{sub.id}",
+            )
+            return
+        started = asyncio.Event()
+
+        async def run_owned() -> None:
+            """在通知 actor 后执行已有 accepted-work finally ownership。"""
+            started.set()
+            await self._run_audited_turn_for(sub, root_cancel)
+
+        self._start_operation(run_owned(), name=f"turn:{sub.id}")
+        await started.wait()
 
     async def _run_audited_turn_for(
         self,
@@ -1323,6 +1370,7 @@ class AgentEngine:
         """应用 ack conversation envelope，并始终退休 accepted-work ownership。"""
         try:
             assert self._audit_state is not None
+            await self._audit_state.coordinator.ensure_effect_allowed()
             try:
                 item, conversation_envelopes = token.validated_application()
             except BaseException as error:

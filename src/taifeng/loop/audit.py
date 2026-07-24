@@ -240,17 +240,7 @@ class SessionAuditCoordinator:
         durable_accept: Callable[[], Awaitable[None]],
     ) -> AcceptedWork:
         """shared lock 内登记 reservation，锁外 accept，再回锁结算。"""
-        if not work_id:
-            raise ValueError("work_id must be non-empty")
-        async with self._lifecycle_lock:
-            if self._lifecycle is not SessionLifecycle.OPEN:
-                raise SessionFinishingError(self.session_id, self._lifecycle)
-            self._raise_if_frozen()
-            self._prune_completed_admissions()
-            if work_id in self._admissions:
-                raise ValueError(f"work already accepted: {work_id}")
-            reservation = _AdmissionReservation(work_id)
-            self._admissions[work_id] = reservation
+        reservation = await self._reserve_admission(work_id)
         try:
             await durable_accept()
         except BaseException:
@@ -267,6 +257,50 @@ class SessionAuditCoordinator:
                 await work.complete()
             raise
         return work
+
+    async def reject_work(
+        self,
+        work_id: str,
+        durable_reject: Callable[[], Awaitable[None]],
+    ) -> None:
+        """在 OPEN 内登记 rejection，使 finish 等待其 durable 结果后再封口。"""
+        reservation = await self._reserve_admission(work_id)
+        try:
+            await durable_reject()
+        finally:
+            await self._settle_admission(reservation, accepted=False)
+
+    async def _reserve_admission(self, work_id: str) -> _AdmissionReservation:
+        """在 shared lifecycle lock 内占用唯一 submission identity。"""
+        if not work_id:
+            raise ValueError("work_id must be non-empty")
+        async with self._lifecycle_lock:
+            if self._lifecycle is not SessionLifecycle.OPEN:
+                raise SessionFinishingError(self.session_id, self._lifecycle)
+            self._raise_if_frozen()
+            self._prune_completed_admissions()
+            if work_id in self._admissions:
+                raise ValueError(f"work already accepted: {work_id}")
+            reservation = _AdmissionReservation(work_id)
+            self._admissions[work_id] = reservation
+        return reservation
+
+    def ensure_intake_open(self) -> None:
+        """在首个 await 前让 FINISHING/CLOSED 优先于输入 canonical 校验。"""
+        if self._lifecycle is not SessionLifecycle.OPEN:
+            raise SessionFinishingError(self.session_id, self._lifecycle)
+        self._raise_if_frozen()
+
+    async def close_intake(self) -> SessionLifecycle:
+        """与 admission 共锁地关闭新 intake，已登记 reservation 继续收敛。"""
+        lifecycle: SessionLifecycle | None = None
+        with anyio.CancelScope(shield=True):
+            async with self._lifecycle_lock:
+                if self._lifecycle is SessionLifecycle.OPEN:
+                    self._lifecycle = SessionLifecycle.FINISHING
+                lifecycle = self._lifecycle
+        assert lifecycle is not None
+        return lifecycle
 
     async def _settle_admission(
         self,

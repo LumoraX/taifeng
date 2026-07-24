@@ -254,6 +254,7 @@ async def _engine_with_audit(
     model_client: object | None = None,
     store_override: JsonlMessageStore | None = None,
     finish_timeout: float = 30.0,
+    submission_queue_size: int = 256,
 ) -> tuple[AgentEngine, SessionAuditCoordinator, JsonlSessionJournalCore]:
     """使用真实 Engine、Coordinator、Journal 和 projector 建立审计会话。"""
     registry = await FilesystemSkillRegistry.load(skills_dir)
@@ -305,6 +306,7 @@ async def _engine_with_audit(
         store=store,
         thread_id=thread_id,
         session_id=session_id,
+        submission_queue_size=submission_queue_size,
     )
     engine._audit_state = SimpleNamespace(  # type: ignore[attr-defined]  # noqa: SLF001
         thread_id=thread_id,

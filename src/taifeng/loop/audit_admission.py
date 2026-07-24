@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 import anyio
 
-from taifeng.conversation.journal.canonical import model_canonical_data
+from taifeng.conversation.journal.canonical import (
+    canonical_hash,
+    model_canonical_data,
+)
 from taifeng.conversation.journal.errors import JournalIntegrityError
 from taifeng.conversation.journal.framing import validate_envelope_chain
 from taifeng.conversation.journal.models import (
@@ -22,8 +26,10 @@ from taifeng.conversation.journal.records import (
     ConversationItemV1,
     JournalIdentities,
     JournalRecordFactory,
+    StableErrorV1,
     SubmissionAcceptedV1,
     SubmissionAppliedV1,
+    SubmissionRejectedV1,
     conversation_item_record,
     deserialize_response_item,
     record_id,
@@ -62,6 +68,27 @@ class AuditedAdmissionState(Protocol):
         """返回 submission 附件总上限。"""
 
 
+class AcceptedUserMessageSink(Protocol):
+    """accepted token handoff 使用的最小有界 queue 协议。"""
+
+    async def put(self, item: AcceptedUserMessage) -> None:
+        """等待 queue 明确取得 token ownership。"""
+
+
+class InvalidAuditedSubmissionError(ValueError):
+    """非法 audited UserMessage 已 durable 拒绝。"""
+
+    code = "invalid_audited_user_message"
+
+    def __init__(self, submission_id: str, descriptor_hash: str) -> None:
+        """仅暴露稳定 identity/hash，不保留原始异常或输入。"""
+        super().__init__(
+            f"{self.code}: submission={submission_id}, descriptor={descriptor_hash}"
+        )
+        self.submission_id = submission_id
+        self.descriptor_hash = descriptor_hash
+
+
 @dataclass(frozen=True, slots=True)
 class AuditedUserMessageSubmission:
     """审计专用的完整 frozen submission 与首次 admission turn 事实。"""
@@ -98,6 +125,15 @@ class _PreparedUserMessage:
     submitted_at: datetime
     text: str
     attachments: tuple[AttachmentV1, ...]
+
+    def __post_init__(self) -> None:
+        """拒绝 dataclass 注解不能在运行期阻止的非 V1 值。"""
+        if type(self.submission_id) is not str or not self.submission_id:
+            raise ValueError("submission_id must be a non-empty string")
+        if type(self.text) is not str:
+            raise TypeError("UserMessage text must be a string")
+        if any(type(attachment) is not AttachmentV1 for attachment in self.attachments):
+            raise TypeError("attachments must contain only AttachmentV1 values")
 
     def accept(self, turn_index: int) -> AuditedUserMessageSubmission:
         """在 admission 顺序点绑定唯一 turn index。"""
@@ -268,6 +304,10 @@ def _validated_attachments(
     state: AuditedAdmissionState,
 ) -> tuple[AttachmentV1, ...]:
     """把自由 attachment mapping 收敛为 canonical V1 DTO 并校验内容上限。"""
+    if type(op.attachments) is not list:
+        raise TypeError("UserMessage attachments must be a list")
+    if any(type(attachment) is not dict for attachment in op.attachments):
+        raise TypeError("UserMessage attachments must contain plain mappings")
     attachments = tuple(
         AttachmentV1.model_validate(attachment)
         for attachment in op.attachments
@@ -278,6 +318,64 @@ def _validated_attachments(
         max_total_bytes=state.max_total_attachment_bytes,
     )
     return attachments
+
+
+def _safe_input_value(
+    value: object,
+    *,
+    active: set[int],
+    depth: int,
+) -> object:
+    """生成只用于 hash 的 bounded 安全值，不调用任意对象 repr/序列化钩子。"""
+    value_type = type(value)
+    if value is None or value_type in (bool, int, str):
+        return value
+    if value_type is float:
+        assert isinstance(value, float)
+        return value if math.isfinite(value) else {"invalid": "non_finite_float"}
+    if depth >= 32:
+        return {"invalid": "depth_limit"}
+    if value_type not in (list, dict):
+        return {"invalid": "unsupported_value"}
+    identity = id(value)
+    if identity in active:
+        return {"invalid": "cycle"}
+    active.add(identity)
+    try:
+        if value_type is list:
+            assert isinstance(value, list)
+            return [
+                _safe_input_value(item, active=active, depth=depth + 1)
+                for item in value
+            ]
+        assert isinstance(value, dict)
+        if any(type(key) is not str for key in value):
+            return {"invalid": "non_string_mapping_key", "entry_count": len(value)}
+        return {
+            key: _safe_input_value(item, active=active, depth=depth + 1)
+            for key, item in value.items()
+        }
+    finally:
+        active.remove(identity)
+
+
+def user_message_input_descriptor_hash(submission: Submission) -> str:
+    """对完整自由输入构造 deterministic hash，只持久化 digest。"""
+    if not isinstance(submission.op, UserMessage):
+        raise TypeError("input descriptor requires UserMessage")
+    descriptor = {
+        "schema": "audited_user_message_input_v1",
+        "submission_id": submission.id,
+        "input": _safe_input_value(
+            {
+                "text": submission.op.text,
+                "attachments": submission.op.attachments,
+            },
+            active=set(),
+            depth=0,
+        ),
+    }
+    return canonical_hash(descriptor)
 
 
 def prepare_user_message(
@@ -295,6 +393,65 @@ def prepare_user_message(
         text=submission.op.text,
         attachments=_validated_attachments(submission.op, state),
     )
+
+
+def _submission_rejected_record(
+    state: AuditedAdmissionState,
+    *,
+    submission_id: str,
+    descriptor_hash: str,
+) -> JournalRecord:
+    """构造不含非法原文、repr 或 traceback 的唯一 rejection record。"""
+    error = StableErrorV1(
+        code=InvalidAuditedSubmissionError.code,
+        class_name="InvalidAuditedSubmissionError",
+        failure_class="input_validation",
+        descriptor_hash=descriptor_hash,
+        retryable=False,
+    )
+    factory = JournalRecordFactory(
+        session_id=state.coordinator.session_id,
+        actor=ActorRef(kind="user", source="user"),
+        identities=JournalIdentities(
+            session_id=state.coordinator.session_id,
+            thread_id=state.thread_id,
+            submission_id=submission_id,
+        ),
+    )
+    return factory.build(
+        operation_id=submission_id,
+        record_type="submission_rejected",
+        payload=SubmissionRejectedV1(
+            op_kind="user_message",
+            stable_error=error,
+            input_descriptor_hash=descriptor_hash,
+        ),
+        submission_id=submission_id,
+        thread_id=state.thread_id,
+    )
+
+
+async def reject_invalid_user_message(
+    state: AuditedAdmissionState,
+    *,
+    submission_id: str,
+    descriptor_hash: str,
+) -> None:
+    """durable 写安全 rejection；写失败仍冻结。"""
+    record = _submission_rejected_record(
+        state,
+        submission_id=submission_id,
+        descriptor_hash=descriptor_hash,
+    )
+
+    async def durable_reject() -> None:
+        try:
+            await state.coordinator.append(record)
+        except BaseException as error:
+            state.coordinator.freeze(error)
+            raise
+
+    await state.coordinator.reject_work(submission_id, durable_reject)
 
 
 def _submission_records(
@@ -405,11 +562,60 @@ async def admit_user_message(
     return token
 
 
+def _handoff_failure() -> StableErrorV1:
+    """返回 ack 后内存 ownership 无法转移的稳定恢复原因。"""
+    return StableErrorV1(
+        code="accepted_work_handoff_failed",
+        class_name="AcceptedWorkHandoffFailure",
+        failure_class="lifecycle",
+        retryable=False,
+    )
+
+
+async def _fail_accepted_handoff(
+    state: AuditedAdmissionState,
+    token: AcceptedUserMessage,
+    error: BaseException,
+) -> None:
+    """冻结、shielded 退休未交付 work，并保留 fatal/cancel 类型。"""
+    frozen = state.coordinator.freeze(_handoff_failure())
+    with anyio.CancelScope(shield=True):
+        await token.accepted_work.complete()
+    if isinstance(
+        error,
+        (KeyboardInterrupt, SystemExit, anyio.get_cancelled_exc_class()),
+    ):
+        raise error
+    raise frozen from None
+
+
+async def handoff_accepted_user_message(
+    state: AuditedAdmissionState,
+    sink: AcceptedUserMessageSink,
+    token: AcceptedUserMessage,
+    *,
+    actor_terminated: bool,
+) -> None:
+    """把 definite accepted token 唯一交给 queue，失败则 recovery-required。"""
+    try:
+        if actor_terminated:
+            raise RuntimeError("audited actor terminated")
+        await state.coordinator.ensure_effect_allowed()
+        await sink.put(token)
+    except BaseException as error:
+        await _fail_accepted_handoff(state, token, error)
+
+
 __all__ = [
     "AcceptedUserMessage",
+    "AcceptedUserMessageSink",
     "AuditedAdmissionState",
     "AuditedUserMessageSubmission",
+    "InvalidAuditedSubmissionError",
     "ReplayedUserMessage",
     "admit_user_message",
+    "handoff_accepted_user_message",
     "prepare_user_message",
+    "reject_invalid_user_message",
+    "user_message_input_descriptor_hash",
 ]
