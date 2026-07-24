@@ -22,13 +22,17 @@ from taifeng.conversation.journal import (
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.projector import JournalConversationProjector
 from taifeng.conversation.transcript import JsonlMessageStore
-from taifeng.llm.providers.sim import SimClient
+from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.loop.audit import (
     AuditHealth,
     SessionAuditCoordinator,
     SessionAuditFrozenError,
 )
-from taifeng.loop.audit_admission import admit_user_message
+from taifeng.loop.audit_admission import (
+    AcceptedUserMessage,
+    ReplayedUserMessage,
+    admit_user_message,
+)
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.submission import Submission, UserMessage
@@ -456,17 +460,114 @@ async def test_same_logical_submission_retries_with_exact_idempotent_ack(
     state = engine._audit_state  # type: ignore[attr-defined]  # noqa: SLF001
 
     first = await admit_user_message(state, submission, turn_index=0)
+    assert isinstance(first, AcceptedUserMessage)
     await first.accepted_work.complete()
     second = await admit_user_message(state, submission, turn_index=0)
 
+    assert isinstance(second, ReplayedUserMessage)
     assert second.ack == first.ack
-    assert second.conversation_envelopes == first.conversation_envelopes
+    assert second.envelopes == first.envelopes
     committed = [envelope async for envelope in core.load("ses_audit_submission")]
     assert len(committed) == 6
     assert ConversationItemV1.model_validate(committed[4].payload).created_at == submitted_at
     assert coordinator.expected_seq == first.ack.last_seq
     assert coordinator.health is AuditHealth.HEALTHY
-    await second.accepted_work.complete()
+    assert coordinator.snapshot().accepted_work_ids == ()
+
+
+@pytest.mark.anyio
+async def test_completed_actor_submission_replay_is_a_noop(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """真实 actor 完成后重放完整 frozen Submission 不得再次入队或执行。"""
+    submission = Submission(
+        id="sub_completed_replay",
+        submitted_at=datetime(2026, 7, 24, 9, 15, tzinfo=UTC),
+        op=UserMessage(text="exact replay"),
+    )
+    client = SimClient(turns=[SimTurn(text="first and only response")])
+    engine, coordinator, core = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=client,
+    )
+    cancel = CancellationToken(name="test-root")
+    actor = asyncio.create_task(engine.run(cancel))
+    try:
+        first_id = await engine._submit_frozen_submission(  # noqa: SLF001
+            submission,
+            accepted_turn_index=0,
+        )
+        with anyio.fail_after(2):
+            while (
+                coordinator.snapshot().accepted_work_ids
+                or engine._turn_index == 0  # noqa: SLF001
+            ):
+                await anyio.lowlevel.checkpoint()
+
+        history = tuple(engine._history)  # noqa: SLF001
+        projection = engine._audit_state.projector.state(engine.thread_id)  # type: ignore[attr-defined]  # noqa: SLF001
+        projected_seq = projection.projected_seq
+        committed = [
+            envelope async for envelope in core.load("ses_audit_submission")
+        ]
+        assert first_id == "sub_completed_replay"
+        assert len(client.ledger.requests()) == 1
+        assert engine._submissions.empty()  # noqa: SLF001
+
+        second_id = await engine._submit_frozen_submission(  # noqa: SLF001
+            submission,
+            accepted_turn_index=0,
+        )
+
+        assert second_id == first_id
+        assert engine._submissions.empty()  # noqa: SLF001
+        assert tuple(engine._history) == history  # noqa: SLF001
+        assert (
+            engine._audit_state.projector.state(engine.thread_id).projected_seq  # type: ignore[attr-defined]  # noqa: SLF001
+            == projected_seq
+        )
+        assert len(client.ledger.requests()) == 1
+        assert [
+            envelope async for envelope in core.load("ses_audit_submission")
+        ] == committed
+        assert [envelope.record_type for envelope in committed[3:]] == [
+            "submission_accepted",
+            "conversation_item",
+            "submission_applied",
+        ]
+        assert committed[3].payload["turn_index"] == 0
+        assert coordinator.health is AuditHealth.HEALTHY
+    finally:
+        cancel.cancel()
+        await actor
+
+
+@pytest.mark.anyio
+async def test_incomplete_accepted_submission_cannot_execute_twice(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """同 work_id 尚未 complete 时重试必须拒绝，且不生成第二份执行 token。"""
+    engine, coordinator, core = await _engine_with_audit(tmp_path, skills_dir)
+    submission = Submission(
+        id="sub_incomplete_retry",
+        submitted_at=datetime(2026, 7, 24, 9, 30, tzinfo=UTC),
+        op=UserMessage(text="still running"),
+    )
+    state = engine._audit_state  # type: ignore[attr-defined]  # noqa: SLF001
+    first = await admit_user_message(state, submission, turn_index=0)
+    assert isinstance(first, AcceptedUserMessage)
+
+    with pytest.raises(ValueError, match="work already accepted"):
+        await admit_user_message(state, submission, turn_index=0)
+
+    committed = [envelope async for envelope in core.load("ses_audit_submission")]
+    assert len(committed) == 6
+    assert coordinator.snapshot().accepted_work_ids == (submission.id,)
+    assert coordinator.health is AuditHealth.HEALTHY
+    await first.accepted_work.complete()
 
 
 def test_submission_timestamp_roundtrips_without_changing_legacy_op() -> None:

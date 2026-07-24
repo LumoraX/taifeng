@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import anyio
@@ -72,6 +73,20 @@ class _JournalAppendCore(Protocol):
         after_seq: int = 0,
     ) -> AsyncIterator[JournalEnvelope]:
         """strict 读取已 durable committed envelopes。"""
+
+
+@dataclass(frozen=True, slots=True)
+class JournalAppendReceipt:
+    """协调器在 append lock 内裁定的新提交或 historical durable receipt。"""
+
+    ack: JournalAck
+    newly_committed: bool
+
+    @property
+    def historical(self) -> bool:
+        """返回本次 ack 是否只证明此前已提交的同一批 records。"""
+        return not self.newly_committed
+
 
 class SessionAuditCoordinator:
     """串行化一个 Session 的 Journal append，并隔离其 fail-closed 状态。"""
@@ -153,7 +168,17 @@ class SessionAuditCoordinator:
         *,
         cancel: CancellationToken | None = None,
     ) -> JournalAck:
-        """串行追加 batch，只以覆盖当前 batch 的 durable ack 推进 seq。"""
+        """兼容入口：串行追加 batch 并返回原有 JournalAck。"""
+        receipt = await self.append_batch_receipt(records, cancel=cancel)
+        return receipt.ack
+
+    async def append_batch_receipt(
+        self,
+        records: Sequence[JournalRecord],
+        *,
+        cancel: CancellationToken | None = None,
+    ) -> JournalAppendReceipt:
+        """串行追加并显式返回新提交或 historical ack 的 race-free 裁定。"""
         self._raise_if_frozen()
         self._raise_if_append_sealed()
         snapshot = self._validate_records(records)
@@ -234,14 +259,15 @@ class SessionAuditCoordinator:
     async def _append_locked(
         self,
         records: tuple[JournalRecord, ...],
-    ) -> JournalAck:
+    ) -> JournalAppendReceipt:
         """在 append lock 内调用 core，并把任何 runtime 边界失败原子冻结。"""
+        expected_seq = self._expected_seq
         failure: BaseException | None = None
         try:
             ack = await self._core.append_batch(
                 records,
                 lease=self._lease,
-                expected_seq=self._expected_seq,
+                expected_seq=expected_seq,
             )
             ack = self._validate_ack(ack, records)
         except (KeyboardInterrupt, SystemExit) as error:
@@ -257,7 +283,10 @@ class SessionAuditCoordinator:
             self._raise_if_frozen()
         self._expected_seq = max(self._expected_seq, ack.last_seq)
         self._remember_terminal_threads(records)
-        return ack
+        return JournalAppendReceipt(
+            ack=ack,
+            newly_committed=ack.first_seq == expected_seq + 1,
+        )
 
     def _remember_terminal_threads(self, records: tuple[JournalRecord, ...]) -> None:
         """只在 durable ack 后登记已提交的 thread terminal，供 finish 去重。"""
@@ -549,7 +578,8 @@ class SessionAuditCoordinator:
                 status=status,
                 reason=reason,
             )
-            return await self._append_locked(records)
+            receipt = await self._append_locked(records)
+            return receipt.ack
 
     async def _settle_finish_failure(
         self,
@@ -824,6 +854,7 @@ class SessionAuditCoordinator:
 __all__ = [
     "AcceptedWork",
     "AuditHealth",
+    "JournalAppendReceipt",
     "ProjectionAuditSnapshot",
     "SessionAuditCoordinator",
     "SessionAuditFrozenError",

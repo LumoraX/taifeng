@@ -118,6 +118,38 @@ class _RecordingCore:
             self.active -= 1
 
 
+class _IdempotentRecordingCore(_RecordingCore):
+    """相同 records 总是返回首次 durable ack，模拟 core historical retry。"""
+
+    def __init__(self) -> None:
+        """初始化空 historical ack。"""
+        super().__init__()
+        self._ack: JournalAck | None = None
+
+    async def append_batch(
+        self,
+        records: tuple[JournalRecord, ...],
+        *,
+        lease: SessionLease,
+        expected_seq: int,
+    ) -> JournalAck:
+        """首次提交，后续在新 expected_seq 下返回同一历史 ack。"""
+        if self._ack is None:
+            self._ack = await super().append_batch(
+                records,
+                lease=lease,
+                expected_seq=expected_seq,
+            )
+        else:
+            self.calls.append(
+                _AppendCall(
+                    record_ids=tuple(record.record_id for record in records),
+                    expected_seq=expected_seq,
+                )
+            )
+        return self._ack
+
+
 def _coordinator(
     core: _RecordingCore,
     *,
@@ -168,6 +200,25 @@ async def test_batch_advances_expected_seq_only_from_covering_durable_ack() -> N
     assert ack.record_ids == ("rec_1", "rec_2")
     assert ack.last_seq == 5
     assert coordinator.expected_seq == ack.last_seq
+
+
+@pytest.mark.anyio
+async def test_append_receipt_distinguishes_new_commit_from_historical_ack() -> None:
+    """receipt 必须在 append lock 内显式区分新提交与 historical replay。"""
+    core = _IdempotentRecordingCore()
+    coordinator = _coordinator(core)
+    records = (_record("rec_1"),)
+
+    first = await coordinator.append_batch_receipt(records)
+    replay = await coordinator.append_batch_receipt(records)
+
+    assert first.newly_committed is True
+    assert first.historical is False
+    assert replay.newly_committed is False
+    assert replay.historical is True
+    assert replay.ack == first.ack
+    assert [call.expected_seq for call in core.calls] == [3, 4]
+    assert coordinator.expected_seq == 4
 
 
 @pytest.mark.anyio

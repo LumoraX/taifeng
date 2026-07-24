@@ -29,7 +29,7 @@ from taifeng.loop.submission import Submission, UserMessage
 
 if TYPE_CHECKING:
     from taifeng.conversation.journal.projector import JournalConversationProjector
-    from taifeng.loop.audit import SessionAuditCoordinator
+    from taifeng.loop.audit import JournalAppendReceipt, SessionAuditCoordinator
     from taifeng.loop.audit_lifecycle import AcceptedWork
 
 
@@ -172,6 +172,21 @@ class AcceptedUserMessage:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ReplayedUserMessage:
+    """historical durable receipt 的 no-op 结果，不能进入 actor queue。"""
+
+    submission_id: str
+    ack: JournalAck
+    envelopes: tuple[JournalEnvelope, ...]
+    op: None = None
+
+    @property
+    def id(self) -> str:
+        """返回被确认已处理的 submission identity。"""
+        return self.submission_id
+
+
 class _InvalidAcceptedUserMessageError(Exception):
     """内部 accepted token 不能证明完整 admission batch。"""
 
@@ -268,30 +283,43 @@ async def admit_user_message(
     submission: Submission,
     *,
     turn_index: int,
-) -> AcceptedUserMessage:
+) -> AcceptedUserMessage | ReplayedUserMessage:
     """在 coordinator admission lifecycle 内先 durable commit，再生成 queue token。"""
-    ack: JournalAck | None = None
+    receipt: JournalAppendReceipt | None = None
     records: tuple[JournalRecord, ...] | None = None
 
     async def durable_accept() -> None:
-        nonlocal ack, records
+        nonlocal receipt, records
         records = _submission_records(state, submission, turn_index=turn_index)
-        ack = await state.coordinator.append_batch(records)
+        receipt = await state.coordinator.append_batch_receipt(records)
 
     work = await state.coordinator.admit_work(submission.id, durable_accept)
-    assert ack is not None and records is not None
-    envelopes = await state.coordinator.load_acknowledged(ack, records)
-    token = AcceptedUserMessage(
-        submission_id=submission.id,
-        accepted_work=work,
-        ack=ack,
-        envelopes=envelopes,
-    )
     try:
+        assert receipt is not None and records is not None
+        envelopes = await state.coordinator.load_acknowledged(receipt.ack, records)
+        token = AcceptedUserMessage(
+            submission_id=submission.id,
+            accepted_work=work,
+            ack=receipt.ack,
+            envelopes=envelopes,
+        )
         token.validated_application()
     except BaseException as error:
+        await work.complete()
         raise state.coordinator.freeze(error) from None
+    if receipt.historical:
+        await work.complete()
+        return ReplayedUserMessage(
+            submission_id=token.submission_id,
+            ack=token.ack,
+            envelopes=token.envelopes,
+        )
     return token
 
 
-__all__ = ["AcceptedUserMessage", "AuditedAdmissionState", "admit_user_message"]
+__all__ = [
+    "AcceptedUserMessage",
+    "AuditedAdmissionState",
+    "ReplayedUserMessage",
+    "admit_user_message",
+]

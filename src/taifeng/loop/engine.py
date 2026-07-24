@@ -577,13 +577,28 @@ class AgentEngine:
     async def submit(self, op: Op) -> str:
         """业务侧入队接口。返回 submission_id。"""
         sub = Submission(op=op)
-        if self._audit_state is not None and isinstance(op, UserMessage):
-            accepted = await admit_user_message(
+        return await self._submit_frozen_submission(
+            sub,
+            accepted_turn_index=self._turn_index,
+        )
+
+    async def _submit_frozen_submission(
+        self,
+        sub: Submission,
+        *,
+        accepted_turn_index: int,
+    ) -> str:
+        """提交已冻结 identity，并显式保留首次 admission 的 turn 事实。"""
+        if accepted_turn_index < 0:
+            raise ValueError("accepted_turn_index must be non-negative")
+        if self._audit_state is not None and isinstance(sub.op, UserMessage):
+            admission = await admit_user_message(
                 self._audit_state,
                 sub,
-                turn_index=self._turn_index,
+                turn_index=accepted_turn_index,
             )
-            await self._submissions.put(accepted)
+            if isinstance(admission, AcceptedUserMessage):
+                await self._submissions.put(admission)
         else:
             await self._submissions.put(sub)
         return sub.id
