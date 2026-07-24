@@ -38,6 +38,10 @@ from taifeng.loop.audit_support import (
     _journal_failure,
     _projection_failure,
 )
+from taifeng.loop.audit_targets import (
+    TargetCancellationMixin,
+    TargetCancellationRegistry,
+)
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
@@ -51,7 +55,7 @@ if TYPE_CHECKING:
     )
 
 
-class SessionAuditCoordinator:
+class SessionAuditCoordinator(TargetCancellationMixin):
     """串行化一个 Session 的 Journal append，并隔离其 fail-closed 状态。"""
 
     def __init__(
@@ -81,7 +85,9 @@ class SessionAuditCoordinator:
         self._effect_gate_open = True
         self._frozen_error: SessionAuditFrozenError | None = None
         self._first_failure: StableErrorV1 | None = None
-        self._targets: dict[str, CancellationToken] = {}
+        self._target_cancellations = TargetCancellationRegistry(
+            self._session_root_cancel
+        )
         self._projections: dict[str, ProjectionAuditSnapshot] = {}
         self._lifecycle = SessionLifecycle.OPEN
         self._audit_complete: bool | None = None
@@ -623,8 +629,7 @@ class SessionAuditCoordinator:
         self._health = AuditHealth.RECOVERY_REQUIRED
         self._effect_gate_open = False
         self._session_root_cancel.cancel()
-        for target in tuple(self._targets.values()):
-            target.cancel()
+        self._target_cancellations.cancel_all()
         return frozen
 
     def _raise_if_frozen(self) -> None:
@@ -637,38 +642,6 @@ class SessionAuditCoordinator:
         frozen.__context__ = None
         frozen.__suppress_context__ = True
         raise frozen from None
-
-    def register_target(self, target_id: str) -> CancellationToken:
-        """登记 active turn token；其 child 自动形成目标取消 subtree。"""
-        self._raise_if_frozen()
-        if not target_id:
-            raise ValueError("target_id must be non-empty")
-        if target_id in self._targets:
-            raise ValueError(f"target already registered: {target_id}")
-        target = self._session_root_cancel.child(f"target:{target_id}")
-        self._targets[target_id] = target
-        return target
-
-    def unregister_target(
-        self,
-        target_id: str,
-        token: CancellationToken,
-    ) -> bool:
-        """仅当 id/token 仍对应同一 active turn 时注销，避免旧任务误删新任务。"""
-        current = self._targets.get(target_id)
-        if current is not token:
-            return False
-        self._targets.pop(target_id)
-        token._detach_from_parent()  # noqa: SLF001
-        return True
-
-    def cancel_target(self, target_id: str) -> bool:
-        """只取消目标 turn 及其 child subtree，不影响 Session root/peer target。"""
-        target = self._targets.get(target_id)
-        if target is None:
-            return False
-        target.cancel()
-        return True
 
     def mark_projection_stale(
         self,
@@ -773,7 +746,7 @@ class SessionAuditCoordinator:
                 if self._first_failure is not None
                 else None
             ),
-            active_target_ids=tuple(sorted(self._targets)),
+            active_target_ids=self._target_cancellations.active_target_ids,
             projections=tuple(
                 _copy_projection_snapshot(self._projections[thread_id])
                 for thread_id in sorted(self._projections)

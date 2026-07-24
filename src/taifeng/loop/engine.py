@@ -37,6 +37,11 @@ from taifeng.loop.audit_admission import (
     reject_invalid_user_message,
     user_message_input_descriptor_hash,
 )
+from taifeng.loop.audit_cancel import (
+    AuditedCancelTurnSubmission,
+    apply_cancel_turn,
+    finalize_cancelled_target,
+)
 from taifeng.loop.audit_history import (
     AuditedHistoryConflictError,
     audited_history_conflict_failure,
@@ -621,8 +626,57 @@ class AgentEngine:
             async with self._audited_admission_lock:
                 accepted = prepared.accept(self._next_audited_turn_index)
                 return await self._submit_audited_user_message_locked(accepted)
+        if self._audit_state is not None and isinstance(sub.op, CancelTurn):
+            return await self._submit_audited_cancel_turn(sub)
         await self._submissions.put(sub)
         return sub.id
+
+    async def _submit_audited_cancel_turn(self, sub: Submission) -> str:
+        """healthy 时 durable 收敛 CancelTurn；frozen 时仅安全取消。"""
+        assert self._audit_state is not None
+        assert isinstance(sub.op, CancelTurn)
+        state = self._audit_state
+        if not state.coordinator.effect_gate_open:
+            state.coordinator.cancel_target(sub.op.submission_id)
+            await self._emit_cancel_turn_log(
+                sub.id,
+                sub.op.submission_id,
+                result_status="safe_degraded",
+            )
+            return sub.id
+        submission = AuditedCancelTurnSubmission(
+            submission_id=sub.id,
+            target_submission_id=sub.op.submission_id,
+        )
+        async with self._audited_admission_lock:
+            result = await apply_cancel_turn(state, submission)
+        await self._emit_cancel_turn_log(
+            sub.id,
+            sub.op.submission_id,
+            result_status=result.result_status,
+        )
+        return sub.id
+
+    async def _emit_cancel_turn_log(
+        self,
+        cancel_submission_id: str,
+        target_submission_id: str,
+        *,
+        result_status: str,
+    ) -> None:
+        """通过既有 EventMsg 通道投影 CancelTurn 结果。"""
+        await self._emit(
+            EventMsg(
+                submission_id=cancel_submission_id,
+                msg=EngineLog(
+                    data={
+                        "level": "info",
+                        "message": f"cancel turn result: {result_status}",
+                        "extra": {"target_submission_id": target_submission_id},
+                    }
+                ),
+            )
+        )
 
     async def _submit_audited_user_message(
         self,
@@ -1446,13 +1500,39 @@ class AgentEngine:
         self._audit_state.coordinator.update_projection(result)
         if application_checkpoint is not None:
             application_checkpoint.succeed()
-        await self._run_turn_for(
-            _AppliedUserSubmission(
-                id=token.submission_id,
-                text=str(item.payload["text"]),
-            ),
-            root_cancel,
+        target_cancel = self._audit_state.coordinator.register_target(
+            token.submission_id
         )
+        try:
+            await self._run_turn_for(
+                _AppliedUserSubmission(
+                    id=token.submission_id,
+                    text=str(item.payload["text"]),
+                ),
+                target_cancel,
+            )
+            end_reason = self._audit_state.coordinator.target_outcome(
+                token.submission_id,
+                target_cancel,
+            )
+            if (
+                end_reason == "cancelled"
+                and self._audit_state.coordinator.target_cancel_requested(
+                    token.submission_id,
+                    target_cancel,
+                )
+            ):
+                await finalize_cancelled_target(
+                    self._audit_state,
+                    submission_id=token.submission_id,
+                    turn_index=token.accepted_turn_index,
+                    target_token=target_cancel,
+                )
+        finally:
+            self._audit_state.coordinator.unregister_target(
+                token.submission_id,
+                target_cancel,
+            )
 
     async def _run_turn_for(
         self,
@@ -1814,6 +1894,11 @@ class AgentEngine:
         fired_iteration = self._turn_index
         try:
             outcome = await runner.run()
+            if self._audit_state is not None:
+                self._audit_state.coordinator.record_target_outcome(
+                    submission_id,
+                    outcome.end_reason,
+                )
         finally:
             self._pending.pop(submission_id, None)
             self._turn_index += 1

@@ -157,6 +157,14 @@ class AcceptedUserMessage:
         return self.ack.record_ids
 
     @property
+    def accepted_turn_index(self) -> int:
+        """返回 durable acceptance 中冻结的 turn index。"""
+        accepted = SubmissionAcceptedV1.model_validate(self.envelopes[0].payload)
+        if accepted.turn_index is None:
+            raise _InvalidAcceptedUserMessageError
+        return accepted.turn_index
+
+    @property
     def conversation_envelopes(self) -> tuple[JournalEnvelope, ...]:
         """返回 projector 唯一允许消费的 acknowledged conversation envelope。"""
         return (self.envelopes[1],) if len(self.envelopes) == 3 else ()
