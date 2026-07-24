@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from taifeng.conversation.journal.models import ActorRef, JournalRecord
@@ -54,10 +55,17 @@ async def _submit_shutdown(
     """先在 admission 临界区 durable accept，再交给 pool-owned finish。"""
     record = _accepted_record(state, submission)
     async with admission_lock:
-        owner = await state.coordinator.admit_shutdown(record)
-    if owner:
+        claim = await state.coordinator.admit_shutdown(record)
+    if claim.owner:
         state.coordinator.cancel_session_root()
-        await finish_owner()
+        if claim.fatal is None:
+            await finish_owner()
+        else:
+            from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
+
+            with suppress(AuditSessionReleaseError):
+                await finish_owner()
+            raise claim.fatal
     else:
         result = await state.coordinator.wait_shutdown_finish(submission.id)
         if not result.audit_complete or not result.lease_released:

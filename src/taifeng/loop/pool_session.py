@@ -48,7 +48,7 @@ def _bind_audited_finish_owner(
 
     async def finish_owner() -> None:
         """把 audited Shutdown 收敛委托给唯一 EnginePool owner。"""
-        await pool.release(session_id)
+        await pool.release(session_id, force=True)
 
     engine._audit_state = state  # noqa: SLF001
     engine._audit_finish_owner = finish_owner  # noqa: SLF001

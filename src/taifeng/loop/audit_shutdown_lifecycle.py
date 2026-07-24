@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
 import anyio
@@ -43,6 +44,14 @@ class _CoordinatorProtocol(Protocol):
         """terminal seal 后拒绝普通 append。"""
 
 
+@dataclass(frozen=True, slots=True)
+class ShutdownAdmissionClaim:
+    """Shutdown admission 的唯一 owner 与待延迟重抛 fatal。"""
+
+    owner: bool
+    fatal: KeyboardInterrupt | SystemExit | None = None
+
+
 class ShutdownLifecycleMixin:
     """向 SessionAuditCoordinator 提供单一 Shutdown lifecycle admission。"""
 
@@ -63,7 +72,7 @@ class ShutdownLifecycleMixin:
         """返回已登记的 durable Shutdown id，供 actor EventMsg 归因。"""
         return self._shutdown_submission_id
 
-    async def admit_shutdown(self, record: JournalRecord) -> bool:
+    async def admit_shutdown(self, record: JournalRecord) -> ShutdownAdmissionClaim:
         """登记首个 Shutdown；healthy 时 durable accept，frozen 时安全降级。"""
         from taifeng.loop.audit_journal import validate_records
 
@@ -80,7 +89,7 @@ class ShutdownLifecycleMixin:
             raise ValueError("invalid Shutdown acceptance record")
         async with coordinator._lifecycle_lock:
             if self._shutdown_submission_id == record.submission_id:
-                return False
+                return ShutdownAdmissionClaim(owner=False)
             if coordinator._lifecycle is not SessionLifecycle.OPEN:
                 raise SessionFinishingError(
                     coordinator.session_id,
@@ -90,15 +99,17 @@ class ShutdownLifecycleMixin:
             self._shutdown_submission_id = record.submission_id
             self._shutdown_thread_id = record.thread_id
             if coordinator._frozen_error is not None:
-                return True
+                return ShutdownAdmissionClaim(owner=True)
             try:
                 async with coordinator._append_lock:
                     coordinator._raise_if_append_sealed()
                     receipt = await coordinator._append_locked(records)
+            except (KeyboardInterrupt, SystemExit) as fatal:
+                return ShutdownAdmissionClaim(owner=True, fatal=fatal)
             except SessionAuditFrozenError:
-                return True
+                return ShutdownAdmissionClaim(owner=True)
             self._shutdown_accepted_record_id = receipt.ack.record_ids[0]
-        return True
+        return ShutdownAdmissionClaim(owner=True)
 
     async def wait_shutdown_finish(
         self,
@@ -139,4 +150,4 @@ class ShutdownLifecycleMixin:
         )
 
 
-__all__ = ["ShutdownLifecycleMixin"]
+__all__ = ["ShutdownAdmissionClaim", "ShutdownLifecycleMixin"]
