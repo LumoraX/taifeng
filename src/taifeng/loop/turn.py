@@ -45,6 +45,7 @@ from taifeng.loop.audit_llm import (
     model_session_for_turn,
     record_model_cache_read,
 )
+from taifeng.loop.audit_tool import audited_tool_batch
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
 from taifeng.loop.event import (
@@ -1269,19 +1270,45 @@ class TurnRunner:
         def _ctx_for(call_id: str) -> ToolContext:
             return self._build_tool_context(call_id, iteration)
 
-        outcomes = await dispatch_batch(
-            requests,
-            runtime=self.tool_runtime,
-            ctx_for=_ctx_for,
-            hooks=self.hooks,
-            emit=self._emit,
-            semaphore=semaphore,
-            thread_id=self.thread_id,
-            submission_id=self.submission_id,
-            entry_skill_id=self.entry_skill.id,
-            # tool-whitelist：与本轮请求严格同源的名集（registry 过滤后）——可见才可执行
-            visible_tools=frozenset(t.name for t in tools),
-        )
+        # tool-whitelist：与本轮请求严格同源的名集（registry 过滤后）——可见才可执行
+        visible_tools = frozenset(t.name for t in tools)
+
+        def _run_dispatch() -> Any:
+            """派发本批 tool call（audit 与 legacy 复用同一并发派发器）。"""
+            return dispatch_batch(
+                requests,
+                runtime=self.tool_runtime,
+                ctx_for=_ctx_for,
+                hooks=self.hooks,
+                emit=self._emit,
+                semaphore=semaphore,
+                thread_id=self.thread_id,
+                submission_id=self.submission_id,
+                entry_skill_id=self.entry_skill.id,
+                visible_tools=visible_tools,
+            )
+
+        # audit：整批意图先于派发 durable，取消无关地把每个意图收敛为唯一终态
+        # + 唯一 function_call_output 会话项；任一 UNKNOWN 记录后冻结。fc 会话项已在
+        # §7.6 最终响应批中 durable，此处只补 fco。
+        if self.audit_state is not None:
+            fco_items = await audited_tool_batch(
+                state=self.audit_state,
+                submission_id=self.submission_id,
+                turn_index=self.turn_index,
+                iteration=iteration,
+                requests=requests,
+                registry=self.tool_runtime._registry,  # noqa: SLF001
+                run_dispatch=_run_dispatch,
+                cancel=self.cancel,
+                finalization_timeout=(
+                    self.audit_state.coordinator.finalization_timeout
+                ),
+            )
+            self.history_buffer.extend(fco_items)
+            return assistant_text, True
+
+        outcomes = await _run_dispatch()
 
         # === 阶段 3：按发起序以 (call, output) 配对写历史 ===
         # 配对追加复现今天的交错 transcript 结构（history_to_api_messages 1:1 保序），

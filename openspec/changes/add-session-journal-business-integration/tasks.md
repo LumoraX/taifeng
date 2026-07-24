@@ -67,13 +67,13 @@
 
 - [x] 8.1 Write failing tests for ToolSpec audit metadata, missing metadata rejection, hooks/permission/suspension rejection, invalid JSON, and not-offered Tool handling
 - [x] 8.2 Add backward-compatible effect kind, reconciliation, and suspension metadata; classify all built-ins allowed in strict mode
-- [ ] 8.3 Write failing tests proving ordered Tool intents are durable before dispatch for serial and parallel batches
-- [ ] 8.4 Implement strict preflight and atomic intent batch before any runtime task starts
-- [ ] 8.5 Write failing cancellation-window tests for intent-after/pre-dispatch, in-effect uncertainty, post-effect success, sibling exception, and partial completion
-- [ ] 8.6 Replace fail-fast gather with cancellation-independent ordered terminal convergence that gives every committed intent one outcome
-- [ ] 8.7 Atomically commit Tool outcomes and exactly one linked function-call-output item per call without duplicating function calls
-- [ ] 8.8 Freeze before another effect when any Tool outcome is UNKNOWN
-- [ ] 8.9 Run audited/legacy Tool tests and commit the Tool slice
+- [x] 8.3 Write failing tests proving ordered Tool intents are durable before dispatch for serial and parallel batches
+- [x] 8.4 Implement strict preflight and atomic intent batch before any runtime task starts
+- [x] 8.5 Write failing cancellation-window tests for intent-after/pre-dispatch, in-effect uncertainty, post-effect success, sibling exception, and partial completion
+- [x] 8.6 Replace fail-fast gather with cancellation-independent ordered terminal convergence that gives every committed intent one outcome
+- [x] 8.7 Atomically commit Tool outcomes and exactly one linked function-call-output item per call without duplicating function calls
+- [x] 8.8 Freeze before another effect when any Tool outcome is UNKNOWN
+- [x] 8.9 Run audited/legacy Tool tests and commit the Tool slice
 
 ## 9. Synchronous call_skill lineage
 
