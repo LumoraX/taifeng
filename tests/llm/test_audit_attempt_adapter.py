@@ -29,7 +29,7 @@ from taifeng.loop.audit_config import AttemptObservableModelClient
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from taifeng.llm.client import ModelClientSession
     from taifeng.llm.events import ResponseEvent
@@ -516,7 +516,7 @@ async def test_non_owner_exit_cannot_close_running_owner_stream(
     async def blocking_stream(
         inner_session: _DispatchSpySession,
         request: ApiRequest,
-    ) -> AsyncIterator[ResponseEvent]:
+    ) -> AsyncGenerator[ResponseEvent, None]:
         """在真实 dispatch 窗口保持 async generator 运行中。"""
         inner_session.dispatched = True
         inner_session.requests.append(request)
@@ -560,7 +560,10 @@ async def test_non_owner_exit_cannot_close_running_owner_stream(
 
     async with session as entered:
         closer = asyncio.create_task(exit_from_non_owner())
-        stream = entered.stream(_request())
+        stream = cast(
+            "AsyncGenerator[ResponseEvent, None]",
+            entered.stream(_request()),
+        )
         event = await anext(stream)
         await closer
 
