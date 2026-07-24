@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -17,6 +18,9 @@ from taifeng.conversation.journal.errors import (
 from taifeng.conversation.journal.records import StableErrorV1
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+    from typing import Any
+
     from taifeng.conversation.journal.projector import ProjectionResult
     from taifeng.loop.audit_lifecycle import SessionLifecycle
 
@@ -78,6 +82,26 @@ class _InvalidJournalAckError(Exception):
     """core 返回的 ack 不能证明当前 batch durable。"""
 
 
+async def _await_owned[T](
+    operation: Coroutine[Any, Any, T],
+    *,
+    name: str,
+) -> tuple[T, asyncio.CancelledError | None]:
+    """等待 coordinator-owned operation；caller raw cancel 只能延迟重抛。"""
+    worker = asyncio.create_task(operation, name=name)
+    cancellation: asyncio.CancelledError | None = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as error:
+            current = asyncio.current_task()
+            if current is None or current.cancelling() == 0:
+                raise
+            cancellation = cancellation or error
+            current.uncancel()
+    return worker.result(), cancellation
+
+
 def _journal_failure(error: BaseException) -> StableErrorV1:
     """把 Journal 边界异常映射为不读取原文的稳定失败 DTO。"""
     if isinstance(error, _InvalidJournalAckError):
@@ -114,6 +138,16 @@ def _projection_failure(result: ProjectionResult) -> StableErrorV1:
         class_name=result.failure_class,
         failure_class="projection",
         retryable=True,
+    )
+
+
+def _accepted_work_ownership_failure() -> StableErrorV1:
+    """返回 durable accepted work 无法安全交付时的稳定恢复原因。"""
+    return StableErrorV1(
+        code="accepted_work_handoff_failed",
+        class_name="AcceptedWorkHandoffFailure",
+        failure_class="lifecycle",
+        retryable=False,
     )
 
 

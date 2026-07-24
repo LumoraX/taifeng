@@ -37,8 +37,14 @@ from taifeng.loop.audit_admission import (
     reject_invalid_user_message,
     user_message_input_descriptor_hash,
 )
+from taifeng.loop.audit_history import (
+    AuditedHistoryConflictError,
+    audited_history_conflict_failure,
+    merge_audited_history,
+)
 from taifeng.loop.audit_lifecycle import SessionLifecycle
 from taifeng.loop.audit_mailbox import (
+    AuditedApplicationCheckpoint,
     AuditedSubmissionMailbox,
     finalize_audited_mailbox,
     handoff_accepted_user_message,
@@ -1368,47 +1374,57 @@ class AgentEngine:
             return
         if not await self._audited_mailbox.claim(sub):
             return
-        application_converged = asyncio.Event()
+        application_checkpoint = AuditedApplicationCheckpoint()
         self._start_operation(
             self._run_claimed_audited_turn(
                 sub,
                 root_cancel,
-                application_converged=application_converged,
+                application_checkpoint=application_checkpoint,
             ),
             name=f"turn:{sub.id}",
         )
-        await application_converged.wait()
+        await application_checkpoint.wait()
 
     async def _run_claimed_audited_turn(
         self,
         token: AcceptedUserMessage,
         root_cancel: CancellationToken,
         *,
-        application_converged: asyncio.Event | None = None,
+        application_checkpoint: AuditedApplicationCheckpoint | None = None,
     ) -> None:
-        """handshake 后收敛 application；outer finally 唯一退休 ownership。"""
+        """handshake 后收敛 application；失败由 actor checkpoint 单点传播。"""
+        failure: BaseException | None = None
         try:
             if not await self._audited_mailbox.start_claimed(token):
                 return
-            await self._run_audited_turn_for(
-                token,
-                root_cancel,
-                application_converged=application_converged,
-            )
+            try:
+                await self._run_audited_turn_for(
+                    token,
+                    root_cancel,
+                    application_checkpoint=application_checkpoint,
+                )
+            except BaseException as error:  # noqa: BLE001
+                failure = error
         finally:
-            if application_converged is not None:
-                application_converged.set()
             await retire_started_audited_token(
                 self._audited_mailbox,
                 token,
             )
+        if failure is None:
+            return
+        if (
+            application_checkpoint is not None
+            and application_checkpoint.fail(failure)
+        ):
+            return
+        raise failure
 
     async def _run_audited_turn_for(
         self,
         token: AcceptedUserMessage,
         root_cancel: CancellationToken,
         *,
-        application_converged: asyncio.Event | None = None,
+        application_checkpoint: AuditedApplicationCheckpoint | None = None,
     ) -> None:
         """应用 ack conversation envelope；ownership 由外层 handshake/finally 管理。"""
         assert self._audit_state is not None
@@ -1428,8 +1444,8 @@ class AgentEngine:
         except Exception as error:  # noqa: BLE001  # 普通未分类异常必须 fail closed
             raise self._audit_state.coordinator.freeze(error) from None
         self._audit_state.coordinator.update_projection(result)
-        if application_converged is not None:
-            application_converged.set()
+        if application_checkpoint is not None:
+            application_checkpoint.succeed()
         await self._run_turn_for(
             _AppliedUserSubmission(
                 id=token.submission_id,
@@ -1684,31 +1700,21 @@ class AgentEngine:
                 "expires_at": record.expires_at,
             })))
 
-    async def _build_and_run_runner(
+    def _new_turn_runner(
         self,
         submission_id: str,
         turn_cancel: CancellationToken,
         resolved_for_turn: list[ResolvedInstruction],
         *,
-        seed_pending_call_id: str | None = None,
-        cache_break_expected_reason: str | None = None,
         auto_retry_count: int = 0,
-    ) -> None:
-        """构造 TurnRunner(基于当前 self._history)→ run → 回写 engine 状态。
-
-        从 _run_turn_for 抽出，供 UserMessage turn 与 resume 续跑复用。
-        调用方负责在调用前完成 gating(user_message 落盘 / instruction resolve /
-        pre_turn hook / token 守卫)并把 pending 注册好；本方法只负责"跑一轮 + 回写"。
-
-        参数:
-            submission_id: 当前 turn 的 submission id（用于 pending 注销 / emit 归因）
-            turn_cancel: 当前 turn 的取消子 token（由调用方从 root_cancel 派生）
-            resolved_for_turn: 当前 turn 已 resolve 的 instruction 列表
-        副作用:
-            注销 self._pending[submission_id]、自增 self._turn_index、
-            回写 self._history / cache_anchor / prompt 指纹 / 压缩计数 / 会话 token。
-        """
-        runner = TurnRunner(
+    ) -> TurnRunner:
+        """从 Engine 当前快照构造单轮 runner。"""
+        pending_input = (
+            self._pending[submission_id].pending_input
+            if submission_id in self._pending
+            else []
+        )
+        return TurnRunner(
             entry_skill=self._entry_skill,
             snapshot=self._snapshot,
             model_client=self._model_client,
@@ -1735,39 +1741,67 @@ class AgentEngine:
             reasoning_passback=self._reasoning_passback,
             enable_request_capture=self._enable_request_capture,
             history_buffer=list(self._history),
-            # B1 midturn-input-steering：与活跃 _PendingTurn 共享注入队列（同一 list
-            # 引用：engine 主循环 append、runner 迭代边界 drain）
-            pending_input=(
-                self._pending[submission_id].pending_input
-                if submission_id in self._pending
-                else []
-            ),
+            pending_input=pending_input,
             cache_anchor_index=self._cache_anchor_index,
             instructions=list(resolved_for_turn),
             permission_policy=self._permission_policy,
             request_metadata=self._request_metadata,
             turn_index=self._turn_index,
             capabilities=self._capabilities,
-            # T6: deferred 暴露阈值（驱动 child 列表 inline/deferred + 工具裁剪）
             recall_threshold=self._recall_threshold,
-            # 召回后端存在性：无后端恒 inline（与阈值同口径透传）
             has_recall_backend=self._has_recall_backend,
             spawn_registry=self._spawn_registry,
-            # G-CACHE：注入持久 cache 统计 + 上一轮 prompt 指纹（跨 turn 归因）
             cache_stats=self._cache_stats,
             last_prompt_fingerprint=self._last_prompt_fingerprint,
-            # G1c：注入跨 turn 累计压缩次数 + 阈值
             compaction_count=self._compaction_count,
             compaction_degradation_threshold=self._compaction_degradation_threshold,
-            # K2：注入会话累计 token 基线 + 上限（OOM-killer）
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             memory_store=self._memory_store,
             memory_query_builder=self._memory_query_builder,
             pinned_states=self._pinned_states,
-            # detached-spawn：注入自身作 spawn 协调器 → spawn_skill/await_skills/
-            # join_skill/kill_skill 四工具经 ctx.extras['spawn_coordinator'] 转发
             spawn_coordinator=self,
+        )
+
+    async def _writeback_turn_runner(self, runner: TurnRunner) -> None:
+        """完整验证 audited history 后原子回写 runner 派生状态。"""
+        async with self._lock:
+            runner_history = list(runner.history_buffer)
+            if self._audit_state is None:
+                self._history = runner_history
+            else:
+                try:
+                    merged_history = merge_audited_history(
+                        self._history,
+                        runner_history,
+                    )
+                except AuditedHistoryConflictError:
+                    raise self._audit_state.coordinator.freeze(
+                        audited_history_conflict_failure()
+                    ) from None
+                self._history = merged_history
+            self._cache_anchor_index = runner.cache_anchor_index
+            self._rewind_checkpoints = derive_rewind_log(self._history)
+            self._last_prompt_fingerprint = runner.last_prompt_fingerprint
+            self._compaction_count = runner.compaction_count
+            self._session_tokens += runner.total_usage.total_tokens
+
+    async def _build_and_run_runner(
+        self,
+        submission_id: str,
+        turn_cancel: CancellationToken,
+        resolved_for_turn: list[ResolvedInstruction],
+        *,
+        seed_pending_call_id: str | None = None,
+        cache_break_expected_reason: str | None = None,
+        auto_retry_count: int = 0,
+    ) -> None:
+        """构造并运行一轮，最后一次性回写 Engine 状态。"""
+        runner = self._new_turn_runner(
+            submission_id,
+            turn_cancel,
+            resolved_for_turn,
+            auto_retry_count=auto_retry_count,
         )
         # turn-rewind retry_tool：让 runner 采样前先补跑被保留的悬空 call
         runner._seed_pending_call_id = seed_pending_call_id  # noqa: SLF001
@@ -1784,31 +1818,7 @@ class AgentEngine:
             self._pending.pop(submission_id, None)
             self._turn_index += 1
 
-        # 同步 turn 内的 history 变更回 engine
-        async with self._lock:
-            # audit path 的并发 runner 各自持有旧快照，只能把新增项合并回
-            # acknowledged hot history；整表覆盖会删除后来 durable apply 的用户项。
-            runner_history = list(runner.history_buffer)
-            if self._audit_state is None:
-                self._history = runner_history
-            else:
-                current_ids = {item.id for item in self._history}
-                self._history.extend(
-                    item for item in runner_history if item.id not in current_ids
-                )
-            self._cache_anchor_index = runner.cache_anchor_index
-            # turn-rewind：对当前全量逻辑 history 重算节点表(derive 为唯一产出方)。
-            # 历史 turn 节点(冷加载推导的)+ 本 turn 新节点共存，turn 限定 id 不撞。
-            self._rewind_checkpoints = derive_rewind_log(self._history)
-            # G-CACHE：读回本轮末的 prompt 指纹，作为下一轮的对比基线
-            self._last_prompt_fingerprint = runner.last_prompt_fingerprint
-            # G1c：读回累计压缩次数，跨 turn 持久
-            self._compaction_count = runner.compaction_count
-            # K2：累加本 turn 消耗，跨 turn 维护会话累计 token
-            self._session_tokens += runner.total_usage.total_tokens
-
-        # post_turn 钩子：在状态回写之后、下一 turn 启动之前同步触发(顺序保证)。
-        # 仅 root turn 真终态触发(suspended/cancelled 不触发,详见 helper)。
+        await self._writeback_turn_runner(runner)
         await self._fire_post_turn_hook(
             submission_id, outcome, turn_cancel, fired_iteration,
         )

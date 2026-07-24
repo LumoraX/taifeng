@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 import anyio
 
-from taifeng.conversation.journal.records import StableErrorV1
+from taifeng.loop.audit_support import _accepted_work_ownership_failure
 
 if TYPE_CHECKING:
     from taifeng.loop.audit_admission import (
@@ -30,6 +30,41 @@ class AcceptedUserMessageSink(Protocol):
 
     async def put(self, item: AcceptedUserMessage) -> None:
         """等待 queue 明确取得 token。"""
+
+
+class AuditedApplicationCheckpoint:
+    """actor 等待 audited application 成功或精确失败的一次性握手。"""
+
+    def __init__(self) -> None:
+        """创建 result-bearing future，并确保无人等待时也检索异常。"""
+        self._future: asyncio.Future[None] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._future.add_done_callback(self._consume_terminal_exception)
+
+    async def wait(self) -> None:
+        """等待 application 结果；失败时传播原始 BaseException 对象。"""
+        await self._future
+
+    def succeed(self) -> bool:
+        """只允许首个 terminal result 发布 application success。"""
+        if self._future.done():
+            return False
+        self._future.set_result(None)
+        return True
+
+    def fail(self, error: BaseException) -> bool:
+        """只允许首个 terminal result 发布原始 application failure。"""
+        if self._future.done():
+            return False
+        self._future.set_exception(error)
+        return True
+
+    @staticmethod
+    def _consume_terminal_exception(future: asyncio.Future[None]) -> None:
+        """检索无人等待的异常；正常 await 仍会传播同一对象。"""
+        if not future.cancelled():
+            future.exception()
 
 
 class _MailboxClosedError(RuntimeError):
@@ -200,16 +235,6 @@ class AuditedSubmissionMailbox:
             )
 
 
-def _handoff_failure() -> StableErrorV1:
-    """返回 accepted token ownership 不确定的稳定恢复原因。"""
-    return StableErrorV1(
-        code="accepted_work_handoff_failed",
-        class_name="AcceptedWorkHandoffFailure",
-        failure_class="lifecycle",
-        retryable=False,
-    )
-
-
 async def _retire_tokens(
     tokens: tuple[AcceptedUserMessage, ...],
 ) -> None:
@@ -271,7 +296,7 @@ async def handoff_accepted_user_message(
     try:
         await state.coordinator.ensure_effect_allowed()
     except BaseException as cause:
-        frozen = state.coordinator.freeze(_handoff_failure())
+        frozen = state.coordinator.freeze(_accepted_work_ownership_failure())
         await _retire_tokens((token,))
         if isinstance(
             cause,
@@ -282,7 +307,7 @@ async def handoff_accepted_user_message(
     handoff_error, caller_owns = await mailbox.put_token(sink, token)
     if handoff_error is None:
         return
-    frozen = state.coordinator.freeze(_handoff_failure())
+    frozen = state.coordinator.freeze(_accepted_work_ownership_failure())
     if caller_owns:
         await _retire_tokens((token,))
     if isinstance(
@@ -302,12 +327,13 @@ async def finalize_audited_mailbox(
         tokens = await mailbox.close()
         if not tokens:
             return
-        state.coordinator.freeze(_handoff_failure())
+        state.coordinator.freeze(_accepted_work_ownership_failure())
         await _retire_tokens(tokens)
 
 
 __all__ = [
     "AcceptedUserMessageSink",
+    "AuditedApplicationCheckpoint",
     "AuditedSubmissionMailbox",
     "finalize_audited_mailbox",
     "handoff_accepted_user_message",

@@ -472,7 +472,8 @@ async def test_cancelled_full_queue_handoff_freezes_and_retires_failed_work(
         )
     finally:
         root.cancel()
-        await actor
+        with pytest.raises(SessionAuditFrozenError):
+            await actor
 
     assert after_cancel.health is AuditHealth.RECOVERY_REQUIRED
     assert after_cancel.effect_gate_open is False

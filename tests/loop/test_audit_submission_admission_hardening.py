@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Never
 
 import anyio
@@ -19,7 +19,7 @@ from taifeng.loop.audit import (
 )
 from taifeng.loop.audit_admission import AcceptedUserMessage
 from taifeng.loop.cancellation import CancellationToken
-from taifeng.loop.submission import UserMessage
+from taifeng.loop.submission import Shutdown, UserMessage
 from tests.loop.test_audit_submission_admission import (
     _BlockingClient,
     _engine_with_audit,
@@ -94,6 +94,53 @@ class _BoundaryRaisingMessageStore(JsonlMessageStore):
         """验证 Engine 不会把取消/fatal 误分类为普通不变量。"""
         del thread_id
         raise self.error
+
+
+class _BlockingProjectionMessageStore(JsonlMessageStore):
+    """在 projection append 中阻塞并记录 child 收到的原始取消。"""
+
+    def __init__(self, root: Path) -> None:
+        """初始化写入 barrier 与取消观测点。"""
+        super().__init__(root)
+        self.entered = anyio.Event()
+        self.cancelled: asyncio.CancelledError | None = None
+
+    async def append_projection_batch(
+        self,
+        thread_id: str,
+        items: list[ResponseItem],
+        expected_identity: ProjectionFileIdentity,
+    ) -> None:
+        """在任何健康或 stale result 形成前等待 raw child cancellation。"""
+        del thread_id, items, expected_identity
+        self.entered.set()
+        try:
+            await anyio.Event().wait()
+        except asyncio.CancelledError as error:
+            self.cancelled = error
+            raise
+
+
+def _audited_turn_operation(
+    engine: object,
+    submission_id: str,
+) -> asyncio.Task[None]:
+    """从 Engine-owned operation 中定位指定 audited turn child。"""
+    tasks = engine._operation_tasks  # type: ignore[attr-defined]  # noqa: SLF001
+    return next(
+        task
+        for task in tasks
+        if task.get_name().endswith(f"turn:{submission_id}")
+    )
+
+
+async def _stop_actor(actor: asyncio.Task[None]) -> None:
+    """失败断言清理仍在运行的 actor，避免泄漏 operation。"""
+    if actor.done():
+        return
+    actor.cancel()
+    with suppress(asyncio.CancelledError):
+        await actor
 
 
 @pytest.mark.anyio
@@ -176,7 +223,8 @@ async def test_actor_rejects_coordinated_payload_tamper_with_stale_hashes(
                 await anyio.lowlevel.checkpoint()
     finally:
         cancel.cancel()
-        await actor
+        with pytest.raises(SessionAuditFrozenError):
+            await actor
 
     assert engine._history == []  # noqa: SLF001
     assert coordinator.health is AuditHealth.RECOVERY_REQUIRED
@@ -231,6 +279,77 @@ async def test_strict_load_cancellation_propagates_after_retiring_work(
     assert snapshot.first_failure is not None
     assert snapshot.first_failure.class_name == "CancelledError"
     assert snapshot.accepted_work_ids == ()
+
+
+@pytest.mark.anyio
+async def test_cancelled_projection_checkpoint_stops_before_next_token(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """application cancel 必须阻止 actor dequeue 后续 accepted token。"""
+    store = _BlockingProjectionMessageStore(tmp_path / "threads")
+    engine, coordinator, _ = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=_BlockingClient(),
+        store_override=store,
+    )
+    first_id = await engine.submit(UserMessage(text="first projection blocks"))
+    await engine.submit(UserMessage(text="second must remain queued"))
+    first, second = tuple(engine._submissions._queue)  # type: ignore[attr-defined]  # noqa: SLF001
+    actor = asyncio.create_task(engine.run(CancellationToken(name="test-root")))
+    try:
+        await store.entered.wait()
+        _audited_turn_operation(engine, first_id).cancel("raw projector child cancel")
+        with anyio.fail_after(1):
+            while not actor.done() and engine._submissions.qsize() == 1:  # noqa: SLF001
+                await anyio.lowlevel.checkpoint()
+        assert actor.done()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await actor
+        assert cancelled.value is store.cancelled
+        assert tuple(engine._submissions._queue) == (second,)  # type: ignore[attr-defined]  # noqa: SLF001
+        assert first.accepted_work.is_completed
+        assert second.accepted_work.is_completed
+        assert coordinator.snapshot().accepted_work_ids == ()
+    finally:
+        await _stop_actor(actor)
+
+
+@pytest.mark.anyio
+async def test_cancelled_projection_checkpoint_stops_before_shutdown(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """application cancel 必须由 actor 原样传播，不能继续消费 Shutdown。"""
+    store = _BlockingProjectionMessageStore(tmp_path / "threads")
+    engine, coordinator, core = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=_BlockingClient(),
+        store_override=store,
+    )
+    first_id = await engine.submit(UserMessage(text="projection before shutdown"))
+    first = engine._submissions._queue[0]  # type: ignore[attr-defined]  # noqa: SLF001
+    await engine.shutdown()
+    actor = asyncio.create_task(engine.run(CancellationToken(name="test-root")))
+    try:
+        await store.entered.wait()
+        _audited_turn_operation(engine, first_id).cancel("raw projector child cancel")
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            with anyio.fail_after(1):
+                await actor
+        assert cancelled.value is store.cancelled
+        queued = tuple(engine._submissions._queue)  # type: ignore[attr-defined]  # noqa: SLF001
+        assert len(queued) == 1 and isinstance(queued[0].op, Shutdown)
+        assert first.accepted_work.is_completed
+        assert coordinator.snapshot().accepted_work_ids == ()
+        committed = [
+            envelope async for envelope in core.load("ses_audit_submission")
+        ]
+        assert "session_ended" not in [item.record_type for item in committed]
+    finally:
+        await _stop_actor(actor)
 
 
 @pytest.mark.anyio
@@ -300,7 +419,8 @@ async def test_projection_identity_invariant_freezes_before_effect_dispatch(
                 await anyio.lowlevel.checkpoint()
     finally:
         cancel.cancel()
-        await actor
+        with pytest.raises(SessionAuditFrozenError):
+            await actor
 
     assert [item.payload["text"] for item in engine._history] == [  # noqa: SLF001
         "identity invariant"
@@ -337,7 +457,8 @@ async def test_unclassified_projector_invariant_freezes_coordinator(
                 await anyio.lowlevel.checkpoint()
     finally:
         cancel.cancel()
-        await actor
+        with pytest.raises(SessionAuditFrozenError):
+            await actor
 
     assert coordinator.projection_snapshot(engine.thread_id) is None
     assert coordinator.health is AuditHealth.RECOVERY_REQUIRED

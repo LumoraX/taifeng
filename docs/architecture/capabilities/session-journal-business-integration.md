@@ -170,10 +170,17 @@ lifecycle 是 `OPEN → FINISHING → CLOSED`：
 - EnginePool 的 graceful shutdown 与 admission sequencing lock 串行：先关闭 intake，再把内部 Shutdown
   排在此前 accepted token 之后；actor 在读取下一 queue item 前不仅安装 operation ownership，还等待该
   token 的 hot-history + projection application checkpoint，确保 terminal 不越过已 accepted input；并发
-  audited runner 收尾按 item id append-only 合并，旧 history snapshot 不得覆盖后来 durable-applied 输入；
+  audited runner 收尾按完整 `ResponseItem` 身份（`id/kind/thread_id/payload/created_at/metadata`）
+  append-only 幂等合并，旧 history snapshot 不得覆盖后来 durable-applied 输入；相同 id 的完整内容不一致
+  必须以稳定 `audit_history_item_conflict` fail-closed，且合并整体成功前不得回写 cache anchor、rewind
+  checkpoints、prompt fingerprint、compaction count 或 usage；
 - FINISHING/CLOSED 后的新请求不得 durable accept 或 enqueue，返回 `SessionFinishingError`；
 - 并发 release/close 只等待同一 canonical future value，但每个 caller 得到对象与嵌套 failure 独立的
   防御性副本；并发不同 Shutdown id 在 acceptance 前拒绝。
+
+上述 hot-history merge 是 Task 7 以 Journal seq 建立 authoritative writeback 前的临时 audit-only
+边界；当前内存列表顺序受 durable application 与 runner 完成顺序影响，不承诺等于 Journal seq。legacy
+路径仍沿用单 runner 整表回写，不受该临时合并规则影响。
 
 accepted work 收敛后，finish 持有 append lock，重读最新 committed thread-terminal 集合，设置不可逆
 terminal seal 并直接提交去重后的 `thread_terminal* + session_ended`。seal 或 CLOSED 后的普通 append 必须

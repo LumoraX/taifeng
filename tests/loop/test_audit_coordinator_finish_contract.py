@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 
 import anyio
@@ -108,6 +109,78 @@ async def test_completed_reservations_are_pruned_before_each_new_admission() -> 
     await pending.complete()
     result = await coordinator.finish(thread_terminals=(), reason="released")
     assert result.audit_complete
+
+
+@pytest.mark.anyio
+async def test_raw_cancel_after_definite_accept_settles_and_retires_ownership() -> None:
+    """durable accept 后的 raw cancel 必须先结算、冻结并退休 hidden work。"""
+    coordinator = _coordinator(_LifecycleCore(), finish_timeout=0.05)
+    durable_entered = anyio.Event()
+    allow_durable_return = anyio.Event()
+    durable_returned = anyio.Event()
+
+    async def durable_accept() -> None:
+        durable_entered.set()
+        await allow_durable_return.wait()
+        durable_returned.set()
+
+    admission = asyncio.create_task(
+        coordinator.admit_work("definite-accept", durable_accept)
+    )
+    await durable_entered.wait()
+    async with coordinator._lifecycle_lock:  # noqa: SLF001
+        allow_durable_return.set()
+        await durable_returned.wait()
+        await anyio.lowlevel.checkpoint()
+        admission.cancel("cancel after definite accept")
+        await anyio.lowlevel.checkpoint()
+
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await admission
+    assert cancelled.value.args == ("cancel after definite accept",)
+    snapshot = coordinator.snapshot()
+    assert snapshot.accepted_work_ids == ()
+    assert snapshot.health is AuditHealth.RECOVERY_REQUIRED
+
+    result = await coordinator.finish(thread_terminals=(), reason="cancelled")
+    assert result.failure is not None
+    assert result.failure.code == "accepted_work_handoff_failed"
+    assert coordinator.snapshot().accepted_work_ids == ()
+
+
+@pytest.mark.anyio
+async def test_raw_cancel_after_definite_reject_settles_without_acceptance() -> None:
+    """durable reject 后的 raw cancel 必须移除 reservation 再原样重抛。"""
+    coordinator = _coordinator(_LifecycleCore(), finish_timeout=0.05)
+    durable_entered = anyio.Event()
+    allow_durable_return = anyio.Event()
+    durable_returned = anyio.Event()
+
+    async def durable_reject() -> None:
+        durable_entered.set()
+        await allow_durable_return.wait()
+        durable_returned.set()
+
+    rejection = asyncio.create_task(
+        coordinator.reject_work("definite-reject", durable_reject)
+    )
+    await durable_entered.wait()
+    async with coordinator._lifecycle_lock:  # noqa: SLF001
+        allow_durable_return.set()
+        await durable_returned.wait()
+        await anyio.lowlevel.checkpoint()
+        rejection.cancel("cancel after definite reject")
+        await anyio.lowlevel.checkpoint()
+
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await rejection
+    assert cancelled.value.args == ("cancel after definite reject",)
+    assert coordinator.snapshot().accepted_work_ids == ()
+
+    result = await coordinator.finish(thread_terminals=(), reason="rejected")
+    assert result.audit_complete is True
+    assert result.failure is None
+    assert coordinator.snapshot().accepted_work_ids == ()
 
 
 @pytest.mark.anyio

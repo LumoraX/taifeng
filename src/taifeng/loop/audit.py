@@ -30,6 +30,8 @@ from taifeng.loop.audit_support import (
     ProjectionAuditSnapshot,
     SessionAuditFrozenError,
     SessionAuditSnapshot,
+    _accepted_work_ownership_failure,
+    _await_owned,
     _copy_projection_snapshot,
     _copy_stable_error,
     _InvalidJournalAckError,
@@ -233,7 +235,6 @@ class SessionAuditCoordinator:
         for record in records:
             if record.record_type == "thread_terminal" and record.thread_id is not None:
                 self._committed_terminal_threads.add(record.thread_id)
-
     async def admit_work(
         self,
         work_id: str,
@@ -241,20 +242,31 @@ class SessionAuditCoordinator:
     ) -> AcceptedWork:
         """shared lock 内登记 reservation，锁外 accept，再回锁结算。"""
         reservation = await self._reserve_admission(work_id)
+        settlement_name = f"audit-admission-settle:{self.session_id}:{work_id}"
+        retirement_name = f"audit-admission-retire:{self.session_id}:{work_id}"
         try:
             await durable_accept()
         except BaseException:
-            await self._settle_admission(reservation, accepted=False)
+            await _await_owned(self._settle_admission(
+                reservation, accepted=False,
+            ), name=settlement_name)
             raise
-        work, lifecycle = await self._settle_admission(reservation, accepted=True)
+        settlement, cancellation = await _await_owned(
+            self._settle_admission(reservation, accepted=True),
+            name=settlement_name,
+        )
+        work, lifecycle = settlement
         assert work is not None
+        if cancellation is not None:
+            self.freeze(_accepted_work_ownership_failure())
+            await _await_owned(work.complete(), name=retirement_name)
+            raise cancellation
         try:
             self._raise_if_frozen()
             if lifecycle is SessionLifecycle.CLOSED:
                 raise SessionFinishingError(self.session_id, lifecycle)
         except (SessionAuditFrozenError, SessionFinishingError):
-            with anyio.CancelScope(shield=True):
-                await work.complete()
+            await _await_owned(work.complete(), name=retirement_name)
             raise
         return work
 
@@ -268,7 +280,12 @@ class SessionAuditCoordinator:
         try:
             await durable_reject()
         finally:
-            await self._settle_admission(reservation, accepted=False)
+            _, cancellation = await _await_owned(
+                self._settle_admission(reservation, accepted=False),
+                name=f"audit-admission-settle:{self.session_id}:{work_id}",
+            )
+        if cancellation is not None:
+            raise cancellation
 
     async def _reserve_admission(self, work_id: str) -> _AdmissionReservation:
         """在 shared lifecycle lock 内占用唯一 submission identity。"""

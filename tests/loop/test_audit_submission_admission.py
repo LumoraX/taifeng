@@ -736,7 +736,8 @@ async def test_actor_revalidates_full_token_before_hot_history_mutation(
                 await anyio.lowlevel.checkpoint()
     finally:
         cancel.cancel()
-        await actor
+        with pytest.raises(SessionAuditFrozenError):
+            await actor
 
     assert engine._history == []  # noqa: SLF001
     assert engine._audit_state.projector.state(engine.thread_id).projected_seq == 0  # type: ignore[attr-defined]  # noqa: SLF001

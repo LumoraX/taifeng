@@ -10,12 +10,29 @@ import pytest
 
 from taifeng.loop.audit import AuditHealth
 from taifeng.loop.audit_admission import AcceptedUserMessage
+from taifeng.loop.audit_mailbox import AuditedApplicationCheckpoint
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import UserMessage
 from tests.loop.test_audit_submission_admission import _engine_with_audit
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fatal_type", [KeyboardInterrupt, SystemExit])
+async def test_application_checkpoint_propagates_exact_fatal(
+    fatal_type: type[BaseException],
+) -> None:
+    """checkpoint 必须传播同一个 fatal 对象，而非改写或降级。"""
+    checkpoint = AuditedApplicationCheckpoint()
+    fatal = fatal_type("stable-test-fatal")
+
+    assert checkpoint.fail(fatal) is True
+    with pytest.raises(fatal_type) as raised:
+        await checkpoint.wait()
+
+    assert raised.value is fatal
 
 
 @pytest.mark.anyio
