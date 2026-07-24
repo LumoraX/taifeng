@@ -13,10 +13,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from taifeng.llm.client import ModelClient
+from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
     ContentFilterError,
     InvalidRequestError,
@@ -43,7 +42,11 @@ from taifeng.llm.providers._shared import (
     extract_usage_openai_family,
 )
 from taifeng.llm.types import ApiRequest, TokenUsage
-from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from taifeng.loop.cancellation import CancellationToken
 
 
 class OpenAICompatSession:
@@ -305,7 +308,7 @@ class OpenAICompatSession:
             )
 
 
-class OpenAICompatClient(ModelClient):
+class OpenAICompatClient(OneNetworkAttemptModelClient, ModelClient):
     """OpenAI-compat 原生客户端（不依赖 LiteLLM）。
 
     适用 vLLM / Ollama / new-api / Together / Groq / DeepSeek 等。

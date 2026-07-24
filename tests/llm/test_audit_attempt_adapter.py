@@ -14,7 +14,13 @@ from taifeng.llm.audit import (
     ModelAttemptPermit,
     ModelAttemptRequest,
 )
+from taifeng.llm.client import OneNetworkAttemptModelClient
 from taifeng.llm.events import text_delta
+from taifeng.llm.providers.anthropic_provider import AnthropicClient
+from taifeng.llm.providers.gemini_provider import GeminiClient
+from taifeng.llm.providers.litellm_provider import LiteLLMClient
+from taifeng.llm.providers.openai_compat import OpenAICompatClient
+from taifeng.llm.providers.sim import SimClient
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.audit_config import AttemptObservableModelClient
 from taifeng.loop.cancellation import CancellationToken
@@ -57,6 +63,7 @@ class _DispatchSpySession:
         self.requests: list[ApiRequest] = []
 
     async def __aenter__(self) -> _DispatchSpySession:
+        self.events.append("enter")
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -69,7 +76,7 @@ class _DispatchSpySession:
         yield text_delta("ok")
 
 
-class _OneAttemptClient:
+class _OneAttemptClient(OneNetworkAttemptModelClient):
     """每个 session 只进行一次真实 stream dispatch 的受控 client。"""
 
     def __init__(self, events: list[str]) -> None:
@@ -85,6 +92,7 @@ class _OneAttemptClient:
     ) -> ModelClientSession:
         del cancel, model
         self.legacy_calls += 1
+        self.events.append("session_construct")
         session = _DispatchSpySession(self.events)
         self.sessions.append(session)
         return session
@@ -154,11 +162,13 @@ async def test_durable_observer_ack_precedes_actual_dispatch() -> None:
 
         tasks.start_soon(run)
         await observer.entered.wait()
-        assert inner.sessions[0].dispatched is False
+        assert events == []
+        assert inner.sessions == []
         observer.allow.set()
 
     assert result == ["ok"]
-    assert events == ["ack", "dispatch"]
+    assert events == ["ack", "session_construct", "enter", "dispatch"]
+    assert inner.sessions[0].dispatched is True
     assert observer.requests[0].provider == "provider-a"
     assert observer.requests[0].model == "model-a"
     assert observer.requests[0].api_request["model"] == "model-a"
@@ -182,7 +192,7 @@ async def test_observer_failure_prevents_dispatch() -> None:
     with pytest.raises(RuntimeError, match="journal unavailable"):
         await _consume(session, _request())
 
-    assert inner.sessions[0].dispatched is False
+    assert inner.sessions == []
 
 
 @pytest.mark.anyio
@@ -217,7 +227,7 @@ async def test_target_cancel_during_observer_barrier_prevents_dispatch() -> None
 
     assert len(caught) == 1
     assert isinstance(caught[0], asyncio.CancelledError)
-    assert inner.sessions[0].dispatched is False
+    assert inner.sessions == []
 
 
 @pytest.mark.anyio
@@ -241,7 +251,7 @@ async def test_raw_caller_cancel_during_observer_barrier_prevents_dispatch() -> 
     with pytest.raises(asyncio.CancelledError, match="caller cancelled"):
         await task
 
-    assert inner.sessions[0].dispatched is False
+    assert inner.sessions == []
 
 
 def test_adapter_is_nominal_attempt_observable_client_and_legacy_is_untouched() -> None:
@@ -278,3 +288,65 @@ def test_attempt_dtos_are_frozen_and_adapter_names_must_be_stable() -> None:
             provider="provider-a",
             default_model="",
         )
+
+
+class _UncontrolledMultiDispatchClient:
+    """可在单个 stream 内自行 fallback 多 endpoint 的未认证 client。"""
+
+    def __init__(self) -> None:
+        self.session_calls = 0
+
+    def session(
+        self,
+        *,
+        cancel: CancellationToken,
+        model: str | None = None,
+    ) -> ModelClientSession:
+        del cancel, model
+        self.session_calls += 1
+        return _DispatchSpySession([])
+
+
+def test_adapter_rejects_uncontrolled_inner_before_session_construction() -> None:
+    """duck ModelClient 即使形状兼容也不能把 adapter 当 observability 证明。"""
+    inner = _UncontrolledMultiDispatchClient()
+
+    with pytest.raises(TypeError, match="one-network-attempt"):
+        AttemptObservableClientAdapter(
+            inner,  # type: ignore[arg-type]
+            provider="unsafe",
+            default_model="unsafe-model",
+        )
+
+    assert inner.session_calls == 0
+
+
+def test_adapter_rejects_litellm_with_opaque_retry_and_fallback_surface() -> None:
+    """LiteLLM 未显式实现受控 attempt 边界时必须 fail closed。"""
+    inner = LiteLLMClient(
+        model="openai/test",
+        extra_params={"fallbacks": [{"model": "openai/other"}]},
+    )
+
+    with pytest.raises(TypeError, match="one-network-attempt"):
+        AttemptObservableClientAdapter(
+            inner,  # type: ignore[arg-type]
+            provider="litellm",
+            default_model="openai/test",
+        )
+
+
+@pytest.mark.parametrize(
+    "client_type",
+    [SimClient, OpenAICompatClient, AnthropicClient, GeminiClient],
+)
+def test_reviewed_direct_clients_nominally_declare_one_attempt(
+    client_type: type[object],
+) -> None:
+    """只有已审查直连实现和 Sim 明确继承受控 attempt 边界。"""
+    assert OneNetworkAttemptModelClient in client_type.__mro__
+
+
+def test_litellm_does_not_nominally_declare_one_attempt() -> None:
+    """LiteLLM opaque fallback/retry surface 不能拥有 nominal marker。"""
+    assert OneNetworkAttemptModelClient not in LiteLLMClient.__mro__

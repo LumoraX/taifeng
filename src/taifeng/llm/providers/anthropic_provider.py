@@ -17,10 +17,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from taifeng.llm.client import ModelClient
+from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
     InvalidRequestError,
     TransientNetworkError,
@@ -45,7 +44,11 @@ from taifeng.llm.providers._shared import (
     parse_sse_event,
 )
 from taifeng.llm.types import ApiRequest, TokenUsage
-from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from taifeng.loop.cancellation import CancellationToken
 
 # Anthropic API 默认 anthropic-version
 _DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
@@ -415,7 +418,7 @@ class AnthropicSession:
         return self._last_usage
 
 
-class AnthropicClient(ModelClient):
+class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
     """Session 级 Anthropic native 客户端。
 
     构造参数：

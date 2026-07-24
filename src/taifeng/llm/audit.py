@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from taifeng.llm.client import ModelClient, ModelClientSession
+    from taifeng.llm.client import ModelClientSession, OneNetworkAttemptModelClient
     from taifeng.llm.events import ResponseEvent
     from taifeng.llm.types import ApiRequest
     from taifeng.loop.cancellation import CancellationToken
@@ -125,7 +125,7 @@ class _ObservedOneAttemptSession:
 
     def __init__(
         self,
-        inner: ModelClientSession,
+        inner: OneNetworkAttemptModelClient,
         *,
         cancel: CancellationToken,
         observer: ModelAttemptObserver,
@@ -141,11 +141,10 @@ class _ObservedOneAttemptSession:
         self._session_model = session_model
 
     async def __aenter__(self) -> _ObservedOneAttemptSession:
-        await self._inner.__aenter__()
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        await self._inner.__aexit__(*exc)
+        del exc
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
         """取得 definite permit 后才迭代底层 one-attempt stream。"""
@@ -161,8 +160,12 @@ class _ObservedOneAttemptSession:
         if type(permit) is not ModelAttemptPermit:
             raise TypeError("attempt observer returned no definite permit")
         self._cancel.raise_if_cancelled()
-        async for event in self._inner.stream(dispatched_request):
-            yield event
+        async with self._inner.session(
+            cancel=self._cancel,
+            model=self._session_model,
+        ) as session:
+            async for event in session.stream(dispatched_request):
+                yield event
 
 
 class AttemptObservableClientAdapter(AttemptObservableModelClient):
@@ -170,7 +173,7 @@ class AttemptObservableClientAdapter(AttemptObservableModelClient):
 
     def __init__(
         self,
-        inner: ModelClient,
+        inner: OneNetworkAttemptModelClient,
         *,
         provider: str,
         default_model: str,
@@ -180,6 +183,12 @@ class AttemptObservableClientAdapter(AttemptObservableModelClient):
             raise ValueError("provider must be non-empty")
         if not default_model:
             raise ValueError("default model must be non-empty")
+        from taifeng.llm.client import OneNetworkAttemptModelClient
+
+        inner_type = type(inner)
+        mro = type.__getattribute__(inner_type, "__mro__")
+        if OneNetworkAttemptModelClient not in mro:
+            raise TypeError("inner client lacks nominal one-network-attempt capability")
         self._inner = inner
         self._provider = provider
         self._default_model = default_model
@@ -201,9 +210,8 @@ class AttemptObservableClientAdapter(AttemptObservableModelClient):
         model: str | None = None,
     ) -> ModelClientSession:
         """包装一个明确只有一次真实网络 attempt 的底层 session。"""
-        inner = self._inner.session(cancel=cancel, model=model)
         return _ObservedOneAttemptSession(
-            inner,
+            self._inner,
             cancel=cancel,
             observer=attempt_observer,
             provider=self._provider,

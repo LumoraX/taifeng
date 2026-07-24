@@ -20,14 +20,16 @@ from taifeng.llm.audit import (
     AttemptObservableClientAdapter,
     ModelAttemptRequest,
 )
+from taifeng.llm.client import OneNetworkAttemptModelClient
 from taifeng.llm.events import text_delta
-from taifeng.llm.providers.sim import SimClient, SimTurn
+from taifeng.llm.providers.sim import RoutingSimClient, SimClient, SimTurn
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.audit import SessionAuditCoordinator
 from taifeng.loop.audit_bootstrap import AuditedSessionState
 from taifeng.loop.audit_llm import JournalModelAttemptObserver
 from taifeng.loop.audit_support import AuditHealth, SessionAuditFrozenError
 from taifeng.loop.cancellation import CancellationToken
+from taifeng.loop.submission import UserMessage
 from tests.loop.test_audit_submission_admission import _engine_with_audit
 
 if TYPE_CHECKING:
@@ -290,7 +292,7 @@ class _DispatchSession:
         yield text_delta("ok")
 
 
-class _DispatchClient:
+class _DispatchClient(OneNetworkAttemptModelClient):
     """返回唯一 dispatch spy session。"""
 
     def __init__(self, events: list[str]) -> None:
@@ -437,3 +439,65 @@ async def test_audited_turn_runner_injects_journal_observer(
     )
     assert request.attempt_id == f"{request.operation_id}:attempt:0"
     assert len(inner.ledger.requests()) == 1
+
+
+@pytest.mark.anyio
+async def test_overlapping_audited_turns_keep_accepted_turn_indexes(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """反向完成的 accepted turns 必须沿用 admission 分配的 0/1 lineage。"""
+    inner = RoutingSimClient(
+        routes={
+            "SECOND_ATTEMPT": [
+                SimTurn(text="second", emit_signal="second-finished")
+            ],
+            "FIRST_ATTEMPT": [
+                SimTurn(text="first", await_signal="second-finished")
+            ],
+        }
+    )
+    client = AttemptObservableClientAdapter(
+        inner,
+        provider="sim",
+        default_model="sim-model",
+    )
+    engine, coordinator, core = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=client,
+    )
+    root_cancel = CancellationToken(name="overlap-root")
+    actor = asyncio.create_task(engine.run(root_cancel))
+    try:
+        first_id = await engine.submit(UserMessage(text="FIRST_ATTEMPT"))
+        with anyio.fail_after(2):
+            while len(inner.ledger.requests()) < 1:
+                await anyio.lowlevel.checkpoint()
+        second_id = await engine.submit(UserMessage(text="SECOND_ATTEMPT"))
+        with anyio.fail_after(2):
+            while (
+                engine._turn_index < 2  # noqa: SLF001
+                or coordinator.snapshot().accepted_work_ids
+            ):
+                await anyio.lowlevel.checkpoint()
+    finally:
+        root_cancel.cancel()
+        await actor
+
+    committed = [
+        envelope
+        async for envelope in core.load("ses_audit_submission")
+        if envelope.record_type == "llm_request_committed"
+    ]
+    by_submission = {record.submission_id: record for record in committed}
+    first = by_submission[first_id]
+    second = by_submission[second_id]
+    assert first.payload["turn_index"] == 0
+    assert second.payload["turn_index"] == 1
+    assert first.operation_id == (
+        f"thr_audit_submission:{first_id}:turn:0:llm:1"
+    )
+    assert second.operation_id == (
+        f"thr_audit_submission:{second_id}:turn:1:llm:1"
+    )

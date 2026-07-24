@@ -25,6 +25,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING
 
+from taifeng.llm.client import OneNetworkAttemptModelClient
 from taifeng.llm.errors import ContentFilterError, RateLimitError, ServerError
 from taifeng.llm.events import (
     completed,
@@ -234,7 +235,7 @@ def _end_turn(turn: SimTurn) -> bool:
     return turn.finish in ("end_turn", "length")
 
 
-class _SimClientBase:
+class _SimClientBase(OneNetworkAttemptModelClient):
     """SimClient / RoutingSimClient 公共骨架：状态件 + session 工厂。"""
 
     def __init__(

@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from taifeng.llm.client import ModelClient
+from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
     InvalidRequestError,
     TransientNetworkError,
@@ -43,7 +42,11 @@ from taifeng.llm.providers._shared import (
     parse_sse_data,
 )
 from taifeng.llm.types import ApiRequest, TokenUsage
-from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from taifeng.loop.cancellation import CancellationToken
 
 # Gemini role 映射
 _ROLE_MAP = {
@@ -341,7 +344,7 @@ class GeminiSession:
         return self._last_usage
 
 
-class GeminiClient(ModelClient):
+class GeminiClient(OneNetworkAttemptModelClient, ModelClient):
     """Session 级 Gemini native 客户端。
 
     构造参数：

@@ -10,6 +10,7 @@ import anyio
 import pytest
 
 from taifeng.conversation.journal import SubmissionAppliedV1
+from taifeng.llm.client import OneNetworkAttemptModelClient
 from taifeng.llm.events import completed
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.audit import (
@@ -69,7 +70,7 @@ class _RootFirstSession:
             yield completed(response_id=None, usage=TokenUsage(), end_turn=True)
 
 
-class _RootFirstClient:
+class _RootFirstClient(OneNetworkAttemptModelClient):
     """控制 root-first cancellation attribution 的确定性竞态。"""
 
     def __init__(self) -> None:
@@ -121,7 +122,7 @@ class _HeldCancelledSession:
             yield completed(response_id=None, usage=TokenUsage(), end_turn=True)
 
 
-class _HeldCancelledClient:
+class _HeldCancelledClient(OneNetworkAttemptModelClient):
     """构造不立即响应 target token 的受控 LLM session。"""
 
     def __init__(self) -> None:

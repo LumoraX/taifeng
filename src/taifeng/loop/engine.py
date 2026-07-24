@@ -177,6 +177,7 @@ class _AppliedUserSubmission:
 
     id: str
     text: str
+    accepted_turn_index: int
 
 
 class AgentEngine:
@@ -1514,6 +1515,7 @@ class AgentEngine:
                 _AppliedUserSubmission(
                     id=token.submission_id,
                     text=str(item.payload["text"]),
+                    accepted_turn_index=token.accepted_turn_index,
                 ),
                 target_cancel,
             )
@@ -1552,6 +1554,11 @@ class AgentEngine:
         else:
             user_text = sub.text
             attachments = None
+        accepted_turn_index = (
+            sub.accepted_turn_index
+            if isinstance(sub, _AppliedUserSubmission)
+            else None
+        )
 
         # 挂起态守卫(suspend-review-fixes):根 thread 有活跃挂起 → 在落史**之前**
         # 显式拒绝新 UserMessage。挂起 = turn 停在待裁决,裁决(Resume retry/abort)
@@ -1682,7 +1689,12 @@ class AgentEngine:
             self._turn_index += 1
             return
 
-        await self._build_and_run_runner(sub.id, turn_cancel, resolved_for_turn)
+        await self._build_and_run_runner(
+            sub.id,
+            turn_cancel,
+            resolved_for_turn,
+            turn_index=accepted_turn_index,
+        )
 
     async def _gate_session_tokens(self, submission_id: str) -> bool:
         """K2 引擎级闸门:触顶时按 policy 裁决终态 / 挂起。
@@ -1793,6 +1805,7 @@ class AgentEngine:
         resolved_for_turn: list[ResolvedInstruction],
         *,
         auto_retry_count: int = 0,
+        turn_index: int | None = None,
     ) -> TurnRunner:
         """从 Engine 当前快照构造单轮 runner。"""
         pending_input = (
@@ -1833,7 +1846,7 @@ class AgentEngine:
             instructions=list(resolved_for_turn),
             permission_policy=self._permission_policy,
             request_metadata=self._request_metadata,
-            turn_index=self._turn_index,
+            turn_index=self._turn_index if turn_index is None else turn_index,
             capabilities=self._capabilities,
             recall_threshold=self._recall_threshold,
             has_recall_backend=self._has_recall_backend,
@@ -1882,6 +1895,7 @@ class AgentEngine:
         seed_pending_call_id: str | None = None,
         cache_break_expected_reason: str | None = None,
         auto_retry_count: int = 0,
+        turn_index: int | None = None,
     ) -> None:
         """构造并运行一轮，最后一次性回写 Engine 状态。"""
         runner = self._new_turn_runner(
@@ -1889,6 +1903,7 @@ class AgentEngine:
             turn_cancel,
             resolved_for_turn,
             auto_retry_count=auto_retry_count,
+            turn_index=turn_index,
         )
         # turn-rewind retry_tool：让 runner 采样前先补跑被保留的悬空 call
         runner._seed_pending_call_id = seed_pending_call_id  # noqa: SLF001
@@ -1898,7 +1913,7 @@ class AgentEngine:
             runner._next_cache_break_reason = cache_break_expected_reason  # noqa: SLF001
         # post_turn 钩子需用「本 turn 的 index」(= +1 之前的值,与同 turn 的
         # pre_turn iteration 对齐),故在 finally 自增前先捕获。
-        fired_iteration = self._turn_index
+        fired_iteration = self._turn_index if turn_index is None else turn_index
         try:
             outcome = await runner.run()
             if self._audit_state is not None:

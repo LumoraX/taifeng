@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Protocol, runtime_checkable
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from taifeng.llm.events import ResponseEvent
-from taifeng.llm.types import ApiRequest
-from taifeng.loop.cancellation import CancellationToken
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from taifeng.llm.events import ResponseEvent
+    from taifeng.llm.types import ApiRequest
+    from taifeng.loop.cancellation import CancellationToken
 
 
 @runtime_checkable
@@ -48,3 +51,20 @@ class ModelClient(Protocol):
     ) -> ModelClientSession:
         """创建一个 turn 级 session。"""
         ...
+
+
+class OneNetworkAttemptModelClient(ABC):
+    """session 构造无 effect，且每次 ``stream`` 恰有一个网络 attempt 的 nominal 边界。
+
+    只有实现 owner 审核过 session/stream 全调用链后才能显式继承。duck typing、
+    virtual subclass 或外部 wrapper 均不能声明该能力。
+    """
+
+    @abstractmethod
+    def session(
+        self,
+        *,
+        cancel: CancellationToken,
+        model: str | None = None,
+    ) -> ModelClientSession:
+        """创建无 IO/effect 的 session；真实 dispatch 只能发生在 ``stream``。"""

@@ -14,6 +14,7 @@ from taifeng.conversation.journal import (
     SubmissionAppliedV1,
 )
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
+from taifeng.llm.client import OneNetworkAttemptModelClient
 from taifeng.llm.events import completed, text_delta
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.audit import (
@@ -191,7 +192,7 @@ class _ControlledSession:
         yield completed(response_id=None, usage=TokenUsage(), end_turn=True)
 
 
-class _ControlledClient:
+class _ControlledClient(OneNetworkAttemptModelClient):
     """控制两个并发真实 TurnRunner 的 effect 时序。"""
 
     def __init__(self) -> None:
@@ -241,7 +242,7 @@ class _ImmediateSession:
         yield completed(response_id=None, usage=TokenUsage(), end_turn=True)
 
 
-class _ImmediateClient:
+class _ImmediateClient(OneNetworkAttemptModelClient):
     """构造可观测自然完成 turn。"""
 
     def __init__(self) -> None:

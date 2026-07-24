@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import anyio
 import pytest
@@ -23,6 +23,11 @@ from taifeng.conversation.journal import (
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.projector import JournalConversationProjector
 from taifeng.conversation.transcript import JsonlMessageStore
+from taifeng.llm.audit import (
+    AttemptObservableClientAdapter,
+    AttemptObservableModelClient,
+)
+from taifeng.llm.client import OneNetworkAttemptModelClient
 from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.loop.audit import (
     AuditHealth,
@@ -227,7 +232,7 @@ class _BlockingSession:
             yield
 
 
-class _BlockingClient:
+class _BlockingClient(OneNetworkAttemptModelClient):
     """每个 turn 返回同一可控阻塞 session。"""
 
     def __init__(self) -> None:
@@ -298,11 +303,27 @@ async def _engine_with_audit(
             "journal_schema_version": 1,
         },
     )
+    selected_model_client = (
+        model_client if model_client is not None else SimClient(turns=[])
+    )
+    selected_mro = type.__getattribute__(
+        type(selected_model_client),
+        "__mro__",
+    )
+    observed_model_client = (
+        selected_model_client
+        if AttemptObservableModelClient in selected_mro
+        else AttemptObservableClientAdapter(
+            cast("OneNetworkAttemptModelClient", selected_model_client),
+            provider="test",
+            default_model="mock-model",
+        )
+    )
     engine = AgentEngine(
         entry_skill=entry,
         skill_snapshot=registry.snapshot(),
         tool_runtime=ToolCallRuntime(ToolRegistry()),
-        model_client=model_client or SimClient(turns=[]),
+        model_client=observed_model_client,
         store=store,
         thread_id=thread_id,
         session_id=session_id,
@@ -627,6 +648,7 @@ async def test_completed_actor_submission_replay_is_a_noop(
             "submission_accepted",
             "conversation_item",
             "submission_applied",
+            "llm_request_committed",
         ]
         assert committed[3].payload["turn_index"] == 0
         assert coordinator.health is AuditHealth.HEALTHY
