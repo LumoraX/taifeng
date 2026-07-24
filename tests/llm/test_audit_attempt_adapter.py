@@ -505,6 +505,78 @@ def test_adapter_cache_read_proxy_is_safe_when_inner_has_no_telemetry() -> None:
 
 
 @pytest.mark.anyio
+async def test_non_owner_exit_cannot_close_running_owner_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 owner exit 须在状态变更前拒绝，owner 最终 exactly-once cleanup。"""
+    events: list[str] = []
+    dispatch_started = anyio.Event()
+    dispatch_allowed = anyio.Event()
+
+    async def blocking_stream(
+        inner_session: _DispatchSpySession,
+        request: ApiRequest,
+    ) -> AsyncIterator[ResponseEvent]:
+        """在真实 dispatch 窗口保持 async generator 运行中。"""
+        inner_session.dispatched = True
+        inner_session.requests.append(request)
+        inner_session.events.append("dispatch")
+        dispatch_started.set()
+        await dispatch_allowed.wait()
+        yield text_delta("ok-0")
+
+    monkeypatch.setattr(_DispatchSpySession, "stream", blocking_stream)
+    reviewed, inner = _reviewed_spy_inner(monkeypatch, events)
+    client = AttemptObservableClientAdapter(
+        reviewed,
+        provider="provider-a",
+        default_model="model-a",
+    )
+    observer = _BlockingObserver(events)
+    observer.allow.set()
+    session = client.session_with_attempt_observer(
+        cancel=CancellationToken(name="turn"),
+        attempt_observer=observer,
+    )
+    non_owner_errors: list[RuntimeError] = []
+    exit_calls_during_race: list[int] = []
+    state_during_race: list[tuple[bool, bool, bool]] = []
+
+    async def exit_from_non_owner() -> None:
+        """在 inner generator 正运行时从另一 task 请求退出。"""
+        await dispatch_started.wait()
+        try:
+            await session.__aexit__(None, None, None)
+        except RuntimeError as error:
+            non_owner_errors.append(error)
+        finally:
+            exit_calls_during_race.append(inner.sessions[0].exit_calls)
+            state_during_race.append((
+                session._closed,  # type: ignore[attr-defined]  # noqa: SLF001
+                session._active_stream is not None,  # type: ignore[attr-defined]  # noqa: SLF001
+                session._active_context is not None,  # type: ignore[attr-defined]  # noqa: SLF001
+            ))
+            dispatch_allowed.set()
+
+    async with session as entered:
+        closer = asyncio.create_task(exit_from_non_owner())
+        stream = entered.stream(_request())
+        event = await anext(stream)
+        await closer
+
+    await stream.aclose()
+    assert len(non_owner_errors) == 1
+    assert str(non_owner_errors[0]) == "observed session exit must run in owner task"
+    assert "asynchronous generator is already running" not in str(non_owner_errors[0])
+    assert exit_calls_during_race == [0]
+    assert state_during_race == [(False, True, True)]
+    assert event.data["text"] == "ok-0"
+    assert len(observer.requests) == 1
+    assert events == ["ack", "session_construct", "enter", "dispatch", "exit"]
+    assert inner.sessions[0].exit_calls == 1
+
+
+@pytest.mark.anyio
 async def test_observed_session_rejects_stream_from_non_owner_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

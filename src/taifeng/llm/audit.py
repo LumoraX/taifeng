@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
+
+import anyio
 
 from taifeng.conversation.journal.canonical import validate_json_value
 from taifeng.conversation.journal.errors import NonCanonicalValueError
@@ -152,29 +153,30 @@ class _ObservedOneAttemptSession:
         self._session_model = session_model
         self._stream_started = False
         self._closed = False
-        self._owner_task: asyncio.Task[Any] | None = None
+        self._owner_task_id: int | None = None
         self._active_context: ModelClientSession | None = None
         self._active_stream: AsyncIterator[ResponseEvent] | None = None
 
     async def __aenter__(self) -> _ObservedOneAttemptSession:
         if self._closed:
             raise RuntimeError("observed session is closed")
-        current_task = asyncio.current_task()
-        if current_task is None:
-            raise RuntimeError("observed session requires an asyncio owner task")
-        if self._owner_task is not None and current_task is not self._owner_task:
+        current_task_id = anyio.get_current_task().id
+        if (
+            self._owner_task_id is not None
+            and current_task_id != self._owner_task_id
+        ):
             raise RuntimeError("observed session context already has an owner task")
-        self._owner_task = current_task
+        self._owner_task_id = current_task_id
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        self._require_owner_task("exit")
         self._closed = True
         await self._close_active(*exc)
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
         """取得 definite permit 后才迭代底层 one-attempt stream。"""
-        if asyncio.current_task() is not self._owner_task:
-            raise RuntimeError("observed session stream must run in owner task")
+        self._require_owner_task("stream")
         if self._closed:
             raise RuntimeError("observed session is closed")
         if self._stream_started:
@@ -208,6 +210,13 @@ class _ObservedOneAttemptSession:
             raise
         else:
             await self._close_active(None, None, None)
+
+    def _require_owner_task(self, action: str) -> None:
+        """在任何状态或资源变更前拒绝非 owner task 操作。"""
+        if anyio.get_current_task().id != self._owner_task_id:
+            raise RuntimeError(
+                f"observed session {action} must run in owner task"
+            )
 
     async def _close_active(self, *exc: object) -> None:
         """摘除并 exactly-once 关闭当前 inner stream/context。"""
