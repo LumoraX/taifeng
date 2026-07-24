@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from taifeng.conversation.journal.models import ActorRef, JournalRecord
@@ -62,9 +61,15 @@ async def _submit_shutdown(
             await finish_owner()
         else:
             from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
+            from taifeng.loop.pool_lifecycle import EnginePoolReleaseError
 
-            with suppress(AuditSessionReleaseError):
+            try:
                 await finish_owner()
+            except AuditSessionReleaseError:
+                pass
+            except EnginePoolReleaseError as error:
+                if error.finish_result is None:
+                    state.coordinator.fail_shutdown_finish_handoff()
             raise claim.fatal
     else:
         result = await state.coordinator.wait_shutdown_finish(submission.id)

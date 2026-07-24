@@ -205,7 +205,10 @@ class PeerMailbox:
             # 句柄回 running（_finalize_spawn 的终态幂等以此放行新收敛）
             drv._spawn_handles.set_result(  # noqa: SLF001
                 handle.handle_id, status="running", result=None)
-            asyncio.create_task(self._drive_woken_turn(handle))
+            drv._start_owned_task(  # noqa: SLF001
+                self._drive_woken_turn(handle),
+                name=f"peer-wake:{handle.handle_id}",
+            )
         except Exception:
             eng._spawn_registry.release_manual()  # noqa: SLF001
             raise

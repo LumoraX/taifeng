@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import user_message
@@ -191,7 +190,10 @@ class JoinBarrierCoordinator:
         runner = eng._build_child_runner(  # noqa: SLF001
             target, then_thread_id, seed, cancel, history=[seed])
         # 聚合 turn 后台独立跑(不阻塞主 actor / 不回写本 engine 状态)
-        asyncio.create_task(runner.run())
+        drv._start_owned_task(  # noqa: SLF001
+            runner.run(),
+            name=f"barrier:{barrier.barrier_id}",
+        )
 
         # 幂等:先入守卫集再落 fired 标记 + emit(防止并发 _check_barriers 重入触发)
         drv._fired_barriers.add(barrier.barrier_id)  # noqa: SLF001

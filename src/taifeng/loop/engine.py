@@ -1246,12 +1246,12 @@ class AgentEngine:
                 self._audited_mailbox,
             )
         cancel.cancel()
-        # R4:任何退出路径(Shutdown / root-cancel break / 异常)统一取消全部
-        # TTL 定时器——孤儿定时器到期后会向无人消费的队列 submit(可能永久阻塞)
+        # R4:任何退出路径统一取消 TTL，避免孤儿定时器向无人消费的队列 submit。
         self._cancel_ttl_timers()
         actor_cancellation = await self._converge_operations()
+        spawn_cancellation = await self._spawn.converge_owned_tasks()
+        actor_cancellation = actor_cancellation or spawn_cancellation
         if shutdown_requested:
-            # K3 teardown 必须在所有会话 operation 收敛后再最终 flush。
             await self._memory_session_end()
         # 通知所有 subscriber 退出：经统一投递路径，shutdown 也获全局 seq +
         # per-subscriber delivery_seq（保持两个序号在退出事件上同样连续可自检）。

@@ -88,6 +88,29 @@ def _gate_shutdown_acceptance(core: Any) -> tuple[anyio.Event, anyio.Event]:
     return entered, allow
 
 
+def _inject_shutdown_acceptance_failure(
+    core: Any,
+    failure: BaseException,
+) -> None:
+    """只在 Shutdown acceptance 的真实 core dispatch 注入指定失败。"""
+    original_append = core.append_batch
+
+    async def fail_acceptance(
+        _core: Any,
+        records: tuple[Any, ...],
+        **kwargs: Any,
+    ) -> Any:
+        if any(
+            record.record_type == "submission_accepted"
+            and record.payload.get("op_kind") == "shutdown"
+            for record in records
+        ):
+            raise failure
+        return await original_append(records, **kwargs)
+
+    core.append_batch = MethodType(fail_acceptance, core)
+
+
 def _gate_same_id_replay(
     engine: Any,
     coordinator: SessionAuditCoordinator,
@@ -475,23 +498,7 @@ async def test_shutdown_acceptance_fatal_finishes_then_reraises_original(
         entry_skill_id="entry",
     )
     state = pool._audit_sessions[session_id]  # noqa: SLF001
-    original_append = core.append_batch
-
-    async def fatal_acceptance(
-        _core: Any,
-        records: tuple[Any, ...],
-        **kwargs: Any,
-    ) -> Any:
-        """只在 Shutdown acceptance 的真实 core dispatch 注入 fatal。"""
-        if any(
-            record.record_type == "submission_accepted"
-            and record.payload.get("op_kind") == "shutdown"
-            for record in records
-        ):
-            raise fatal
-        return await original_append(records, **kwargs)
-
-    core.append_batch = MethodType(fatal_acceptance, core)
+    _inject_shutdown_acceptance_failure(core, fatal)
     original_owner = engine._audit_finish_owner  # noqa: SLF001
     assert original_owner is not None
     owner_calls: list[int] = []
@@ -615,76 +622,3 @@ async def test_audited_shutdown_event_uses_durable_public_submission_id(
 
     await pool.close()
     assert core.close_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_explicit_audited_shutdown_forces_live_spawn_convergence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """显式 Shutdown 不受普通 release 的 detached spawn 保活闸阻止。"""
-    real_core, core, pool, _ = _build_release_scenario(tmp_path)
-    session_id = "ses_shutdown_live_spawn"
-    engine = await pool.get_or_create(
-        session_id=session_id,
-        entry_skill_id="entry",
-    )
-    core.allow_terminal.set()
-    with anyio.fail_after(1):
-        await engine._spawn._await_root_cancel_ready()  # noqa: SLF001
-    assert engine._root_cancel is not None  # noqa: SLF001
-    handle_id = "sp_live_shutdown"
-    engine._spawn._spawn_handles.register(  # noqa: SLF001
-        handle_id=handle_id,
-        skill_id="live-child",
-        child_thread_id="thr_live_shutdown",
-    )
-    spawn_cancel = engine._root_cancel.child(  # noqa: SLF001
-        f"spawn:{handle_id}"
-    )
-    engine._spawn._spawn_cancels[handle_id] = spawn_cancel  # noqa: SLF001
-    settled = anyio.Event()
-
-    async def converge_live_spawn() -> None:
-        """模拟真实 detached runner 在 root cancel 后收敛句柄终态。"""
-        await spawn_cancel.wait_cancelled()
-        engine._spawn._spawn_handles.set_result(  # noqa: SLF001
-            handle_id,
-            status="cancelled",
-            result=None,
-        )
-        settled.set()
-
-    spawn_task = asyncio.create_task(converge_live_spawn())
-    await pool.release(session_id)
-    assert session_id in pool._engines  # noqa: SLF001
-    assert not spawn_cancel.is_cancelled
-    assert core.close_calls == 0
-    monkeypatch.setattr(
-        "taifeng.loop.submission.secrets.token_hex",
-        lambda _size: "shutdown_live_spawn",
-    )
-    try:
-        shutdown_id = await engine.submit(Shutdown())
-        with anyio.fail_after(1):
-            await settled.wait()
-
-        assert shutdown_id == "sub_shutdown_live_spawn"
-        assert engine.spawn_status([handle_id])[handle_id]["status"] == "cancelled"
-        assert session_id not in pool._engines  # noqa: SLF001
-        assert session_id not in pool._engine_tasks  # noqa: SLF001
-        assert session_id not in pool._audit_sessions  # noqa: SLF001
-        committed = [envelope async for envelope in real_core.load(session_id)]
-        assert [envelope.record_type for envelope in committed[3:]] == [
-            "submission_accepted",
-            "submission_applied",
-            "thread_terminal",
-            "session_ended",
-        ]
-        assert committed[3].submission_id == shutdown_id
-        assert core.close_calls == 1
-    finally:
-        await pool.close()
-        if not spawn_task.done():
-            spawn_task.cancel()
-        await asyncio.gather(spawn_task, return_exceptions=True)

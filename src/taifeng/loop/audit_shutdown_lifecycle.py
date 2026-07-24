@@ -43,6 +43,9 @@ class _CoordinatorProtocol(Protocol):
     def _raise_if_append_sealed(self) -> None:
         """terminal seal 后拒绝普通 append。"""
 
+    def _raise_if_frozen(self) -> None:
+        """重抛唯一冻结错误。"""
+
 
 @dataclass(frozen=True, slots=True)
 class ShutdownAdmissionClaim:
@@ -128,11 +131,17 @@ class ShutdownLifecycleMixin:
             await self._shutdown_finish_started.wait()
             async with coordinator._lifecycle_lock:
                 future = coordinator._finish_future
-        assert future is not None
+        if future is None:
+            coordinator._raise_if_frozen()
+            raise RuntimeError("Shutdown finish handoff failed")
         return await future.wait()
 
     def _publish_shutdown_finish_started(self) -> None:
         """在唯一 finish future 安装后唤醒 same-id replay。"""
+        self._shutdown_finish_started.set()
+
+    def fail_shutdown_finish_handoff(self) -> None:
+        """owner 未发布 finish future 时唤醒 same-id retry，使其 fail-fast。"""
         self._shutdown_finish_started.set()
 
     def _shutdown_admission(self) -> tuple[str, str, str] | None:

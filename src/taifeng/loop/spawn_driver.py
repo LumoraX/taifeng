@@ -42,6 +42,8 @@ from taifeng.loop.spawn_resume import SpawnResumeChain
 from taifeng.loop.spawn_rewind import SpawnRewindChain
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
     from taifeng.loop.submission import Submission
@@ -72,6 +74,10 @@ class SpawnDriver:
         # 由 _drive_spawn / resume_spawn 在派生 token 时登记；spawn 收尾时不强制清理
         # （终态句柄不会被再 kill，留着无副作用，且便于幂等 no-op）。
         self._spawn_cancels: dict[str, CancellationToken] = {}
+        # 所有真正分离执行的 task 由 driver 显式持有。Session root cancel 只发出
+        # 协作取消信号；Engine teardown 必须等待这些 task 完成句柄/slot/runner
+        # 收敛，才能写 Session terminal 并释放 pool ownership。
+        self._owned_tasks: set[asyncio.Task[Any]] = set()
         # join-barrier 进程内幂等守卫:已触发过的 barrier_id 集合。保证每个 barrier
         # 在本进程内**至多触发一次**(配合 parent thread 落 join_barrier_fired 标记,
         # 冷恢复重建时也不重复起聚合 turn)。
@@ -145,7 +151,6 @@ class SpawnDriver:
         import secrets
 
         eng = self._engine
-
         # 1. 目标 skill 必须存在
         target = eng._snapshot.get(skill_id)  # noqa: SLF001
         if target is None:
@@ -227,8 +232,9 @@ class SpawnDriver:
 
             # 6. 分离 task：后台独立跑子 skill turn（非阻塞），跑完回写句柄 + emit 终态。
             #    seed 传入 _drive_spawn，确保 history_buffer[0] 与 store 里的同一对象。
-            asyncio.create_task(
-                self._drive_spawn(handle_id, target, child_thread_id, seed)
+            self._start_owned_task(
+                self._drive_spawn(handle_id, target, child_thread_id, seed),
+                name=f"spawn:{handle_id}",
             )
         except Exception:
             # 预启动失败：子 task 未启动，释放 K1 槽位后重抛。
@@ -236,6 +242,54 @@ class SpawnDriver:
             raise
 
         return {"handle_id": handle_id, "child_thread_id": child_thread_id}
+
+    def _start_owned_task(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        """创建并登记 detached task，终态统一检索异常并释放 ownership。"""
+        task = asyncio.create_task(
+            coroutine,
+            name=f"engine-spawn:{self._engine._session_id}:{name}",  # noqa: SLF001
+        )
+        self._owned_tasks.add(task)
+        task.add_done_callback(self._forget_owned_task)
+        return task
+
+    def _forget_owned_task(self, task: asyncio.Task[Any]) -> None:
+        """检索 detached task 终态并从 driver ownership 移除。"""
+        self._owned_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except BaseException as exc:  # noqa: BLE001
+            logger.error(
+                "detached spawn task failed: %s",
+                task.get_name(),
+                exc_info=exc,
+            )
+
+    async def converge_owned_tasks(self) -> asyncio.CancelledError | None:
+        """等待 root-cancel 驱动的 detached 收敛，不用 raw task.cancel 截断终态。"""
+        cancellation: asyncio.CancelledError | None = None
+        while self._owned_tasks:
+            tasks = tuple(self._owned_tasks)
+            waiter = asyncio.gather(*tasks, return_exceptions=True)
+            while not waiter.done():
+                try:
+                    await asyncio.shield(waiter)
+                except asyncio.CancelledError as error:
+                    cancellation = cancellation or error
+                    current = asyncio.current_task()
+                    if current is not None:
+                        current.uncancel()
+            waiter.result()
+            for task in tasks:
+                self._owned_tasks.discard(task)
+        return cancellation
 
     async def _drive_spawn(
         self,
