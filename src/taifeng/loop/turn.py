@@ -26,9 +26,6 @@ from taifeng.context.compressor import (
     CompressionOrchestrator,
 )
 from taifeng.context.injection import InitialContextInjection
-
-if TYPE_CHECKING:
-    from taifeng.context.pinned_state import PinnedStateRegistry
 from taifeng.conversation.models import (
     ResponseItem,
     assistant_message,
@@ -36,8 +33,6 @@ from taifeng.conversation.models import (
     function_call_output,
     reasoning,
 )
-from taifeng.conversation.store import MessageStore
-from taifeng.llm.client import ModelClient
 from taifeng.llm.errors import (
     LLMError,
     RequestTooLargeError,
@@ -45,39 +40,31 @@ from taifeng.llm.errors import (
 )
 from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
-from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
-from taifeng.loop.failure_policy import (
-    DEFAULT_FAILURE_POLICY,
-    FailureContext,
-    FailureDisposition,
-    FailureDispositionPolicy,
-)
-from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.event import (
     AssistantReasoning,
     AssistantText,
+    BudgetHintInjected,
     CacheBreakDetected,
     CompactionCompleted,
     CompactionDegradationWarning,
     CompactionIntegrityRolledBack,
     CompactionStarted,
     ContextBudgetExceeded,
+    DenialCircuitOpen,
+    DoomLoopCircuitOpen,
+    DoomLoopWarned,
     EngineLog,
     EventMsg,
     LlmRequestRecorded,
-    BudgetHintInjected,
     PinnedStateReinjected,
     PreCompactHookSkipped,
     ProviderRetry,
     ResourceLimitExceeded,
-    DenialCircuitOpen,
-    DoomLoopWarned,
-    DoomLoopCircuitOpen,
+    RewindCheckpointRecorded,
     SkillDispatched,
     SkillReturned,
-    RewindCheckpointRecorded,
     SkillSpawnRejected,
     SubagentPolicyOverridden,
     ToolBatchDispatched,
@@ -88,16 +75,30 @@ from taifeng.loop.event import (
     TurnSuspended,
     UserInputInjected,
 )
+from taifeng.loop.failure_policy import (
+    DEFAULT_FAILURE_POLICY,
+    FailureContext,
+    FailureDisposition,
+    FailureDispositionPolicy,
+)
+from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.rewind import RewindLog, count_turns
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch
-from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import CallStack, DispatchPolicy
-from taifeng.skill.eligibility import RuntimeCapabilities
-from taifeng.skill.registry import SkillSnapshot
 from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获，不可放 TYPE_CHECKING
-from taifeng.tool.runtime import ToolCallRuntime
 from taifeng.tool.spec import ToolContext, ToolResult
+
+if TYPE_CHECKING:
+    from taifeng.context.pinned_state import PinnedStateRegistry
+    from taifeng.conversation.store import MessageStore
+    from taifeng.llm.client import ModelClient, ModelClientSession
+    from taifeng.loop.audit_bootstrap import AuditedSessionState
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.skill.definition import SkillDefinition
+    from taifeng.skill.eligibility import RuntimeCapabilities
+    from taifeng.skill.registry import SkillSnapshot
+    from taifeng.tool.runtime import ToolCallRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,8 @@ class TurnRunner:
     submission_id: str
     emit: Any  # Callable[[EventMsg], Awaitable[None]] —— 业务侧注入
     cancel: CancellationToken
+    audit_state: AuditedSessionState | None = None
+    """strict audit state；None 时保持 legacy ModelClient session 路径。"""
     hooks: Any = None  # HookRunner | None —— 可选钩子
     permission_policy: Any = None
     """可选 PermissionPolicy；非 None 时 call_skill 派发会经过 check()
@@ -943,6 +946,32 @@ class TurnRunner:
             return "system_prompt_changed"
         return None
 
+    def _model_session(self, iteration: int) -> ModelClientSession:
+        """audit 模式注入 Journal observer；legacy 原样创建普通 session。"""
+        if self.audit_state is None:
+            return self.model_client.session(cancel=self.cancel)
+        from taifeng.llm.audit import AttemptObservableModelClient
+        from taifeng.loop.audit_llm import JournalModelAttemptObserver
+
+        client_type = type(self.model_client)
+        if AttemptObservableModelClient not in client_type.__mro__:
+            error = RuntimeError("audit model attempt observer unavailable")
+            raise self.audit_state.coordinator.freeze(error) from None
+        observer = JournalModelAttemptObserver(
+            state=self.audit_state,
+            thread_id=self.thread_id,
+            submission_id=self.submission_id,
+            turn_index=self.turn_index,
+            iteration=iteration,
+            cancel=self.cancel,
+        )
+        client = self.model_client
+        assert isinstance(client, AttemptObservableModelClient)
+        return client.session_with_attempt_observer(
+            cancel=self.cancel,
+            attempt_observer=observer,
+        )
+
     async def _sample_once(self, iteration: int) -> tuple[str, bool]:
         """一次 LLM 采样 + 工具调度，返回 (本轮 assistant text, 是否有 tool call)。"""
 
@@ -1057,7 +1086,7 @@ class TurnRunner:
                     raise SuspendSignal(self._system_retry_pending(err))
                 raise err
 
-        sess = self.model_client.session(cancel=self.cancel)
+        sess = self._model_session(iteration)
         assistant_text = ""
         # 累积本轮 reasoning 全文(thinking 模型;非 thinking 恒为空)
         reasoning_text = ""
@@ -1532,7 +1561,8 @@ class TurnRunner:
         self.total_usage = TokenUsage(
             input_tokens=self.total_usage.input_tokens + u.input_tokens,
             output_tokens=self.total_usage.output_tokens + u.output_tokens,
-            total_tokens=self.total_usage.total_tokens + (u.total_tokens or u.input_tokens + u.output_tokens),
+            total_tokens=self.total_usage.total_tokens
+            + (u.total_tokens or u.input_tokens + u.output_tokens),
             cache_creation_input_tokens=self.total_usage.cache_creation_input_tokens
             + u.cache_creation_input_tokens,
             cache_read_input_tokens=self.total_usage.cache_read_input_tokens

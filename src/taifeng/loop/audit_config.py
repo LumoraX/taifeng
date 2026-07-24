@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import inspect
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import MemberDescriptorType
 from typing import TYPE_CHECKING, Literal, Protocol
+
+from taifeng.llm.audit import AttemptObservableModelClient
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -19,8 +20,7 @@ if TYPE_CHECKING:
         SessionDescriptor,
         SessionLease,
     )
-    from taifeng.llm.client import ModelClient, ModelClientSession
-    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.llm.client import ModelClient
     from taifeng.skill.registry import SkillSnapshot
 
 
@@ -56,33 +56,6 @@ class AuditJournalCore(Protocol):
     ) -> AsyncIterator[JournalEnvelope]:
         """strict 读取 durable committed envelopes。"""
         ...
-
-
-class AttemptObservableModelClient(ABC):
-    """Task 7 observer adapter 必须 nominal 实现的静态 client 边界。
-
-    Task 5 只声明 observer-aware session 注入点，不实现 observer、dispatch 或网络逻辑。
-    普通 ModelClient 即使拥有同名属性，也不会自动满足这个 nominal 边界。
-    """
-
-    @abstractmethod
-    def session(
-        self,
-        *,
-        cancel: CancellationToken,
-        model: str | None = None,
-    ) -> ModelClientSession:
-        """创建普通 turn 级 session。"""
-
-    @abstractmethod
-    def session_with_attempt_observer(
-        self,
-        *,
-        cancel: CancellationToken,
-        attempt_observer: object,
-        model: str | None = None,
-    ) -> ModelClientSession:
-        """创建显式绑定 attempt observer 的 turn 级 session。"""
 
 
 @dataclass(frozen=True, slots=True)

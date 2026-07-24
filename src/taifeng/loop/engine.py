@@ -1814,6 +1814,7 @@ class AgentEngine:
             submission_id=submission_id,
             emit=self._emit,
             cancel=turn_cancel,
+            audit_state=self._audit_state,
             hooks=self._hooks,
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
