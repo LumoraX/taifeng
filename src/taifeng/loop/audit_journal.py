@@ -31,7 +31,12 @@ class JournalAppendCore(Protocol):
         lease: SessionLease,
         expected_seq: int,
     ) -> JournalAck:
-        """以 caller expected seq 原子追加一个 batch。"""
+        """以 caller expected seq 原子追加一个 batch。
+
+        契约：raw ``CancelledError`` 只能表示实现已证明 commit 未开始且无 mutation；
+        mutation/dispatch 后的取消必须收敛为确定 ``JournalAck``，或抛
+        ``JournalRecoveryRequiredError``。未知实现不得用 raw cancel 表达 post-dispatch 结果。
+        """
 
     async def close_session(self, lease: SessionLease) -> None:
         """释放且只释放 coordinator 绑定的 per-Session writer。"""
