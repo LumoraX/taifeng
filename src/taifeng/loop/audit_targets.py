@@ -22,6 +22,26 @@ class TargetCancelResult:
     terminal_record_ids: tuple[str, ...]
 
 
+class TargetCancelIdentityConflictError(RuntimeError):
+    """同一 CancelTurn submission identity 指向不同 target。"""
+
+    def __init__(
+        self,
+        cancel_submission_id: str,
+        expected_target_id: str,
+        actual_target_id: str,
+    ) -> None:
+        """保存稳定 identity，不读取任意对象表示。"""
+        super().__init__(
+            "cancel submission target conflict: "
+            f"cancel={cancel_submission_id}, "
+            f"expected={expected_target_id}, actual={actual_target_id}"
+        )
+        self.cancel_submission_id = cancel_submission_id
+        self.expected_target_id = expected_target_id
+        self.actual_target_id = actual_target_id
+
+
 @dataclass(slots=True)
 class _TargetState:
     """active target token 与终态唤醒点。"""
@@ -35,11 +55,19 @@ class _TargetState:
 
 
 @dataclass(slots=True)
-class _CancelResolution:
-    """同一 CancelTurn submission 的共享收敛状态。"""
+class _CancelResolutionState:
+    """同一 resolution handle 的可变结果槽。"""
 
-    target: _TargetState | None
     result: TargetCancelResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CancelResolution:
+    """绑定 immutable target identity 的共享收敛 handle。"""
+
+    target_submission_id: str
+    target: _TargetState | None
+    state: _CancelResolutionState
 
 
 class TargetCancellationRegistry:
@@ -96,6 +124,15 @@ class TargetCancellationRegistry:
             state.token.cancel()
             state.closed_without_terminal = True
             state.terminal.set()
+
+    def cancel_from_session_root(self) -> None:
+        """Session shutdown 标 external 并唤醒未被 CancelTurn 先认领的 target。"""
+        for state in tuple(self._active.values()):
+            if state.cancellation_origin is None:
+                state.cancellation_origin = "external"
+                state.closed_without_terminal = True
+                state.terminal.set()
+            state.token.cancel()
 
     def register_terminal(
         self,
@@ -161,18 +198,45 @@ class TargetCancellationRegistry:
         target_submission_id: str,
     ) -> TargetCancelResult:
         """取消 active target 并等待终态；重试复用首次稳定裁定。"""
+        resolution = self.begin(
+            cancel_submission_id=cancel_submission_id,
+            target_submission_id=target_submission_id,
+        )
+        return await self.wait(resolution)
+
+    def begin(
+        self,
+        *,
+        cancel_submission_id: str,
+        target_submission_id: str,
+    ) -> _CancelResolution:
+        """同步建立 first-winner handle，作为 admission lock 内线性化点。"""
         if not cancel_submission_id or not target_submission_id:
             raise ValueError("cancel and target submission ids must be non-empty")
         resolution = self._resolutions.get(cancel_submission_id)
-        if resolution is None:
-            resolution = self._start_resolution(target_submission_id)
-            self._resolutions[cancel_submission_id] = resolution
-        if resolution.result is None:
+        if resolution is not None:
+            if resolution.target_submission_id != target_submission_id:
+                raise TargetCancelIdentityConflictError(
+                    cancel_submission_id,
+                    resolution.target_submission_id,
+                    target_submission_id,
+                )
+            return resolution
+        resolution = self._start_resolution(target_submission_id)
+        self._resolutions[cancel_submission_id] = resolution
+        return resolution
+
+    async def wait(
+        self,
+        resolution: _CancelResolution,
+    ) -> TargetCancelResult:
+        """等待 handle 对应 target 收敛，并重放其唯一稳定结果。"""
+        if resolution.state.result is None:
             assert resolution.target is not None
             await resolution.target.terminal.wait()
-            if resolution.result is None:
-                resolution.result = self._settled_result(resolution.target)
-        return self._copy_result(resolution.result)
+            if resolution.state.result is None:
+                resolution.state.result = self._settled_result(resolution.target)
+        return self._copy_result(resolution.state.result)
 
     @staticmethod
     def _settled_result(target: _TargetState) -> TargetCancelResult:
@@ -197,28 +261,42 @@ class TargetCancellationRegistry:
         terminal_ids = self._terminal.get(target_id)
         if terminal_ids is not None:
             return _CancelResolution(
+                target_submission_id=target_id,
                 target=None,
-                result=TargetCancelResult(
-                    result_status="already_terminal",
-                    terminal_record_ids=terminal_ids,
+                state=_CancelResolutionState(
+                    result=TargetCancelResult(
+                        result_status="already_terminal",
+                        terminal_record_ids=terminal_ids,
+                    )
                 ),
             )
         target = self._active.get(target_id)
         if target is None:
             return _CancelResolution(
+                target_submission_id=target_id,
                 target=None,
-                result=TargetCancelResult(
-                    result_status="not_found",
-                    terminal_record_ids=(),
+                state=_CancelResolutionState(
+                    result=TargetCancelResult(
+                        result_status="not_found",
+                        terminal_record_ids=(),
+                    )
                 ),
             )
         if target.token.is_cancelled:
             if target.cancellation_origin is None:
                 target.cancellation_origin = "external"
-            return _CancelResolution(target=target)
+            return _CancelResolution(
+                target_submission_id=target_id,
+                target=target,
+                state=_CancelResolutionState(),
+            )
         target.cancellation_origin = "cancel_turn"
         target.token.cancel()
-        return _CancelResolution(target=target)
+        return _CancelResolution(
+            target_submission_id=target_id,
+            target=target,
+            state=_CancelResolutionState(),
+        )
 
     @staticmethod
     def _copy_result(result: TargetCancelResult) -> TargetCancelResult:
@@ -250,6 +328,11 @@ class TargetCancellationMixin:
     def cancel_target(self, target_id: str) -> bool:
         """只取消目标 turn 及其 child subtree。"""
         return self._target_cancellations.cancel(target_id)
+
+    def cancel_session_root(self) -> None:
+        """幂等取消 Session root，并以 external 来源唤醒未认领 target。"""
+        self._target_cancellations.cancel_from_session_root()
+        self._session_root_cancel.cancel()  # type: ignore[attr-defined]
 
     def register_target_terminal(
         self,
@@ -292,9 +375,32 @@ class TargetCancellationMixin:
         target_submission_id: str,
     ) -> TargetCancelResult:
         """返回 scoped CancelTurn 的稳定 registry 结果。"""
-        result = await self._target_cancellations.resolve(
+        resolution = self.begin_target_cancel(
             cancel_submission_id=cancel_submission_id,
             target_submission_id=target_submission_id,
         )
+        return await self.wait_target_cancel(resolution)
+
+    def begin_target_cancel(
+        self,
+        *,
+        cancel_submission_id: str,
+        target_submission_id: str,
+    ) -> _CancelResolution:
+        """同步建立 CancelTurn first-winner；identity 冲突立即 freeze。"""
+        try:
+            return self._target_cancellations.begin(
+                cancel_submission_id=cancel_submission_id,
+                target_submission_id=target_submission_id,
+            )
+        except TargetCancelIdentityConflictError as error:
+            raise self.freeze(error) from None  # type: ignore[attr-defined]
+
+    async def wait_target_cancel(
+        self,
+        resolution: _CancelResolution,
+    ) -> TargetCancelResult:
+        """等待既有 first-winner handle，冻结后不返回伪造结果。"""
+        result = await self._target_cancellations.wait(resolution)
         self._raise_if_frozen()  # type: ignore[attr-defined]
         return result

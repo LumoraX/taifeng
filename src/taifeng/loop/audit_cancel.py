@@ -105,22 +105,31 @@ def _applied_record(
 async def _apply_cancel_turn(
     state: AuditedSessionState,
     submission: AuditedCancelTurnSubmission,
+    admission_lock: asyncio.Lock,
 ) -> TargetCancelResult:
-    """accepted ack 后触发 target，terminal 收敛后写 applied。"""
+    """lock 内 accept/begin，lock 外等待 terminal、写 applied 并退休 work。"""
     accepted = _accepted_record(state, submission)
 
     async def durable_accept() -> None:
         """写入 durable acceptance。"""
         await state.coordinator.append(accepted)
 
-    work = await state.coordinator.admit_work(
-        submission.submission_id,
-        durable_accept,
-    )
+    async with admission_lock:
+        work = await state.coordinator.admit_work(
+            submission.submission_id,
+            durable_accept,
+        )
+        try:
+            resolution = state.coordinator.begin_target_cancel(
+                cancel_submission_id=submission.submission_id,
+                target_submission_id=submission.target_submission_id,
+            )
+        except BaseException:
+            await work.complete()
+            raise
     try:
-        result = await state.coordinator.resolve_target_cancel(
-            cancel_submission_id=submission.submission_id,
-            target_submission_id=submission.target_submission_id,
+        result = await state.coordinator.wait_target_cancel(
+            resolution,
         )
         applied = _applied_record(
             state,
@@ -155,9 +164,12 @@ async def _await_owned[T](operation: Coroutine[object, object, T]) -> T:
 async def apply_cancel_turn(
     state: AuditedSessionState,
     submission: AuditedCancelTurnSubmission,
+    admission_lock: asyncio.Lock,
 ) -> TargetCancelResult:
     """以 cancellation-independent ownership 执行 healthy CancelTurn。"""
-    return await _await_owned(_apply_cancel_turn(state, submission))
+    return await _await_owned(
+        _apply_cancel_turn(state, submission, admission_lock)
+    )
 
 
 async def finalize_cancelled_target(

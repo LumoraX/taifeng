@@ -650,8 +650,11 @@ class AgentEngine:
             submission_id=sub.id,
             target_submission_id=sub.op.submission_id,
         )
-        async with self._audited_admission_lock:
-            result = await apply_cancel_turn(state, submission)
+        result = await apply_cancel_turn(
+            state,
+            submission,
+            self._audited_admission_lock,
+        )
         await self._emit_cancel_turn_log(
             sub.id,
             sub.op.submission_id,
@@ -1220,6 +1223,7 @@ class AgentEngine:
         """按原顺序收敛 actor、operation、持久化 flush 与订阅者终态。"""
         self._running = False
         if self._audit_state is not None:
+            self._audit_state.coordinator.cancel_session_root()
             await finalize_audited_mailbox(
                 self._audit_state,
                 self._audited_mailbox,

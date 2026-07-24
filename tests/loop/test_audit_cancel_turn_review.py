@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -13,15 +14,20 @@ from taifeng.llm.events import completed
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.audit import (
     AuditHealth,
+    SessionAuditFrozenError,
     SessionFinishingError,
+    SessionLifecycle,
 )
+from taifeng.loop.audit_targets import TargetCancellationRegistry
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import CancelTurn, UserMessage
 from tests.loop.test_audit_cancel_turn import (
+    _ControlledClient,
     _load_journal,
     _stop_actor,
     _wait_for_record,
 )
+from tests.loop.test_audit_coordinator import _coordinator, _RecordingCore
 from tests.loop.test_audit_submission_admission import _engine_with_audit
 
 if TYPE_CHECKING:
@@ -81,6 +87,210 @@ class _RootFirstClient:
         """返回绑定 target token 的受控 session。"""
         del model
         return _RootFirstSession(self, cancel)
+
+
+class _HeldCancelledSession:
+    """收到 target cancel 后仍等待测试显式释放。"""
+
+    def __init__(
+        self,
+        client: _HeldCancelledClient,
+        cancel: CancellationToken,
+    ) -> None:
+        """保存 admission-lock 竞态控制器与 target token。"""
+        self._client = client
+        self._cancel = cancel
+
+    async def __aenter__(self) -> _HeldCancelledSession:
+        """返回当前 session。"""
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        """无额外资源需要释放。"""
+
+    async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
+        """保持 CancelTurn pending，直到 shutdown 已关闭 intake。"""
+        del request
+        self._client.token = self._cancel
+        self._client.target_entered.set()
+        await self._cancel.wait_cancelled()
+        self._client.cancel_observed.set()
+        await self._client.release_target.wait()
+        self._cancel.raise_if_cancelled()
+        if False:
+            yield completed(response_id=None, usage=TokenUsage(), end_turn=True)
+
+
+class _HeldCancelledClient:
+    """构造不立即响应 target token 的受控 LLM session。"""
+
+    def __init__(self) -> None:
+        """初始化 target、cancel 与 release barriers。"""
+        self.target_entered = anyio.Event()
+        self.cancel_observed = anyio.Event()
+        self.release_target = anyio.Event()
+        self.token: CancellationToken | None = None
+
+    def session(
+        self,
+        *,
+        cancel: CancellationToken,
+        model: str | None = None,
+    ) -> _HeldCancelledSession:
+        """返回绑定 target token 的受控 session。"""
+        del model
+        return _HeldCancelledSession(self, cancel)
+
+
+@pytest.mark.anyio
+async def test_pending_cancel_releases_admission_lock_for_shutdown(
+    tmp_path: Path,
+    skills_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CancelTurn pending/raw-cancel 时 shutdown 仍可关闭 intake 并入队。"""
+    client = _HeldCancelledClient()
+    engine, coordinator, core = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=client,
+    )
+    actor = asyncio.create_task(
+        engine.run(CancellationToken(name="test-actor-root"))
+    )
+    cancel_task: asyncio.Task[str] | None = None
+    try:
+        target_id = await engine.submit(UserMessage(text="held-cancel"))
+        with anyio.fail_after(2):
+            await client.target_entered.wait()
+        monkeypatch.setattr(
+            "taifeng.loop.submission.secrets.token_hex",
+            lambda _: "lockcancel",
+        )
+        cancel_task = asyncio.create_task(
+            engine.submit(CancelTurn(submission_id=target_id))
+        )
+        with anyio.fail_after(2):
+            await client.cancel_observed.wait()
+        cancel_task.cancel("caller cancelled while target pending")
+
+        with anyio.fail_after(0.2):
+            await engine.shutdown()
+        assert coordinator.snapshot().lifecycle is SessionLifecycle.FINISHING
+        assert engine._audited_shutdown_enqueued  # noqa: SLF001
+
+        client.release_target.set()
+        with pytest.raises(asyncio.CancelledError, match="caller cancelled"):
+            await cancel_task
+        await _wait_for_record(
+            core,
+            record_type="submission_applied",
+            submission_id="sub_lockcancel",
+        )
+        assert coordinator.snapshot().accepted_work_ids == ()
+        with anyio.fail_after(2):
+            await actor
+    finally:
+        client.release_target.set()
+        if cancel_task is not None and not cancel_task.done():
+            with suppress(asyncio.CancelledError):
+                await cancel_task
+        await _stop_actor(actor)
+
+
+@pytest.mark.anyio
+async def test_audited_shutdown_cancels_session_root_and_active_target(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """actor shutdown 取消 coordinator root/target subtree 且不伪造 CancelTurn。"""
+    client = _ControlledClient()
+    engine, coordinator, core = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=client,
+    )
+    actor = asyncio.create_task(
+        engine.run(CancellationToken(name="test-actor-root"))
+    )
+    target_id = await engine.submit(UserMessage(text="cancel-me"))
+    with anyio.fail_after(2):
+        await client.target_entered.wait()
+    assert client.target_token is not None
+    child = client.target_token.child("child-effect")
+
+    await engine.shutdown()
+    with anyio.fail_after(0.2):
+        await actor
+
+    assert coordinator.session_root_cancel.is_cancelled
+    assert client.target_token.is_cancelled
+    assert child.is_cancelled
+    records = await _load_journal(core)
+    assert not any(
+        envelope.record_type == "turn_cancelled"
+        and envelope.submission_id == target_id
+        for envelope in records
+    )
+
+
+@pytest.mark.anyio
+async def test_registry_rejects_same_cancel_id_for_different_target() -> None:
+    """registry 不得把 cancel identity 的旧结果复用于另一个 target。"""
+    registry = TargetCancellationRegistry(CancellationToken(name="session-root"))
+    first = registry.register("sub_first")
+    second = registry.register("sub_second")
+    pending = asyncio.create_task(
+        registry.resolve(
+            cancel_submission_id="sub_cancel",
+            target_submission_id="sub_first",
+        )
+    )
+    with anyio.fail_after(1):
+        await first.wait_cancelled()
+    assert registry.register_terminal(
+        "sub_first",
+        first,
+        terminal_record_ids=("turn:first:cancelled",),
+    )
+    await pending
+
+    with pytest.raises(RuntimeError) as caught:
+        await registry.resolve(
+            cancel_submission_id="sub_cancel",
+            target_submission_id="sub_second",
+        )
+    assert type(caught.value).__name__ == "TargetCancelIdentityConflictError"
+    assert not second.is_cancelled
+
+
+@pytest.mark.anyio
+async def test_coordinator_freezes_on_cancel_identity_target_conflict() -> None:
+    """coordinator 把 cancel id/target 冲突视为 fail-closed invariant。"""
+    coordinator = _coordinator(_RecordingCore())
+    first = coordinator.register_target("sub_first")
+    coordinator.register_target("sub_second")
+    pending = asyncio.create_task(
+        coordinator.resolve_target_cancel(
+            cancel_submission_id="sub_cancel",
+            target_submission_id="sub_first",
+        )
+    )
+    with anyio.fail_after(1):
+        await first.wait_cancelled()
+    assert coordinator.register_target_terminal(
+        "sub_first",
+        first,
+        terminal_record_ids=("turn:first:cancelled",),
+    )
+    await pending
+
+    with pytest.raises(SessionAuditFrozenError):
+        await coordinator.resolve_target_cancel(
+            cancel_submission_id="sub_cancel",
+            target_submission_id="sub_second",
+        )
+    assert coordinator.health is AuditHealth.RECOVERY_REQUIRED
 
 
 @pytest.mark.anyio
