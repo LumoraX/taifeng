@@ -45,8 +45,8 @@
 
 - [x] 6.1 Write failing tests proving UserMessage durable acceptance precedes enqueue and actor history/projection application follows ack
 - [x] 6.2 Implement accepted submission tokens and admission-lock canonical validation in `AgentEngine.submit()` while preserving legacy enqueue behavior
-- [ ] 6.3 Write failing tests for invalid input rejection, enqueue-after-ack failure, FINISHING rejection, and accepted-but-queued finish convergence
-- [ ] 6.4 Implement invalid submission records, recovery-required enqueue failure handling, intake closure, and accepted work convergence
+- [x] 6.3 Write failing tests for invalid input rejection, enqueue-after-ack failure, FINISHING rejection, and accepted-but-queued finish convergence
+- [x] 6.4 Implement invalid submission records, recovery-required enqueue failure handling, intake closure, and accepted work convergence
 - [ ] 6.5 Write failing tests proving CancelTurn cancels only its target turn/child subtree while another turn remains effect-capable
 - [ ] 6.6 Implement CancelTurn accepted/applied records and target cancellation semantics including not-found/already-terminal outcomes
 - [ ] 6.7 Write failing tests for release-vs-Shutdown, two Shutdown ids, one finish future, stable terminal ids, and one lease close
