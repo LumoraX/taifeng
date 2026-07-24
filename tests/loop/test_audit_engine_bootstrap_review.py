@@ -30,6 +30,7 @@ from tests.loop.test_audit_engine_bootstrap import (
     _pool,
     _Registry,
     _SpyStore,
+    _suspending_tool,
 )
 
 if TYPE_CHECKING:
@@ -403,6 +404,7 @@ async def test_public_create_static_failure_releases_projection_handle(
     root = (tmp_path / "threads").resolve()
     core = _JournalCore([])
 
+    # Task 8.2 后默认 built-ins 已合规；注入违规 tool 触发 static gate 失败以验证清理
     with pytest.raises(AuditCapabilityError):
         await EnginePool.create(
             skills_dir=skills_dir,
@@ -410,6 +412,7 @@ async def test_public_create_static_failure_releases_projection_handle(
             model_client=_observed_client(),
             compressors=[],
             audit=_config(core),
+            extra_tools=[_suspending_tool()],
         )
 
     assert root not in _TARGETS

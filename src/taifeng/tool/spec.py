@@ -82,6 +82,22 @@ class ToolSpec:
     仅 spec 静态声明 + 内核 dispatch 路径生效，不暴露为 LLM 可触发语义；
     失败轮照常计费。本内核不为任何既有内置工具默认开启（使用方决策）。"""
 
+    # === strict audit metadata（ADR 0025）===
+    # 仅 strict audit 模式静态读取（AuditConfig 校验 + Journal tool_intent 落账）。
+    # 默认取最安全的 pure/none/无幂等键/不可挂起 —— 无副作用只读工具开箱即用；
+    # 有副作用的内置工具在各自 builtins 里显式声明真实分类。
+    effect_kind: str = "pure"
+    """effect 分类：pure / idempotent / reconcilable / external_non_idempotent。"""
+
+    idempotency_key: str | None = None
+    """幂等键（None=无）；idempotent/reconcilable 类可据此在恢复时去重。"""
+
+    reconciliation: str = "none"
+    """恢复策略：none / query / retry / manual；与 effect_kind 的组合受 ADR 0025 约束。"""
+
+    can_suspend: bool = False
+    """该工具是否可能抛 SuspendSignal（HITL/长挂起）。strict audit 只接受 False。"""
+
     def to_ref(self) -> ToolSpecRef:
         return ToolSpecRef(
             name=self.name,

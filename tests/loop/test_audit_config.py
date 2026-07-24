@@ -437,9 +437,53 @@ def test_registered_unsupported_tools_are_rejected(
     assert caught.value.code == expected_code
 
 
-def test_current_legacy_tool_spec_is_metadata_incomplete() -> None:
-    """Task 8.2 前的真实 ToolSpec 在 strict audit 中 fail closed。"""
-    inputs = replace(_static_inputs(), tools=(_legacy_tool(),))
+def test_default_real_tool_spec_now_carries_complete_metadata() -> None:
+    """Task 8.2：真实 ToolSpec 默认 pure/none/非挂起，strict audit 直接放行。"""
+    tool = _legacy_tool()
+    assert tool.effect_kind == "pure"
+    assert tool.reconciliation == "none"
+    assert tool.idempotency_key is None
+    assert tool.can_suspend is False
+    # 默认只读分类的真实 ToolSpec 不再 fail closed
+    validate_audit_config(
+        _config(),
+        static_inputs=replace(_static_inputs(), tools=(tool,)),
+    )
+
+
+def test_default_registered_builtins_pass_strict_audit() -> None:
+    """Task 8.2：默认注册的 built-ins 均按 ADR 0025 分类，strict audit 放行。"""
+    from taifeng.tool.builtins import (
+        make_call_skill_tool,
+        make_read_skill_tool,
+        make_run_script_tool,
+    )
+
+    tools = (
+        make_read_skill_tool(),
+        make_call_skill_tool(),
+        make_run_script_tool(),
+    )
+    # read_skill=pure/none，call_skill/run_script=external_non_idempotent/manual
+    assert tools[0].effect_kind == "pure"
+    assert tools[1].effect_kind == "external_non_idempotent"
+    assert tools[2].reconciliation == "manual"
+    # 不抛即通过 strict audit 静态校验
+    validate_audit_config(
+        _config(),
+        static_inputs=replace(_static_inputs(), tools=tools),
+    )
+
+
+class _BareTool:
+    """完全没有 audit metadata 字段的第三方 tool 对象。"""
+
+    name = "bare_tool"
+
+
+def test_tool_object_without_metadata_is_incomplete() -> None:
+    """缺少 effect_kind/reconciliation 等字段的 tool 对象仍 fail closed。"""
+    inputs = replace(_static_inputs(), tools=(_BareTool(),))
 
     with pytest.raises(AuditCapabilityError) as caught:
         validate_audit_config(_config(), static_inputs=inputs)
@@ -668,7 +712,7 @@ def test_any_loaded_orchestration_skill_is_rejected() -> None:
 
 
 def test_legacy_tool_spec_shape_is_fully_restored() -> None:
-    """Task 5 前的 ToolSpec 构造字段与默认值完全保留。"""
+    """Task 5 前字段保留，并叠加 Task 8.2 的 audit metadata 字段（均带默认值）。"""
     assert {field.name for field in fields(ToolSpec)} == {
         "name",
         "description",
@@ -677,6 +721,11 @@ def test_legacy_tool_spec_shape_is_fully_restored() -> None:
         "parallel_safe",
         "timeout_seconds",
         "refunds_iteration",
+        # Task 8.2：strict audit metadata（默认 pure/none/无幂等键/不可挂起）
+        "effect_kind",
+        "idempotency_key",
+        "reconciliation",
+        "can_suspend",
     }
     tool = _legacy_tool()
     assert tool.parallel_safe is False

@@ -264,6 +264,9 @@ def make_http_request_tool(
         input_schema=HTTP_REQUEST_SCHEMA,
         handler=handler,
         parallel_safe=False,
+        # 单一 ToolSpec 同承载读写方法，保守视为外部不可幂等副作用
+        effect_kind="external_non_idempotent",
+        reconciliation="manual",
         timeout_seconds=timeout_seconds,
     )
 

@@ -65,8 +65,8 @@
 
 ## 8. Audited Tool convergence
 
-- [ ] 8.1 Write failing tests for ToolSpec audit metadata, missing metadata rejection, hooks/permission/suspension rejection, invalid JSON, and not-offered Tool handling
-- [ ] 8.2 Add backward-compatible effect kind, reconciliation, and suspension metadata; classify all built-ins allowed in strict mode
+- [x] 8.1 Write failing tests for ToolSpec audit metadata, missing metadata rejection, hooks/permission/suspension rejection, invalid JSON, and not-offered Tool handling
+- [x] 8.2 Add backward-compatible effect kind, reconciliation, and suspension metadata; classify all built-ins allowed in strict mode
 - [ ] 8.3 Write failing tests proving ordered Tool intents are durable before dispatch for serial and parallel batches
 - [ ] 8.4 Implement strict preflight and atomic intent batch before any runtime task starts
 - [ ] 8.5 Write failing cancellation-window tests for intent-after/pre-dispatch, in-effect uncertainty, post-effect success, sibling exception, and partial completion

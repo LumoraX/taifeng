@@ -169,5 +169,8 @@ def make_shell_exec_tool(
         },
         handler=handler,
         parallel_safe=False,
+        # subprocess 执行是外部不可幂等副作用，恢复需人工核对
+        effect_kind="external_non_idempotent",
+        reconciliation="manual",
         timeout_seconds=timeout_seconds + 5.0,
     )

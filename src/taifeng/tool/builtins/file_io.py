@@ -209,5 +209,8 @@ def make_file_write_tool(
         },
         handler=handler,
         parallel_safe=False,
+        # 写文件是外部不可幂等副作用，恢复需人工核对（不自动重试）
+        effect_kind="external_non_idempotent",
+        reconciliation="manual",
         timeout_seconds=10.0,
     )

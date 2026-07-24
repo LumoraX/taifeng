@@ -35,6 +35,7 @@ from taifeng.loop.pool import EnginePool
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.registry import SkillSnapshot
 from taifeng.tool.registry import ToolRegistry
+from taifeng.tool.spec import ToolResult, ToolSpec
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -383,11 +384,32 @@ def test_static_gate_uses_actual_pool_dependencies_before_journal_effect(
 
 
 @pytest.mark.asyncio
-async def test_public_create_validates_actual_unclassified_builtins(
+async def _suspending_handler(
+    args: dict[str, Any],
+    ctx: object,
+) -> ToolResult:
+    """占位 handler；仅用于构造 audit 不接受的可挂起工具。"""
+    del args, ctx
+    return ToolResult.ok("ok")
+
+
+def _suspending_tool() -> ToolSpec:
+    """构造声明 can_suspend=True 的 extra tool（strict audit 拒绝）。"""
+    return ToolSpec(
+        name="suspends_tool",
+        description="suspends",
+        input_schema={"type": "object"},
+        handler=_suspending_handler,
+        can_suspend=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_public_create_rejects_injected_suspending_tool(
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
-    """public factory 不为现有 built-ins 伪造 Task 8 metadata。"""
+    """Task 8.2 后 built-ins 已合规；public factory 仍对注入的违规 tool fail closed。"""
     events: list[str] = []
     core = _JournalCore(events)
 
@@ -398,9 +420,10 @@ async def test_public_create_validates_actual_unclassified_builtins(
             model_client=_observed_client(),
             compressors=[],
             audit=_config(core),
+            extra_tools=[_suspending_tool()],
         )
 
-    assert caught.value.code == "audit_tool_metadata_incomplete"
+    assert caught.value.code == "audit_tool_suspension_unsupported"
     assert events == []
 
 

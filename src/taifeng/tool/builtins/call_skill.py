@@ -362,5 +362,8 @@ def make_call_skill_tool() -> ToolSpec:
         input_schema=CALL_SKILL_SCHEMA,
         handler=_call_skill_handler,
         parallel_safe=False,  # 子 LLM 调用，独占
+        # 触发子 skill（含子 LLM 调用）是外部不可幂等副作用，恢复需人工核对
+        effect_kind="external_non_idempotent",
+        reconciliation="manual",
         timeout_seconds=300.0,  # 子 skill 可能耗时
     )

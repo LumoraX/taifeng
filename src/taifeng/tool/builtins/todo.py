@@ -142,4 +142,7 @@ def make_todo_write_tool(store: TodoStore) -> ToolSpec:
         },
         handler=handler,
         parallel_safe=False,  # 写共享清单状态,串行保护
+        # 整表重写内存清单，重复应用结果一致 → 幂等，可安全重试
+        effect_kind="idempotent",
+        reconciliation="retry",
     )

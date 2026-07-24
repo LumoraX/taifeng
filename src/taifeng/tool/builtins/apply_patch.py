@@ -287,5 +287,8 @@ def make_apply_patch_tool(
         },
         handler=handler,
         parallel_safe=False,
+        # 打补丁改文件是外部不可幂等副作用，恢复需人工核对
+        effect_kind="external_non_idempotent",
+        reconciliation="manual",
         timeout_seconds=30.0,
     )

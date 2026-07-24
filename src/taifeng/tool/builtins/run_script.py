@@ -415,5 +415,8 @@ def make_run_script_tool() -> ToolSpec:
         input_schema=RUN_SCRIPT_SCHEMA,
         handler=_run_script_handler,
         parallel_safe=False,
+        # subprocess 有副作用，视为外部不可幂等，恢复需人工核对
+        effect_kind="external_non_idempotent",
+        reconciliation="manual",
         timeout_seconds=600.0,
     )
