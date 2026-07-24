@@ -14,17 +14,27 @@ from taifeng.conversation.journal.models import (
     SessionDescriptor,
 )
 from taifeng.conversation.journal.projector import JournalConversationProjector
-from taifeng.conversation.models import user_message
+from taifeng.conversation.journal.records import ConversationItemV1, LlmStatus
+from taifeng.conversation.models import (
+    assistant_message,
+    function_call,
+    reasoning,
+    user_message,
+)
 from taifeng.conversation.transcript import JsonlMessageStore
 from taifeng.llm.audit import (
     AttemptObservableClientAdapter,
+    ModelAttemptOutcome,
     ModelAttemptRequest,
 )
 from taifeng.llm.providers.sim import RoutingSimClient, SimClient, SimTurn
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.audit import SessionAuditCoordinator
 from taifeng.loop.audit_bootstrap import AuditedSessionState
-from taifeng.loop.audit_llm import JournalModelAttemptObserver
+from taifeng.loop.audit_llm import (
+    JournalModelAttemptObserver,
+    commit_audited_llm_response,
+)
 from taifeng.loop.audit_support import AuditHealth, SessionAuditFrozenError
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import UserMessage
@@ -395,7 +405,7 @@ async def test_audited_turn_runner_injects_journal_observer(
     await runner._sample_once(0)  # noqa: SLF001
 
     committed = [envelope async for envelope in core.load("ses_audit_submission")]
-    request, checkpoint = committed[-2:]
+    request, checkpoint, response, conversation = committed[-4:]
     assert request.record_type == "llm_request_committed"
     assert request.operation_id == (
         "thr_audit_submission:submission_1:turn:0:llm:0"
@@ -405,7 +415,105 @@ async def test_audited_turn_runner_injects_journal_observer(
     assert checkpoint.operation_id == request.operation_id
     assert checkpoint.attempt_id == request.attempt_id
     assert checkpoint.causation_id == request.record_id
+    # 7.6：最终逻辑响应在 checkpoint 之后 durable，引用 request/checkpoint lineage
+    assert response.record_type == "llm_response_committed"
+    assert response.operation_id == request.operation_id
+    assert response.causation_id == checkpoint.record_id
+    assert response.payload["request_record_id"] == request.record_id
+    assert response.payload["checkpoint_record_id"] == checkpoint.record_id
+    assert response.payload["status"] == "complete"
+    # assistant 会话项与最终响应同批 durable，causation 指向 response
+    assert conversation.record_type == "conversation_item"
+    assert conversation.causation_id == response.record_id
+    item = ConversationItemV1.model_validate(conversation.payload)
+    assert item.item_kind == "assistant_message"
+    assert item.payload["text"] == "observed"
+    # 仅在 durable ack 后应用到 hot history；projection 单调推进到该会话项 seq
+    assert runner.history_buffer[-1].kind == "assistant_message"
+    assert runner.history_buffer[-1].payload["text"] == "observed"
+    projected = engine._audit_state.projector.state(engine.thread_id)  # type: ignore[attr-defined]  # noqa: SLF001
+    assert projected.projected_seq == conversation.seq
+    assert projected.stale is False
     assert len(inner.ledger.requests()) == 1
+
+
+async def _complete_checkpoint(state):
+    """在真实 observer 上产出一个 COMPLETE attempt checkpoint。"""
+    observer = _observer(state)
+    permit = await observer.before_attempt(_attempt_request())
+    return await observer.after_attempt(
+        ModelAttemptOutcome(
+            permit=permit,
+            status=LlmStatus.COMPLETE,
+            normalized_items=({"kind": "assistant", "text": "ok"},),
+            usage={"total_tokens": 1},
+            provider_request_id=None,
+            stable_error=None,
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_final_response_commits_ordered_conversation_items(
+    tmp_path: Path,
+) -> None:
+    """最终响应批：llm_response_committed + provider 顺序会话项，projection 推进。"""
+    state, core = await _state(tmp_path)
+    await state.projector.bootstrap_thread(
+        thread_id="thread_1",
+        cwd=None,
+        entry_skill_id="entry",
+        source="session:session_1",
+        extra={
+            "audit_required": True,
+            "journal_session_id": "session_1",
+            "journal_schema_version": 1,
+        },
+    )
+    checkpoint = await _complete_checkpoint(state)
+    items = [
+        reasoning("why", thread_id="thread_1"),
+        assistant_message("ok", thread_id="thread_1", model="sim-model"),
+        function_call("call_1", "do_it", "{}", thread_id="thread_1"),
+    ]
+
+    await commit_audited_llm_response(
+        state=state,
+        submission_id="submission_1",
+        turn_index=3,
+        iteration=2,
+        checkpoint=checkpoint,
+        items=items,
+        cancel=CancellationToken(name="turn"),
+    )
+
+    committed = [envelope async for envelope in core.load("session_1")]
+    response = committed[-4]
+    conversation = committed[-3:]
+    # 最终响应引用本 attempt 的 checkpoint lineage
+    assert response.record_type == "llm_response_committed"
+    assert response.operation_id == checkpoint.operation_id
+    assert response.payload["checkpoint_record_id"] == checkpoint.checkpoint_record_id
+    # 三条会话项严格 provider 顺序，ordinal 递增，causation 指向最终响应
+    assert [envelope.record_type for envelope in conversation] == [
+        "conversation_item"
+    ] * 3
+    kinds = [
+        ConversationItemV1.model_validate(envelope.payload).item_kind
+        for envelope in conversation
+    ]
+    assert kinds == ["reasoning", "assistant_message", "function_call"]
+    assert all(envelope.causation_id == response.record_id for envelope in conversation)
+    assert [envelope.record_id.rsplit(":", 1)[-1] for envelope in conversation] == [
+        "0",
+        "1",
+        "2",
+    ]
+    # projection 单调推进到最后一条会话项 seq，且不 stale
+    projected = state.projector.state("thread_1")
+    assert projected.projected_seq == conversation[-1].seq
+    assert projected.stale is False
+    assert state.coordinator.health is AuditHealth.HEALTHY
 
 
 @pytest.mark.anyio

@@ -14,7 +14,9 @@ from taifeng.conversation.journal.records import (
     JournalRecordFactory,
     LlmRequestCommittedV1,
     LlmResponseCheckpointV1,
+    LlmResponseCommittedV1,
     LlmStatus,
+    conversation_item_record,
     record_id,
 )
 from taifeng.llm.audit import (
@@ -26,6 +28,9 @@ from taifeng.llm.audit import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from taifeng.conversation.models import ResponseItem
     from taifeng.llm.client import ModelClient, ModelClientSession
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.cancellation import CancellationToken
@@ -278,10 +283,106 @@ class JournalModelAttemptObserver:
         )
 
 
+async def commit_audited_llm_response(
+    *,
+    state: AuditedSessionState,
+    submission_id: str,
+    turn_index: int,
+    iteration: int,
+    checkpoint: ModelAttemptCheckpoint,
+    items: Sequence[ResponseItem],
+    cancel: CancellationToken,
+) -> None:
+    """原子提交 final llm_response_committed + 有序 conversation_item 并推进 projection。
+
+    契约（spec「Final LLM response commits before downstream effects」）：在最终
+    attempt checkpoint 之后、任何 Tool effect 或 turn 终态之前，把逻辑最终响应与
+    provider 顺序的 reasoning / assistant / function_call 会话项作为**同一原子
+    batch** 落 durable；仅在 definite ack 后才把会话项应用到 projection。hot history
+    由调用方在返回后追加（与 durable 内容逐字一致）。
+
+    副作用：向 Session Journal 追加 1 条 llm_response_committed + N 条 conversation_item；
+    projection 单调推进或标记 stale（不冻结）。任何 Journal 不确定性 → coordinator
+    freeze 并向上抛稳定边界异常。
+    """
+    coordinator = state.coordinator
+    # effect gate：freeze/FINISHING 后不得再产生任何 durable 效果
+    await coordinator.ensure_effect_allowed()
+    identities = JournalIdentities(
+        coordinator.session_id,
+        state.thread_id,
+        submission_id,
+    )
+    turn_id = identities.turn(turn_index)
+    operation_id = identities.llm(turn_id, iteration)
+    # checkpoint 的 operation 必须与本 turn 独立推导的 logical LLM operation 一致，
+    # 否则说明 attempt lineage 被串轨——fail closed。
+    if checkpoint.operation_id != operation_id:
+        raise coordinator.freeze(
+            ValueError("llm response checkpoint operation mismatch")
+        ) from None
+    factory = JournalRecordFactory(
+        session_id=coordinator.session_id,
+        actor=ActorRef(kind="system", source="llm"),
+        identities=identities,
+    )
+    response_record = factory.build(
+        operation_id=operation_id,
+        record_type="llm_response_committed",
+        payload=LlmResponseCommittedV1(
+            request_record_id=checkpoint.request_record_id,
+            checkpoint_record_id=checkpoint.checkpoint_record_id,
+            status=checkpoint.status,
+            normalized_items=checkpoint.normalized_items_list(),
+            # usage 为必填 CanonicalMapping：provider 未报用量时以空 mapping 记账
+            # （空 = 无用量，而非未知回退），保持 DTO 稳定形状。
+            usage=checkpoint.usage_dict() or {},
+            provider_request_id=checkpoint.provider_request_id,
+            stable_error=checkpoint.stable_error,
+        ),
+        submission_id=submission_id,
+        thread_id=state.thread_id,
+        turn_id=turn_id,
+        causation_id=checkpoint.checkpoint_record_id,
+    )
+    conversation_records = tuple(
+        conversation_item_record(
+            factory,
+            operation_id=operation_id,
+            item=item,
+            source_record_id=response_record.record_id,
+            ordinal=ordinal,
+            submission_id=submission_id,
+            turn_id=turn_id,
+        )
+        for ordinal, item in enumerate(items)
+    )
+    batch = (response_record, *conversation_records)
+    ack = await coordinator.append_batch(batch, cancel=cancel)
+    if not conversation_records:
+        return
+    # ack 后读回本 batch 全量 envelope，并只把 conversation_item 交给 projector；
+    # projection 失败只返回 stale（不冻结 Journal 执行）。
+    envelopes = await coordinator.load_acknowledged(ack, batch)
+    conversation_envelopes = tuple(
+        envelope
+        for envelope in envelopes
+        if envelope.record_type == "conversation_item"
+    )
+    try:
+        result = await state.projector.project(conversation_envelopes, ack)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as error:
+        raise coordinator.freeze(error) from None
+    coordinator.update_projection(result)
+
+
 __all__ = [
     "AuditedTurnInput",
     "JournalModelAttemptObserver",
     "audited_turn_index",
+    "commit_audited_llm_response",
     "model_session_for_turn",
     "record_model_cache_read",
 ]

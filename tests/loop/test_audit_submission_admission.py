@@ -655,8 +655,20 @@ async def test_completed_actor_submission_replay_is_a_noop(
             "submission_applied",
             "llm_request_committed",
             "llm_response_checkpoint",
+            # 7.6：最终逻辑响应 + assistant 会话项在 checkpoint 之后同批 durable
+            "llm_response_committed",
+            "conversation_item",
         ]
         assert committed[3].payload["turn_index"] == 0
+        # 最终响应引用本 turn 的 request/checkpoint lineage，assistant 会话项紧随其后
+        assert committed[-2].record_type == "llm_response_committed"
+        assert committed[-2].payload["checkpoint_record_id"] == committed[7].record_id
+        assert committed[-1].record_type == "conversation_item"
+        assert committed[-1].causation_id == committed[-2].record_id
+        assert (
+            ConversationItemV1.model_validate(committed[-1].payload).item_kind
+            == "assistant_message"
+        )
         assert coordinator.health is AuditHealth.HEALTHY
     finally:
         cancel.cancel()

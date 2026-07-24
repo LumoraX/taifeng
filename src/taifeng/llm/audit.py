@@ -176,6 +176,18 @@ class ModelAttemptCheckpoint:
         object.__setattr__(self, "normalized_items", outcome.normalized_items)
         object.__setattr__(self, "usage", outcome.usage)
 
+    def normalized_items_list(self) -> list[Any]:
+        """返回供 durable llm_response_committed DTO 使用的普通 items 副本。"""
+        value = _thaw_json(self.normalized_items)
+        assert isinstance(value, list)
+        return value
+
+    def usage_dict(self) -> dict[str, Any] | None:
+        """返回供 durable llm_response_committed DTO 使用的普通 usage 副本。"""
+        value = _thaw_json(self.usage)
+        assert value is None or isinstance(value, dict)
+        return value
+
 
 class ModelAttemptObserver(Protocol):
     """每个真实网络 attempt 的 durable request/checkpoint 门禁。"""

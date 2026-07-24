@@ -40,7 +40,11 @@ from taifeng.llm.errors import (
 )
 from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
-from taifeng.loop.audit_llm import model_session_for_turn, record_model_cache_read
+from taifeng.loop.audit_llm import (
+    commit_audited_llm_response,
+    model_session_for_turn,
+    record_model_cache_read,
+)
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
 from taifeng.loop.event import (
@@ -1171,23 +1175,54 @@ class TurnRunner:
                 raise SuspendSignal(self._system_retry_pending(e)) from e
             raise  # 确定性失败:照旧上抛硬失败(走 run_turn 宽 except → TurnFailed)
 
-        # reasoning-content-passback:本轮有 reasoning 且有产出时,先落 reasoning item
-        # (紧邻配对 assistant message 之前,与 provider 产出顺序一致;无产出轮不落——
-        # 没有可关联的 assistant 消息,回传无意义)
+        # 组装本轮 provider 顺序的会话项：reasoning → assistant →（audit 模式下）
+        # function_call*。reasoning-content-passback:本轮有 reasoning 且有产出时,先落
+        # reasoning item(紧邻配对 assistant message 之前,与 provider 产出顺序一致;
+        # 无产出轮不落——没有可关联的 assistant 消息,回传无意义)。
+        response_items: list[ResponseItem] = []
         if reasoning_text and (assistant_text or tool_calls):
-            r_item = reasoning(reasoning_text, thread_id=self.thread_id)
-            self.history_buffer.append(r_item)
-            await self.store.append(r_item)
-
-        # 落 assistant message（即使为空也记下，因为 tool calls 也在这条消息上）
+            response_items.append(reasoning(reasoning_text, thread_id=self.thread_id))
+        # assistant message（即使为空也记下，因为 tool calls 也挂在这条消息上）
         if assistant_text or tool_calls:
-            msg = assistant_message(
+            response_items.append(assistant_message(
                 assistant_text,
                 thread_id=self.thread_id,
                 model=self.entry_skill.model or "auto",
+            ))
+
+        audit_state = self.audit_state
+        if audit_state is not None:
+            # audit：function_call 会话项必须与最终响应同批 durable（先于任何 Tool
+            # intent/effect）；随后 dispatch 阶段跳过 legacy 逐 call 的 fc 落库。
+            for tc in tool_calls:
+                response_items.append(function_call(
+                    call_id=tc["call_id"],
+                    name=tc["name"],
+                    arguments=tc["arguments"],
+                    thread_id=self.thread_id,
+                ))
+            # 观测 session 在 checkpoint definite ack 后暴露 lineage；缺失即 attempt
+            # 未收敛，fail closed 冻结（不得在无 durable 最终响应时继续产生效果）。
+            checkpoint = getattr(sess, "last_attempt_checkpoint", None)
+            if checkpoint is None:
+                raise audit_state.coordinator.freeze(
+                    RuntimeError("audited turn produced no attempt checkpoint")
+                ) from None
+            await commit_audited_llm_response(
+                state=audit_state,
+                submission_id=self.submission_id,
+                turn_index=self.turn_index,
+                iteration=iteration,
+                checkpoint=checkpoint,
+                items=response_items,
+                cancel=self.cancel,
             )
-            self.history_buffer.append(msg)
-            await self.store.append(msg)
+            # 仅在 durable ack + projection 推进后才把逐字一致的会话项应用到 hot history
+            self.history_buffer.extend(response_items)
+        else:
+            for item in response_items:
+                self.history_buffer.append(item)
+                await self.store.append(item)
 
         if not tool_calls:
             return assistant_text, False
@@ -1260,8 +1295,12 @@ class TurnRunner:
                 arguments=req.arguments_raw,
                 thread_id=self.thread_id,
             )
-            self.history_buffer.append(fc_item)
-            await self.store.append(fc_item)
+            # audit：function_call 已在最终响应批中 durable + 应用到 hot history，
+            # 此处不得重复入史 / 直写 projection store（transcript 唯一写者是
+            # projector）。legacy：保持逐 call 配对写 fc。
+            if self.audit_state is None:
+                self.history_buffer.append(fc_item)
+                await self.store.append(fc_item)
             # turn-rewind：记本次派发的 dispatch 回访节点（仅 root turn）。
             # inner_history_len = fc 追加后长度 = retry_tool 切点(fc 与 fco 之间);
             # history_len 复用本圈 iteration 采样前长度 = re_reason 切点。
@@ -1293,7 +1332,10 @@ class TurnRunner:
                 is_error=outcome.result.is_error,
             )
             self.history_buffer.append(fco_item)
-            await self.store.append(fco_item)
+            # audit：function_call_output 的 durable + projection 归 §8 Tool 收敛；
+            # 此处只入 hot history，不直写 projection store（避免与 projector 竞写）。
+            if self.audit_state is None:
+                await self.store.append(fco_item)
             # turn-resource-guards：单点观察 deny/success 记账 + refunds_iteration 退还
             await self._note_tool_outcome(req.name, outcome.result, req.arguments_raw)
 
