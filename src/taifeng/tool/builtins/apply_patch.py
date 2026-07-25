@@ -26,7 +26,6 @@ from taifeng.permission.types import PermissionPolicy, PermissionRequest
 from taifeng.tool.builtins.file_io import _resolve_safe
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
-
 # 每个 PatchSpec 的"类型"标记（互斥）
 _PATCH_KIND_EDIT = "edit"
 _PATCH_KIND_CREATE = "create"

@@ -103,10 +103,10 @@
 
 ## 12. Repository gates and completion evidence
 
-- [ ] 12.1 Run `git diff --check`, focused Ruff for all changed files, and full mypy over `src/taifeng`
-- [ ] 12.2 Run all focused audit suites and full `PYTHONPATH=src .venv/bin/pytest tests/ -q`
-- [ ] 12.3 Run `examples/real_llm/selfcheck.py` with SimClient and zero provider cost
-- [ ] 12.4 Run `openspec validate add-session-journal-business-integration --strict`
+- [x] 12.1 Run `git diff --check`, focused Ruff for all changed files, and full mypy over `src/taifeng`
+- [x] 12.2 Run all focused audit suites and full `PYTHONPATH=src .venv/bin/pytest tests/ -q`
+- [x] 12.3 Run `examples/real_llm/selfcheck.py` with SimClient and zero provider cost
+- [x] 12.4 Run `openspec validate add-session-journal-business-integration --strict`
 - [ ] 12.5 Obtain informed external-provider authorization, run the full real-LLM capability matrix at the final code head, and regenerate both ledger files
 - [ ] 12.6 Run an independent code/spec audit; fix every Critical/Important finding and rerun affected gates
 - [ ] 12.7 Mark only evidenced tasks complete; do not archive or merge without explicit user instruction
