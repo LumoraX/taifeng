@@ -45,6 +45,7 @@ from taifeng.loop.audit_llm import (
     model_session_for_turn,
     record_model_cache_read,
 )
+from taifeng.loop.audit_skill import AuditedSkillDispatch
 from taifeng.loop.audit_tool import audited_tool_batch
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
@@ -1824,6 +1825,24 @@ class TurnRunner:
             )
         )
 
+        # audit：在外层 call_skill Tool 意图之后先 durable skill_selected（完整
+        # definition/body 快照）；随后配额拒绝走 rejected 终态，接受走 child 谱系。
+        audit_dispatch: AuditedSkillDispatch | None = None
+        if self.audit_state is not None:
+            parent_call_id = str(
+                ctx.extras.get("parent_call_skill_call_id") or ctx.call_id
+            )
+            audit_dispatch = AuditedSkillDispatch(
+                state=self.audit_state,
+                parent_turn_index=self.turn_index,
+                parent_call_id=parent_call_id,
+                submission_id=self.submission_id,
+                cancel=ctx.cancel,
+            )
+            await audit_dispatch.commit_selected(
+                target=target, arguments=arguments
+            )
+
         # K1 广度准入：spawn 配额（engine 注入 registry 时生效）。超限→拒绝派发，
         # 不创建 thread / 不跑子 turn，返回 error 让 LLM 自行调整（fork-bomb 防护）。
         if self.spawn_registry is not None:
@@ -1833,6 +1852,7 @@ class TurnRunner:
                     return await self._spawn_sub_runner(
                         target=target, arguments=arguments,
                         parent_stack=parent_stack, ctx=ctx,
+                        audit_dispatch=audit_dispatch,
                     )
             except SpawnLimitError as e:
                 await self._emit(SkillSpawnRejected(data={
@@ -1841,6 +1861,11 @@ class TurnRunner:
                     "limit_kind": e.kind,
                     "limit": e.limit,
                 }))
+                # audit：配额拒绝 → skill_dispatch_finished(rejected)，无 child lineage
+                if audit_dispatch is not None:
+                    await audit_dispatch.reject(
+                        reason=f"spawn_limit:{e.kind}"
+                    )
                 return ToolResult.error(
                     f"spawn_limit_exceeded: {e.kind} >= {e.limit}",
                     reason="spawn_limit",
@@ -1848,6 +1873,7 @@ class TurnRunner:
         return await self._spawn_sub_runner(
             target=target, arguments=arguments,
             parent_stack=parent_stack, ctx=ctx,
+            audit_dispatch=audit_dispatch,
         )
 
     async def _spawn_sub_runner(
@@ -1857,6 +1883,7 @@ class TurnRunner:
         arguments: dict[str, Any],
         parent_stack: CallStack,
         ctx: ToolContext,
+        audit_dispatch: AuditedSkillDispatch | None = None,
     ) -> ToolResult:
         """实际派发子 TurnRunner（已通过 K1 spawn 准入）。"""
         # G3 subagent-isolation-policy: 根据 dispatch_policy.subagent_approval_mode
@@ -1882,24 +1909,37 @@ class TurnRunner:
             )
 
         # 子 turn：把 sub_args 序列化为 user_message 作为种子输入。
-        # K7：把谱系（父 thread / spawn 深度 / 调用栈）持久化进 ThreadMetadata.extra，
-        # 使 resume 可从持久谱系重导子 agent 的深度/特权（不改"独立 seed"隔离模型）。
-        sub_thread_id = await self.store.create_thread(
-            cwd=None,
-            entry_skill_id=target.id,
-            source=f"subskill:{self.entry_skill.id}",
-            extra={
-                "parent_thread_id": self.thread_id,
-                "spawn_depth": parent_stack.depth,
-                "stack_path": parent_stack.path(),
-            },
-        )
-        from taifeng.conversation.models import user_message
-        seed = user_message(
-            json.dumps(arguments, ensure_ascii=False),
-            thread_id=sub_thread_id,
-        )
-        await self.store.append(seed)
+        # audit：child thread/seed 走 Journal 原子 started 批（thread_created/bound/
+        # child-seed）+ child projection；child_state 让子 turn 递归走同一审计路径。
+        # legacy：K7 把谱系持久化进 ThreadMetadata.extra，seed 直写 store。
+        child_ctx = None
+        child_audit_state = None
+        if audit_dispatch is not None:
+            child_ctx = await audit_dispatch.start_child(
+                target=target,
+                arguments=arguments,
+                call_stack_path=tuple(parent_stack.path()),
+            )
+            sub_thread_id = child_ctx.child_thread_id
+            seed = child_ctx.seed_item
+            child_audit_state = child_ctx.child_state
+        else:
+            sub_thread_id = await self.store.create_thread(
+                cwd=None,
+                entry_skill_id=target.id,
+                source=f"subskill:{self.entry_skill.id}",
+                extra={
+                    "parent_thread_id": self.thread_id,
+                    "spawn_depth": parent_stack.depth,
+                    "stack_path": parent_stack.path(),
+                },
+            )
+            from taifeng.conversation.models import user_message
+            seed = user_message(
+                json.dumps(arguments, ensure_ascii=False),
+                thread_id=sub_thread_id,
+            )
+            await self.store.append(seed)
 
         sub_runner = TurnRunner(
             entry_skill=target,
@@ -1955,8 +1995,18 @@ class TurnRunner:
             has_recall_backend=self.has_recall_backend,
             call_stack=parent_stack,
             history_buffer=[seed],
+            # audit：子 turn 携带 child audit_state（共享根 coordinator/lease、同一
+            # projector 的 child thread）→ 子的 LLM/Tool/Skill 效果递归走同一审计路径。
+            audit_state=child_audit_state,
         )
         outcome = await sub_runner.run()
+        # audit：strict 能力面不接受挂起（skill_suspension/HITL/failure_policy 均已被
+        # 静态拒）；子 turn 若仍挂起属 capability 契约违约 → fail closed 冻结。
+        if child_ctx is not None and outcome.end_reason == "suspended":
+            assert self.audit_state is not None
+            raise self.audit_state.coordinator.freeze(
+                RuntimeError("audited child skill suspended (capability violation)")
+            ) from None
         # 子 turn 挂起：子 thread 内已落 SuspensionRecord 并 emit turn_suspended。
         # 父的 call_skill 必须随之挂起（而非把挂起误当成功/失败回填），否则父 turn
         # 会带着占位结果继续/完成，子挂起永远无法回传父调用栈（item d 的根因）。
@@ -2045,9 +2095,43 @@ class TurnRunner:
             cost_iterations=outcome.iterations,
             ts_unix=self._now_factory(),
         )
-        await self.store.append(
-            skill_outcome_item(_record.as_payload(), thread_id=sub_thread_id)
-        )
+        if child_ctx is not None and audit_dispatch is not None:
+            # audit：原子 finished + thread_terminal + skill_outcome（先于外层 Tool
+            # outcome）；skill_outcome 会话项由 finish_child 落 durable + 投影。
+            from taifeng.conversation.journal.records import (
+                SkillStatus as _SkillStatus,
+            )
+            from taifeng.conversation.journal.records import (
+                StableErrorV1 as _StableErrorV1,
+            )
+            if outcome.end_reason == "cancelled":
+                _status = _SkillStatus.CANCELLED
+            elif outcome.success:
+                _status = _SkillStatus.SUCCESS
+            else:
+                _status = _SkillStatus.ERROR
+            _child_error = (
+                None
+                if _status is _SkillStatus.SUCCESS
+                else _StableErrorV1(
+                    code="skill_child_terminal_error",
+                    class_name="ChildSkillError",
+                    failure_class="skill_error",
+                    retryable=False,
+                )
+            )
+            await audit_dispatch.finish_child(
+                child=child_ctx,
+                status=_status,
+                end_reason=outcome.end_reason,
+                final_text=outcome.final_text,
+                outcome_payload=_record.as_payload(),
+                error=_child_error,
+            )
+        else:
+            await self.store.append(
+                skill_outcome_item(_record.as_payload(), thread_id=sub_thread_id)
+            )
         await self._emit(SkillOutcomeRecorded(data=_record.as_payload()))
 
         if outcome.success:

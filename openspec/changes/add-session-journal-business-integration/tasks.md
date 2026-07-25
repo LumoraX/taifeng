@@ -77,13 +77,13 @@
 
 ## 9. Synchronous call_skill lineage
 
-- [ ] 9.1 Write failing tests for full Skill snapshot selection, quota rejection without started/thread records, and parent/child operation identities
-- [ ] 9.2 Commit `skill_selected` after outer Tool intent and implement quota rejection terminal records
-- [ ] 9.3 Write failing tests for atomic started/thread-created/thread-bound/child-seed records and projection-stale child execution
-- [ ] 9.4 Implement preallocated child identity, shared root coordinator/lease, acknowledged hot child history, and child turn identity
-- [ ] 9.5 Write failing success/error/cancel tests for atomic finished/thread-terminal/skill-outcome and outer Tool outcome ordering
-- [ ] 9.6 Implement child terminal convergence, three-level lineage, and capability-contract freeze on unexpected suspension
-- [ ] 9.7 Run audited call_skill plus existing composite/dispatch/outcome tests and commit the Skill slice
+- [x] 9.1 Write failing tests for full Skill snapshot selection, quota rejection without started/thread records, and parent/child operation identities
+- [x] 9.2 Commit `skill_selected` after outer Tool intent and implement quota rejection terminal records
+- [x] 9.3 Write failing tests for atomic started/thread-created/thread-bound/child-seed records and projection-stale child execution
+- [x] 9.4 Implement preallocated child identity, shared root coordinator/lease, acknowledged hot child history, and child turn identity
+- [x] 9.5 Write failing success/error/cancel tests for atomic finished/thread-terminal/skill-outcome and outer Tool outcome ordering
+- [x] 9.6 Implement child terminal convergence, three-level lineage, and capability-contract freeze on unexpected suspension
+- [x] 9.7 Run audited call_skill plus existing composite/dispatch/outcome tests and commit the Skill slice
 
 ## 10. Dynamic capability and end-to-end verification
 
