@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import anyio
@@ -30,6 +31,7 @@ from taifeng.conversation.journal.records import (
     stable_error,
 )
 from taifeng.conversation.models import function_call_output
+from taifeng.loop.audit_support import SessionAuditFrozenError
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
@@ -299,15 +301,27 @@ async def audited_tool_batch(
         cancel=cancel,
     )
     # 取消无关的有界 finalization：意图落账 + 收敛都在 shield 内，无论外层取消与否
-    # 每个已提交意图都必须收敛出唯一终态
-    with anyio.fail_after(finalization_timeout, shield=True):
-        await convergence.commit_intents()
-        # 整批在任何 dispatch 之前已取消 → 不进入 runtime，全部收敛为 cancelled
-        # （区别于 dispatch 中途取消的 ambiguous → unknown）
-        if cancel.is_cancelled:
-            return await convergence.converge_cancelled()
-        outcomes = await run_dispatch()
-        return await convergence.converge(outcomes)
+    # 每个已提交意图都必须收敛出唯一终态。
+    # fail-closed：finalization 到期（TimeoutError）或收敛内任何非取消异常逃逸时，
+    # 意图已 durable 但未必都收敛出终态 → 必须冻结 Session（下一次效果前拒绝），
+    # 绝不 fail-open（否则会留下无 outcome 的 dangling intent 且 Session 仍接受效果）。
+    try:
+        with anyio.fail_after(finalization_timeout, shield=True):
+            await convergence.commit_intents()
+            # 整批在任何 dispatch 之前已取消 → 不进入 runtime，全部收敛为 cancelled
+            # （区别于 dispatch 中途取消的 ambiguous → unknown）
+            if cancel.is_cancelled:
+                return await convergence.converge_cancelled()
+            outcomes = await run_dispatch()
+            return await convergence.converge(outcomes)
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+        raise
+    except SessionAuditFrozenError:
+        # converge/commit 内已 fail closed（UNKNOWN/挂起/Journal 失败）→ 原样上抛
+        raise
+    except BaseException as error:
+        # 含 finalization TimeoutError、缺分支 KeyError、intent append IO 失败等
+        raise state.coordinator.freeze(error) from None
 
 
 __all__ = ["audited_tool_batch"]

@@ -16,6 +16,7 @@ audit_state 让子 turn 的 LLM/Tool 效果递归走同一审计路径。
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -33,11 +34,13 @@ from taifeng.conversation.journal.records import (
     ThreadCreatedV1,
     ThreadTerminalV1,
     conversation_item_record,
+    record_id,
 )
 from taifeng.conversation.models import skill_outcome_item, user_message
 from taifeng.loop.audit_bootstrap import AuditedSessionState
 
 if TYPE_CHECKING:
+    from taifeng.conversation.journal.models import JournalRecord
     from taifeng.conversation.models import ResponseItem
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.skill.definition import SkillDefinition
@@ -141,7 +144,11 @@ class AuditedSkillDispatch:
             submission_id=self._submission_id,
             thread_id=self._state.thread_id,
             turn_id=self._turn_id,
-            causation_id=self._tool_operation_id + ":tool_intent_committed:none:0",
+            # 回链外层 call_skill Tool 的 §8 intent record（用 canonical 生成器而非
+            # 手拼字符串，record_id 格式变更时不会静默指向不存在的记录）。
+            causation_id=record_id(
+                self._tool_operation_id, "tool_intent_committed"
+            ),
         )
         await self._coordinator.append(record, cancel=self._cancel)
         self._selected_record_id = record.record_id
@@ -169,42 +176,22 @@ class AuditedSkillDispatch:
         )
         await self._coordinator.append(record)
 
-    async def start_child(
+    def _build_started_batch(
         self,
         *,
+        op: str,
+        child_thread_id: str,
         target: SkillDefinition,
         arguments: dict[str, Any],
         call_stack_path: tuple[str, ...],
-    ) -> ChildSkillContext:
-        """原子 started+thread_created+thread_bound+child_seed，并 bootstrap child projection。"""
-        assert self._skill_operation_id is not None
-        assert self._selected_record_id is not None
-        op = self._skill_operation_id
-        child_thread_id = _child_thread_id(op)
-        # 先 bootstrap child thread 的 transcript projection target（seed 投影前置条件）
-        await self._state.projector.bootstrap_thread(
-            thread_id=child_thread_id,
-            cwd=None,
-            entry_skill_id=target.id,
-            source=f"skill:{op}",
-            extra={
-                "audit_required": True,
-                "journal_session_id": self._coordinator.session_id,
-                "journal_schema_version": 1,
-                "parent_thread_id": self._state.thread_id,
-            },
-        )
-        import json
-
-        seed_item = user_message(
-            json.dumps(arguments, ensure_ascii=False),
-            thread_id=child_thread_id,
-        )
+        seed_item: ResponseItem,
+    ) -> tuple[JournalRecord, ...]:
+        """构造 started/thread_created/thread_bound/child_seed 的有序原子批。"""
         started = self._factory.build(
             operation_id=op,
             record_type="skill_dispatch_started",
             payload=SkillDispatchStartedV1(
-                selected_record_id=self._selected_record_id,
+                selected_record_id=self._selected_record_id,  # type: ignore[arg-type]
                 call_id=self._parent_call_id,
                 parent_call_id=None,
                 child_thread_id=child_thread_id,
@@ -254,7 +241,45 @@ class AuditedSkillDispatch:
             submission_id=self._submission_id,
             turn_id=self._turn_id,
         )
-        batch = (started, thread_created, thread_bound, seed_record)
+        return (started, thread_created, thread_bound, seed_record)
+
+    async def start_child(
+        self,
+        *,
+        target: SkillDefinition,
+        arguments: dict[str, Any],
+        call_stack_path: tuple[str, ...],
+    ) -> ChildSkillContext:
+        """原子 started+thread_created+thread_bound+child_seed，并 bootstrap child projection。"""
+        assert self._skill_operation_id is not None
+        assert self._selected_record_id is not None
+        op = self._skill_operation_id
+        child_thread_id = _child_thread_id(op)
+        # 先 bootstrap child thread 的 transcript projection target（seed 投影前置条件）
+        await self._state.projector.bootstrap_thread(
+            thread_id=child_thread_id,
+            cwd=None,
+            entry_skill_id=target.id,
+            source=f"skill:{op}",
+            extra={
+                "audit_required": True,
+                "journal_session_id": self._coordinator.session_id,
+                "journal_schema_version": 1,
+                "parent_thread_id": self._state.thread_id,
+            },
+        )
+        seed_item = user_message(
+            json.dumps(arguments, ensure_ascii=False),
+            thread_id=child_thread_id,
+        )
+        batch = self._build_started_batch(
+            op=op,
+            child_thread_id=child_thread_id,
+            target=target,
+            arguments=arguments,
+            call_stack_path=call_stack_path,
+            seed_item=seed_item,
+        )
         ack = await self._coordinator.append_batch(batch, cancel=self._cancel)
         # ack 后投影 child seed（child thread），推进 child projection
         envelopes = await self._coordinator.load_acknowledged(ack, batch)
@@ -279,7 +304,7 @@ class AuditedSkillDispatch:
             child_state=child_state,
             seed_item=seed_item,
             skill_operation_id=op,
-            started_record_id=started.record_id,
+            started_record_id=batch[0].record_id,  # skill_dispatch_started
             child_thread_id=child_thread_id,
             call_id=self._parent_call_id,
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import anyio
 import pytest
 
 from taifeng.conversation.journal.records import ConversationItemV1
@@ -342,6 +343,48 @@ async def test_declared_non_suspending_tool_that_suspends_errors_and_freezes(
     # 挂起违约先记 error 终态，随后冻结
     assert outcome.payload["status"] == "error"
     assert state.coordinator.health is AuditHealth.RECOVERY_REQUIRED
+
+
+@pytest.mark.anyio
+async def test_finalization_timeout_freezes_and_does_not_fail_open(
+    tmp_path: Path,
+) -> None:
+    """finalization 到期（工具阻塞超期）→ 冻结 Session，绝不 fail-open。
+
+    回归 C1：`anyio.fail_after` 的 deadline 触发 TimeoutError 时必须 freeze——否则
+    已提交意图无 outcome 且 Session 仍接受效果（fail-open）。
+    """
+    state, core = await _bootstrapped_state(tmp_path)
+    req = _request(0, "call_a", "file_write")
+    registry = _Registry({"file_write": _spec(
+        "file_write",
+        effect_kind="external_non_idempotent",
+        reconciliation="manual",
+    )})
+
+    async def run_dispatch():
+        # 工具阻塞超过 finalization_timeout，触发 fail_after deadline
+        await anyio.sleep_forever()
+        return []  # pragma: no cover
+
+    with pytest.raises(SessionAuditFrozenError):
+        await audited_tool_batch(
+            state=state,
+            submission_id="submission_1",
+            turn_index=3,
+            iteration=2,
+            requests=[req],
+            registry=registry,
+            run_dispatch=run_dispatch,
+            cancel=CancellationToken(name="turn"),
+            finalization_timeout=0.05,
+        )
+
+    committed = [envelope async for envelope in core.load("session_1")]
+    # 意图已 durable；Session 冻结（不 fail-open）
+    assert any(e.record_type == "tool_intent_committed" for e in committed)
+    assert state.coordinator.health is AuditHealth.RECOVERY_REQUIRED
+    assert state.coordinator.effect_gate_open is False
 
 
 @pytest.mark.anyio

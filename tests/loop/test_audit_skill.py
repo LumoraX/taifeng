@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from taifeng.conversation.journal.records import ConversationItemV1, SkillStatus
+from taifeng.conversation.journal.records import (
+    ConversationItemV1,
+    JournalIdentities,
+    SkillStatus,
+    record_id,
+)
 from taifeng.loop.audit_skill import AuditedSkillDispatch, _child_thread_id
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.cancellation import CancellationToken
@@ -91,6 +96,27 @@ async def test_skill_selected_precedes_atomic_started_batch(tmp_path: Path) -> N
     assert seed.thread_id == child.child_thread_id
     assert state.projector.state(child.child_thread_id).projected_seq == seed_env.seq
     assert state.coordinator.health is AuditHealth.HEALTHY
+
+
+@pytest.mark.anyio
+async def test_skill_selected_causation_points_at_canonical_tool_intent(
+    tmp_path: Path,
+) -> None:
+    """skill_selected.causation_id 必须等于外层 call_skill 的 §8 intent record_id。
+
+    回归 M1：用 canonical record_id 生成器而非手拼字符串，锁死回链正确性。
+    """
+    state, core = await _root_state(tmp_path)
+    dispatch = _dispatch(state, call_id="call_sk")
+    await dispatch.commit_selected(target=_target(), arguments={})
+
+    committed = [e async for e in core.load("session_1")]
+    selected = next(e for e in committed if e.record_type == "skill_selected")
+    # 独立按 §8 的 identity 规则推导外层 Tool intent 的 record_id
+    identities = JournalIdentities("session_1", "thread_1", "submission_1")
+    tool_op = identities.tool(identities.turn(3), "call_sk")
+    expected = record_id(tool_op, "tool_intent_committed")
+    assert selected.causation_id == expected
 
 
 @pytest.mark.anyio

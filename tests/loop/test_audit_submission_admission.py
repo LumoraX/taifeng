@@ -40,8 +40,13 @@ from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.submission import (
     CompactNow,
+    InjectSystemMessage,
+    RefreshSnapshot,
+    Resume,
     Rewind,
     Submission,
+    ThreadRollback,
+    UpdateInstructions,
     UserMessage,
 )
 from taifeng.skill.registry import FilesystemSkillRegistry
@@ -513,7 +518,15 @@ async def test_queued_user_messages_receive_unique_durable_turn_indexes(
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "op",
-    [CompactNow(), Rewind(node_id="n1")],
+    [
+        CompactNow(),
+        Rewind(node_id="n1"),
+        Resume(thread_id="t1", resolutions={}),
+        InjectSystemMessage(text="x"),
+        RefreshSnapshot(),
+        ThreadRollback(),
+        UpdateInstructions(layer_name="L", new_source="s"),
+    ],
 )
 async def test_unsupported_dynamic_op_is_rejected_before_effect(
     tmp_path: Path,
