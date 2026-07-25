@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import anyio
 
-from taifeng.conversation.journal.canonical import model_canonical_data
+from taifeng.conversation.journal.canonical import canonical_hash, model_canonical_data
 from taifeng.conversation.journal.errors import JournalIntegrityError
 from taifeng.conversation.journal.framing import validate_envelope_chain
 from taifeng.conversation.journal.models import (
@@ -77,6 +77,20 @@ class InvalidAuditedSubmissionError(ValueError):
         )
         self.submission_id = submission_id
         self.descriptor_hash = descriptor_hash
+
+
+class UnsupportedAuditedOperationError(ValueError):
+    """audit 能力面外的动态 Op 已 durable 安全拒绝（未执行）。"""
+
+    code = "audit_unsupported_operation"
+
+    def __init__(self, submission_id: str, op_kind: str) -> None:
+        """仅暴露稳定 identity 与 op 类别，不保留原始 Op 内容。"""
+        super().__init__(
+            f"{self.code}: submission={submission_id}, op={op_kind}"
+        )
+        self.submission_id = submission_id
+        self.op_kind = op_kind
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,6 +406,67 @@ async def reject_invalid_user_message(
             raise
 
     await state.coordinator.reject_work(submission_id, durable_reject)
+
+
+def _unsupported_op_rejected_record(
+    state: AuditedAdmissionState,
+    *,
+    submission_id: str,
+    op_kind: str,
+    descriptor_hash: str,
+) -> JournalRecord:
+    """构造 audit 能力面外动态 Op 的唯一 rejection record（不含 Op 原文）。"""
+    error = StableErrorV1(
+        code=UnsupportedAuditedOperationError.code,
+        class_name="UnsupportedAuditedOperationError",
+        failure_class="capability",
+        descriptor_hash=descriptor_hash,
+        retryable=False,
+    )
+    factory = JournalRecordFactory(
+        session_id=state.coordinator.session_id,
+        actor=ActorRef(kind="user", source="user"),
+        identities=JournalIdentities(
+            session_id=state.coordinator.session_id,
+            thread_id=state.thread_id,
+            submission_id=submission_id,
+        ),
+    )
+    return factory.build(
+        operation_id=submission_id,
+        record_type="submission_rejected",
+        payload=SubmissionRejectedV1(
+            op_kind=op_kind,
+            stable_error=error,
+            input_descriptor_hash=descriptor_hash,
+        ),
+        submission_id=submission_id,
+        thread_id=state.thread_id,
+    )
+
+
+async def reject_unsupported_audited_op(
+    state: AuditedAdmissionState,
+    submission: Submission,
+) -> None:
+    """durable 安全拒绝能力面外动态 Op；不入队、不执行；写失败仍冻结。"""
+    op_kind = str(submission.op.kind)
+    descriptor_hash = canonical_hash(submission.op.model_dump(mode="json"))
+    record = _unsupported_op_rejected_record(
+        state,
+        submission_id=submission.id,
+        op_kind=op_kind,
+        descriptor_hash=descriptor_hash,
+    )
+
+    async def durable_reject() -> None:
+        try:
+            await state.coordinator.append(record)
+        except BaseException as error:
+            state.coordinator.freeze(error)
+            raise
+
+    await state.coordinator.reject_work(submission.id, durable_reject)
 
 
 def _submission_records(

@@ -87,11 +87,11 @@
 
 ## 10. Dynamic capability and end-to-end verification
 
-- [ ] 10.1 Add one effect-spy test for every unsupported dynamic Op and capability path
-- [ ] 10.2 Implement submission and per-effect dynamic gates with stable rejection/failure records before effect
-- [ ] 10.3 Add exact Journal sequence tests for plain assistant, basic Tool, synchronous call_skill, provider error, Tool error, targeted cancel, Journal intent failure, outcome UNKNOWN, and projection stale
-- [ ] 10.4 Add a two-Session integration test proving one frozen Session does not block another
-- [ ] 10.5 Run all focused Journal/loop/llm/tool/skill audit tests and the full legacy test suite; commit the integration slice
+- [x] 10.1 Add one effect-spy test for every unsupported dynamic Op and capability path
+- [x] 10.2 Implement submission and per-effect dynamic gates with stable rejection/failure records before effect
+- [x] 10.3 Add exact Journal sequence tests for plain assistant, basic Tool, synchronous call_skill, provider error, Tool error, targeted cancel, Journal intent failure, outcome UNKNOWN, and projection stale
+- [x] 10.4 Add a two-Session integration test proving one frozen Session does not block another
+- [x] 10.5 Run all focused Journal/loop/llm/tool/skill audit tests and the full legacy test suite; commit the integration slice
 
 ## 11. Living documentation and capability registration
 

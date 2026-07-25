@@ -32,9 +32,11 @@ from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
     InvalidAuditedSubmissionError,
+    UnsupportedAuditedOperationError,
     admit_user_message,
     prepare_user_message,
     reject_invalid_user_message,
+    reject_unsupported_audited_op,
     user_message_input_descriptor_hash,
 )
 from taifeng.loop.audit_cancel import (
@@ -626,6 +628,12 @@ class AgentEngine:
         if self._audit_state is not None and isinstance(sub.op, Shutdown):
             return await submit_audited_shutdown(
                 self._audit_state, sub, self._audited_admission_lock, self._audit_finish_owner)
+        if self._audit_state is not None:
+            # audit 动态门：仅 UserMessage/CancelTurn/Shutdown 允许；能力面外的 Op
+            # 在执行前 durable 安全拒绝，不入队、不执行（spec 动态未支持操作）。
+            async with self._audited_admission_lock:
+                await reject_unsupported_audited_op(self._audit_state, sub)
+            raise UnsupportedAuditedOperationError(sub.id, str(sub.op.kind))
         await self._submissions.put(sub)
         return sub.id
 

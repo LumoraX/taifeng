@@ -454,6 +454,45 @@ async def _complete_checkpoint(state):
 
 
 @pytest.mark.anyio
+async def test_audited_turn_provider_error_records_error_checkpoint_only(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """provider 错误：request + error checkpoint durable，无 response_committed。
+
+    ConservativeFailurePolicy（默认）对 retryable ServerError 裁决 SYSTEM_RETRY 挂起；
+    审计关键不变量是错误 attempt 已 durable 留痕、且未合成最终响应。
+    """
+    from taifeng.llm.providers.sim import SimFault
+    from taifeng.suspend.signal import SuspendSignal
+
+    inner = SimClient(turns=[SimTurn(text="", fault=SimFault.server_error())])
+    client = AttemptObservableClientAdapter(
+        inner, provider="sim", default_model="sim-model"
+    )
+    engine, _, core = await _engine_with_audit(
+        tmp_path, skills_dir, model_client=client
+    )
+    runner = engine._new_turn_runner(  # noqa: SLF001
+        "submission_1", CancellationToken(name="turn"), []
+    )
+    runner.history_buffer.append(
+        user_message("hi", thread_id="thr_audit_submission")
+    )
+
+    with pytest.raises(SuspendSignal):
+        await runner._sample_once(0)  # noqa: SLF001
+
+    committed = [envelope async for envelope in core.load("ses_audit_submission")]
+    request, checkpoint = committed[-2:]
+    assert request.record_type == "llm_request_committed"
+    assert checkpoint.record_type == "llm_response_checkpoint"
+    assert checkpoint.payload["status"] == "error"
+    # 未形成最终响应：无 llm_response_committed
+    assert all(e.record_type != "llm_response_committed" for e in committed)
+
+
+@pytest.mark.anyio
 async def test_final_response_commits_ordered_conversation_items(
     tmp_path: Path,
 ) -> None:

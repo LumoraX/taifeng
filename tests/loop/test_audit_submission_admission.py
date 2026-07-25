@@ -38,7 +38,12 @@ from taifeng.loop.audit_admission import (
 )
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
-from taifeng.loop.submission import Submission, UserMessage
+from taifeng.loop.submission import (
+    CompactNow,
+    Rewind,
+    Submission,
+    UserMessage,
+)
 from taifeng.skill.registry import FilesystemSkillRegistry
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
@@ -503,6 +508,65 @@ async def test_queued_user_messages_receive_unique_durable_turn_indexes(
     finally:
         cancel.cancel()
         await actor
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "op",
+    [CompactNow(), Rewind(node_id="n1")],
+)
+async def test_unsupported_dynamic_op_is_rejected_before_effect(
+    tmp_path: Path,
+    skills_dir: Path,
+    op: object,
+) -> None:
+    """audit 能力面外的动态 Op：durable submission_rejected，不入队、不执行。"""
+    from taifeng.loop.audit_admission import UnsupportedAuditedOperationError
+
+    engine, coordinator, core = await _engine_with_audit(tmp_path, skills_dir)
+
+    with pytest.raises(UnsupportedAuditedOperationError):
+        await engine.submit(op)  # type: ignore[arg-type]
+
+    # 未入队（不执行）
+    assert engine._submissions.empty()  # noqa: SLF001
+    # durable 落一条稳定 submission_rejected（capability），不含 Op 原文
+    committed = [envelope async for envelope in core.load("ses_audit_submission")]
+    rejected = next(
+        e for e in committed if e.record_type == "submission_rejected"
+    )
+    assert rejected.payload["op_kind"] == op.kind  # type: ignore[attr-defined]
+    assert rejected.payload["stable_error"]["code"] == "audit_unsupported_operation"
+    assert rejected.payload["stable_error"]["failure_class"] == "capability"
+    # 拒绝不冻结：Session 仍健康、可继续接受合法提交
+    assert coordinator.health is AuditHealth.HEALTHY
+
+
+@pytest.mark.anyio
+async def test_two_sessions_one_frozen_does_not_block_other(
+    tmp_path: Path,
+    skills_dir: Path,
+) -> None:
+    """两个独立 audited Session：一个冻结不影响另一个的效果闸与提交。"""
+    engine_a, coord_a, core_a = await _engine_with_audit(
+        tmp_path / "a", skills_dir
+    )
+    engine_b, coord_b, core_b = await _engine_with_audit(
+        tmp_path / "b", skills_dir
+    )
+
+    # 冻结 A
+    coord_a.freeze(RuntimeError("boom"))
+    assert coord_a.health is AuditHealth.RECOVERY_REQUIRED
+    assert coord_a.effect_gate_open is False
+
+    # B 完全不受影响：健康、效果闸开、能正常接受 UserMessage
+    assert coord_b.health is AuditHealth.HEALTHY
+    assert coord_b.effect_gate_open is True
+    sub_id = await engine_b.submit(UserMessage(text="still works"))
+    assert sub_id
+    committed_b = [e async for e in core_b.load("ses_audit_submission")]
+    assert any(e.record_type == "submission_accepted" for e in committed_b)
 
 
 @pytest.mark.anyio

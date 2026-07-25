@@ -10,7 +10,7 @@ import pytest
 import taifeng.loop.pool_lifecycle as lifecycle_module
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.pool_lifecycle import EnginePoolUnresponsiveError
-from taifeng.loop.submission import Resume, Rewind, UserMessage
+from taifeng.loop.submission import UserMessage
 from tests.loop.test_audit_engine_bootstrap import _JournalCore, _pool
 
 if TYPE_CHECKING:
@@ -27,13 +27,14 @@ async def _task_error(task: asyncio.Task[None]) -> BaseException | None:
 
 
 @pytest.mark.asyncio
+# 注：audit 引擎仅 UserMessage/CancelTurn/Shutdown 可派发；Rewind/Resume/spawn-Resume
+# 等能力面外 Op 现由动态门在 submit() 前 durable 拒绝（见
+# test_unsupported_dynamic_op_is_rejected_before_effect），故不再作为「真实派发收敛」
+# 参数——它们不会进入 actor dispatch。此处保留会派发的 UserMessage 与 TTL 定时器两类。
 @pytest.mark.parametrize(
     ("handler_name", "operation", "spawn_resume"),
     [
         ("_run_turn_for", UserMessage(text="block"), False),
-        ("_handle_rewind", Rewind(node_id="missing"), False),
-        ("_handle_resume", Resume(thread_id="root", resolutions={}), False),
-        ("_resume_spawn", Resume(thread_id="spawn", resolutions={}), True),
         ("_ttl_expire_after", None, False),
     ],
 )
