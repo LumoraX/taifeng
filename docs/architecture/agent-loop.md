@@ -658,3 +658,42 @@ Resume(thread_id, resolutions)
 **子 thread 嵌套挂起 + 续跑回传父 call_skill**：`call_skill` 派发的子 skill 在独立子 thread 运行（`_spawn_sub_runner`，history 隔离）。子 turn 挂起时挂起记录落**子 thread**，子 emit `turn_suspended`（子 thread_id）。`_spawn_sub_runner` 在子 `end_reason=="suspended"` 时抛 `SuspendSignal(reason=CHILD_SKILL, detail={sub_thread_id, skill_id})` → 父 `call_skill` 随之挂起 → 逐层上抛至根 → 根也 emit `turn_suspended`。`Resume(thread_id=<子 thread>)` 经 `_handle_resume` 分流到 `_handle_child_resume` 续跑链：自根沿 `CHILD_SKILL` pending 串链至 leaf（不依赖 `get_metadata`，谱系由父挂起 record 的 pending detail 携带）→ 核销 leaf 用户挂起 + 续跑子 turn → 把子结果逐层回填父 `call_skill` 的 `function_call_output` + 续跑父 turn → 根以 `_build_and_run_runner` 收尾。子层续跑 turn `is_root=False`（engine 注入非空 `call_stack`），根续跑 `is_root=True`。**`Resume` 经 `asyncio.create_task` 异步派发**（与 `UserMessage` 一致），使续跑链多 turn 不阻塞 run 循环、且给 `subscribe(submission_id)` 留出注册窗口。详见 [suspend-resume 契约](capabilities/suspend-resume.md) §子 thread resume 续跑链。
 
 - [x] `cancel.child()` 派生层级正确，父取消级联 —— `tests/loop/test_cancellation.py::test_child_cancel_propagates_from_parent`
+
+## audit-required Session 的 Journal-first 执行（business-integration 契约）
+
+注入 `AuditConfig` 后，Engine 对该 Session 切换到 **Journal-first 审计执行**：每一次业务效果都
+「先 durable 落 Journal → definite ack → 才应用到 hot history / projection / 下游效果」，由
+`SessionAuditCoordinator`（单 Session append/lifecycle 锁 + effect gate）统一门控。完整数据契约见
+[SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)；此处只记模块协作。
+
+- **Submission admission（动态门）**：`AgentEngine.submit()` 在 audit 模式仅放行 UserMessage / CancelTurn /
+  Shutdown。UserMessage 的 durable acceptance（`submission_accepted` + user 会话项 + `submission_applied`
+  原子三记录）**先于**入队，actor 只应用已 ack 的 envelope 才更新 hot history/projection；非法输入落安全
+  `submission_rejected` 不入队；能力面外的 Op（CompactNow/Rewind/Resume/… 共 10 类）在执行前 durable 拒绝
+  （`reject_unsupported_audited_op`，failure_class=capability），不入队、不执行。
+- **effect gate**：每个 durable 效果前 `coordinator.ensure_effect_allowed()`；首个 Journal IO / 完整性 /
+  ack 不确定失败即 freeze（关闭 effect gate），此后该 Session 的 LLM/Tool/Skill 效果全部被拒。
+- **LLM**：见 llm-client.md「attempt observer 与 checkpoint-before-delta」；checkpoint 之后、任何 Tool
+  effect / turn 终态之前，`_sample_once` 原子提交 `llm_response_committed` + provider 顺序的
+  reasoning/assistant/function_call 会话项（`audit_llm.commit_audited_llm_response`），ack 后才 extend hot
+  history；function_call 会话项先于 Tool intent durable。
+- **Tool convergence**（`audit_tool.audited_tool_batch`）：派发前把整批有序 `tool_intent_committed` 作为一个
+  原子 batch durable；随后在 `anyio.fail_after(shield=True)`（取消无关有界 finalization）内复用既有
+  `dispatch_batch`，让工具经 `ctx.cancel` 协作取消产出确定结果，而 outcome 落账不被外层取消打断；每个已提交
+  意图恰好收敛到一个 `tool_outcome_committed`（success/error/rejected/cancelled/unknown）+ 唯一
+  `function_call_output` 会话项，按 call-index 有序。整批派发前取消 → cancelled（不进 runtime）；dispatch
+  中途取消/超时对 reconcilable/external_non_idempotent → UNKNOWN（无法证明外部效果）→ 记录后 freeze；声明
+  non-suspending 却运行时挂起 → error 终态 + freeze（不进 HITL）。
+- **同步 call_skill lineage**（`audit_skill.AuditedSkillDispatch`）：复用根 coordinator/lease；外层 Tool 意图
+  之后先 durable `skill_selected`（完整 definition/body 快照）→ 配额拒绝走 `skill_dispatch_finished(rejected)`
+  无 child；接受走原子 `skill_dispatch_started`+`thread_created`+`thread_bound`+child-seed，子 runner 携
+  child `audit_state`（child thread、共享根 coordinator、同一 projector）→ 子 turn 的 LLM/Tool/Skill 效果
+  递归走同一审计路径 → 原子 `skill_dispatch_finished`+`thread_terminal`+`skill_outcome`，先于外层 Tool
+  outcome。嵌套 call_skill 天然形成三级谱系；子 turn 若挂起属 capability 违约 → freeze。
+- **cancellation**：每个 active turn 有目标取消子树（CancelTurn 只取消其目标 turn/子树），Session root 取消
+  保留给 freeze 与 Shutdown；LLM checkpoint 与 Tool outcome 的落账均为取消无关（shield）。
+- **Session isolation**：coordinator/writer 健康态每 Session 独立；一个 Session freeze 不影响其他 Session 的
+  effect gate 与提交。
+
+> legacy 模式（未注入 `AuditConfig`）逐字保持原有 dispatch/persist/suspend/resume 行为，本节所有 audit 分支
+> 均以 `audit_state is not None` 门控，对 legacy 零行为变化。

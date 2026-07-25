@@ -211,6 +211,32 @@ cache 统计**不挂在 `ModelClient` 上**，而是 `Engine` 跨 turn 持有一
 `cache_creation_input_tokens` / `cache_read_input_tokens`）由 provider 经 `prompt_cache` / `completed`
 事件透出，`turn.py` 调 `PromptCacheStats.record_turn(...)` 累积并归因 cache break。
 
+## Attempt observer 与 checkpoint-before-delta（audit-required Session）
+
+普通（legacy）模式下 `ModelClientSession.stream(request)` 直接把 provider 事件流回吐给 TurnRunner，无额外
+门禁。**audit-required Session**（注入 `AuditConfig`）额外要求 ModelClient 可观测每一次**真实网络 attempt**，
+契约见 `src/taifeng/llm/audit.py`：
+
+- **能力门**：strict audit 只接受仓库官方 `AttemptObservableClientAdapter`（内部 client 必须属于逐一审查过的
+  one-network-attempt 类型集合；任何自带 retry 的 wrapper 或外部 subclass 都被拒），否则 Session 在 LLM
+  effect 前被 capability 校验拒绝。
+- **request 先于 dispatch**：一次 `stream` = 一次网络 attempt。observer 的 `before_attempt` 先 durable 落
+  `llm_request_committed`（definite ack 后才消费 attempt ordinal），**ack 之后**才构造底层 session 并开始迭代
+  provider 流。
+- **checkpoint-before-delta**：observed session 把 attempt 的**全部事件缓冲**，在 `after_attempt` durable 落
+  attempt-specific `llm_response_checkpoint`（complete/error/cancelled/unknown）**之后**才把缓冲事件按 provider
+  顺序 yield 给 TurnRunner——即任何可见 delta（`AssistantText` / `AssistantReasoning` / tool call）都严格晚于
+  该 attempt 的 durable checkpoint。
+- **cancellation-independent finalization**：checkpoint 收敛在独立 task + `anyio.fail_after(shield=True)` 内完成；
+  取消到达也只延迟到 durable ack 后再传播，缓冲事件绝不在 error/UNKNOWN 路径泄漏。
+- **UNKNOWN → freeze**：dispatch 后无法形成可信终态（静默断流 / 归一化失败 / observer 失败）→ attempt 记
+  UNKNOWN、Session 冻结、零事件发布、不重试。
+- **最终 logical response**：checkpoint 之后、任何 Tool effect / turn 终态之前，TurnRunner 原子提交
+  `llm_response_committed` + provider 顺序的 reasoning/assistant/function_call 会话项（见 agent-loop.md）。
+
+完整数据契约见
+[SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)。
+
 ## 测试用例（M1 验收）
 
 > 全部已覆盖（`tests/` 下 provider / retry / structured-output 测试 + `tests/loop/test_cache_break_reason.py`）。

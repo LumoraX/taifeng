@@ -17,20 +17,35 @@ canonical JSON、SHA-256 envelope hash chain、`BEGIN + envelopes + COMMIT` 原�
 fencing，以及 fail-closed strict verification。每次 durable ack 都在 file flush+fsync 后返回；新建文件还会
 fsync 父目录。同步文件操作和 strict scan 全部经 anyio worker thread 执行。
 
-这一能力当前**不是默认 conversation 持久化路径**：
+这一能力当前**不是默认 conversation 持久化路径**（legacy 模式）：
 
-- `AgentEngine`、`EnginePool`、`MessageWriter` / `MessageStore` 和 EventMsg 均未接入 SessionJournal；
-- 现有 per-thread JSONL transcript、resume、reconstruct 和 corrupt-line tolerance 行为保持不变；
-- Phase 1 只写 `session_started`、`thread_created`、`thread_bound` 三种初始化记录，以及显式调用方提交的测试/
-  基础 record；尚未覆盖 LLM、Tool、Skill、HITL、审批或外部 effect；
-- 不支持 `open_existing`、跨进程崩溃接管、repair/reconcile/unfreeze 或历史迁移；`close()` 只释放 live lease，
-  不写 `session_ended`；
-- 因此不得把本阶段描述成“Engine 已获得完整审计真相源”或“生产 resume 已迁移”。完整边界以
-  [SessionJournal Durable Core（Phase 1）能力契约](capabilities/session-journal-core.md) 和
-  [ADR 0025](../decisions/0025-session-journal-source-of-truth.md) 为准。
+- 未注入 `AuditConfig` 时，`AgentEngine`、`EnginePool`、`MessageWriter` / `MessageStore` 和 EventMsg
+  **不接入** SessionJournal；现有 per-thread JSONL transcript、resume、reconstruct 和 corrupt-line
+  tolerance 行为逐字不变，SessionJournal 不与它双写，也不改变其公共 API。
 
-后续阶段完成 recovery/open 与 Engine 单写接入前，本页其余章节描述的默认 thread transcript 仍是现行行为；
-SessionJournal 不与它双写，也不改变其公共 API。
+### audit-required Session（business-integration，已接入）
+
+注入 `AuditConfig` 后，EnginePool 为该 Session 建立 **Journal-first 审计执行模式**：Journal 成为该 Session
+的**授权真相源**，per-thread JSONL transcript 降级为**只读投影目标**（projection target），由
+`JournalConversationProjector` 仅消费已 durable ack 的 `conversation_item` envelope 单调物化——投影失败只
+返回 stale、不冻结 Journal 执行，replay 按 Journal seq 可重建同序历史。
+
+- **Journal authority**：UserMessage、LLM attempt/response、Tool intent/outcome、同步 call_skill 子谱系、
+  会话项（user/assistant/reasoning/function_call/function_call_output/skill_outcome）全部先 durable 落
+  Journal，ack 后才应用到 hot history 与 projection；效果永远后于 durable。
+- **lifecycle**：`SessionAuditCoordinator` 持单 Session 的 append/lifecycle 锁、OPEN/FINISHING/CLOSED 生命周期、
+  一个 finish future、terminal batch（thread terminal + 唯一 `session_ended`）+ `close_session(lease)` 恰一次；
+  首个 Journal IO / 完整性 / ack 不确定失败即关闭 effect gate（freeze），且**每 Session 独立**——一个
+  Session 冻结不影响其他 Session。
+- **current recovery exclusions（本阶段不支持）**：audit 静态拒绝 resume、custom store/directory、IndexHook、
+  hooks、permission/HITL、compressor、memory、instruction layers、orchestration、spawn/peer、非 attempt-
+  observable client、可 suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable
+  拒绝。跨进程崩溃接管、repair/reconcile/unfreeze、历史迁移仍不在本阶段范围。
+
+完整数据契约与边界以
+[SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)、
+[SessionJournal Durable Core（Phase 1）能力契约](capabilities/session-journal-core.md) 和
+[ADR 0025](../decisions/0025-session-journal-source-of-truth.md) 为准。
 
 ## 三协议总览
 

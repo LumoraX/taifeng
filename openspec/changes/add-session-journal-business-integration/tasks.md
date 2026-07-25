@@ -95,11 +95,11 @@
 
 ## 11. Living documentation and capability registration
 
-- [ ] 11.1 Update `docs/architecture/conversation.md` with Journal authority, projection, lifecycle, and current recovery exclusions
-- [ ] 11.2 Update `docs/architecture/agent-loop.md` with admission, effect gates, Tool/Skill convergence, cancellation, and Session isolation
-- [ ] 11.3 Update `docs/architecture/llm-client.md` with attempt observer and checkpoint-before-delta semantics
-- [ ] 11.4 Register the LLM strategy capability and real-LLM verification scenarios in `docs/capability-matrix.md`
-- [ ] 11.5 Ensure the capability contract/index and OpenSpec artifacts match the delivered runtime behavior
+- [x] 11.1 Update `docs/architecture/conversation.md` with Journal authority, projection, lifecycle, and current recovery exclusions
+- [x] 11.2 Update `docs/architecture/agent-loop.md` with admission, effect gates, Tool/Skill convergence, cancellation, and Session isolation
+- [x] 11.3 Update `docs/architecture/llm-client.md` with attempt observer and checkpoint-before-delta semantics
+- [x] 11.4 Register the LLM strategy capability and real-LLM verification scenarios in `docs/capability-matrix.md`
+- [x] 11.5 Ensure the capability contract/index and OpenSpec artifacts match the delivered runtime behavior
 
 ## 12. Repository gates and completion evidence
 
