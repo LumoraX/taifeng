@@ -3,7 +3,12 @@
 设计文档：docs/architecture/llm-client.md
 """
 
-from taifeng.llm.client import ModelClient, ModelClientSession
+from taifeng.llm.client import (
+    ModelCapabilities,
+    ModelClient,
+    ModelClientSession,
+    model_capabilities,
+)
 from taifeng.llm.errors import (
     AuthenticationError,
     CancelledError,
@@ -23,17 +28,30 @@ from taifeng.llm.events import EventKind, ResponseEvent
 from taifeng.llm.recovery import RecoveryPlan, RecoveryStep, recommend_recovery
 from taifeng.llm.retry import RetryConfig, retry_async
 from taifeng.llm.types import (
+    ApiFunctionCallItem,
+    ApiFunctionCallOutputItem,
+    ApiInputItem,
     ApiMessage,
+    ApiMessageItem,
+    ApiProviderStateItem,
     ApiRequest,
     CacheBreakpoint,
+    ImagePart,
+    ProviderStateEnvelope,
     RateLimitSnapshot,
     ResponseFormatSpec,
+    TextPart,
     TokenUsage,
     ToolSpecRef,
 )
 
 __all__ = [
     "ApiMessage",
+    "ApiMessageItem",
+    "ApiFunctionCallItem",
+    "ApiFunctionCallOutputItem",
+    "ApiInputItem",
+    "ApiProviderStateItem",
     "ApiRequest",
     "AuthenticationError",
     "CacheBreakpoint",
@@ -44,10 +62,13 @@ __all__ = [
     "FailureClass",
     "InvalidRequestError",
     "LLMError",
+    "ImagePart",
+    "ModelCapabilities",
     "ModelClient",
     "ModelClientSession",
     "RateLimitError",
     "RateLimitSnapshot",
+    "ProviderStateEnvelope",
     "RecoveryPlan",
     "RecoveryStep",
     "RequestTooLargeError",
@@ -56,9 +77,11 @@ __all__ = [
     "RetryConfig",
     "ServerError",
     "TokenUsage",
+    "TextPart",
     "ToolSpecRef",
     "TransientNetworkError",
     "classify_failure",
+    "model_capabilities",
     "recommend_recovery",
     "retry_async",
     "suggested_action_for",

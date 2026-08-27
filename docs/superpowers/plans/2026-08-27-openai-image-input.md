@@ -28,7 +28,7 @@
 - Create: docs/architecture/capabilities/llm-image-input.md, tests/llm/test_image_input_types.py
 - Modify: src/taifeng/conversation/models.py, src/taifeng/llm/types.py, src/taifeng/llm/client.py, src/taifeng/llm/__init__.py
 
-- [ ] **Step 1: 写失败 schema tests。** 覆盖 PNG/JPEG/WebP/GIF MIME union、旧 attachment 缺 detail → auto、纯文本 content 仍为 str、image-only 合法、text/image 都空非法，以及 messages-only/items-only/equivalent/conflicting 四种 ApiRequest 构造路径。
+- [x] **Step 1: 写失败 schema tests。** 覆盖 PNG/JPEG/WebP/GIF MIME union、旧 attachment 缺 detail → auto、纯文本 content 仍为 str、image-only 合法、text/image 都空非法，以及 messages-only/items-only/equivalent/conflicting 四种 ApiRequest 构造路径。
 
 ~~~python
 def test_request_items_are_canonical_source() -> None:
@@ -43,13 +43,13 @@ def test_conflicting_request_views_fail() -> None:
                    input_items=[ApiMessageItem(role="user", content="b")])
 ~~~
 
-- [ ] **Step 2: 确认红灯。**
+- [x] **Step 2: 确认红灯。**
 
 Run: PYTHONPATH=src uv run pytest tests/llm/test_image_input_types.py -q
 
 Expected: FAIL，因为 DTO、input item conversion 与 capability helper 尚不存在。
 
-- [ ] **Step 3: 实现严格 DTO。** 定义 frozen ImageAttachmentV1、TextPart、ImagePart、ProviderStateEnvelope、ApiMessageItem、ApiFunctionCallItem、ApiFunctionCallOutputItem、ApiProviderStateItem 和 ModelCapabilities；实现 messages_to_input_items()、input_items_to_messages()，在 ApiRequest validator 强制单一来源。旧 client 通过 helper 自动视为 text-only。
+- [x] **Step 3: 实现严格 DTO。** 定义 frozen TextPart、ImagePart、ProviderStateEnvelope、ApiMessageItem、ApiFunctionCallItem、ApiFunctionCallOutputItem、ApiProviderStateItem 和 ModelCapabilities；实现 messages_to_input_items()、input_items_to_messages()，在 ApiRequest validator 强制单一来源。旧 client 通过 helper 自动视为 text-only。
 
 ~~~python
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ class ModelCapabilities:
     accepts_provider_state: bool = False
 ~~~
 
-- [ ] **Step 4: 验证并提交。**
+- [x] **Step 4: 验证并提交。**
 
 Run: PYTHONPATH=src uv run pytest tests/llm/test_image_input_types.py tests/conversation/test_models_system_injection.py -q
 
@@ -95,7 +95,7 @@ Run: PYTHONPATH=src uv run pytest tests/llm/test_image_admission.py -q
 
 Expected: FAIL，因为 policy、inspector 和错误类型尚不存在。
 
-- [ ] **Step 3: 实现 bounded pure-Python admission。** 定义不可变 ImageInputPolicy、DISABLED_IMAGE_POLICY、InputCostEstimator、ConservativeImageCostEstimator、OpenAIImageCostEstimator。严格按 count → encoded length → strict base64 → decoded size/total → sha256 → MIME signature → dimensions → GIF frame 顺序检查；只用内存且所有 decode 上限受 policy 限制。扩充 estimate_item_tokens/bytes，图片 bytes 包含 canonical base64 与 JSON 开销。
+- [ ] **Step 3: 实现 bounded pure-Python admission。** 定义不可变 ImageAttachmentV1、ImageInputPolicy、DISABLED_IMAGE_POLICY、InputCostEstimator、ConservativeImageCostEstimator、OpenAIImageCostEstimator。严格按 count → encoded length → strict base64 → decoded size/total → sha256 → MIME signature → dimensions → GIF frame 顺序检查；只用内存且所有 decode 上限受 policy 限制。扩充 estimate_item_tokens/bytes，图片 bytes 包含 canonical base64 与 JSON 开销。
 
 ~~~python
 def validate_image_attachment(attachment: ImageAttachmentV1,

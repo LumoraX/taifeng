@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -14,6 +15,31 @@ if TYPE_CHECKING:
     from taifeng.llm.events import ResponseEvent
     from taifeng.llm.types import ApiRequest
     from taifeng.loop.cancellation import CancellationToken
+
+
+@dataclass(frozen=True)
+class ModelCapabilities:
+    """Model client 输入协议能力的只读描述。"""
+
+    input_modalities: frozenset[Literal["text", "image"]]
+    provider: str
+    protocol: str
+    accepts_provider_state: bool = False
+
+
+TEXT_ONLY_CAPABILITIES = ModelCapabilities(
+    input_modalities=frozenset({"text"}),
+    provider="unknown",
+    protocol="unknown",
+)
+
+
+def model_capabilities(client: object) -> ModelCapabilities:
+    """读取 client 能力；未迁移的旧实现安全降级为 text-only。"""
+    value = getattr(client, "capabilities", None)
+    if isinstance(value, ModelCapabilities):
+        return value
+    return TEXT_ONLY_CAPABILITIES
 
 
 @runtime_checkable
@@ -29,11 +55,9 @@ class ModelClientSession(Protocol):
         """
         ...
 
-    async def __aenter__(self) -> ModelClientSession:
-        ...
+    async def __aenter__(self) -> ModelClientSession: ...
 
-    async def __aexit__(self, *exc: object) -> None:
-        ...
+    async def __aexit__(self, *exc: object) -> None: ...
 
 
 @runtime_checkable
