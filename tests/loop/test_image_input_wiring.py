@@ -9,11 +9,20 @@ from typing import TYPE_CHECKING
 import pytest
 
 import taifeng
+from taifeng.conversation.models import user_message
 from taifeng.llm.client import ModelCapabilities
 from taifeng.llm.errors import UnsupportedModalityError
-from taifeng.llm.image_input import ImageAttachmentV1, ImageInputPolicy
+from taifeng.llm.image_input import (
+    ConservativeImageCostEstimator,
+    ImageAttachmentV1,
+    ImageInputPolicy,
+)
 from taifeng.llm.providers import SimClient, SimTurn
+from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
 from taifeng.llm.types import ImagePart, TextPart
+from taifeng.loop.cancellation import CancellationToken
+from taifeng.loop.submission import Submission, UserMessage
+from taifeng.loop.turn import TurnRunner
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -105,3 +114,103 @@ async def test_text_only_client_rejects_image_before_conversation_append(
 
     assert items == []
     assert client.ledger.requests() == []
+
+
+@pytest.mark.asyncio
+async def test_pool_passes_request_byte_budget_to_provider_preflight(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """TurnRunner 必须让 provider 看见最终 wire JSON 的业务字节上限。"""
+    client = SimClient(turns=[SimTurn(text="seen")])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        budget=taifeng.ContextBudget(max_request_bytes=1_000_000),
+    )
+    engine = await pool.get_or_create(session_id="wire-limit", entry_skill_id="code-reviewer")
+
+    submission_id = await engine.submit(taifeng.UserMessage(text="inspect"))
+    async for event in engine.subscribe(submission_id):
+        if event.msg.kind in ("turn_completed", "turn_failed"):
+            assert event.msg.kind == "turn_completed"
+            break
+
+    request = client.ledger.single_request().request
+    await pool.close()
+
+    assert request.metadata[MAX_REQUEST_BYTES_METADATA_KEY] == 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_detached_child_runner_inherits_image_policy_and_estimator(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """detached spawn 子 runner 必须继承 pool 的多模态业务配置。"""
+    policy = ImageInputPolicy(enabled=True)
+    estimator = ConservativeImageCostEstimator(token_ceiling=1234)
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=SimClient(turns=[]),
+        compressors=[],
+        image_input_policy=policy,
+        input_cost_estimator=estimator,
+    )
+    engine = await pool.get_or_create(session_id="child-policy", entry_skill_id="code-reviewer")
+    target = engine._snapshot.get("style-checker")  # noqa: SLF001
+    assert target is not None
+    child_thread_id = await pool.store.create_thread(
+        cwd=None, entry_skill_id=target.id, source="test"
+    )
+    seed = user_message("inspect", thread_id=child_thread_id)
+
+    runner = engine._build_child_runner(  # noqa: SLF001
+        target, child_thread_id, seed, CancellationToken()
+    )
+    await pool.close()
+
+    assert runner.image_input_policy is policy
+    assert runner.input_cost_estimator is estimator
+
+
+@pytest.mark.asyncio
+async def test_resumed_child_runner_inherits_image_policy_and_estimator(
+    skills_dir: Path,
+    threads_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非根 thread Resume 重建的 runner 不得退回默认 text-only 策略。"""
+    policy = ImageInputPolicy(enabled=True)
+    estimator = ConservativeImageCostEstimator(token_ceiling=1234)
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=SimClient(turns=[]),
+        compressors=[],
+        image_input_policy=policy,
+        input_cost_estimator=estimator,
+    )
+    engine = await pool.get_or_create(session_id="resume-policy", entry_skill_id="code-reviewer")
+    child_thread_id = await pool.store.create_thread(
+        cwd=None, entry_skill_id="style-checker", source="test"
+    )
+    await pool.store.append(user_message("inspect", thread_id=child_thread_id))
+    captured: list[TurnRunner] = []
+
+    async def fake_run(runner: TurnRunner) -> object:
+        captured.append(runner)
+        return object()
+
+    monkeypatch.setattr(TurnRunner, "run", fake_run)
+    await engine._run_thread_turn(  # noqa: SLF001
+        Submission(op=UserMessage(text="resume")),
+        child_thread_id,
+        "style-checker",
+        CancellationToken(),
+    )
+    await pool.close()
+
+    assert captured[0].image_input_policy is policy
+    assert captured[0].input_cost_estimator is estimator

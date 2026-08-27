@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 
 import pytest
 
 from taifeng.llm.client import ModelCapabilities
 from taifeng.llm.errors import (
     InvalidHistoryError,
+    RequestTooLargeError,
     UnsupportedCombinationError,
     UnsupportedModalityError,
 )
+from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
 from taifeng.llm.providers.openai.chat import OpenAIChatClient, OpenAIChatSession
 from taifeng.llm.providers.openai_compat import OpenAICompatSession
 from taifeng.llm.types import (
@@ -95,6 +98,29 @@ def test_chat_maps_image_parts_to_data_urls_and_disables_store() -> None:
             },
         },
     ]
+
+
+def test_chat_guards_exact_final_utf8_json_bytes() -> None:
+    """Chat 最终 JSON 的精确 UTF-8 字节边界必须在网络前执行。"""
+    request = ApiRequest(
+        model="gpt-5.6",
+        messages=[ApiMessage(role="user", content=[TextPart(text="看图"), _IMAGE])],
+    )
+    payload = _chat_session()._build_payload(request)
+    exact = len(
+        json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    )
+
+    request.metadata[MAX_REQUEST_BYTES_METADATA_KEY] = exact
+    assert _chat_session()._build_payload(request) == payload
+
+    request.metadata[MAX_REQUEST_BYTES_METADATA_KEY] = exact - 1
+    with pytest.raises(RequestTooLargeError) as exc_info:
+        _chat_session()._build_payload(request)
+    assert exc_info.value.estimated_bytes == exact
+    assert exc_info.value.max_bytes == exact - 1
 
 
 def test_chat_retains_system_tool_and_structured_output_semantics() -> None:

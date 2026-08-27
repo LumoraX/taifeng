@@ -40,6 +40,7 @@ from taifeng.llm.providers._shared import (
 from taifeng.llm.providers.openai._shared import (
     OPENAI_DEFAULT_BASE_URL,
     build_openai_headers,
+    enforce_openai_wire_size,
 )
 from taifeng.llm.types import (
     ApiFunctionCallItem,
@@ -404,6 +405,7 @@ class OpenAIResponsesSession:
             payload["max_output_tokens"] = request.max_output_tokens
         if request.temperature is not None:
             payload["temperature"] = request.temperature
+        enforce_openai_wire_size(payload, request)
         return payload
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:

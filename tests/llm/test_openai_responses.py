@@ -11,7 +11,12 @@ import pytest
 
 from taifeng.llm.audit import AttemptObservableClientAdapter
 from taifeng.llm.client import ModelCapabilities
-from taifeng.llm.errors import InvalidHistoryError, InvalidResponseError
+from taifeng.llm.errors import (
+    InvalidHistoryError,
+    InvalidResponseError,
+    RequestTooLargeError,
+)
+from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
 from taifeng.llm.providers.openai.responses import (
     OpenAIResponsesClient,
     OpenAIResponsesSession,
@@ -143,6 +148,29 @@ def test_responses_maps_ordered_items_images_tools_and_format() -> None:
     assert "function" not in payload["tools"][0]
     assert payload["text"]["format"]["name"] == "result"
     assert payload["reasoning"] == {"effort": "medium"}
+
+
+def test_responses_guards_exact_final_utf8_json_bytes() -> None:
+    """Responses 对包含 input_image 的最终 wire JSON 做精确字节门禁。"""
+    request = ApiRequest(
+        model="gpt-5.6",
+        input_items=[ApiMessageItem(role="user", content=[TextPart(text="看图"), _IMAGE])],
+    )
+    payload = _session()._build_payload(request)
+    exact = len(
+        json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    )
+
+    request.metadata[MAX_REQUEST_BYTES_METADATA_KEY] = exact
+    assert _session()._build_payload(request) == payload
+
+    request.metadata[MAX_REQUEST_BYTES_METADATA_KEY] = exact - 1
+    with pytest.raises(RequestTooLargeError) as exc_info:
+        _session()._build_payload(request)
+    assert exc_info.value.estimated_bytes == exact
+    assert exc_info.value.max_bytes == exact - 1
 
 
 def test_responses_rejects_foreign_provider_state_before_network() -> None:

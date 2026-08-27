@@ -28,6 +28,7 @@ from taifeng.instructions.types import (
     InstructionLayer,
     ResolvedInstruction,
 )
+from taifeng.llm.errors import LLMError
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
@@ -613,8 +614,15 @@ class AgentEngine:
             state.coordinator.ensure_intake_open()
             descriptor_hash = user_message_input_descriptor_hash(sub)
             prepared = None
-            with suppress(TypeError, ValueError):
-                prepared = prepare_user_message(state, sub)
+            with suppress(TypeError, ValueError, LLMError):
+                from taifeng.llm.client import model_capabilities
+
+                prepared = prepare_user_message(
+                    state,
+                    sub,
+                    image_input_policy=self._image_input_policy,
+                    model_input_capabilities=model_capabilities(self._model_client),
+                )
             if prepared is None:
                 async with self._audited_admission_lock:
                     await reject_invalid_user_message(
@@ -2077,6 +2085,8 @@ class AgentEngine:
             submission_id=child_thread_id,
             emit=self._emit,
             cancel=cancel,
+            image_input_policy=self._image_input_policy,
+            input_cost_estimator=self._input_cost_estimator,
             hooks=self._hooks,
             permission_policy=self._permission_policy,
             request_metadata=self._request_metadata,
@@ -2815,6 +2825,8 @@ class AgentEngine:
             submission_id=submission_id or sub.id,
             emit=self._emit,
             cancel=turn_cancel,
+            image_input_policy=self._image_input_policy,
+            input_cost_estimator=self._input_cost_estimator,
             hooks=self._hooks,
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
@@ -3181,6 +3193,8 @@ class AgentEngine:
             submission_id=submission_id,
             emit=self._emit,
             cancel=cancel,
+            image_input_policy=self._image_input_policy,
+            input_cost_estimator=self._input_cost_estimator,
             hooks=self._hooks,
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,

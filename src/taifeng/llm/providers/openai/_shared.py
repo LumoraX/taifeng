@@ -2,12 +2,35 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from taifeng.llm.errors import InvalidHistoryError
-from taifeng.llm.types import ApiProviderStateItem, ImagePart, PartContent, TextPart
+from taifeng.llm.errors import InvalidHistoryError, InvalidRequestError, RequestTooLargeError
+from taifeng.llm.types import ApiProviderStateItem, ApiRequest, ImagePart, PartContent, TextPart
 
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+MAX_REQUEST_BYTES_METADATA_KEY = "taifeng.max_request_bytes"
+
+
+def enforce_openai_wire_size(payload: dict[str, Any], request: ApiRequest) -> None:
+    """按 httpx 紧凑 JSON 规则检查最终 OpenAI wire 的精确 UTF-8 字节数。"""
+    max_bytes = request.metadata.get(MAX_REQUEST_BYTES_METADATA_KEY)
+    if max_bytes is None:
+        return
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise InvalidRequestError("max request bytes metadata must be a positive integer")
+    wire = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(wire) > max_bytes:
+        raise RequestTooLargeError(
+            f"final OpenAI request body {len(wire)}B exceeds limit {max_bytes}B",
+            estimated_bytes=len(wire),
+            max_bytes=max_bytes,
+        )
 
 
 def build_openai_headers(

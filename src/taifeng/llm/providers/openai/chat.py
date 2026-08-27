@@ -10,6 +10,7 @@ from taifeng.llm.providers.openai._shared import (
     OPENAI_DEFAULT_BASE_URL,
     build_openai_headers,
     chat_content,
+    enforce_openai_wire_size,
     reject_provider_state,
 )
 from taifeng.llm.providers.openai_compat import OpenAICompatClient, OpenAICompatSession
@@ -88,6 +89,7 @@ class OpenAIChatSession(OpenAICompatSession):
                     "strict": req.response_format.strict,
                 },
             }
+        enforce_openai_wire_size(payload, req)
         return payload
 
 

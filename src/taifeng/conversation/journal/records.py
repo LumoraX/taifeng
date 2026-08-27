@@ -141,6 +141,7 @@ class AttachmentV1(PayloadModel):
     sha256: HashHex
     encoding: Literal["base64"] = "base64"
     content: NonEmptyStr
+    detail: Literal["auto", "low", "high", "original"] = "auto"
 
     def decoded(self) -> bytes:
         """严格解码并校验声明 size 和小写 SHA-256。"""

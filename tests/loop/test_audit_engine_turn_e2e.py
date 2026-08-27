@@ -11,14 +11,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
+import json
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 
 import taifeng
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
+from taifeng.conversation.journal.records import (
+    ConversationItemV1,
+    deserialize_response_item,
+)
 from taifeng.llm.audit import AttemptObservableClientAdapter
+from taifeng.llm.image_input import ImageAttachmentV1, ImageInputPolicy
+from taifeng.llm.providers.openai.responses import OpenAIResponsesClient
 from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.loop.audit_config import AuditConfig
 
@@ -43,6 +53,35 @@ def _audit_config(core: JsonlSessionJournalCore) -> AuditConfig:
     )
 
 
+def _responses_sse(response_id: str, output: list[dict[str, object]]) -> bytes:
+    """构造只依赖 terminal truth 的 Responses SSE。"""
+    event = {
+        "type": "response.completed",
+        "response": {
+            "id": response_id,
+            "model": "gpt-5.6-2026-08-01",
+            "status": "completed",
+            "output": output,
+            "usage": {"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
+        },
+    }
+    return f"data: {json.dumps(event)}\n\n".encode()
+
+
+def _image_attachment() -> dict[str, object]:
+    """构造 strict audit 与图片 admission 均认可的 1x1 PNG。"""
+    data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    return ImageAttachmentV1(
+        media_type="image/png",
+        size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        content=base64.b64encode(data).decode("ascii"),
+        detail="high",
+    ).model_dump()
+
+
 async def _run_until_root_done(
     engine: taifeng.AgentEngine,
     text: str,
@@ -56,6 +95,20 @@ async def _run_until_root_done(
     tests/skill/test_composite_e2e.py 注释）。故改用 ``subscribe_all()`` 后台收集，仅在
     终态事件带 ``is_root=True``（最外层 entry turn）时退出，确保父 turn 完整收敛。
     """
+    return await _run_op_until_root_done(
+        engine,
+        taifeng.UserMessage(text=text),
+        deadline_seconds=deadline_seconds,
+    )
+
+
+async def _run_op_until_root_done(
+    engine: taifeng.AgentEngine,
+    op: taifeng.UserMessage,
+    *,
+    deadline_seconds: float = 10.0,
+) -> str:
+    """在提交任意 UserMessage 前注册 collector，并等待根 turn 终态。"""
     result: list[str] = []
     done = asyncio.Event()
     sub_holder: list[str] = []
@@ -73,7 +126,7 @@ async def _run_until_root_done(
 
     task = asyncio.create_task(collector())
     await asyncio.sleep(0)  # 让 collector 先注册 subscribe_all 队列
-    sub_holder.append(await engine.submit(taifeng.UserMessage(text=text)))
+    sub_holder.append(await engine.submit(op))
     try:
         await asyncio.wait_for(done.wait(), timeout=deadline_seconds)
     finally:
@@ -203,3 +256,107 @@ async def test_engine_plain_turn_durably_records_llm_commit_without_tool_records
     # 初始化与收尾骨架齐全
     assert types[:3] == ["session_started", "thread_created", "thread_bound"]
     assert types[-1] == "session_ended"
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_image_state_and_tool_origin_survive_strict_audit(
+    tmp_path: Path,
+    skills_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """实际 Responses adapter 经 strict audit 保留图片、密文与 tool sample 谱系。"""
+    bodies = [
+        _responses_sse(
+            "resp-1",
+            [
+                {
+                    "id": "rs-1",
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "读取 skill"}],
+                    "encrypted_content": "ciphertext",
+                    "status": "completed",
+                },
+                {
+                    "id": "fc-1",
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "read_skill",
+                    "arguments": '{"skill_id":"style-checker"}',
+                    "status": "completed",
+                },
+            ],
+        ),
+        _responses_sse(
+            "resp-2",
+            [
+                {
+                    "id": "msg-2",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "检查完成"}],
+                    "status": "completed",
+                }
+            ],
+        ),
+    ]
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, content=bodies[len(requests) - 1])
+
+    transport = httpx.MockTransport(handler)
+    original = httpx.AsyncClient
+
+    def patched(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", patched)
+    core = JsonlSessionJournalCore(tmp_path / "journal-responses")
+    inner = OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6")
+    client = AttemptObservableClientAdapter(
+        inner, provider="openai", default_model="gpt-5.6"
+    )
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=tmp_path / "threads-responses",
+        model_client=client,
+        compressors=[],
+        audit=_audit_config(core),
+        image_input_policy=ImageInputPolicy(
+            enabled=True,
+            max_images=1,
+            max_item_bytes=65536,
+            max_total_bytes=65536,
+            allowed_media_types=frozenset({"image/png"}),
+        ),
+    )
+    engine = await pool.get_or_create(
+        session_id="ses-responses", entry_skill_id="code-reviewer"
+    )
+    result = await _run_op_until_root_done(
+        engine,
+        taifeng.UserMessage(text="检查图片", attachments=[_image_attachment()]),
+    )
+    assert result == "turn_completed"
+    await pool.close()
+
+    committed = [entry async for entry in core.load("ses-responses")]
+    items = [
+        deserialize_response_item(ConversationItemV1.model_validate(entry.payload))
+        for entry in committed
+        if entry.record_type == "conversation_item"
+    ]
+    reasoning = next(item for item in items if item.kind == "reasoning")
+    call = next(item for item in items if item.kind == "function_call")
+    output = next(item for item in items if item.kind == "function_call_output")
+    assert reasoning.payload["provider_state"]["payload"]["encrypted_content"] == "ciphertext"
+    assert call.metadata["llm_sample_id"] == reasoning.metadata["llm_sample_id"]
+    assert output.metadata["origin_llm_sample_id"] == call.metadata["llm_sample_id"]
+    assert requests[0]["input"][1]["content"][1]["type"] == "input_image"
+    assert [item["type"] for item in requests[1]["input"][-3:]] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]

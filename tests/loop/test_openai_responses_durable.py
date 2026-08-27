@@ -161,3 +161,53 @@ async def test_responses_terminal_groups_are_atomic_and_replayed_in_order(
     ).splitlines()
     frames = [json.loads(line).get("frame") for line in raw_lines]
     assert frames.count("item_batch_commit") == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events",
+    [
+        [normalized_output([{"type": "message", "output_index": 0, "text": "x"}])],
+        [
+            completed(response_id="resp", usage=TokenUsage(), end_turn=True),
+            normalized_output([{"type": "message", "output_index": 0, "text": "x"}]),
+        ],
+        [
+            normalized_output([{"type": "message", "output_index": 0, "text": "x"}]),
+            completed(response_id="resp", usage=TokenUsage(), end_turn=True),
+            completed(response_id="resp", usage=TokenUsage(), end_turn=True),
+        ],
+    ],
+    ids=["missing-completed", "normalized-after-completed", "duplicate-completed"],
+)
+async def test_invalid_responses_terminal_sequence_is_never_committed(
+    skills_dir: Path,
+    threads_dir: Path,
+    events: list[ResponseEvent],
+) -> None:
+    """Responses 只接受 normalized_output 后紧随唯一 completed 的终态。"""
+    client = _ResponsesClient([events])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="responses-invalid-terminal", entry_skill_id="code-reviewer"
+    )
+
+    submission_id = await engine.submit(taifeng.UserMessage(text="检查"))
+    terminal = None
+    async for event in engine.subscribe(submission_id):
+        if event.msg.kind in {"turn_completed", "turn_failed"}:
+            terminal = event.msg
+            break
+
+    stream = await pool.store.load_thread(engine.thread_id)
+    items = [item async for item in stream]
+    await pool.close()
+
+    assert terminal is not None
+    assert terminal.kind == "turn_failed"
+    assert [item.kind for item in items] == ["user_message"]

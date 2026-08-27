@@ -37,6 +37,8 @@ from taifeng.loop.submission import Submission, UserMessage
 
 if TYPE_CHECKING:
     from taifeng.conversation.journal.projector import JournalConversationProjector
+    from taifeng.llm.client import ModelCapabilities
+    from taifeng.llm.image_input import ImageInputPolicy
     from taifeng.loop.audit import JournalAppendReceipt, SessionAuditCoordinator
     from taifeng.loop.audit_lifecycle import AcceptedWork
 
@@ -195,7 +197,7 @@ class AcceptedUserMessage:
         applied = SubmissionAppliedV1.model_validate(envelopes[2].payload)
         item = deserialize_response_item(conversation)
         attachments = [
-            model_canonical_data(attachment)
+            _conversation_attachment_data(attachment)
             for attachment in accepted.attachments or ()
         ]
         valid = (
@@ -311,6 +313,13 @@ class _InvalidAcceptedUserMessageError(Exception):
     """内部 accepted token 不能证明完整 admission batch。"""
 
 
+def _conversation_attachment_data(attachment: AttachmentV1) -> dict[str, object]:
+    """把 Journal 嵌套 payload 投影为 conversation canonical attachment。"""
+    data = dict(model_canonical_data(attachment))
+    data.pop("payload_version", None)
+    return data
+
+
 def _validated_attachments(
     op: UserMessage,
     state: AuditedAdmissionState,
@@ -337,15 +346,36 @@ def prepare_user_message(
     submission: Submission,
     *,
     submitted_at: datetime | None = None,
+    image_input_policy: ImageInputPolicy | None = None,
+    model_input_capabilities: ModelCapabilities | None = None,
 ) -> _PreparedUserMessage:
     """在 Engine 第一个 await 前复制并 canonicalize legacy Submission。"""
     if not isinstance(submission.op, UserMessage):
         raise TypeError("audited UserMessage admission requires UserMessage")
+    attachments = _validated_attachments(submission.op, state)
+    candidate = ResponseItem(
+        kind="user_message",
+        thread_id=state.thread_id,
+        payload={
+            "text": submission.op.text,
+            "attachments": [
+                _conversation_attachment_data(attachment)
+                for attachment in attachments
+            ],
+        },
+    )
+    from taifeng.loop.prompt import history_to_api_messages
+
+    history_to_api_messages(
+        [candidate],
+        image_input_policy=image_input_policy,
+        model_capabilities=model_input_capabilities,
+    )
     return _PreparedUserMessage(
         submission_id=submission.id,
         submitted_at=submitted_at or datetime.now(UTC),
         text=submission.op.text,
-        attachments=_validated_attachments(submission.op, state),
+        attachments=attachments,
     )
 
 
@@ -504,7 +534,7 @@ def _submission_records(
         payload={
             "text": submission.text,
             "attachments": [
-                model_canonical_data(attachment)
+                _conversation_attachment_data(attachment)
                 for attachment in submission.attachments
             ],
         },

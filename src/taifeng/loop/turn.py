@@ -47,6 +47,7 @@ from taifeng.llm.image_input import (
     ImageInputPolicy,
     InputCostEstimator,
 )
+from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
 from taifeng.llm.providers.openai.responses import (
     NormalizedFunctionCallItem,
     NormalizedMessageItem,
@@ -1113,6 +1114,10 @@ class TurnRunner:
             model_input_capabilities=input_capabilities,
         )
 
+        max_bytes = self.budget.max_request_bytes
+        if max_bytes is not None:
+            request.metadata[MAX_REQUEST_BYTES_METADATA_KEY] = max_bytes
+
         # 审计可观测 层1:request 全文留痕。注入点选在「build 之后、发送 provider
         # 之前」——即便 provider 超时/失败,request 仍已留痕;mid-turn 压缩重建会走到
         # 新一轮 _run_sample 再次 build → 再 emit 一条,故「每次实发各一条」自然成立。
@@ -1136,7 +1141,6 @@ class TurnRunner:
 
         # G2b body-size 硬护栏：max_request_bytes 启用时，请求体超限在发送前
         # 直接抛 RequestTooLargeError（确定性字节数，无误判；比等 provider 4xx 快）。
-        max_bytes = self.budget.max_request_bytes
         if max_bytes is not None:
             request_bytes = estimate_history_bytes(self.history_buffer)
             if request_bytes > max_bytes:
@@ -1162,6 +1166,7 @@ class TurnRunner:
         # 累积 tool calls
         tool_calls: list[dict[str, Any]] = []
         normalized_items: list[dict[str, Any]] | None = None
+        responses_completed = False
         # retry 已由 provider 内 retry_async 兜底(≤3 次);走到这里的 LLMError 即重试耗尽。
         # 可恢复 / 等外部介入类 → 转 SYSTEM_RETRY 挂起(等业务侧 resume 重跑同次 sample);
         # 确定性失败照旧上抛硬失败。CancelledError 走 asyncio 路径,不在此 except 内。
@@ -1169,6 +1174,10 @@ class TurnRunner:
             async with sess as s:
                 async for ev in s.stream(request):
                     self.cancel.raise_if_cancelled()
+                    if is_responses and responses_completed:
+                        raise InvalidResponseError(
+                            "Responses emitted an event after completed"
+                        )
                     if ev.kind == "text_delta":
                         delta = ev.data.get("text", "")
                         assistant_text += delta
@@ -1189,7 +1198,11 @@ class TurnRunner:
                                 }
                             )
                     elif ev.kind == "normalized_output":
-                        if not is_responses or normalized_items is not None:
+                        if (
+                            not is_responses
+                            or normalized_items is not None
+                            or responses_completed
+                        ):
                             raise InvalidResponseError(
                                 "unexpected or duplicate normalized output"
                             )
@@ -1200,6 +1213,12 @@ class TurnRunner:
                             )
                         normalized_items = raw_items
                     elif ev.kind == "completed":
+                        if is_responses:
+                            if normalized_items is None:
+                                raise InvalidResponseError(
+                                    "Responses completed before normalized output"
+                                )
+                            responses_completed = True
                         usage_dict = ev.data.get("usage") or {}
                         self._accumulate_usage(usage_dict)
                         # G3：回流的服务端 request-id（供失败 / telemetry 关联）
@@ -1279,9 +1298,9 @@ class TurnRunner:
             raise  # 确定性失败:照旧上抛硬失败(走 run_turn 宽 except → TurnFailed)
 
         if is_responses:
-            if normalized_items is None:
+            if normalized_items is None or not responses_completed:
                 raise InvalidResponseError(
-                    "Responses completed without one normalized output"
+                    "Responses requires one normalized output and one completed event"
                 )
             sample_id = _responses_sample_id(
                 thread_id=self.thread_id,

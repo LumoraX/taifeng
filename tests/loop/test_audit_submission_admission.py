@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -24,6 +26,8 @@ from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.projector import JournalConversationProjector
 from taifeng.conversation.transcript import JsonlMessageStore
 from taifeng.llm.audit import AttemptObservableClientAdapter
+from taifeng.llm.client import ModelCapabilities
+from taifeng.llm.image_input import ImageAttachmentV1, ImageInputPolicy
 from taifeng.llm.providers.sim import RoutingSimClient, SimClient, SimTurn
 from taifeng.loop.audit import (
     AuditHealth,
@@ -33,8 +37,10 @@ from taifeng.loop.audit import (
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
+    InvalidAuditedSubmissionError,
     ReplayedUserMessage,
     admit_user_message,
+    prepare_user_message,
 )
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
@@ -317,6 +323,7 @@ async def _engine_with_audit(
     store_override: JsonlMessageStore | None = None,
     finish_timeout: float = 30.0,
     submission_queue_size: int = 256,
+    image_input_policy: ImageInputPolicy | None = None,
 ) -> tuple[AgentEngine, SessionAuditCoordinator, JsonlSessionJournalCore]:
     """使用真实 Engine、Coordinator、Journal 和 projector 建立审计会话。"""
     registry, core, coordinator, thread_id, session_id = await _create_audit_runtime(
@@ -343,6 +350,7 @@ async def _engine_with_audit(
         thread_id=thread_id,
         session_id=session_id,
         submission_queue_size=submission_queue_size,
+        image_input_policy=image_input_policy,
     )
     engine._audit_state = SimpleNamespace(  # type: ignore[attr-defined]  # noqa: SLF001
         thread_id=thread_id,
@@ -352,6 +360,116 @@ async def _engine_with_audit(
         max_total_attachment_bytes=4096,
     )
     return engine, coordinator, core
+
+
+@pytest.mark.anyio
+async def test_audited_disabled_image_is_rejected_before_conversation_commit(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """strict audit 默认关闭图片时只写脱敏拒绝，不写图片 conversation item。"""
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    attachment = ImageAttachmentV1(
+        media_type="image/png",
+        size=len(image_bytes),
+        sha256=hashlib.sha256(image_bytes).hexdigest(),
+        content=base64.b64encode(image_bytes).decode("ascii"),
+    ).model_dump()
+    client = SimClient(
+        turns=[],
+        capabilities=ModelCapabilities(
+            input_modalities=frozenset({"text", "image"}),
+            provider="sim",
+            protocol="sim",
+        ),
+    )
+    engine, _, core = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=client,
+    )
+
+    with pytest.raises(InvalidAuditedSubmissionError):
+        await engine.submit(UserMessage(text="inspect", attachments=[attachment]))
+
+    committed = [envelope async for envelope in core.load("ses_audit_submission")]
+    assert [envelope.record_type for envelope in committed[-1:]] == [
+        "submission_rejected"
+    ]
+    assert not any(
+        envelope.record_type == "conversation_item" for envelope in committed
+    )
+    assert attachment["content"] not in repr(committed)
+    assert engine._submissions.empty()  # noqa: SLF001
+    assert engine._history == []  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_audited_enabled_image_preserves_detail_in_journal(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """strict audit 启用图片后，合法图片及 detail 必须进入原子 acceptance。"""
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    attachment = ImageAttachmentV1(
+        media_type="image/png",
+        size=len(image_bytes),
+        sha256=hashlib.sha256(image_bytes).hexdigest(),
+        content=base64.b64encode(image_bytes).decode("ascii"),
+        detail="high",
+    ).model_dump()
+    client = SimClient(
+        turns=[],
+        capabilities=ModelCapabilities(
+            input_modalities=frozenset({"text", "image"}),
+            provider="sim",
+            protocol="sim",
+        ),
+    )
+    engine, _, core = await _engine_with_audit(
+        tmp_path,
+        skills_dir,
+        model_client=client,
+        image_input_policy=ImageInputPolicy(
+            enabled=True,
+            max_images=1,
+            max_item_bytes=1024,
+            max_total_bytes=1024,
+            allowed_media_types=frozenset({"image/png"}),
+        ),
+    )
+
+    prepared = prepare_user_message(
+        engine._audit_state,  # type: ignore[attr-defined]  # noqa: SLF001
+        Submission(op=UserMessage(text="inspect", attachments=[attachment])),
+        image_input_policy=engine._image_input_policy,  # noqa: SLF001
+        model_input_capabilities=engine._model_client.capabilities,  # noqa: SLF001
+    )
+    assert prepared.attachments[0].detail == "high"
+
+    submission_id = await engine.submit(
+        UserMessage(text="inspect", attachments=[attachment])
+    )
+
+    committed = [envelope async for envelope in core.load("ses_audit_submission")]
+    accepted_envelope = next(
+        envelope
+        for envelope in committed
+        if envelope.record_type == "submission_accepted"
+        and envelope.submission_id == submission_id
+    )
+    accepted = SubmissionAcceptedV1.model_validate(accepted_envelope.payload)
+    assert accepted.attachments is not None
+    assert accepted.attachments[0].detail == "high"
+    conversation = next(
+        envelope
+        for envelope in committed
+        if envelope.record_type == "conversation_item"
+        and envelope.submission_id == submission_id
+    )
+    assert conversation.payload["payload"]["attachments"][0]["detail"] == "high"
 
 
 async def _wait_for_applied_history(engine: AgentEngine) -> None:
