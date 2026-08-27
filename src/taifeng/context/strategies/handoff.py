@@ -16,19 +16,23 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from taifeng.context.boundaries import resolve_compaction_range
 from taifeng.context.budget import estimate_history_tokens
+from taifeng.context.compaction_view import CompactionView
 from taifeng.context.compressor import (
     CompressionContext,
     CompressionResult,
     CompressionTrigger,
 )
 from taifeng.context.injection import InitialContextInjection
-from taifeng.context.truncate import truncate_middle
 from taifeng.conversation.models import ResponseItem, compacted
-from taifeng.llm.client import ModelClient
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from taifeng.llm.client import ModelClient
 
 logger = logging.getLogger(__name__)
 
@@ -114,35 +118,8 @@ def _walk_back_to_safe_boundary(history: list[ResponseItem], cut: int) -> int:
 
 
 def _format_messages_for_summary(items: list[ResponseItem]) -> str:
-    lines: list[str] = []
-    for i, it in enumerate(items):
-        role_label = {
-            "user_message": "用户",
-            "assistant_message": "助手",
-            "function_call": "工具调用",
-            "function_call_output": "工具结果",
-            "reasoning": "推理",
-            "system_injection": "系统注入",
-            "compacted": "（已压缩摘要）",
-        }.get(it.kind, it.kind)
-        header = f"--- [{i + 1}] {role_label} ---"
-        lines.append(header)
-        if it.kind == "user_message" or it.kind == "assistant_message":
-            lines.append(str(it.payload.get("text", "")))
-        elif it.kind == "function_call":
-            lines.append(
-                f"调用 {it.payload.get('name')}(call_id={it.payload.get('call_id')}): "
-                f"{it.payload.get('arguments', '')}"
-            )
-        elif it.kind == "function_call_output":
-            output = str(it.payload.get("output", ""))
-            # G6b：中段截断，保尾部（错误/结论常在尾），优于朴素 [:1000]
-            output = truncate_middle(output, 1500)
-            lines.append(f"call_id={it.payload.get('call_id')}: {output}")
-        else:
-            lines.append(str(it.payload))
-        lines.append("")
-    return "\n".join(lines)
+    """通过唯一脱敏视图格式化摘要输入。"""
+    return CompactionView.from_items(items).format_for_summary()
 
 
 # === 摘要质量审计（G1a；参照 openclaw compaction-safeguard-quality.ts）===
@@ -289,8 +266,13 @@ class HandoffCompactionStrategy:
                 start += 1
 
         end = len(history) - ctx.budget.preserve_tail_messages
-        # 配对边界保护：切点不切断 function_call / function_call_output
-        end = _walk_back_to_safe_boundary(history, end)
+        start, end = resolve_compaction_range(
+            history,
+            start,
+            end,
+            protected_before=start,
+            protected_from=end,
+        )
         if end - start < 2:
             return self._fail(ctx, "boundary_too_narrow")
         return start, end

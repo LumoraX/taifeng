@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 
+from taifeng.context.boundaries import resolve_compaction_range
 from taifeng.context.budget import estimate_history_tokens
 from taifeng.context.compressor import (
     CompressionContext,
@@ -65,6 +66,13 @@ class SlidingWindowStrategy:
 
         tail_start = max(head_end + 1, len(history) - self._keep_tail)
         tail_start = _walk_back_to_safe_boundary(history, tail_start)
+        head_end, tail_start = resolve_compaction_range(
+            history,
+            head_end,
+            tail_start,
+            protected_before=head_end,
+            protected_from=tail_start,
+        )
 
         if tail_start - head_end < 2:
             return CompressionResult(
