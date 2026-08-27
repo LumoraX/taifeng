@@ -233,6 +233,8 @@ class AgentEngine:
         pinned_total_max_chars: int = 8000,
         recall_threshold: int = 50,
         has_recall_backend: bool = False,
+        image_input_policy: Any = None,
+        input_cost_estimator: Any = None,
     ) -> None:
         """
         Args:
@@ -250,6 +252,10 @@ class AgentEngine:
         self._snapshot = skill_snapshot
         self._tool_runtime = tool_runtime
         self._model_client = model_client
+        from taifeng.llm.image_input import DISABLED_IMAGE_POLICY
+
+        self._image_input_policy = image_input_policy or DISABLED_IMAGE_POLICY
+        self._input_cost_estimator = input_cost_estimator
         self._store = store
         self._thread_id = thread_id
         # session_id 主要用于 InstructionContext.session_id 缓存键；若未传，
@@ -634,6 +640,21 @@ class AgentEngine:
             async with self._audited_admission_lock:
                 await reject_unsupported_audited_op(self._audit_state, sub)
             raise UnsupportedAuditedOperationError(sub.id, str(sub.op.kind))
+        if isinstance(sub.op, UserMessage):
+            # legacy path 在 enqueue 与 durable append 前完成图片准入。
+            from taifeng.llm.client import model_capabilities
+            from taifeng.loop.prompt import history_to_api_messages
+
+            candidate = user_message(
+                sub.op.text,
+                thread_id=self._thread_id,
+                attachments=sub.op.attachments,
+            )
+            history_to_api_messages(
+                [candidate],
+                image_input_policy=self._image_input_policy,
+                model_capabilities=model_capabilities(self._model_client),
+            )
         await self._submissions.put(sub)
         return sub.id
 
@@ -1585,6 +1606,15 @@ class AgentEngine:
                 thread_id=self._thread_id,
                 attachments=attachments,
             )
+            # resume/内部路径仍在 durable append 前执行 defense-in-depth 校验。
+            from taifeng.llm.client import model_capabilities
+            from taifeng.loop.prompt import history_to_api_messages
+
+            history_to_api_messages(
+                [item],
+                image_input_policy=self._image_input_policy,
+                model_capabilities=model_capabilities(self._model_client),
+            )
             async with self._lock:
                 self._history.append(item)
             await self._store.append(item)
@@ -1815,6 +1845,8 @@ class AgentEngine:
             submission_id=submission_id,
             emit=self._emit,
             cancel=turn_cancel,
+            image_input_policy=self._image_input_policy,
+            input_cost_estimator=self._input_cost_estimator,
             audit_state=self._audit_state,
             hooks=self._hooks,
             script_executors=self._script_executors,

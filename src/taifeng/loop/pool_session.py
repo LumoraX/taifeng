@@ -108,6 +108,8 @@ async def create_started_pool_engine(
             skill_snapshot=snapshot,
             tool_runtime=pool._tool_runtime,  # noqa: SLF001
             model_client=pool._model_client,  # noqa: SLF001
+            image_input_policy=pool._image_input_policy,  # noqa: SLF001
+            input_cost_estimator=pool._input_cost_estimator,  # noqa: SLF001
             store=pool._store,  # noqa: SLF001
             thread_id=prepared.thread_id,
             session_id=session_id,

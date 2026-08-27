@@ -370,6 +370,8 @@ def build_api_request(
     reasoning_passback: bool = True,
     recall_threshold: int = DEFAULT_RECALL_THRESHOLD,
     has_recall_backend: bool = False,
+    image_input_policy: ImageInputPolicy | None = None,
+    model_input_capabilities: ModelCapabilities | None = None,
 ) -> ApiRequest:
     system_prompt = render_system_prompt(
         entry,
@@ -379,7 +381,12 @@ def build_api_request(
         recall_threshold=recall_threshold,
         has_recall_backend=has_recall_backend,
     )
-    messages, source_indexes = _convert_history(history, include_reasoning=reasoning_passback)
+    messages, source_indexes = _convert_history(
+        history,
+        include_reasoning=reasoning_passback,
+        image_input_policy=image_input_policy or DISABLED_IMAGE_POLICY,
+        model_capabilities=model_input_capabilities or TEXT_ONLY_CAPABILITIES,
+    )
 
     # cache anchor 坐标换算(cache-anchor-message-index):anchor 是 history
     # 下标(压缩 anchor_preserved_until,[0, N) 为稳定前缀),CacheBreakpoint.index

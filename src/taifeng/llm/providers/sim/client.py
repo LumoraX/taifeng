@@ -25,7 +25,11 @@ import asyncio
 import json
 from typing import TYPE_CHECKING
 
-from taifeng.llm.client import OneNetworkAttemptModelClient
+from taifeng.llm.client import (
+    TEXT_ONLY_CAPABILITIES,
+    ModelCapabilities,
+    OneNetworkAttemptModelClient,
+)
 from taifeng.llm.errors import ContentFilterError, RateLimitError, ServerError
 from taifeng.llm.events import (
     completed,
@@ -245,6 +249,7 @@ class _SimClientBase(OneNetworkAttemptModelClient):
         context_window: int | None = None,
         chunked_tool_calls: bool = True,
         coordinator: SimCoordinator | None = None,
+        capabilities: ModelCapabilities | None = None,
     ) -> None:
         self._model = model
         self.ledger = RequestLedger()
@@ -252,6 +257,7 @@ class _SimClientBase(OneNetworkAttemptModelClient):
         self.validator = RequestContractValidator()
         self.coordinator = coordinator if coordinator is not None else SimCoordinator()
         self.chunked_tool_calls = chunked_tool_calls
+        self.capabilities = capabilities or TEXT_ONLY_CAPABILITIES
 
     def session(self, *, cancel: CancellationToken, model: str | None = None) -> _SimSession:
         """创建 turn 级 session（脚本选取延迟到 stream 拿到请求时）。"""

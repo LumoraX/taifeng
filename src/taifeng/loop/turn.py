@@ -33,10 +33,16 @@ from taifeng.conversation.models import (
     function_call_output,
     reasoning,
 )
+from taifeng.llm.client import model_capabilities
 from taifeng.llm.errors import (
     LLMError,
     RequestTooLargeError,
     classify_failure,
+)
+from taifeng.llm.image_input import (
+    DISABLED_IMAGE_POLICY,
+    ImageInputPolicy,
+    InputCostEstimator,
 )
 from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
@@ -231,6 +237,8 @@ class TurnRunner:
     submission_id: str
     emit: Any  # Callable[[EventMsg], Awaitable[None]] —— 业务侧注入
     cancel: CancellationToken
+    image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY
+    input_cost_estimator: InputCostEstimator | None = None
     audit_state: AuditedSessionState | None = None
     """strict audit state；None 时保持 legacy ModelClient session 路径。"""
     hooks: Any = None  # HookRunner | None —— 可选钩子
@@ -1023,6 +1031,8 @@ class TurnRunner:
             recall_threshold=self.recall_threshold,
             # 是否有召回后端：无后端恒 inline（与工具裁剪同口径）
             has_recall_backend=self.has_recall_backend,
+            image_input_policy=self.image_input_policy,
+            model_input_capabilities=model_capabilities(self.model_client),
         )
 
         # 审计可观测 层1:request 全文留痕。注入点选在「build 之后、发送 provider
@@ -1954,6 +1964,8 @@ class TurnRunner:
             submission_id=self.submission_id,
             emit=self.emit,
             cancel=ctx.cancel,
+            image_input_policy=self.image_input_policy,
+            input_cost_estimator=self.input_cost_estimator,
             hooks=self.hooks,
             # G3: 透传或包装后的 permission_policy（auto_deny/auto_allow 时已包装）
             permission_policy=sub_permission_policy,

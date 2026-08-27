@@ -19,6 +19,11 @@ from taifeng.conversation.protocols import IndexHook, NoopIndexHook, ThreadDirec
 from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
 from taifeng.conversation.store import MessageStore
 from taifeng.conversation.transcript import JsonlMessageStore
+from taifeng.llm.image_input import (
+    DISABLED_IMAGE_POLICY,
+    ImageInputPolicy,
+    InputCostEstimator,
+)
 from taifeng.loop.audit_bootstrap import (
     AuditStoreBinding,
     ensure_legacy_resume_allowed,
@@ -304,9 +309,13 @@ class EnginePool:
         enable_auto_discovery: bool = False,
         skill_verifier: SkillVerifier | None = None,
         audit: AuditConfig | None = None,
+        image_input_policy: ImageInputPolicy | None = None,
+        input_cost_estimator: InputCostEstimator | None = None,
     ) -> None:
         self._registry = skill_registry
         self._model_client = model_client
+        self._image_input_policy = image_input_policy or DISABLED_IMAGE_POLICY
+        self._input_cost_estimator = input_cost_estimator
         self._store = store
         self._tool_registry = tool_registry
         self._tool_runtime = ToolCallRuntime(tool_registry)
@@ -520,6 +529,8 @@ class EnginePool:
         enable_auto_discovery: bool = False,
         skill_verifier: SkillVerifier | None = None,
         audit: AuditConfig | None = None,
+        image_input_policy: ImageInputPolicy | None = None,
+        input_cost_estimator: InputCostEstimator | None = None,
     ) -> EnginePool:
         """便捷构造。
 
@@ -634,6 +645,8 @@ class EnginePool:
                 enable_auto_discovery=enable_auto_discovery,
                 skill_verifier=resolved_verifier,
                 audit=audit,
+                image_input_policy=image_input_policy,
+                input_cost_estimator=input_cost_estimator,
             )
             pool._owned_directory = owned_directory
             await start_skill_watcher(
