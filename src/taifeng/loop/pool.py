@@ -17,8 +17,14 @@ from taifeng.conversation.hook_runner import HookRunner
 from taifeng.conversation.models import ResponseItem, ThreadInfo, ThreadMetadata
 from taifeng.conversation.protocols import IndexHook, NoopIndexHook, ThreadDirectory
 from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
-from taifeng.conversation.store import MessageStore
+from taifeng.conversation.store import (
+    AtomicBatchMessageStore,
+    BatchAppendAck,
+    MessageStore,
+)
 from taifeng.conversation.transcript import JsonlMessageStore
+from taifeng.llm.client import model_capabilities
+from taifeng.llm.errors import UnsupportedPersistenceCapabilityError
 from taifeng.llm.image_input import (
     DISABLED_IMAGE_POLICY,
     ImageInputPolicy,
@@ -57,7 +63,7 @@ from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
 
     from taifeng.llm.client import ModelClient
     from taifeng.loop.audit_bootstrap import AuditedSessionState
@@ -136,6 +142,27 @@ class _HookEmittingStore(MessageStore):
             by_thread.setdefault(it.thread_id, []).append(it)
         for tid, group in by_thread.items():
             self._runner.spawn_on_message_appended(tid, group)
+
+    async def append_atomic_batch(
+        self,
+        items: Sequence[ResponseItem],
+        *,
+        batch_id: str,
+    ) -> BatchAppendAck:
+        """把 Responses 原子提交委派给 inner，并在新提交后触发 hook。"""
+        if not isinstance(self._inner, AtomicBatchMessageStore):
+            raise UnsupportedPersistenceCapabilityError(
+                "wrapped store does not support atomic response batches"
+            )
+        ack = await self._inner.append_atomic_batch(items, batch_id=batch_id)
+        if ack.already_committed:
+            return ack
+        by_thread: dict[str, list[ResponseItem]] = {}
+        for item in items:
+            by_thread.setdefault(item.thread_id, []).append(item)
+        for thread_id, group in by_thread.items():
+            self._runner.spawn_on_message_appended(thread_id, group)
+        return ack
 
     async def load_thread(self, thread_id: str) -> AsyncIterator[ResponseItem]:
         return await self._inner.load_thread(thread_id)
@@ -435,6 +462,14 @@ class EnginePool:
         # 透传到每个 AgentEngine → TurnRunner（驱动 prompt 文本 + 工具裁剪）。
         self._recall_threshold = recall_threshold
         self._audit = audit
+        if (
+            audit is None
+            and model_capabilities(model_client).protocol == "responses"
+            and not isinstance(store, AtomicBatchMessageStore)
+        ):
+            raise UnsupportedPersistenceCapabilityError(
+                "Responses requires AtomicBatchMessageStore when strict audit is disabled"
+            )
         self._audit_store_binding = _resolve_store_binding(audit, store)
         validate_pool_audit(
             audit,

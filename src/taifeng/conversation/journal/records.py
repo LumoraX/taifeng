@@ -447,11 +447,48 @@ class _FunctionCallOutputItemPayload(JournalModel):
     is_error: bool
 
 
+class _ProviderStateEnvelopeV1(JournalModel):
+    """strict audit 可持久化的 provider 专属不透明状态 envelope。"""
+
+    provider: NonEmptyStr
+    protocol: NonEmptyStr
+    item_type: NonEmptyStr
+    payload: CanonicalMapping
+
+    @model_validator(mode="after")
+    def _validate_openai_reasoning_projection(self) -> Self:
+        """OpenAI reasoning 只允许设计批准的白名单字段。"""
+        if (self.provider, self.protocol, self.item_type) != (
+            "openai",
+            "responses",
+            "reasoning",
+        ):
+            return self
+        allowed = {"id", "type", "encrypted_content", "summary", "status"}
+        if unknown := set(self.payload) - allowed:
+            raise ValueError(f"unsupported OpenAI reasoning state fields: {sorted(unknown)}")
+        if not isinstance(self.payload.get("id"), str) or not self.payload["id"]:
+            raise ValueError("OpenAI reasoning state requires id")
+        if self.payload.get("type") != "reasoning":
+            raise ValueError("OpenAI reasoning state type must be reasoning")
+        encrypted = self.payload.get("encrypted_content")
+        if not isinstance(encrypted, str) or not encrypted:
+            raise ValueError("OpenAI reasoning state requires encrypted_content")
+        summary = self.payload.get("summary")
+        if summary is not None and not isinstance(summary, list):
+            raise ValueError("OpenAI reasoning state summary must be a list")
+        status = self.payload.get("status")
+        if status is not None and not isinstance(status, str):
+            raise ValueError("OpenAI reasoning state status must be a string")
+        return self
+
+
 class _ReasoningItemPayload(JournalModel):
     """reasoning 的稳定 payload 形状。"""
 
     text: str
     summary: str
+    provider_state: _ProviderStateEnvelopeV1 | None = None
 
 
 class _SkillOutcomeItemPayload(JournalModel):
@@ -673,13 +710,30 @@ def _validated_item_payload(
     return _canonical_mapping(model.model_dump(mode="python", exclude_unset=True))
 
 
+def _validated_item_metadata(metadata: object) -> dict[str, JsonValue]:
+    """保留自由 metadata，同时严格校验 Responses 的三个保留键。"""
+    canonical = _canonical_mapping(metadata)
+    for key in ("llm_sample_id", "origin_llm_sample_id"):
+        value = canonical.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ValueError(f"{key} must be a non-empty string")
+    output_index = canonical.get("provider_output_index")
+    if output_index is not None and (
+        isinstance(output_index, bool)
+        or not isinstance(output_index, int)
+        or output_index < 0
+    ):
+        raise ValueError("provider_output_index must be a non-negative integer")
+    return canonical
+
+
 def serialize_response_item(
     item: ResponseItem, *, source_record_id: str
 ) -> ConversationItemV1:
     """显式读取六个稳定 ResponseItem 字段，不使用通用 model_dump。"""
     kind = _supported_item_kind(str(item.kind))
     payload = _validated_item_payload(kind, item.payload)
-    metadata = _canonical_mapping(item.metadata)
+    metadata = _validated_item_metadata(item.metadata)
     return ConversationItemV1(
         item_kind=kind,
         thread_id=item.thread_id,
@@ -701,7 +755,7 @@ def deserialize_response_item(payload: ConversationItemV1) -> ResponseItem:
         thread_id=payload.thread_id,
         payload=item_payload,
         created_at=payload.created_at,
-        metadata=_canonical_mapping(payload.metadata),
+        metadata=_validated_item_metadata(payload.metadata),
     )
 
 

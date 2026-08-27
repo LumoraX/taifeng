@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from taifeng.conversation.models import ResponseItem, ThreadInfo
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
+
+    from taifeng.conversation.models import ResponseItem, ThreadInfo
 
 
 @runtime_checkable
@@ -61,4 +64,32 @@ class MessageStore(Protocol):
 
     async def close(self) -> None:
         """关闭底层资源（文件句柄 / 数据库连接）。"""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class BatchAppendAck:
+    """原子 batch 完成 durable ack 后返回的稳定结果。"""
+
+    batch_id: str
+    digest: str
+    item_ids: tuple[str, ...]
+    already_committed: bool = False
+
+
+class BatchConflictError(ValueError):
+    """同一 stable batch id 已对应其他内容。"""
+
+
+@runtime_checkable
+class AtomicBatchMessageStore(Protocol):
+    """Responses terminal 输出所需的 crash-atomic 可见性能力。"""
+
+    async def append_atomic_batch(
+        self,
+        items: Sequence[ResponseItem],
+        *,
+        batch_id: str,
+    ) -> BatchAppendAck:
+        """完整 batch durable 后返回；相同 batch/content 重试必须幂等。"""
         ...

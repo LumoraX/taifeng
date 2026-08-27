@@ -24,9 +24,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,11 +54,15 @@ from taifeng.conversation.models import (
 )
 from taifeng.conversation.protocols import NoopIndexHook
 from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
-from taifeng.conversation.store import MessageStore
+from taifeng.conversation.store import (
+    BatchAppendAck,
+    BatchConflictError,
+    MessageStore,
+)
 from taifeng.loop.event import EventMsg, TranscriptSkippedCorruptLine
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     # TelemetrySink 走 telemetry/__init__.py 会引入循环 (telemetry → loop → context → conversation)
     # 这里只用作类型注解，运行时不需要解析
@@ -75,6 +82,140 @@ def _exclusive_write(path: Path, line: str) -> None:
     """在线程 worker 中 exclusive-create 一个 metadata 文件。"""
     with path.open("x", encoding="utf-8") as stream:
         stream.write(line)
+
+
+def _append_durable(path: Path, content: str) -> None:
+    """单个 worker 内追加完整 frame，并在返回前 flush/fsync。"""
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _append_buffered(path: Path, content: str) -> None:
+    """保持 legacy append 的无 fsync 行为与延迟边界。"""
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(content)
+
+
+def _legacy_item_line(item: ResponseItem) -> str:
+    """保持既有 bare JSONL 字段顺序与编码形状。"""
+    return json.dumps(
+        item.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _canonical_item_line(item: ResponseItem) -> str:
+    """生成用于 wire 与 digest 的唯一 canonical JSON 行。"""
+    return json.dumps(
+        item.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _frame_line(
+    frame: str,
+    *,
+    frame_id: str,
+    batch_id: str,
+    item_ids: tuple[str, ...],
+    digest: str,
+) -> str:
+    """序列化原子 batch transport frame；它不是 conversation item。"""
+    return json.dumps(
+        {
+            "frame": frame,
+            "frame_id": frame_id,
+            "batch_id": batch_id,
+            "item_ids": list(item_ids),
+            "digest": digest,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchDescriptor:
+    """已规范化的待写 batch。"""
+
+    items: tuple[ResponseItem, ...]
+    item_lines: tuple[str, ...]
+    item_ids: tuple[str, ...]
+    digest: str
+
+
+def _describe_batch(items: list[ResponseItem], batch_id: str) -> _BatchDescriptor:
+    """注入 commit metadata 并计算可重放 digest。"""
+    prepared = tuple(
+        item.model_copy(
+            update={"metadata": {**item.metadata, "commit_batch_id": batch_id}}
+        )
+        for item in items
+    )
+    lines = tuple(_canonical_item_line(item) for item in prepared)
+    digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    return _BatchDescriptor(
+        items=prepared,
+        item_lines=lines,
+        item_ids=tuple(item.id for item in prepared),
+        digest=digest,
+    )
+
+
+@dataclass(slots=True)
+class _ActiveBatch:
+    """reader 正在等待 commit 的物理 frame。"""
+
+    frame_id: str
+    batch_id: str
+    item_ids: tuple[str, ...]
+    digest: str
+    items: list[ResponseItem]
+    item_lines: list[str]
+
+
+def _active_batch_from_frame(data: dict[str, Any]) -> _ActiveBatch | None:
+    """仅接受字段类型完整的 begin frame。"""
+    frame_id = data.get("frame_id")
+    batch_id = data.get("batch_id")
+    digest = data.get("digest")
+    raw_ids = data.get("item_ids")
+    if not all(isinstance(value, str) and value for value in (frame_id, batch_id, digest)):
+        return None
+    if not isinstance(raw_ids, list) or not raw_ids or not all(
+        isinstance(item_id, str) and item_id for item_id in raw_ids
+    ):
+        return None
+    return _ActiveBatch(
+        frame_id=frame_id,
+        batch_id=batch_id,
+        item_ids=tuple(raw_ids),
+        digest=digest,
+        items=[],
+        item_lines=[],
+    )
+
+
+def _frame_commits(active: _ActiveBatch, data: dict[str, Any]) -> bool:
+    """核对 commit frame、实际 item ids 与 canonical digest。"""
+    actual_ids = tuple(item.id for item in active.items)
+    actual_digest = hashlib.sha256(
+        "\n".join(active.item_lines).encode("utf-8")
+    ).hexdigest()
+    return (
+        data.get("frame_id") == active.frame_id
+        and data.get("batch_id") == active.batch_id
+        and tuple(data.get("item_ids") or ()) == active.item_ids
+        and data.get("digest") == active.digest
+        and actual_ids == active.item_ids
+        and actual_digest == active.digest
+    )
 
 
 def _is_audited_metadata(extra: dict[str, Any]) -> bool:
@@ -144,6 +285,7 @@ class JsonlMessageWriter:
         self._root = Path(threads_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._sink = sink
+        self._append_locks: dict[str, anyio.Lock] = {}
 
     @property
     def threads_dir(self) -> Path:
@@ -205,15 +347,60 @@ class JsonlMessageWriter:
         if not items:
             return
         path = self._thread_path(thread_id)
-        with path.open("a", encoding="utf-8") as f:
-            for item in items:
-                line = json.dumps(
-                    item.model_dump(mode="json"),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        lock = self._append_locks.setdefault(thread_id, anyio.Lock())
+        content = "".join(f"{_legacy_item_line(item)}\n" for item in items)
+        async with lock:
+            await anyio.to_thread.run_sync(_append_buffered, path, content)
+
+    async def append_atomic_batch(
+        self,
+        thread_id: str,
+        items: list[ResponseItem],
+        *,
+        batch_id: str,
+    ) -> BatchAppendAck:
+        """以 begin/items/commit frame 追加一个 crash-atomic 可见 batch。"""
+        if not batch_id:
+            raise ValueError("batch_id must be non-empty")
+        if not items:
+            raise ValueError("atomic batch must contain at least one item")
+        descriptor = _describe_batch(items, batch_id)
+        path = self._thread_path(thread_id)
+        lock = self._append_locks.setdefault(thread_id, anyio.Lock())
+        async with lock:
+            _, committed = await self._load_state(thread_id)
+            existing = committed.get(batch_id)
+            if existing is not None:
+                if existing != (descriptor.digest, descriptor.item_ids):
+                    raise BatchConflictError(f"batch id conflict: {batch_id}")
+                return BatchAppendAck(
+                    batch_id=batch_id,
+                    digest=descriptor.digest,
+                    item_ids=descriptor.item_ids,
+                    already_committed=True,
                 )
-                # 单次 write 保证 < PIPE_BUF 行原子（line 应 < 4KB）
-                f.write(line + "\n")
+            frame_id = f"frame_{secrets.token_hex(12)}"
+            begin = _frame_line(
+                "item_batch_begin",
+                frame_id=frame_id,
+                batch_id=batch_id,
+                item_ids=descriptor.item_ids,
+                digest=descriptor.digest,
+            )
+            commit = _frame_line(
+                "item_batch_commit",
+                frame_id=frame_id,
+                batch_id=batch_id,
+                item_ids=descriptor.item_ids,
+                digest=descriptor.digest,
+            )
+            content = "\n".join((begin, *descriptor.item_lines, commit)) + "\n"
+            await anyio.to_thread.run_sync(_append_durable, path, content)
+        return BatchAppendAck(
+            batch_id=batch_id,
+            digest=descriptor.digest,
+            item_ids=descriptor.item_ids,
+        )
 
     async def load_history(self, thread_id: str) -> list[ResponseItem]:
         """按写入顺序回放 thread 全部 item。
@@ -223,29 +410,63 @@ class JsonlMessageWriter:
         - 损坏行 SHALL 发 EventMsg ``transcript_skipped_corrupt_line``（若 ``sink`` 已注入）
         - 任何情况下 SHALL NOT 抛异常
         """
+        items, _ = await self._load_state(thread_id)
+        return items
+
+    async def _load_state(
+        self, thread_id: str
+    ) -> tuple[list[ResponseItem], dict[str, tuple[str, tuple[str, ...]]]]:
+        """重放 bare items，并只发布校验完整的 framed batch。"""
         path = self._thread_path(thread_id)
         if not path.exists():
-            return []
+            return [], {}
         result: list[ResponseItem] = []
-        with path.open("r", encoding="utf-8") as f:
-            for line_no, raw in enumerate(f, start=1):
+        committed: dict[str, tuple[str, tuple[str, ...]]] = {}
+        active: _ActiveBatch | None = None
+        with path.open("r", encoding="utf-8") as stream:
+            for line_no, raw in enumerate(stream, start=1):
                 line = raw.strip()
                 if not line:
                     continue
-                # 损坏行处理：捕获 JSON 解码失败 + pydantic 校验失败
                 try:
                     data = json.loads(line)
-                except json.JSONDecodeError as e:
-                    await self._emit_corrupt(thread_id, line_no, e)
+                except json.JSONDecodeError as exc:
+                    await self._emit_corrupt(thread_id, line_no, exc)
+                    active = None
                     continue
-                # 跳过 metadata 首行（首行规约：data 是 dict 且含 __meta__）
                 if isinstance(data, dict) and data.get("__meta__"):
                     continue
+                frame = data.get("frame") if isinstance(data, dict) else None
+                if frame == "item_batch_begin":
+                    active = _active_batch_from_frame(data)
+                    continue
+                if frame == "item_batch_commit":
+                    if active is not None and _frame_commits(active, data):
+                        identity = (active.digest, active.item_ids)
+                        prior = committed.get(active.batch_id)
+                        if prior is None:
+                            result.extend(active.items)
+                            committed[active.batch_id] = identity
+                    active = None
+                    continue
                 try:
-                    result.append(ResponseItem.model_validate(data))
-                except ValidationError as e:
-                    await self._emit_corrupt(thread_id, line_no, e)
-        return result
+                    item = ResponseItem.model_validate(data)
+                except ValidationError as exc:
+                    await self._emit_corrupt(thread_id, line_no, exc)
+                    active = None
+                    continue
+                if active is None and "commit_batch_id" in item.metadata:
+                    # framed item 永不降级成 legacy bare item；即使 begin/前序行损坏，
+                    # 也必须等完整的新 frame 重试后才可见。
+                    continue
+                if active is None:
+                    result.append(item)
+                elif item.metadata.get("commit_batch_id") == active.batch_id:
+                    active.items.append(item)
+                    active.item_lines.append(_canonical_item_line(item))
+                else:
+                    active = None
+        return result, committed
 
     async def _emit_corrupt(self, thread_id: str, line_no: int, cause: Exception) -> None:
         """跳过损坏行时发事件（sink 未注入则静默）。
@@ -529,6 +750,25 @@ class JsonlMessageStore(MessageStore):
             by_thread.setdefault(it.thread_id, []).append(it)
         for tid, group in by_thread.items():
             await self._writer.append(tid, group)
+
+    async def append_atomic_batch(
+        self,
+        items: Sequence[ResponseItem],
+        *,
+        batch_id: str,
+    ) -> BatchAppendAck:
+        """原子追加同一 thread 的 Responses terminal 输出组。"""
+        materialized = list(items)
+        if not materialized:
+            raise ValueError("atomic batch must contain at least one item")
+        thread_ids = {item.thread_id for item in materialized}
+        if len(thread_ids) != 1:
+            raise ValueError("atomic batch items must belong to one thread")
+        return await self._writer.append_atomic_batch(
+            next(iter(thread_ids)),
+            materialized,
+            batch_id=batch_id,
+        )
 
     # -----------------------------------------------------------------
     # Load

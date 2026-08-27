@@ -522,6 +522,59 @@ def test_response_item_explicit_wire_roundtrip_preserves_all_fields(
     assert restored == item
 
 
+def test_reasoning_provider_state_and_sample_metadata_roundtrip() -> None:
+    """Responses 加密状态与 sample 顺序元数据必须经 strict journal 无损往返。"""
+    item = ResponseItem(
+        kind="reasoning",
+        id="item_reasoning",
+        thread_id="thread_1",
+        payload={
+            "text": "",
+            "summary": "检查图片",
+            "provider_state": {
+                "provider": "openai",
+                "protocol": "responses",
+                "item_type": "reasoning",
+                "payload": {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "encrypted_content": "ciphertext",
+                    "summary": [],
+                },
+            },
+        },
+        metadata={"llm_sample_id": "sample-1", "provider_output_index": 0},
+    )
+
+    wire = serialize_response_item(item, source_record_id="source_1")
+    restored = deserialize_response_item(wire)
+
+    assert restored == item
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("llm_sample_id", ""),
+        ("llm_sample_id", 1),
+        ("origin_llm_sample_id", ""),
+        ("provider_output_index", -1),
+        ("provider_output_index", True),
+    ],
+)
+def test_reserved_responses_metadata_is_strictly_typed(key: str, value: object) -> None:
+    """保留 metadata 键不可借 canonical JSON 宽类型绕过协议校验。"""
+    item = ResponseItem(
+        kind="assistant_message",
+        thread_id="thread_1",
+        payload={"text": "ok", "model": "gpt-5.6"},
+        metadata={key: value},
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        serialize_response_item(item, source_record_id="source_1")
+
+
 def test_unknown_response_item_is_rejected_before_serialization() -> None:
     """契约外 kind 必须在构造 wire payload/record 前失败。"""
     unknown = ResponseItem.model_construct(

@@ -128,6 +128,12 @@ class InvalidHistoryError(InvalidRequestError):
     kind = "invalid_history"
 
 
+class UnsupportedPersistenceCapabilityError(InvalidRequestError):
+    """目标协议要求的 durable store 能力未提供。"""
+
+    kind = "unsupported_persistence_capability"
+
+
 class InvalidImageError(InvalidRequestError):
     """图片 canonical 内容、签名或维度不符合输入契约。"""
 
