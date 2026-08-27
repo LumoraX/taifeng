@@ -116,6 +116,18 @@ class UnsupportedModalityError(InvalidRequestError):
     kind = "unsupported_modality"
 
 
+class UnsupportedCombinationError(InvalidRequestError):
+    """模型、协议与请求选项的组合不受支持。"""
+
+    kind = "unsupported_combination"
+
+
+class InvalidHistoryError(InvalidRequestError):
+    """规范历史无法被目标 provider/protocol 无损重放。"""
+
+    kind = "invalid_history"
+
+
 class InvalidImageError(InvalidRequestError):
     """图片 canonical 内容、签名或维度不符合输入契约。"""
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
+from taifeng.llm.client import ModelCapabilities, ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
     ContentFilterError,
     InvalidRequestError,
@@ -36,6 +36,7 @@ from taifeng.llm.events import (
     tool_call_done,
 )
 from taifeng.llm.providers._shared import (
+    assert_text_only_request,
     classify_http_error,
     extract_rate_limit_snapshot,
     extract_request_id,
@@ -89,6 +90,7 @@ class OpenAICompatSession:
         pass
 
     def _build_payload(self, req: ApiRequest) -> dict[str, Any]:
+        assert_text_only_request(req)
         # system prompt 合并为一条 system 消息
         messages: list[dict[str, Any]] = []
         for sp in req.system_prompt:
@@ -313,6 +315,12 @@ class OpenAICompatClient(OneNetworkAttemptModelClient, ModelClient):
 
     适用 vLLM / Ollama / new-api / Together / Groq / DeepSeek 等。
     """
+
+    capabilities = ModelCapabilities(
+        input_modalities=frozenset({"text"}),
+        provider="openai-compatible",
+        protocol="chat",
+    )
 
     def __init__(
         self,

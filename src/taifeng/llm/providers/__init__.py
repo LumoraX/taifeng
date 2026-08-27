@@ -21,6 +21,7 @@ from taifeng.llm.providers.openai_compat import (
     OpenAICompatClient,
     OpenAICompatSession,
 )
+from taifeng.llm.providers.openai import OpenAIChatClient, OpenAIChatSession
 from taifeng.llm.providers.sim import (
     RequestLedger,
     RoutingSimClient,
@@ -43,6 +44,8 @@ __all__ = [
     "LiteLLMSession",
     "OpenAICompatClient",
     "OpenAICompatSession",
+    "OpenAIChatClient",
+    "OpenAIChatSession",
     "RequestLedger",
     "RoutingSimClient",
     "SimClient",
