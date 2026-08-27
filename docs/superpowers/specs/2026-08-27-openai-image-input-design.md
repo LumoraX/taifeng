@@ -62,6 +62,40 @@ client = OpenAICompatClient(...)
 前以稳定 `unsupported_modality` 拒绝；`enabled=True` 时才执行图片 admission、prompt
 转换和 provider wire 转换。Taifeng 不维护“按模型名猜协议”的全局开关。
 
+注入入口固定在 Pool：
+
+```python
+await EnginePool.create(
+    ...,
+    image_input_policy=ImageInputPolicy(enabled=True, ...),
+    input_cost_estimator=OpenAIImageCostEstimator(),
+)
+```
+
+Pool 将两者逐层传给 `AgentEngine` / `TurnRunner`；`history_to_api_messages()` 以显式关键字参数
+接收 policy 和已解析的 client capabilities，不读取全局变量或环境变量。
+
+`ModelClient` 增加只读能力描述：
+
+```python
+@dataclass(frozen=True)
+class ModelCapabilities:
+    input_modalities: frozenset[Literal["text", "image"]]
+    provider: str
+    protocol: str
+    accepts_provider_state: bool = False
+```
+
+未实现该属性的旧 custom client 通过兼容 helper 解析为 text-only；现有 Anthropic、Gemini、
+DeepSeek、LiteLLM 与 `OpenAICompatClient` 第一阶段均显式声明 text-only。`SimClient` 默认
+text-only，测试可在构造时显式启用 image modality，以验证 provider-neutral conformance。
+`OpenAIChatClient` 声明 text+image/chat，`OpenAIResponsesClient` 声明
+text+image/responses 并接受 OpenAI Responses provider state。
+
+TurnRunner 在转换前同时检查业务 policy 与 client capability。所有未改造 adapter 在序列化前再
+执行 defense-in-depth part validation：遇到 `ImagePart` 或非本协议 provider state 必须抛
+`unsupported_modality`，不得把 Pydantic 对象或未知 dict 原样发送给 provider。
+
 ### provider 目录
 
 ```text
@@ -140,6 +174,61 @@ class ApiMessage(BaseModel):
 - system、assistant、tool 在第一阶段不得包含 `ImagePart`。
 - LLM 层只携带 canonical base64；Data URL 只在 provider 发送前临时构造。
 
+为了同时保持现有 Message provider 兼容与 Responses 精确 Item 顺序，`ApiRequest` 增加
+provider-neutral 的有序历史视图：
+
+```python
+class ApiMessageItem(BaseModel):
+    type: Literal["message"]
+    role: Literal["system", "user", "assistant"]
+    content: str | list[TextPart | ImagePart]
+    sample_id: str | None = None
+    output_index: int | None = None
+
+
+class ApiFunctionCallItem(BaseModel):
+    type: Literal["function_call"]
+    call_id: str
+    name: str
+    arguments: str
+    sample_id: str
+    output_index: int
+
+
+class ApiFunctionCallOutputItem(BaseModel):
+    type: Literal["function_call_output"]
+    call_id: str
+    output: str
+    origin_sample_id: str
+
+
+class ApiProviderStateItem(BaseModel):
+    type: Literal["provider_state"]
+    sample_id: str
+    output_index: int
+    state: ProviderStateEnvelope
+
+
+type ApiInputItem = (
+    ApiMessageItem
+    | ApiFunctionCallItem
+    | ApiFunctionCallOutputItem
+    | ApiProviderStateItem
+)
+
+
+class ApiRequest(BaseModel):
+    messages: list[ApiMessage]       # 现有 Message provider 兼容视图
+    input_items: list[ApiInputItem]  # 有序单一历史视图，Responses 使用
+    ...
+```
+
+`_convert_history()` 必须在同一个循环中同时生成 `messages` 与 `input_items`，不能由两套
+独立 converter 重扫 history。`messages` 是为了兼容现有 provider 的确定性 coalesced view；
+`input_items` 保持 conversation item 顺序及 provider `output_index`。测试必须断言两种视图
+中的文字、call id、tool output 与图片次序等价。第一阶段 Responses 只消费
+`input_items`，Chat/现有 provider 只消费 `messages`。
+
 ### Responses opaque provider state
 
 Responses 在 `store=false` 或 ZDR 场景延续 reasoning 上下文时，需要请求
@@ -156,7 +245,30 @@ class ProviderStateEnvelope(BaseModel):
 
 OpenAI Responses 只允许持久化经过白名单投影的 `id`、`type`、`encrypted_content`、
 `summary` 与必要 status 字段，不保存整个原始 response。该 envelope 附着在现有
-`reasoning` conversation item 上并保持 provider 输出顺序。
+`reasoning` conversation item 的 payload 上并保持 provider 输出顺序：
+
+```python
+reasoning.payload = {
+    "text": str,
+    "summary": str,
+    "provider_state": ProviderStateEnvelope | None,
+}
+reasoning.metadata = {
+    "llm_sample_id": str,
+    "provider_output_index": int,
+}
+```
+
+Responses 的每个 reasoning output Item 各自落一条 reasoning conversation item；即使其
+visible summary 为空，只要有 encrypted state 也必须落盘。assistant/function call Items 同样
+携带 `llm_sample_id` 与 `provider_output_index`。后续 function call output 携带
+`origin_llm_sample_id`，该值从 matching function call 复制，不能由列表邻接猜测。
+
+strict audit 的 `_ReasoningItemPayload` 增加可选强类型 `provider_state`，旧记录缺失时为
+`None`。serializer 对 metadata 中三个保留键 `llm_sample_id`、`provider_output_index`、
+`origin_llm_sample_id` 做显式类型校验，projector/deserializer 原样 round-trip；其他既有
+canonical metadata 保持兼容。这样 legacy JSONL、strict audit Journal 和 hot history 使用同一
+数据形状。
 
 provider 通过内部 `ResponseEvent(kind="provider_state")` 把它交给 TurnRunner；TurnRunner
 必须在公开 `EventMsg` 分发前截获并持久化，禁止把 `encrypted_content` 放入 console、
@@ -177,9 +289,27 @@ user_message(text, attachments)
 ApiMessage(role="user", content=[TextPart?, ImagePart...])
 ```
 
-Responses opaque reasoning Item 不塞入 `ApiMessage.content`。`ApiRequest` 增加有序
-`provider_state`，Responses adapter 在对应 assistant/function output 之前原位重建 Item；
-Chat 与其他 provider 忽略非本协议 envelope，并且不得把它转成文本。
+Responses opaque reasoning Item 不塞入 `ApiMessage.content`。它按
+`provider_output_index` 进入 `ApiRequest.input_items`，Responses adapter 因而能在对应
+assistant/function call 之前原位重建；不存在与 messages 脱节的 flat state list。Chat 与其他
+provider 不消费 `ApiProviderStateItem`，并且不得把它转成文本。
+
+### durable sample 分组
+
+每次 logical LLM sample 使用稳定分组键：
+
+```text
+{thread_id}:{submission_id}:turn:{turn_index}:llm:{iteration}
+```
+
+只有成功 attempt 的 normalized output 才使用该 `llm_sample_id` 进入 conversation history。
+同一 sample 的 reasoning、assistant message、全部并行 function calls，以及这些 calls 后续产生的
+function outputs 组成一个配对图。新记录一律依靠显式 sample metadata 分组，不依靠物理邻接。
+
+兼容旧 JSONL 时，缺少 sample metadata 的 history 使用现有确定性窗口算法：从 assistant/reasoning
+开窗，收集其后的 function calls，并按全局唯一 `call_id` 关联 outputs；遇到下一条 user/system/
+compacted/assistant message 关窗。存在重复 call id、孤立 output 或无法唯一归属时判
+`invalid_history`，不猜测归属。
 
 ## OpenAI Chat 协议
 
@@ -205,6 +335,11 @@ Chat 与其他 provider 忽略非本协议 envelope，并且不得把它转成�
   compatible 网关字段。
 - OpenAI 专用 Chat 默认发送 `store=false`。
 - SSE 继续归一化为现有 `ResponseEvent`。
+
+`ApiRequest.reasoning_effort` 增加 `"none"`。GPT-5.6 Chat 请求同时含 tools 时，只允许
+`reasoning_effort is None` 或 `"none"`；显式 `minimal/low/medium/high` 在网络前以
+`unsupported_combination` 拒绝，不静默改写。真实 Chat 图片驱动 function-call 场景显式使用
+`reasoning_effort="none"`。Responses 不受该 Chat 限制，仍按模型能力验证 effort。
 
 `OpenAICompatClient` 不改成 `OpenAIChatClient` 的别名。它保留当前 payload 最小集合和
 兼容容错，不强制第三方网关接受 `store` 或 OpenAI 新字段；内部可以复用无行为差异的
@@ -270,6 +405,26 @@ provider output 顺序。下一轮必须重放加密 reasoning Item、function c
 压缩删除一轮历史时，reasoning、assistant、function calls 与 outputs 按配对边界原子删除。
 保留尾部时必须完整保留该组。
 
+### attempt 缓冲与原子提交
+
+每次网络 attempt 创建独立 `ResponsesAttemptAccumulator`。它按 output index 缓冲 typed output
+Items、visible text、function arguments 与 encrypted reasoning state。流式 text/tool delta 可以按
+现有 UI 语义发布，但不能直接写 conversation history。
+
+- 收到 `response.completed` 后才 finalize normalized Items。
+- 成功 attempt 的 checkpoint 可以包含白名单化 provider state，随后
+  `llm_response_committed + reasoning/assistant/function_call conversation_item*` 作为现有单一
+  原子 batch 提交；只有该 batch 的 durable ack 才推进 hot history/projector。
+- `response.failed`、`response.incomplete`、取消或 transport failure 必须销毁本 attempt
+  accumulator；不得生成 conversation item，也不得把其中 encrypted state 带入下一次 retry。
+- retry 创建全新的 accumulator。先前 attempt 即使发出过 UI delta，也不能成为 logical history。
+- 成功 checkpoint 后、final conversation batch 前崩溃时，strict audit 仍只把 checkpoint 当作
+  recovery evidence；未提交的 conversation item 不进入 LLM replay。恢复协调必须以 final
+  `llm_response_committed` batch 为可见边界。
+
+非 audit JSONL 路径同样只在完整 `response.completed` 后追加整组 Items；失败/incomplete 不追加
+部分 reasoning 或 tool call。
+
 ### Responses SSE 归一化
 
 | Responses SSE | Taifeng `ResponseEvent` |
@@ -297,26 +452,43 @@ class ImageInputPolicy:
     max_item_bytes: int
     max_total_bytes: int
     allowed_media_types: frozenset[str]
+    unknown_model_token_ceiling: int = 32_768
 ```
 
 该策略由业务按 EnginePool 注入。所有数值必须为正，`max_total_bytes` 不得小于
-`max_item_bytes`；允许类型只能是 Taifeng 支持集合的子集。OpenAI 官方当前上限为单请求
+`max_item_bytes`；`unknown_model_token_ceiling` 必须为正；允许类型只能是 Taifeng 支持集合的
+子集。32,768 是未知模型单图的默认保守估值，业务可按所选模型调高。OpenAI 官方当前上限为单请求
 512 MB total payload、最多 1,500 张图片，但这是 provider ceiling，不是 Taifeng 业务默认值。
 有效限制取业务策略、`ContextBudget.max_request_bytes` 与 provider ceiling 的最小值。
 
 admission 依次执行：
 
-1. O(1) encoded-length gate，避免超大正文进入完整 base64 扫描。
-2. canonical base64 校验。
-3. decoded size 与累计 decoded total 校验。
-4. SHA-256 校验。
-5. MIME allowlist 与文件 signature 一致性校验。
-6. 解析宽高；拒绝零尺寸、损坏头和超出安全整数范围的尺寸。
-7. GIF 解析 image descriptor，只有一个 frame 才接受。
-8. image count 校验。
+1. O(1) image count gate，超量时不查看任何正文。
+2. O(1) encoded-length gate，避免超大正文进入完整 base64 扫描。
+3. canonical base64 校验。
+4. decoded size 与累计 decoded total 校验。
+5. SHA-256 校验。
+6. MIME allowlist 与文件 signature 一致性校验。
+7. 解析宽高；拒绝零尺寸、损坏头和超出安全整数范围的尺寸。
+8. GIF 解析 image descriptor，只有一个 frame 才接受。
 
 格式检查使用有界纯 Python inspector，不引入同步文件 IO，不把正文写入临时文件。长时或大体积
 解码受业务 byte policy 严格界定，并在进入 actor 的第一个 effect 前完成。
+
+### admission 时点
+
+strict audit 与 legacy submit 共用 `prepare_user_message()` canonicalizer：
+
+- disabled policy、client 不支持 image、非法 base64/digest/signature、数量/大小超限在 enqueue
+  和任何 durable acceptance 之前拒绝。
+- strict audit 写安全 `submission_rejected`，不写 `submission_accepted` 或 user conversation item。
+- legacy 路径返回 rejected submission，不 append MessageStore、不进入 actor queue。
+- 因此结构非法或业务禁用的图片不会污染 JSONL，也不会在每次 cold resume 重复失败。
+
+model/detail 兼容可能依赖 provider 当前模型登记。canonical 图片可先 durable accepted；
+provider preflight 若确认该组合不支持，则在网络前以 `unsupported_image_detail` 结束本 turn。
+该合法 user item 保留在 history，业务切换支持该 detail 的 client/model 后可以重新执行。provider
+只有在本地能力表无法确定时才可能返回等价 400，仍为 non-retryable。
 
 ## token 与请求字节估算
 
@@ -326,7 +498,8 @@ context 层新增可注入的 `InputCostEstimator` 协议，输入 model、media
 输出保守 image token estimate。文本估算保持现有算法。
 
 OpenAI estimator 按官方 patch/tile 规则实现已登记模型；GPT-5.6 的 `auto` 与 `original`
-按官方当前 sizing 规则估算。未知模型/detail 组合使用业务配置的保守 ceiling，而不是返回 0。
+按官方当前 sizing 规则估算。未知模型/detail 组合使用
+`ImageInputPolicy.unknown_model_token_ceiling`（默认每图 32,768），而不是返回 0。
 估算值用于 soft/hard limit 与 compaction trigger；provider 返回的真实 usage 仍是计费和台账事实。
 
 ### wire bytes
@@ -341,7 +514,12 @@ OpenAI estimator 按官方 patch/tile 规则实现已登记模型；GPT-5.6 的 
 - sliding/surgical/handoff 删除旧图片消息时，只改变 logical history；append-only JSONL 仍保留
   原始 canonical base64 和 lineage。
 - preserve tail 命中的图片消息必须完整保留。
-- Responses reasoning/function group 按配对边界原子保留或删除。
+- Responses reasoning/function group 按 `llm_sample_id` 与 `origin_llm_sample_id` 配对图原子保留
+  或删除。任何策略提出 cut index 后，公共 boundary expander 向两侧扩展到完整 sample group；
+  多个并行 calls、交错 outputs、suspension marker 与 resume 后补写 output 均按显式 metadata/call id
+  纳入同组。无法唯一成组时压缩 fail closed，不修改 history。
+- 旧 history 使用“durable sample 分组”一节的兼容算法计算临时 group；所有可能 cut position 都有
+  pair-safety 参数化测试。
 - 压缩仍必须返回 `cache_invalidated` 与 `anchor_preserved_until`。
 - 图片消息进入稳定前缀后，其 canonical base64 与 part 顺序不得在重放时改变，否则视为
   cache break。
@@ -358,6 +536,7 @@ OpenAI estimator 按官方 patch/tile 规则实现已登记模型；GPT-5.6 的 
 | `attachment_too_large` | 单图或 decoded total 超限 | false |
 | `request_too_large` | 最终 wire JSON 超限或 provider 413 | false |
 | `unsupported_image_detail` | model/protocol 不支持请求 detail | false |
+| `unsupported_combination` | Chat tools 与不支持的 reasoning effort 组合 | false |
 | `invalid_history` | Responses Item/reasoning/tool 配对不完整 | false |
 | `transient_network` | timeout、transport、可重试 5xx/429 | true |
 
@@ -429,8 +608,9 @@ Responses encrypted reasoning + tool call/output 配对、无正文 telemetry。
 
 ### 真实 GPT-5.6
 
-仓库增加固定、可审核的小尺寸图片 fixture，图片内包含 prompt 未透露的唯一视觉验证码与明确
-图形。真实验收不以 HTTP 200 为通过条件，必须验证模型提取的验证码/结构化字段。
+仓库增加固定、可审核的小尺寸图片 fixture，图片内包含 prompt 未透露的良性库存序列号与明确
+几何图形；它不是 CAPTCHA，也不使用验证/绕过措辞。真实验收不以 HTTP 200 为通过条件，必须
+验证模型提取的序列号/结构化字段。
 
 定向场景：
 
