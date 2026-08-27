@@ -33,6 +33,7 @@ from taifeng.llm.image_input import (
     InputCostEstimator,
     OpenAIImageCostEstimator,
 )
+from taifeng.llm.providers.openai import OpenAIChatClient, OpenAIResponsesClient
 from taifeng.llm.recovery import RecoveryPlan, RecoveryStep, recommend_recovery
 from taifeng.llm.retry import RetryConfig, retry_async
 from taifeng.llm.types import (
@@ -78,6 +79,8 @@ __all__ = [
     "ModelClient",
     "ModelClientSession",
     "OpenAIImageCostEstimator",
+    "OpenAIChatClient",
+    "OpenAIResponsesClient",
     "RateLimitError",
     "RateLimitSnapshot",
     "ProviderStateEnvelope",

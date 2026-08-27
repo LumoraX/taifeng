@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from taifeng.llm.errors import ContextOverflowError
+from taifeng.llm.types import ImagePart, TextPart
 
 if TYPE_CHECKING:
     from taifeng.llm.providers.sim.contract import SimContractViolation
@@ -33,10 +34,19 @@ _PREFIX_CACHE_CAPACITY = 32
 
 
 def _message_text(msg: ApiMessage) -> str:
-    """取消息正文的规范化文本（content 可能是 str 或分片 list）。"""
+    """取消息规范化文本；图片仅写结构摘要，绝不拼接 base64 正文。"""
     if isinstance(msg.content, str):
         return msg.content
-    return " ".join(str(part) for part in msg.content)
+    parts: list[str] = []
+    for part in msg.content:
+        if isinstance(part, TextPart):
+            parts.append(part.text)
+        elif isinstance(part, ImagePart):
+            parts.append(
+                f"<image media_type={part.media_type} detail={part.detail} "
+                f"sha256={part.sha256}>"
+            )
+    return " ".join(parts)
 
 
 def _canonical_text(request: ApiRequest) -> str:
@@ -57,10 +67,43 @@ def _canonical_text(request: ApiRequest) -> str:
 
 
 @dataclass(frozen=True)
+class ImageInputDescriptor:
+    """Sim 图片输入的脱敏结构描述；不包含 base64 或视觉语义。"""
+
+    order: int
+    message_index: int
+    part_index: int
+    media_type: str
+    detail: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class RecordedRequest:
     """单次采样请求的侦察视图（强类型 ApiRequest 的断言便捷层）。"""
 
     request: ApiRequest
+
+    def image_inputs(self) -> tuple[ImageInputDescriptor, ...]:
+        """按请求顺序返回图片结构描述，不暴露图片正文。"""
+        descriptors: list[ImageInputDescriptor] = []
+        for message_index, message in enumerate(self.request.messages):
+            if isinstance(message.content, str):
+                continue
+            for part_index, part in enumerate(message.content):
+                if not isinstance(part, ImagePart):
+                    continue
+                descriptors.append(
+                    ImageInputDescriptor(
+                        order=len(descriptors),
+                        message_index=message_index,
+                        part_index=part_index,
+                        media_type=part.media_type,
+                        detail=part.detail,
+                        sha256=part.sha256,
+                    )
+                )
+        return tuple(descriptors)
 
     def saw_function_call(self, call_id: str) -> bool:
         """本请求的 messages 中是否声明过该 call_id 的 tool_call。"""
