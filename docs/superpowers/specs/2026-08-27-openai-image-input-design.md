@@ -270,36 +270,14 @@ class ProviderStateEnvelope(BaseModel):
     payload: dict[str, JsonValue]
 ```
 
-Responses adapter 的 terminal normalized output 使用显式类型：
+Responses adapter 的 terminal `NormalizedOutputItem` 是显式 discriminated union：
 
-```python
-class NormalizedReasoningOutput(BaseModel):
-    type: Literal["reasoning"]
-    output_index: int
-    visible_text: str
-    state: ProviderStateEnvelope | None
+- `reasoning(output_index, visible_text, state?)`
+- `message(output_index, text)`
+- `function_call(output_index, call_id, name, arguments)`
 
-
-class NormalizedMessageOutput(BaseModel):
-    type: Literal["message"]
-    output_index: int
-    text: str
-
-
-class NormalizedFunctionCallOutput(BaseModel):
-    type: Literal["function_call"]
-    output_index: int
-    call_id: str
-    name: str
-    arguments: str
-
-
-type NormalizedOutputItem = (
-    NormalizedReasoningOutput
-    | NormalizedMessageOutput
-    | NormalizedFunctionCallOutput
-)
-```
+三种类型均为 frozen Pydantic model，拒绝额外字段；列表严格按唯一、递增
+`output_index` 排列。
 
 OpenAI Responses 只允许持久化经过白名单投影的 `id`、`type`、`encrypted_content`、
 `summary` 与必要 status 字段，不保存整个原始 response。该 envelope 附着在现有
@@ -482,12 +460,18 @@ provider output 顺序。下一轮必须重放加密 reasoning Item、function c
 
 每次网络 attempt 创建独立 `ResponsesAttemptAccumulator`。它按 output index 缓冲 typed output
 Items、visible text、function arguments 与 encrypted reasoning state。流式 text/tool delta 可以按
-现有 UI 语义发布，但不能直接写 conversation history。
+现有 UI 语义发布，但只是 preview，不能直接写 conversation history、决定 final assistant text 或
+触发 tool execution。
 
 - 收到 `response.completed` 后才 finalize normalized Items。
 - accumulator finalize 后先发唯一内部 `normalized_output`，再发公开 `completed`；TurnRunner
   必须收到 normalized output 才能把 Responses attempt 视为可提交，缺失/重复均为
   `invalid_response`。
+- terminal normalized message Items 按 output index 拼接为本轮 final assistant text；terminal
+  normalized function calls 是 tool dispatch 的唯一输入。`tool_call_done` 只作 UI preview。
+- accumulator 对已观察到的 text/argument delta 分别聚合，并与 terminal normalized Item 做逐字节
+  比较；不一致时 `invalid_response`，不得提交或执行工具。某 Item 完全没有 delta 时允许直接采用
+  terminal 值。
 - 成功 attempt 的 checkpoint 可以包含白名单化 provider state，随后
   `llm_response_committed + reasoning/assistant/function_call conversation_item*` 作为现有单一
   原子 batch 提交；只有该 batch 的 durable ack 才推进 hot history/projector。
@@ -503,23 +487,38 @@ Items、visible text、function arguments 与 encrypted reasoning state。流式
 
 ### 默认 JSONL batch visibility
 
-默认 `MessageStore.append_batch()` 增加向后兼容的 transport frame，不新增 conversation
-`ItemKind`：
+新增可选 `AtomicBatchMessageStore` capability：
 
-```json
-{"frame":"item_batch_begin","batch_id":"...","item_ids":["..."],"digest":"..."}
-{"kind":"reasoning", "metadata":{"commit_batch_id":"..."}, "...":"..."}
-{"kind":"assistant_message", "metadata":{"commit_batch_id":"..."}, "...":"..."}
-{"frame":"item_batch_commit","batch_id":"...","item_ids":["..."],"digest":"..."}
+```python
+async def append_atomic_batch(
+    items: Sequence[ResponseItem], *, batch_id: str
+) -> BatchAppendAck: ...
 ```
 
-- `batch_id` 使用 logical sample id；item ids、顺序与 canonical digest 在 begin/commit 中必须一致。
+默认 JSONL store 实现该协议；Responses client 启用时，custom store 若不实现则在 Pool 构造期以
+`unsupported_persistence_capability` 拒绝。现有 `append_batch(items)` 及非 LLM batch 完全不变。
+只有 terminal normalized LLM response group 调用 atomic 方法，`batch_id=llm_sample_id`。
+transport frame 不新增 conversation `ItemKind`：
+
+```json
+{"frame":"item_batch_begin","frame_id":"...","batch_id":"...","item_ids":["..."],"digest":"..."}
+{"kind":"reasoning", "metadata":{"commit_batch_id":"..."}, "...":"..."}
+{"kind":"assistant_message", "metadata":{"commit_batch_id":"..."}, "...":"..."}
+{"frame":"item_batch_commit","frame_id":"...","batch_id":"...","item_ids":["..."],"digest":"..."}
+```
+
+- stable `batch_id` 提供业务幂等性；每次物理写 attempt 使用新的 transport `frame_id`。item ids、
+  顺序与 canonical digest 在 begin/commit 中必须一致。
 - writer 在同一个 append lock 内写 begin、全部 item lines、commit，完成 flush/fsync 后才返回 ack；
   hot history 只在 ack 后推进。
 - reader 对旧版无 frame lines 保持立即可见。对带 `commit_batch_id` 的新 lines 先按 batch 缓冲，
-  只有读到匹配且 digest 正确的 commit frame 才一次性发布全部 Items。
+  只有读到 frame id 匹配且 digest 正确的 commit 才一次性发布全部 Items。
 - EOF、损坏行、缺项、digest 不符或只有 begin 没有 commit 的 batch 全部不可见；后续合法 batch
   仍可继续读取。orphan frame 不转换为 conversation item。
+- committed batch index 以 `batch_id → digest/item_ids` 重建。重试已 committed 的相同 batch/digest
+  返回 `already_committed=True` 的成功 ack，不再追加；相同 batch id 但内容不同抛
+  `BatchConflictError`。orphan attempt 后重试可写新 frame id；reader 只发布第一个合法 committed
+  frame，并按 stable batch id 去重。
 - reasoning、assistant 和 function calls 属于 LLM response batch；后续 tool outputs 可使用现有
   tool outcome 原子边界单独提交，但必须带 `origin_llm_sample_id`。
 - strict audit 继续使用 Journal 原子 batch，不重复增加 JSONL frame；projector 只有在 Journal ack
@@ -629,6 +628,10 @@ OpenAI estimator 按官方 patch/tile 规则实现已登记模型；GPT-5.6 的 
   唯一成组时压缩 fail closed，不修改 history。
 - 旧 history 使用“durable sample 分组”一节的兼容算法计算临时 group；所有可能 cut position 都有
   pair-safety 参数化测试。
+- handoff/summary model 只能接收专用 `CompactionView`：reasoning 仅投影视觉可见的 `text` 与
+  `summary`，显式删除 `provider_state`、`encrypted_content` 和保留 metadata。禁止通过
+  `str(payload)` 或通用 `model_dump()` 构造 compaction prompt。被移除 group 的 opaque state 直接
+  消失，不得编码进自然语言 summary；被保留 group 的 state 原样留在 history。
 - 压缩仍必须返回 `cache_invalidated` 与 `anchor_preserved_until`。
 - 图片消息进入稳定前缀后，其 canonical base64 与 part 顺序不得在重放时改变，否则视为
   cache break。
@@ -646,8 +649,10 @@ OpenAI estimator 按官方 patch/tile 规则实现已登记模型；GPT-5.6 的 
 | `request_too_large` | 最终 wire JSON 超限或 provider 413 | false |
 | `unsupported_image_detail` | model/protocol 不支持请求 detail | false |
 | `unsupported_combination` | Chat tools 与不支持的 reasoning effort 组合 | false |
+| `unsupported_persistence_capability` | Responses 使用的 custom store 缺少 atomic batch | false |
 | `invalid_history` | Responses Item/reasoning/tool 配对不完整 | false |
 | `invalid_response` | Responses 缺失/重复 terminal normalized output 或 Item 边界非法 | false |
+| `batch_conflict` | 相同 stable batch id 对应不同 digest/items | false |
 | `transient_network` | timeout、transport、可重试 5xx/429 | true |
 
 provider 400 中能稳定识别 modality/detail/context 的错误映射到对应 kind；无法稳定识别的保留
@@ -723,8 +728,9 @@ UserMessage
 Responses encrypted reasoning + tool call/output 配对、无正文 telemetry。
 
 默认 JSONL 对 batch begin、每条 item、commit 与 fsync 前后逐边界注入 crash；恢复时只有完整且
-digest 匹配的 committed batch 可见。压缩对每个 candidate cut position 参数化验证 sample closure
-与 preserve-tail 优先级。
+digest 匹配的 committed batch 可见，并覆盖 ack 丢失后的同 digest no-op 与异 digest conflict。
+压缩对每个 candidate cut position 参数化验证 sample closure 与 preserve-tail 优先级；用 sentinel
+encrypted state 断言 compaction prompt、summary、日志和 capture 均不含该值。
 
 ### 真实 GPT-5.6
 
