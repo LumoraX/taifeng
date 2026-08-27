@@ -35,7 +35,7 @@ from taifeng.loop.audit_support import SessionAuditFrozenError
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from taifeng.conversation.models import ResponseItem
     from taifeng.loop.audit_bootstrap import AuditedSessionState
@@ -103,6 +103,7 @@ class _AuditedToolConvergence:
         requests: Sequence[ToolCallRequest],
         registry: object,
         cancel: CancellationToken,
+        origin_sample_ids: Mapping[str, str] | None = None,
     ) -> None:
         """冻结本批 identity 派生器与按 call-index 有序的请求视图。"""
         self._state = state
@@ -113,6 +114,7 @@ class _AuditedToolConvergence:
         # requests 已按 index 升序；固定该顺序用于意图 batch 与终态收敛
         self._requests = sorted(requests, key=lambda r: r.index)
         self._registry = registry
+        self._origin_sample_ids = dict(origin_sample_ids or {})
         self._identities = JournalIdentities(
             self._coordinator.session_id,
             state.thread_id,
@@ -244,6 +246,16 @@ class _AuditedToolConvergence:
             thread_id=self._state.thread_id,
             is_error=is_error,
         )
+        origin_sample_id = self._origin_sample_ids.get(req.call_id)
+        if origin_sample_id:
+            fco_item = fco_item.model_copy(
+                update={
+                    "metadata": {
+                        **fco_item.metadata,
+                        "origin_llm_sample_id": origin_sample_id,
+                    }
+                }
+            )
         conv_record = conversation_item_record(
             self._factory,
             operation_id=operation_id,
@@ -284,6 +296,7 @@ async def audited_tool_batch(
     run_dispatch: Callable[[], Awaitable[Sequence[ToolCallOutcome]]],
     cancel: CancellationToken,
     finalization_timeout: float,
+    origin_sample_ids: Mapping[str, str] | None = None,
 ) -> list[ResponseItem]:
     """audit 模式下一批 Tool 的端到端收敛：意图 → 派发 → 终态 → projection。
 
@@ -299,6 +312,7 @@ async def audited_tool_batch(
         requests=requests,
         registry=registry,
         cancel=cancel,
+        origin_sample_ids=origin_sample_ids,
     )
     # 取消无关的有界 finalization：意图落账 + 收敛都在 shield 内，无论外层取消与否
     # 每个已提交意图都必须收敛出唯一终态。

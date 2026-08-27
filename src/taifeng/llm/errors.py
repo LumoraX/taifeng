@@ -128,6 +128,12 @@ class InvalidHistoryError(InvalidRequestError):
     kind = "invalid_history"
 
 
+class InvalidResponseError(InvalidRequestError):
+    """provider terminal 响应缺失、重复或与 preview 不一致。"""
+
+    kind = "invalid_response"
+
+
 class UnsupportedPersistenceCapabilityError(InvalidRequestError):
     """目标协议要求的 durable store 能力未提供。"""
 

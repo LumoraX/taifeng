@@ -19,7 +19,7 @@ from taifeng.conversation.journal.records import (
     StableErrorV1,
     stable_error,
 )
-from taifeng.llm.client import ModelClientSession
+from taifeng.llm.client import ModelClientSession, model_capabilities
 
 if TYPE_CHECKING:
     from taifeng.llm.client import OneNetworkAttemptModelClient
@@ -234,6 +234,16 @@ def _normalized_items(
     events: list[ResponseEvent],
 ) -> tuple[Mapping[str, object], ...]:
     """按首次出现顺序把 provider delta 归约为完整 response items。"""
+    terminal = [event for event in events if event.kind == "normalized_output"]
+    if terminal:
+        if len(terminal) != 1:
+            raise ValueError("attempt emitted duplicate normalized output")
+        normalized = validate_json_value(terminal[0].data.get("items"))
+        if not isinstance(normalized, list) or not all(
+            isinstance(item, dict) for item in normalized
+        ):
+            raise NonCanonicalValueError("normalized output must contain JSON objects")
+        return tuple(normalized)
     items: list[dict[str, object]] = []
     positions: dict[tuple[str, str], int] = {}
     for event in events:
@@ -618,6 +628,7 @@ class AttemptObservableClientAdapter(AttemptObservableModelClient):
         self._inner = inner
         self._provider = provider
         self._default_model = default_model
+        self.capabilities = model_capabilities(inner)
 
     def session(
         self,
@@ -667,6 +678,8 @@ def _reviewed_one_attempt_client_types() -> tuple[type[object], ...]:
     from taifeng.llm.providers.anthropic_provider import AnthropicClient
     from taifeng.llm.providers.deepseek_provider import DeepSeekClient
     from taifeng.llm.providers.gemini_provider import GeminiClient
+    from taifeng.llm.providers.openai.chat import OpenAIChatClient
+    from taifeng.llm.providers.openai.responses import OpenAIResponsesClient
     from taifeng.llm.providers.openai_compat import OpenAICompatClient
     from taifeng.llm.providers.sim import RoutingSimClient, SimClient
 
@@ -675,6 +688,8 @@ def _reviewed_one_attempt_client_types() -> tuple[type[object], ...]:
         DeepSeekClient,
         GeminiClient,
         OpenAICompatClient,
+        OpenAIChatClient,
+        OpenAIResponsesClient,
         RoutingSimClient,
         SimClient,
     )

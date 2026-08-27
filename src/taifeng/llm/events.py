@@ -9,11 +9,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from taifeng.llm.types import RateLimitSnapshot, TokenUsage
+if TYPE_CHECKING:
+    from taifeng.llm.types import RateLimitSnapshot, TokenUsage
 
 EventKind = Literal[
     "created",
@@ -25,6 +26,7 @@ EventKind = Literal[
     "server_model",
     "prompt_cache",
     "structured_output",
+    "normalized_output",
     "completed",
     "error",
 ]
@@ -111,6 +113,11 @@ def structured_output(
         kind="structured_output",
         data={"parsed": parsed, "raw_text": raw_text},
     )
+
+
+def normalized_output(items: list[dict[str, Any]]) -> ResponseEvent:
+    """仅供 TurnRunner 消费的 terminal 有序输出；不得桥接到业务事件。"""
+    return ResponseEvent(kind="normalized_output", data={"items": items})
 
 
 def completed(

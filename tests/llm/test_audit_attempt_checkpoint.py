@@ -20,6 +20,7 @@ from taifeng.llm.audit import (
 from taifeng.llm.errors import ServerError
 from taifeng.llm.events import (
     completed,
+    normalized_output,
     prompt_cache,
     reasoning_delta,
     text_delta,
@@ -54,6 +55,27 @@ def _permit() -> ModelAttemptPermit:
         request_record_id=(f"{operation_id}:llm_request_committed:{attempt_id}:0"),
         retry_ordinal=0,
     )
+
+
+def test_audit_prefers_terminal_responses_normalized_output() -> None:
+    """strict checkpoint 必须保留 Responses terminal items 与 encrypted state。"""
+    from taifeng.llm.audit import _normalized_items
+
+    terminal = [
+        {
+            "type": "reasoning",
+            "output_index": 0,
+            "visible_text": "summary",
+            "state": {
+                "provider": "openai",
+                "protocol": "responses",
+                "item_type": "reasoning",
+                "payload": {"encrypted_content": "ciphertext"},
+            },
+        }
+    ]
+
+    assert _normalized_items([normalized_output(terminal)]) == tuple(terminal)
 
 
 class _CompletedSession:

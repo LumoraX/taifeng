@@ -17,11 +17,16 @@ from taifeng.llm.providers.anthropic_provider import (
 from taifeng.llm.providers.deepseek_provider import DeepSeekClient
 from taifeng.llm.providers.gemini_provider import GeminiClient, GeminiSession
 from taifeng.llm.providers.litellm_provider import LiteLLMClient, LiteLLMSession
+from taifeng.llm.providers.openai import (
+    OpenAIChatClient,
+    OpenAIChatSession,
+    OpenAIResponsesClient,
+    OpenAIResponsesSession,
+)
 from taifeng.llm.providers.openai_compat import (
     OpenAICompatClient,
     OpenAICompatSession,
 )
-from taifeng.llm.providers.openai import OpenAIChatClient, OpenAIChatSession
 from taifeng.llm.providers.sim import (
     RequestLedger,
     RoutingSimClient,
@@ -46,6 +51,8 @@ __all__ = [
     "OpenAICompatSession",
     "OpenAIChatClient",
     "OpenAIChatSession",
+    "OpenAIResponsesClient",
+    "OpenAIResponsesSession",
     "RequestLedger",
     "RoutingSimClient",
     "SimClient",

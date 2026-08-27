@@ -33,16 +33,25 @@ from taifeng.conversation.models import (
     function_call_output,
     reasoning,
 )
+from taifeng.conversation.store import AtomicBatchMessageStore
 from taifeng.llm.client import model_capabilities
 from taifeng.llm.errors import (
+    InvalidResponseError,
     LLMError,
     RequestTooLargeError,
+    UnsupportedPersistenceCapabilityError,
     classify_failure,
 )
 from taifeng.llm.image_input import (
     DISABLED_IMAGE_POLICY,
     ImageInputPolicy,
     InputCostEstimator,
+)
+from taifeng.llm.providers.openai.responses import (
+    NormalizedFunctionCallItem,
+    NormalizedMessageItem,
+    NormalizedOutputItem,
+    NormalizedReasoningItem,
 )
 from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
@@ -189,6 +198,73 @@ def _llm_failure_context(
         is_root=is_root,
         iteration=iteration,
     )
+
+
+def _responses_sample_id(
+    *, thread_id: str, submission_id: str, turn_index: int, iteration: int
+) -> str:
+    """构造跨热/冷恢复稳定的 logical Responses sample id。"""
+    return f"{thread_id}:{submission_id}:turn:{turn_index}:llm:{iteration}"
+
+
+def _responses_conversation_items(
+    raw_items: list[dict[str, Any]],
+    *,
+    thread_id: str,
+    model: str,
+    sample_id: str,
+) -> tuple[list[ResponseItem], str, list[dict[str, Any]]]:
+    """把已验证 terminal normalized items 投影为 durable conversation items。"""
+    from pydantic import TypeAdapter
+
+    normalized = TypeAdapter(list[NormalizedOutputItem]).validate_python(raw_items)
+    response_items: list[ResponseItem] = []
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for item in normalized:
+        metadata = {
+            "llm_sample_id": sample_id,
+            "provider_output_index": item.output_index,
+        }
+        if isinstance(item, NormalizedReasoningItem):
+            payload: dict[str, Any] = {"text": "", "summary": item.visible_text}
+            if item.state is not None:
+                payload["provider_state"] = item.state.model_dump(mode="json")
+            response_items.append(
+                ResponseItem(
+                    kind="reasoning",
+                    thread_id=thread_id,
+                    payload=payload,
+                    metadata=metadata,
+                )
+            )
+        elif isinstance(item, NormalizedMessageItem):
+            text_parts.append(item.text)
+            response_items.append(
+                assistant_message(item.text, thread_id=thread_id, model=model).model_copy(
+                    update={"metadata": metadata}
+                )
+            )
+        elif isinstance(item, NormalizedFunctionCallItem):
+            response_items.append(
+                function_call(
+                    call_id=item.call_id,
+                    name=item.name,
+                    arguments=item.arguments,
+                    thread_id=thread_id,
+                ).model_copy(update={"metadata": metadata})
+            )
+            tool_calls.append(
+                {
+                    "call_id": item.call_id,
+                    "name": item.name,
+                    "arguments": item.arguments,
+                    "origin_sample_id": sample_id,
+                }
+            )
+    if not response_items:
+        raise InvalidResponseError("Responses normalized output is empty")
+    return response_items, "".join(text_parts), tool_calls
 
 
 class _BatchSuspend(Exception):  # noqa: N818
@@ -1011,6 +1087,8 @@ class TurnRunner:
         )
         self.last_prompt_fingerprint = prompt_fingerprint
 
+        input_capabilities = model_capabilities(self.model_client)
+        is_responses = input_capabilities.protocol == "responses"
         request = build_api_request(
             entry=self.entry_skill,
             snapshot=self.snapshot,
@@ -1032,7 +1110,7 @@ class TurnRunner:
             # 是否有召回后端：无后端恒 inline（与工具裁剪同口径）
             has_recall_backend=self.has_recall_backend,
             image_input_policy=self.image_input_policy,
-            model_input_capabilities=model_capabilities(self.model_client),
+            model_input_capabilities=input_capabilities,
         )
 
         # 审计可观测 层1:request 全文留痕。注入点选在「build 之后、发送 provider
@@ -1083,6 +1161,7 @@ class TurnRunner:
         reasoning_text = ""
         # 累积 tool calls
         tool_calls: list[dict[str, Any]] = []
+        normalized_items: list[dict[str, Any]] | None = None
         # retry 已由 provider 内 retry_async 兜底(≤3 次);走到这里的 LLMError 即重试耗尽。
         # 可恢复 / 等外部介入类 → 转 SYSTEM_RETRY 挂起(等业务侧 resume 重跑同次 sample);
         # 确定性失败照旧上抛硬失败。CancelledError 走 asyncio 路径,不在此 except 内。
@@ -1101,13 +1180,25 @@ class TurnRunner:
                         reasoning_text += r_delta
                         await self._emit(AssistantReasoning(data={"delta": r_delta}))
                     elif ev.kind == "tool_call_done":
-                        tool_calls.append(
-                            {
-                                "call_id": ev.data["call_id"],
-                                "name": ev.data["name"],
-                                "arguments": ev.data.get("arguments", "{}"),
-                            }
-                        )
+                        if not is_responses:
+                            tool_calls.append(
+                                {
+                                    "call_id": ev.data["call_id"],
+                                    "name": ev.data["name"],
+                                    "arguments": ev.data.get("arguments", "{}"),
+                                }
+                            )
+                    elif ev.kind == "normalized_output":
+                        if not is_responses or normalized_items is not None:
+                            raise InvalidResponseError(
+                                "unexpected or duplicate normalized output"
+                            )
+                        raw_items = ev.data.get("items")
+                        if not isinstance(raw_items, list):
+                            raise InvalidResponseError(
+                                "normalized output items must be a list"
+                            )
+                        normalized_items = raw_items
                     elif ev.kind == "completed":
                         usage_dict = ev.data.get("usage") or {}
                         self._accumulate_usage(usage_dict)
@@ -1187,32 +1278,54 @@ class TurnRunner:
                 raise SuspendSignal(self._system_retry_pending(e)) from e
             raise  # 确定性失败:照旧上抛硬失败(走 run_turn 宽 except → TurnFailed)
 
+        if is_responses:
+            if normalized_items is None:
+                raise InvalidResponseError(
+                    "Responses completed without one normalized output"
+                )
+            sample_id = _responses_sample_id(
+                thread_id=self.thread_id,
+                submission_id=self.submission_id,
+                turn_index=self.turn_index,
+                iteration=iteration,
+            )
+            response_items, assistant_text, tool_calls = _responses_conversation_items(
+                normalized_items,
+                thread_id=self.thread_id,
+                model=self.entry_skill.model or "auto",
+                sample_id=sample_id,
+            )
+        else:
+            sample_id = None
+            response_items = []
+
         # 组装本轮 provider 顺序的会话项：reasoning → assistant →（audit 模式下）
         # function_call*。reasoning-content-passback:本轮有 reasoning 且有产出时,先落
         # reasoning item(紧邻配对 assistant message 之前,与 provider 产出顺序一致;
         # 无产出轮不落——没有可关联的 assistant 消息,回传无意义)。
-        response_items: list[ResponseItem] = []
-        if reasoning_text and (assistant_text or tool_calls):
-            response_items.append(reasoning(reasoning_text, thread_id=self.thread_id))
-        # assistant message（即使为空也记下，因为 tool calls 也挂在这条消息上）
-        if assistant_text or tool_calls:
-            response_items.append(assistant_message(
-                assistant_text,
-                thread_id=self.thread_id,
-                model=self.entry_skill.model or "auto",
-            ))
+        if not is_responses:
+            if reasoning_text and (assistant_text or tool_calls):
+                response_items.append(reasoning(reasoning_text, thread_id=self.thread_id))
+            # assistant message（即使为空也记下，因为 tool calls 也挂在这条消息上）
+            if assistant_text or tool_calls:
+                response_items.append(assistant_message(
+                    assistant_text,
+                    thread_id=self.thread_id,
+                    model=self.entry_skill.model or "auto",
+                ))
 
         audit_state = self.audit_state
         if audit_state is not None:
             # audit：function_call 会话项必须与最终响应同批 durable（先于任何 Tool
             # intent/effect）；随后 dispatch 阶段跳过 legacy 逐 call 的 fc 落库。
-            for tc in tool_calls:
-                response_items.append(function_call(
-                    call_id=tc["call_id"],
-                    name=tc["name"],
-                    arguments=tc["arguments"],
-                    thread_id=self.thread_id,
-                ))
+            if not is_responses:
+                for tc in tool_calls:
+                    response_items.append(function_call(
+                        call_id=tc["call_id"],
+                        name=tc["name"],
+                        arguments=tc["arguments"],
+                        thread_id=self.thread_id,
+                    ))
             # 观测 session 在 checkpoint definite ack 后暴露 lineage；缺失即 attempt
             # 未收敛，fail closed 冻结（不得在无 durable 最终响应时继续产生效果）。
             checkpoint = getattr(sess, "last_attempt_checkpoint", None)
@@ -1231,6 +1344,13 @@ class TurnRunner:
             )
             # 仅在 durable ack + projection 推进后才把逐字一致的会话项应用到 hot history
             self.history_buffer.extend(response_items)
+        elif is_responses:
+            if not isinstance(self.store, AtomicBatchMessageStore):
+                raise UnsupportedPersistenceCapabilityError(
+                    "Responses requires atomic terminal output persistence"
+                )
+            await self.store.append_atomic_batch(response_items, batch_id=sample_id)
+            self.history_buffer.extend(response_items)
         else:
             for item in response_items:
                 self.history_buffer.append(item)
@@ -1241,6 +1361,11 @@ class TurnRunner:
 
         # === 阶段 1：按发起序 emit Started + 解析参数 + 建请求（暂不写历史）===
         requests: list[ToolCallRequest] = []
+        origin_samples = {
+            tc["call_id"]: tc["origin_sample_id"]
+            for tc in tool_calls
+            if tc.get("origin_sample_id")
+        }
         for idx, tc in enumerate(tool_calls):
             call_id = tc["call_id"]
             name = tc["name"]
@@ -1315,6 +1440,7 @@ class TurnRunner:
                 finalization_timeout=(
                     self.audit_state.coordinator.finalization_timeout
                 ),
+                origin_sample_ids=origin_samples,
             )
             self.history_buffer.extend(fco_items)
             return assistant_text, True
@@ -1336,7 +1462,7 @@ class TurnRunner:
             # audit：function_call 已在最终响应批中 durable + 应用到 hot history，
             # 此处不得重复入史 / 直写 projection store（transcript 唯一写者是
             # projector）。legacy：保持逐 call 配对写 fc。
-            if self.audit_state is None:
+            if self.audit_state is None and not is_responses:
                 self.history_buffer.append(fc_item)
                 await self.store.append(fc_item)
             # turn-rewind：记本次派发的 dispatch 回访节点（仅 root turn）。
@@ -1369,6 +1495,16 @@ class TurnRunner:
                 thread_id=self.thread_id,
                 is_error=outcome.result.is_error,
             )
+            origin_sample_id = origin_samples.get(req.call_id)
+            if origin_sample_id:
+                fco_item = fco_item.model_copy(
+                    update={
+                        "metadata": {
+                            **fco_item.metadata,
+                            "origin_llm_sample_id": origin_sample_id,
+                        }
+                    }
+                )
             self.history_buffer.append(fco_item)
             # audit：function_call_output 的 durable + projection 归 §8 Tool 收敛；
             # 此处只入 hot history，不直写 projection store（避免与 projector 竞写）。

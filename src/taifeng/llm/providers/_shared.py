@@ -289,14 +289,16 @@ def extract_usage_openai_family(raw: dict[str, Any]) -> TokenUsage:
     DeepSeek 还有 ``prompt_cache_miss_tokens`` —— 当前不映射，业务侧通过
     ``TokenUsage.raw`` 读原始值。
     """
-    pt = int(raw.get("prompt_tokens", 0) or 0)
-    ct = int(raw.get("completion_tokens", 0) or 0)
+    pt = int(raw.get("prompt_tokens", raw.get("input_tokens", 0)) or 0)
+    ct = int(raw.get("completion_tokens", raw.get("output_tokens", 0)) or 0)
     tt = int(raw.get("total_tokens", pt + ct) or (pt + ct))
 
     # cache_read 三优先级查找
     cache_read = raw.get("cache_read_input_tokens")
     if not cache_read:
         pt_details = raw.get("prompt_tokens_details")
+        if not isinstance(pt_details, dict):
+            pt_details = raw.get("input_tokens_details")
         if isinstance(pt_details, dict):
             cache_read = pt_details.get("cached_tokens")
     if not cache_read:
@@ -307,6 +309,8 @@ def extract_usage_openai_family(raw: dict[str, Any]) -> TokenUsage:
 
     # reasoning_tokens（OpenAI o1 / DeepSeek R1）
     ct_details = raw.get("completion_tokens_details")
+    if not isinstance(ct_details, dict):
+        ct_details = raw.get("output_tokens_details")
     reasoning = 0
     if isinstance(ct_details, dict):
         reasoning = int(ct_details.get("reasoning_tokens", 0) or 0)

@@ -8,13 +8,26 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.client import TEXT_ONLY_CAPABILITIES, ModelCapabilities
+from taifeng.llm.errors import InvalidHistoryError
 from taifeng.llm.image_input import (
     DISABLED_IMAGE_POLICY,
     ImageAttachmentV1,
     ImageInputPolicy,
     admit_image_attachments,
 )
-from taifeng.llm.types import ApiMessage, ApiRequest, CacheBreakpoint, ImagePart, TextPart
+from taifeng.llm.types import (
+    ApiFunctionCallItem,
+    ApiFunctionCallOutputItem,
+    ApiInputItem,
+    ApiMessage,
+    ApiMessageItem,
+    ApiProviderStateItem,
+    ApiRequest,
+    CacheBreakpoint,
+    ImagePart,
+    ProviderStateEnvelope,
+    TextPart,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -356,6 +369,110 @@ def _convert_history(
     return out, src
 
 
+def _metadata_sample_id(item: ResponseItem, key: str) -> str | None:
+    """读取 Responses 保留 sample metadata，并拒绝畸形值。"""
+    value = item.metadata.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise InvalidHistoryError(f"{key} must be a non-empty string")
+    return value
+
+
+def _provider_output_index(item: ResponseItem, fallback: int) -> int:
+    """读取 provider output index；legacy 记录使用确定性 history 下标。"""
+    value = item.metadata.get("provider_output_index", fallback)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise InvalidHistoryError("provider_output_index must be non-negative")
+    return value
+
+
+def _history_to_api_input_items(
+    history: list[ResponseItem],
+    *,
+    image_input_policy: ImageInputPolicy,
+    model_capabilities: ModelCapabilities,
+) -> tuple[list[ApiInputItem], list[int]]:
+    """把 durable history 投影成 Responses/状态门禁使用的严格有序 Items。"""
+    output: list[ApiInputItem] = []
+    sources: list[int] = []
+    current_sample: str | None = None
+    call_samples: dict[str, str] = {}
+    for index, item in enumerate(history):
+        if item.kind == "reasoning":
+            current_sample = _metadata_sample_id(item, "llm_sample_id")
+            raw_state = item.payload.get("provider_state")
+            if raw_state is not None:
+                if current_sample is None:
+                    raise InvalidHistoryError("provider state requires llm_sample_id")
+                output.append(
+                    ApiProviderStateItem(
+                        sample_id=current_sample,
+                        output_index=_provider_output_index(item, index),
+                        state=ProviderStateEnvelope.model_validate(raw_state),
+                    )
+                )
+                sources.append(index)
+            continue
+        if item.kind == "assistant_message":
+            current_sample = _metadata_sample_id(item, "llm_sample_id") or current_sample
+            output.append(
+                ApiMessageItem(
+                    role="assistant",
+                    content=str(item.payload.get("text", "")),
+                    sample_id=current_sample,
+                    output_index=_provider_output_index(item, index),
+                )
+            )
+            sources.append(index)
+            continue
+        if item.kind == "function_call":
+            call_id = str(item.payload.get("call_id", ""))
+            sample_id = _metadata_sample_id(item, "llm_sample_id") or current_sample
+            if not sample_id:
+                sample_id = f"legacy:sample:{index}"
+            if not call_id or call_id in call_samples:
+                raise InvalidHistoryError("function call ids must be non-empty and unique")
+            call_samples[call_id] = sample_id
+            current_sample = sample_id
+            output.append(
+                ApiFunctionCallItem(
+                    call_id=call_id,
+                    name=str(item.payload.get("name", "")),
+                    arguments=str(item.payload.get("arguments", "{}")),
+                    sample_id=sample_id,
+                    output_index=_provider_output_index(item, index),
+                )
+            )
+            sources.append(index)
+            continue
+        if item.kind == "function_call_output":
+            call_id = str(item.payload.get("call_id", ""))
+            origin = _metadata_sample_id(item, "origin_llm_sample_id")
+            origin = origin or call_samples.get(call_id)
+            if not call_id or not origin:
+                raise InvalidHistoryError("function output has no matching sample")
+            output.append(
+                ApiFunctionCallOutputItem(
+                    call_id=call_id,
+                    output=str(item.payload.get("output", "")),
+                    origin_sample_id=origin,
+                )
+            )
+            sources.append(index)
+            continue
+        message = _item_to_api_message(
+            item,
+            image_input_policy=image_input_policy,
+            model_capabilities=model_capabilities,
+        )
+        if message is not None and message.role != "tool":
+            output.append(ApiMessageItem(role=message.role, content=message.content))
+            sources.append(index)
+            current_sample = None
+    return output, sources
+
+
 def build_api_request(
     *,
     entry: SkillDefinition,
@@ -381,12 +498,30 @@ def build_api_request(
         recall_threshold=recall_threshold,
         has_recall_backend=has_recall_backend,
     )
-    messages, source_indexes = _convert_history(
-        history,
-        include_reasoning=reasoning_passback,
-        image_input_policy=image_input_policy or DISABLED_IMAGE_POLICY,
-        model_capabilities=model_input_capabilities or TEXT_ONLY_CAPABILITIES,
+    resolved_policy = image_input_policy or DISABLED_IMAGE_POLICY
+    resolved_capabilities = model_input_capabilities or TEXT_ONLY_CAPABILITIES
+    contains_provider_state = any(
+        item.kind == "reasoning" and item.payload.get("provider_state") is not None
+        for item in history
     )
+    use_ordered_items = (
+        resolved_capabilities.protocol == "responses" or contains_provider_state
+    )
+    input_items: list[ApiInputItem] | None = None
+    if use_ordered_items:
+        input_items, source_indexes = _history_to_api_input_items(
+            history,
+            image_input_policy=resolved_policy,
+            model_capabilities=resolved_capabilities,
+        )
+        messages = []
+    else:
+        messages, source_indexes = _convert_history(
+            history,
+            include_reasoning=reasoning_passback,
+            image_input_policy=resolved_policy,
+            model_capabilities=resolved_capabilities,
+        )
 
     # cache anchor 坐标换算(cache-anchor-message-index):anchor 是 history
     # 下标(压缩 anchor_preserved_until,[0, N) 为稳定前缀),CacheBreakpoint.index
@@ -402,18 +537,19 @@ def build_api_request(
     # K3 prefetch（page-in）：把取回的长期记忆作为**尾部** system 消息注入，
     # 不动 system_prompt 头部（R2 cache-aware：变动的 prefetch 不破坏 cached 前缀）。
     if prefetched_memory:
-        messages.append(
-            ApiMessage(
-                role="system",
-                content=f"<retrieved_memory>\n{prefetched_memory}\n</retrieved_memory>",
-            )
-        )
+        memory_content = f"<retrieved_memory>\n{prefetched_memory}\n</retrieved_memory>"
+        if input_items is not None:
+            input_items.append(ApiMessageItem(role="system", content=memory_content))
+        else:
+            messages.append(ApiMessage(role="system", content=memory_content))
 
-    return ApiRequest(
-        model=model,
-        system_prompt=[system_prompt],
-        messages=messages,
-        tools=tools,
-        parallel_tool_calls=True,
-        cache_breakpoints=breakpoints,
-    )
+    common = {
+        "model": model,
+        "system_prompt": [system_prompt],
+        "tools": tools,
+        "parallel_tool_calls": True,
+        "cache_breakpoints": breakpoints,
+    }
+    if input_items is not None:
+        return ApiRequest(input_items=input_items, **common)
+    return ApiRequest(messages=messages, **common)
