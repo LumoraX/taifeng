@@ -72,8 +72,21 @@ await EnginePool.create(
 )
 ```
 
-Pool 将两者逐层传给 `AgentEngine` / `TurnRunner`；`history_to_api_messages()` 以显式关键字参数
-接收 policy 和已解析的 client capabilities，不读取全局变量或环境变量。
+公共签名使用兼容默认值：
+
+```python
+image_input_policy: ImageInputPolicy | None = None
+input_cost_estimator: InputCostEstimator | None = None
+```
+
+`image_input_policy=None` 解析为不可变 `DISABLED_IMAGE_POLICY`；文本路径不做图片检查或额外
+解码。policy enabled 但 estimator 为 `None` 时使用
+`ConservativeImageCostEstimator(policy.unknown_model_token_ceiling)`。因此现有 Pool、
+custom client 与纯文本 `history_to_api_messages()` 调用不需要新增参数。
+
+Pool 将两者逐层传给 `AgentEngine` / `TurnRunner`；`history_to_api_messages()` 的新增关键字参数
+默认分别为 disabled policy、text-only capabilities 与 text-only estimator。运行时由 TurnRunner
+显式传入解析值，不读取全局变量或环境变量。
 
 `ModelClient` 增加只读能力描述：
 
@@ -93,8 +106,9 @@ text-only，测试可在构造时显式启用 image modality，以验证 provide
 text+image/responses 并接受 OpenAI Responses provider state。
 
 TurnRunner 在转换前同时检查业务 policy 与 client capability。所有未改造 adapter 在序列化前再
-执行 defense-in-depth part validation：遇到 `ImagePart` 或非本协议 provider state 必须抛
-`unsupported_modality`，不得把 Pydantic 对象或未知 dict 原样发送给 provider。
+执行 defense-in-depth part validation：遇到 `ImagePart` 必须抛 `unsupported_modality`；遇到
+不属于当前 provider/protocol 的 `ApiProviderStateItem` 必须抛 `invalid_history`。不得把
+Pydantic 对象或未知 dict 原样发送给 provider。
 
 ### provider 目录
 
@@ -218,16 +232,29 @@ type ApiInputItem = (
 
 
 class ApiRequest(BaseModel):
-    messages: list[ApiMessage]       # 现有 Message provider 兼容视图
-    input_items: list[ApiInputItem]  # 有序单一历史视图，Responses 使用
+    messages: list[ApiMessage] = Field(default_factory=list)
+    input_items: list[ApiInputItem] | None = None
     ...
 ```
 
-`_convert_history()` 必须在同一个循环中同时生成 `messages` 与 `input_items`，不能由两套
-独立 converter 重扫 history。`messages` 是为了兼容现有 provider 的确定性 coalesced view；
-`input_items` 保持 conversation item 顺序及 provider `output_index`。测试必须断言两种视图
-中的文字、call id、tool output 与图片次序等价。第一阶段 Responses 只消费
-`input_items`，Chat/现有 provider 只消费 `messages`。
+validated `ApiRequest.input_items` 是规范源。构造规则为：
+
+- 旧调用方只传 `messages`：validator 用单一 `messages_to_input_items()` 生成不含 provider
+  state 的 ordered Items。
+- 新调用方只传 `input_items`：validator 用单一 `input_items_to_messages()` 生成 coalesced
+  Message compatibility view。
+- 两者都传：validator 从 `input_items` 重新派生 messages 并做完整结构比较；不一致时以
+  `invalid_request` 拒绝。
+- 两者都为空表示合法空 history。
+- validation 完成后 `input_items` 永不为 `None`；任何 provider 不得自己决定选择哪一份输入。
+
+`input_items_to_messages()` 不把 provider state 渲染成文本；它只生成 semantic compatibility
+messages，opaque state 仍仅存在于规范 `input_items`，由 client capability gate 决定是否接受。
+
+`_convert_history()` 只生成 ordered `input_items` 与 source index，再调用同一个
+`input_items_to_messages()` 生成 compatibility view，不能维护第二套 history 扫描逻辑。
+第一阶段 Responses 只消费规范 `input_items`，Chat/现有 provider 只消费从它派生的
+`messages`。测试必须断言文字、call id、tool output 与图片次序等价。
 
 ### Responses opaque provider state
 
@@ -241,6 +268,37 @@ class ProviderStateEnvelope(BaseModel):
     protocol: str
     item_type: str
     payload: dict[str, JsonValue]
+```
+
+Responses adapter 的 terminal normalized output 使用显式类型：
+
+```python
+class NormalizedReasoningOutput(BaseModel):
+    type: Literal["reasoning"]
+    output_index: int
+    visible_text: str
+    state: ProviderStateEnvelope | None
+
+
+class NormalizedMessageOutput(BaseModel):
+    type: Literal["message"]
+    output_index: int
+    text: str
+
+
+class NormalizedFunctionCallOutput(BaseModel):
+    type: Literal["function_call"]
+    output_index: int
+    call_id: str
+    name: str
+    arguments: str
+
+
+type NormalizedOutputItem = (
+    NormalizedReasoningOutput
+    | NormalizedMessageOutput
+    | NormalizedFunctionCallOutput
+)
 ```
 
 OpenAI Responses 只允许持久化经过白名单投影的 `id`、`type`、`encrypted_content`、
@@ -270,10 +328,13 @@ strict audit 的 `_ReasoningItemPayload` 增加可选强类型 `provider_state`�
 canonical metadata 保持兼容。这样 legacy JSONL、strict audit Journal 和 hot history 使用同一
 数据形状。
 
-provider 通过内部 `ResponseEvent(kind="provider_state")` 把它交给 TurnRunner；TurnRunner
-必须在公开 `EventMsg` 分发前截获并持久化，禁止把 `encrypted_content` 放入 console、
-JSONL telemetry、OTel 或业务 SSE。可见 reasoning summary 仍走现有
-`reasoning_delta`/`reasoning` 文本路径。
+provider 在 `response.completed` 后通过一次内部
+`ResponseEvent(kind="normalized_output", data={"items": [...]})` 把完整有序列表交给
+TurnRunner。该事件必须位于公开 `completed` 前，且只允许出现一次。TurnRunner 截获它并按
+`output_index` 创建带 sample metadata 的 conversation Items；它不再尝试从 text/tool delta
+反推 Responses output boundaries。`normalized_output` 不进入公开 `EventMsg`、console、JSONL
+telemetry、OTel 或业务 SSE。可见 reasoning summary 仍可实时走
+`reasoning_delta`，但 durable reasoning 以 terminal normalized Item 为准。
 
 ## prompt 与历史转换
 
@@ -292,7 +353,10 @@ ApiMessage(role="user", content=[TextPart?, ImagePart...])
 Responses opaque reasoning Item 不塞入 `ApiMessage.content`。它按
 `provider_output_index` 进入 `ApiRequest.input_items`，Responses adapter 因而能在对应
 assistant/function call 之前原位重建；不存在与 messages 脱节的 flat state list。Chat 与其他
-provider 不消费 `ApiProviderStateItem`，并且不得把它转成文本。
+provider 在历史不含 provider state 时正常使用 compatibility messages；一旦存在 foreign
+`ApiProviderStateItem`，必须在网络前以 `invalid_history` fail closed，既不忽略也不转成文本。
+因此同一 thread 从 Responses 切换到 Chat/其他 provider 需要先通过显式 compaction/rewind
+移除完整 Responses sample group，不能隐式丢状态切换。
 
 ### durable sample 分组
 
@@ -306,9 +370,18 @@ provider 不消费 `ApiProviderStateItem`，并且不得把它转成文本。
 同一 sample 的 reasoning、assistant message、全部并行 function calls，以及这些 calls 后续产生的
 function outputs 组成一个配对图。新记录一律依靠显式 sample metadata 分组，不依靠物理邻接。
 
-兼容旧 JSONL 时，缺少 sample metadata 的 history 使用现有确定性窗口算法：从 assistant/reasoning
-开窗，收集其后的 function calls，并按全局唯一 `call_id` 关联 outputs；遇到下一条 user/system/
-compacted/assistant message 关窗。存在重复 call id、孤立 output 或无法唯一归属时判
+兼容旧 JSONL 时，缺少 sample metadata 的 history 使用确定性窗口算法：
+
+1. reasoning 只进入 `pending_reasoning`，尚不单独开窗。
+2. 紧随其后的第一条 assistant 消费全部 pending reasoning 并开启同一个 sample window；它不会
+   关闭 reasoning。
+3. 如果 function call 在 assistant 前出现，它消费 pending reasoning 并开启 tool-only window。
+4. 当前 window 收集后续 function calls；outputs 不改变窗口，并按全局唯一 `call_id` 关联。
+5. user/system/compacted 或下一条 reasoning 关闭当前 window；无 pending reasoning 的下一条
+   assistant 关闭旧 window 并开启新 window。
+6. suspension/记账 marker 跨过保窗，resume 后 output 仍按 call id 回到原 window。
+
+存在重复 call id、孤立 output、连续 reasoning 无法确定 output order 或其他无法唯一归属时判
 `invalid_history`，不猜测归属。
 
 ## OpenAI Chat 协议
@@ -412,6 +485,9 @@ Items、visible text、function arguments 与 encrypted reasoning state。流式
 现有 UI 语义发布，但不能直接写 conversation history。
 
 - 收到 `response.completed` 后才 finalize normalized Items。
+- accumulator finalize 后先发唯一内部 `normalized_output`，再发公开 `completed`；TurnRunner
+  必须收到 normalized output 才能把 Responses attempt 视为可提交，缺失/重复均为
+  `invalid_response`。
 - 成功 attempt 的 checkpoint 可以包含白名单化 provider state，随后
   `llm_response_committed + reasoning/assistant/function_call conversation_item*` 作为现有单一
   原子 batch 提交；只有该 batch 的 durable ack 才推进 hot history/projector。
@@ -423,7 +499,34 @@ Items、visible text、function arguments 与 encrypted reasoning state。流式
   `llm_response_committed` batch 为可见边界。
 
 非 audit JSONL 路径同样只在完整 `response.completed` 后追加整组 Items；失败/incomplete 不追加
-部分 reasoning 或 tool call。
+部分 reasoning 或 tool call。完整组还必须使用下述 commit frame 获得 crash-atomic visibility。
+
+### 默认 JSONL batch visibility
+
+默认 `MessageStore.append_batch()` 增加向后兼容的 transport frame，不新增 conversation
+`ItemKind`：
+
+```json
+{"frame":"item_batch_begin","batch_id":"...","item_ids":["..."],"digest":"..."}
+{"kind":"reasoning", "metadata":{"commit_batch_id":"..."}, "...":"..."}
+{"kind":"assistant_message", "metadata":{"commit_batch_id":"..."}, "...":"..."}
+{"frame":"item_batch_commit","batch_id":"...","item_ids":["..."],"digest":"..."}
+```
+
+- `batch_id` 使用 logical sample id；item ids、顺序与 canonical digest 在 begin/commit 中必须一致。
+- writer 在同一个 append lock 内写 begin、全部 item lines、commit，完成 flush/fsync 后才返回 ack；
+  hot history 只在 ack 后推进。
+- reader 对旧版无 frame lines 保持立即可见。对带 `commit_batch_id` 的新 lines 先按 batch 缓冲，
+  只有读到匹配且 digest 正确的 commit frame 才一次性发布全部 Items。
+- EOF、损坏行、缺项、digest 不符或只有 begin 没有 commit 的 batch 全部不可见；后续合法 batch
+  仍可继续读取。orphan frame 不转换为 conversation item。
+- reasoning、assistant 和 function calls 属于 LLM response batch；后续 tool outputs 可使用现有
+  tool outcome 原子边界单独提交，但必须带 `origin_llm_sample_id`。
+- strict audit 继续使用 Journal 原子 batch，不重复增加 JSONL frame；projector 只有在 Journal ack
+  后物化完整 batch。
+
+这样进程在任意 line boundary 崩溃时都不会向 cold resume 暴露部分 encrypted reasoning 或孤立
+function call，同时保持 append-only 与旧 transcript 可读。
 
 ### Responses SSE 归一化
 
@@ -434,8 +537,7 @@ Items、visible text、function arguments 与 encrypted reasoning state。流式
 | `response.function_call_arguments.delta` | `tool_call_delta` |
 | function call arguments/item done | 单次 `tool_call_done` |
 | reasoning summary text delta | `reasoning_delta` |
-| reasoning item with encrypted content | 内部 `provider_state` |
-| `response.completed` | usage/cache + `completed` |
+| `response.completed` | 内部 `normalized_output`，随后 usage/cache + `completed` |
 | `response.failed` / error event | 分类后的 `error` 并抛对应 `LLMError` |
 | `response.incomplete` | 按 incomplete reason 分类，不伪装成功 |
 
@@ -515,9 +617,16 @@ OpenAI estimator 按官方 patch/tile 规则实现已登记模型；GPT-5.6 的 
   原始 canonical base64 和 lineage。
 - preserve tail 命中的图片消息必须完整保留。
 - Responses reasoning/function group 按 `llm_sample_id` 与 `origin_llm_sample_id` 配对图原子保留
-  或删除。任何策略提出 cut index 后，公共 boundary expander 向两侧扩展到完整 sample group；
-  多个并行 calls、交错 outputs、suspension marker 与 resume 后补写 output 均按显式 metadata/call id
-  纳入同组。无法唯一成组时压缩 fail closed，不修改 history。
+  或删除。任何策略提出单一 candidate `replaced_range=[start,end)` 后，公共 boundary resolver
+  计算所有相交 sample groups 的传递闭包，闭包仍表示一个连续 range；中间 suspension/记账项随该
+  连续 closure 一起处理，不产生多段替换。
+- preserve tail、当前 live suspension 与 pinned state 的 protected range 优先级最高。如果 closure
+  与 protected range 相交，resolver 不向 protected range 扩展，而是把 candidate `end` 收缩到最早
+  相交 sample group 的起点，完整保留该 group 及其间所有 Items；随后重新计算闭包。若收缩后无
+  可删除内容，本次压缩 no-op，并由现有 resource/overflow 语义决定是否失败。
+- 不与 protected range 相交时，resolver 才向两侧扩展到完整 closure。多个并行 calls、交错
+  outputs、suspension marker 与 resume 后补写 output 均按显式 metadata/call id 纳入同组。无法
+  唯一成组时压缩 fail closed，不修改 history。
 - 旧 history 使用“durable sample 分组”一节的兼容算法计算临时 group；所有可能 cut position 都有
   pair-safety 参数化测试。
 - 压缩仍必须返回 `cache_invalidated` 与 `anchor_preserved_until`。
@@ -538,6 +647,7 @@ OpenAI estimator 按官方 patch/tile 规则实现已登记模型；GPT-5.6 的 
 | `unsupported_image_detail` | model/protocol 不支持请求 detail | false |
 | `unsupported_combination` | Chat tools 与不支持的 reasoning effort 组合 | false |
 | `invalid_history` | Responses Item/reasoning/tool 配对不完整 | false |
+| `invalid_response` | Responses 缺失/重复 terminal normalized output 或 Item 边界非法 | false |
 | `transient_network` | timeout、transport、可重试 5xx/429 | true |
 
 provider 400 中能稳定识别 modality/detail/context 的错误映射到对应 kind；无法稳定识别的保留
@@ -579,6 +689,8 @@ redaction 替换为包含 count/bytes/media/detail 的 descriptor，不能沿用
 - text-first、attachment order 稳定。
 - text/image 同时为空拒绝。
 - 旧 JSONL 无 detail 按 `auto` 恢复。
+- `ApiRequest` messages-only、items-only、两者等价与两者冲突四种构造路径。
+- Pool/history helper 省略新参数时，现有 text-only 行为逐字节不变。
 
 ### provider wire
 
@@ -587,6 +699,10 @@ redaction 替换为包含 count/bytes/media/detail 的 descriptor，不能沿用
   `include`、`store=false`，且不含 `previous_response_id`。
 - 两协议分别覆盖 text/tool/image SSE 分片、usage、rate-limit、request-id、失败、incomplete、
   cancellation 与重复 done 去重。
+- Responses SSE 覆盖多个 output Items、reasoning/message/并行 function calls 交错，以及唯一
+  terminal `normalized_output` 的 index/order。
+- Responses history 切换到 Chat/其他 provider 时稳定 `invalid_history`；移除完整 Responses
+  sample group 后可切换。
 - `OpenAICompatClient` 现有 payload 和 兼容端点测试保持通过。
 
 ### Sim conformance 与集成
@@ -605,6 +721,10 @@ UserMessage
 
 关闭并重新创建 Engine 后，从 JSONL 冷恢复并断言 payload 等价。另覆盖图片消息压缩、cache anchor、
 Responses encrypted reasoning + tool call/output 配对、无正文 telemetry。
+
+默认 JSONL 对 batch begin、每条 item、commit 与 fsync 前后逐边界注入 crash；恢复时只有完整且
+digest 匹配的 committed batch 可见。压缩对每个 candidate cut position 参数化验证 sample closure
+与 preserve-tail 优先级。
 
 ### 真实 GPT-5.6
 
