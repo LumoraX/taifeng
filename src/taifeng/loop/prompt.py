@@ -7,7 +7,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from taifeng.llm.types import ApiMessage, ApiRequest, CacheBreakpoint
+from taifeng.llm.client import TEXT_ONLY_CAPABILITIES, ModelCapabilities
+from taifeng.llm.image_input import (
+    DISABLED_IMAGE_POLICY,
+    ImageAttachmentV1,
+    ImageInputPolicy,
+    admit_image_attachments,
+)
+from taifeng.llm.types import ApiMessage, ApiRequest, CacheBreakpoint, ImagePart, TextPart
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -156,14 +163,51 @@ def render_system_prompt(
     return body
 
 
-def _item_to_api_message(it: ResponseItem) -> ApiMessage | None:
+def _item_to_api_message(
+    it: ResponseItem,
+    *,
+    image_input_policy: ImageInputPolicy,
+    model_capabilities: ModelCapabilities,
+) -> ApiMessage | None:
     """非采样产出的单条 ResponseItem → ApiMessage;记账类 kind 返回 None。
 
     assistant_message / function_call / function_call_output 在
     ``history_to_api_messages`` 主循环内特殊处理(同轮合并),不走本函数。
     """
     if it.kind == "user_message":
-        return ApiMessage(role="user", content=str(it.payload.get("text", "")))
+        text = str(it.payload.get("text", ""))
+        raw_attachments = it.payload.get("attachments", [])
+        images = (
+            [
+                attachment
+                for attachment in raw_attachments
+                if isinstance(attachment, dict) and attachment.get("kind") == "image"
+            ]
+            if isinstance(raw_attachments, list)
+            else []
+        )
+        if not images:
+            return ApiMessage(role="user", content=text)
+        if "image" not in model_capabilities.input_modalities:
+            from taifeng.llm.errors import UnsupportedModalityError
+
+            raise UnsupportedModalityError("model client does not support image input")
+        attachments = [ImageAttachmentV1.model_validate(image) for image in images]
+        inspected = admit_image_attachments(attachments, image_input_policy)
+        parts: list[TextPart | ImagePart] = []
+        if text:
+            parts.append(TextPart(text=text))
+        parts.extend(
+            ImagePart(
+                media_type=image.attachment.media_type,
+                base64_data=image.attachment.content,
+                size=image.attachment.size,
+                sha256=image.attachment.sha256,
+                detail=image.attachment.detail,
+            )
+            for image in inspected
+        )
+        return ApiMessage(role="user", content=parts)
     if it.kind == "system_injection":
         # suspend_resolved 是 resume 的幂等记账 marker（engine._find_active_suspension
         # 据它跳过已消费的挂起），非 LLM-facing；若渲染成对话中段的 role="system"，
@@ -199,6 +243,8 @@ def history_to_api_messages(
     items: Iterable[ResponseItem],
     *,
     include_reasoning: bool = True,
+    image_input_policy: ImageInputPolicy | None = None,
+    model_capabilities: ModelCapabilities | None = None,
 ) -> list[ApiMessage]:
     """把 ResponseItem 序列转 ApiMessage 序列(同轮合并重建)。
 
@@ -215,13 +261,20 @@ def history_to_api_messages(
     history 必然重建出同一消息序(R2 前缀稳定);压缩剪枝产生的孤儿 reasoning
     (其后首条产出消息非 assistant)确定性跳过。
     """
-    return _convert_history(items, include_reasoning=include_reasoning)[0]
+    return _convert_history(
+        items,
+        include_reasoning=include_reasoning,
+        image_input_policy=image_input_policy or DISABLED_IMAGE_POLICY,
+        model_capabilities=model_capabilities or TEXT_ONLY_CAPABILITIES,
+    )[0]
 
 
 def _convert_history(
     items: Iterable[ResponseItem],
     *,
     include_reasoning: bool,
+    image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY,
+    model_capabilities: ModelCapabilities = TEXT_ONLY_CAPABILITIES,
 ) -> tuple[list[ApiMessage], list[int]]:
     """转换循环的单一来源:返回 ``(messages, source_indexes)``。
 
@@ -245,11 +298,13 @@ def _convert_history(
                 pending_reasoning = str(it.payload.get("text", "")) or None
             continue
         if it.kind == "assistant_message":
-            out.append(ApiMessage(
-                role="assistant",
-                content=str(it.payload.get("text", "")),
-                reasoning=pending_reasoning,
-            ))
+            out.append(
+                ApiMessage(
+                    role="assistant",
+                    content=str(it.payload.get("text", "")),
+                    reasoning=pending_reasoning,
+                )
+            )
             src.append(idx)
             window_idx = len(out) - 1
             pending_reasoning = None
@@ -263,23 +318,33 @@ def _convert_history(
             else:
                 # 无前导 assistant 的孤立 fc(剪枝后的旧数据):独立成消息,
                 # 自身即本轮的合并窗口(后续同轮 fc 仍归并到它)
-                out.append(ApiMessage(
-                    role="assistant", content="", tool_calls=[tc],
-                    reasoning=pending_reasoning,
-                ))
+                out.append(
+                    ApiMessage(
+                        role="assistant",
+                        content="",
+                        tool_calls=[tc],
+                        reasoning=pending_reasoning,
+                    )
+                )
                 src.append(idx)
                 window_idx = len(out) - 1
                 pending_reasoning = None
             continue
         if it.kind == "function_call_output":
-            out.append(ApiMessage(
-                role="tool",
-                content=str(it.payload.get("output", "")),
-                tool_call_id=str(it.payload.get("call_id", "")),
-            ))
+            out.append(
+                ApiMessage(
+                    role="tool",
+                    content=str(it.payload.get("output", "")),
+                    tool_call_id=str(it.payload.get("call_id", "")),
+                )
+            )
             src.append(idx)
             continue
-        msg = _item_to_api_message(it)
+        msg = _item_to_api_message(
+            it,
+            image_input_policy=image_input_policy,
+            model_capabilities=model_capabilities,
+        )
         if msg is None:
             # 记账类 item 对 LLM 视图不存在,跨过它们保窗保 pending(确定性)
             continue
@@ -314,9 +379,7 @@ def build_api_request(
         recall_threshold=recall_threshold,
         has_recall_backend=has_recall_backend,
     )
-    messages, source_indexes = _convert_history(
-        history, include_reasoning=reasoning_passback
-    )
+    messages, source_indexes = _convert_history(history, include_reasoning=reasoning_passback)
 
     # cache anchor 坐标换算(cache-anchor-message-index):anchor 是 history
     # 下标(压缩 anchor_preserved_until,[0, N) 为稳定前缀),CacheBreakpoint.index
@@ -332,10 +395,12 @@ def build_api_request(
     # K3 prefetch（page-in）：把取回的长期记忆作为**尾部** system 消息注入，
     # 不动 system_prompt 头部（R2 cache-aware：变动的 prefetch 不破坏 cached 前缀）。
     if prefetched_memory:
-        messages.append(ApiMessage(
-            role="system",
-            content=f"<retrieved_memory>\n{prefetched_memory}\n</retrieved_memory>",
-        ))
+        messages.append(
+            ApiMessage(
+                role="system",
+                content=f"<retrieved_memory>\n{prefetched_memory}\n</retrieved_memory>",
+            )
+        )
 
     return ApiRequest(
         model=model,
