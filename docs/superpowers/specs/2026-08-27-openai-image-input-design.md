@@ -275,9 +275,10 @@ Responses adapter 的 terminal `NormalizedOutputItem` 是显式 discriminated un
 - `reasoning(output_index, visible_text, state?)`
 - `message(output_index, text)`
 - `function_call(output_index, call_id, name, arguments)`
+- `refusal(output_index, text)`
 
-三种类型均为 frozen Pydantic model，拒绝额外字段；列表严格按唯一、递增
-`output_index` 排列。
+四种类型均为 frozen Pydantic model，拒绝额外字段；列表严格按唯一、递增
+`output_index` 排列。refusal 只用于 finalize 分类，存在时走 error branch，不进入 committed list。
 
 OpenAI Responses 只允许持久化经过白名单投影的 `id`、`type`、`encrypted_content`、
 `summary` 与必要 status 字段，不保存整个原始 response。该 envelope 附着在现有
@@ -495,8 +496,9 @@ async def append_atomic_batch(
 ) -> BatchAppendAck: ...
 ```
 
-默认 JSONL store 实现该协议；Responses client 启用时，custom store 若不实现则在 Pool 构造期以
-`unsupported_persistence_capability` 拒绝。现有 `append_batch(items)` 及非 LLM batch 完全不变。
+默认 JSONL store 实现该协议；非 audit Responses 使用 custom store 时，若不实现则在 Pool 构造期
+以 `unsupported_persistence_capability` 拒绝；strict-audit Journal 原子路径显式豁免该 gate。
+现有 `append_batch(items)` 及非 LLM batch 完全不变。
 只有 terminal normalized LLM response group 调用 atomic 方法，`batch_id=llm_sample_id`。
 transport frame 不新增 conversation `ItemKind`：
 
@@ -511,8 +513,8 @@ transport frame 不新增 conversation `ItemKind`：
   顺序与 canonical digest 在 begin/commit 中必须一致。
 - writer 在同一个 append lock 内写 begin、全部 item lines、commit，完成 flush/fsync 后才返回 ack；
   hot history 只在 ack 后推进。
-- reader 对旧版无 frame lines 保持立即可见。对带 `commit_batch_id` 的新 lines 先按 batch 缓冲，
-  只有读到 frame id 匹配且 digest 正确的 commit 才一次性发布全部 Items。
+- reader 对旧版无 frame lines 保持立即可见。只有 matching active begin/commit frame 内才解释
+  `commit_batch_id`；合法 frame id 与 digest 完整匹配后一次性发布全部 Items。
 - EOF、损坏行、缺项、digest 不符或只有 begin 没有 commit 的 batch 全部不可见；后续合法 batch
   仍可继续读取。orphan frame 不转换为 conversation item。
 - committed batch index 以 `batch_id → digest/item_ids` 重建。重试已 committed 的相同 batch/digest
@@ -536,6 +538,7 @@ function call，同时保持 append-only 与旧 transcript 可读。
 | `response.function_call_arguments.delta` | `tool_call_delta` |
 | function call arguments/item done | 单次 `tool_call_done` |
 | reasoning summary text delta | `reasoning_delta` |
+| `response.refusal.delta` / refusal Item | 缓冲；terminal 时 `content_filter` error，不提交 Items |
 | `response.completed` | 内部 `normalized_output`，随后 usage/cache + `completed` |
 | `response.failed` / error event | 分类后的 `error` 并抛对应 `LLMError` |
 | `response.incomplete` | 按 incomplete reason 分类，不伪装成功 |
@@ -705,7 +708,7 @@ redaction 替换为包含 count/bytes/media/detail 的 descriptor，不能沿用
 - 两协议分别覆盖 text/tool/image SSE 分片、usage、rate-limit、request-id、失败、incomplete、
   cancellation 与重复 done 去重。
 - Responses SSE 覆盖多个 output Items、reasoning/message/并行 function calls 交错，以及唯一
-  terminal `normalized_output` 的 index/order。
+  terminal `normalized_output` 的 index/order；refusal 必须转 `content_filter` 且零 durable output。
 - Responses history 切换到 Chat/其他 provider 时稳定 `invalid_history`；移除完整 Responses
   sample group 后可切换。
 - `OpenAICompatClient` 现有 payload 和 兼容端点测试保持通过。
