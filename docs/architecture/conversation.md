@@ -175,6 +175,10 @@ report = await rebuild_index(writer, directory, *, dry_run=False, sink=None)
 
 ## reconstruct_logical_history（冷加载逻辑 history 重建）
 
+图片 user item 把完整 `ImageAttachmentV1` 作为 canonical JSON 保存（MIME、decoded size、SHA-256、裸 base64、detail）；不保存 provider Data URL。冷加载后 prompt 层重新执行 admission，因此磁盘内容被篡改、策略收紧或换到 text-only client 时都会在网络前 fail closed。
+
+OpenAI Responses 的一个 terminal sample 通过 `append_atomic_batch(items, batch_id=llm_sample_id)` 写为 begin/items/commit frames。reader 只发布 digest 与 item ids 完整匹配的首个 commit；崩溃留下的半 batch 不可见，同 batch 同 digest 幂等，不同 digest 报 conflict。reasoning provider state、function call 和后续 `origin_llm_sample_id` 工具结果保持有序，跨进程只需显式 `resume_thread_id` 即可重建，不依赖 provider conversation id。
+
 `src/taifeng/conversation/reconstruct.py` 提供纯函数 `reconstruct_logical_history(raw)`，把 append-only transcript（`load_history` 返回的原始序列）重放成与热内存等价的逻辑 history。纯 CPU、无 IO。对干净 thread（无压缩、无 rewind）是恒等映射，向后兼容。
 
 **为什么需要它**：append-only 主存在两种情况下与热内存 history 发散：

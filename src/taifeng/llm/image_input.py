@@ -6,7 +6,7 @@ import base64
 import binascii
 import hashlib
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -315,3 +315,20 @@ def admit_image_attachments(
             raise InvalidImageError("image must contain exactly one frame")
         inspected.append(InspectedImage(attachment=attachment, width=width, height=height))
     return inspected
+
+
+def redact_image_bodies(value: object) -> Any:
+    """递归脱敏 request JSON 中的图片正文，只保留可审核结构描述。"""
+    if isinstance(value, list):
+        return [redact_image_bodies(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") == "image" and "base64_data" in value:
+        return {
+            "type": "image",
+            "media_type": value.get("media_type"),
+            "size": value.get("size"),
+            "detail": value.get("detail"),
+            "content_redacted": True,
+        }
+    return {key: redact_image_bodies(item) for key, item in value.items()}

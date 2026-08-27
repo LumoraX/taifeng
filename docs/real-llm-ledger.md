@@ -30,6 +30,10 @@
 | `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-07-25 @ `1091853` | 14s |  |
 | `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-07-25 @ `1091853` | 29s |  |
 
+## 未执行验证
+
+- **openai_image_input**：`NOT_EXECUTED` — OpenAI API key unavailable in this verification environment; real GPT-5.6 Chat/Responses image matrix was not executed （`PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider openai --model gpt-5.6`，2026-08-27 09:26:57 UTC @ `959d481`）
+
 ## R3 可观测完整性审计（最近一次全量）
 
 - 发出的事件 kind：27 种

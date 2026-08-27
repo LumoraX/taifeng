@@ -98,11 +98,13 @@ class LedgerWriter:
 
         old_scenarios: dict[str, dict] = {}
         old_audit: dict | None = None
+        not_executed: dict[str, dict] = {}
         if self._json_path.is_file():
             try:
                 old_data = json.loads(self._json_path.read_text(encoding="utf-8"))
                 old_scenarios = old_data.get("scenarios", {})
                 old_audit = old_data.get("r3_audit")
+                not_executed = old_data.get("not_executed", {})
             except (json.JSONDecodeError, OSError):
                 # 旧台账损坏：如实丢弃重建（台账可由重跑再生，不做修补猜测）
                 old_scenarios = {}
@@ -110,6 +112,9 @@ class LedgerWriter:
         merged = dict(old_scenarios)
         for rec in records:
             merged[rec.scenario_id] = asdict(rec)
+        if any(rec.scenario_id.startswith("openai_") and "_image_" in rec.scenario_id
+               for rec in records):
+            not_executed.pop("openai_image_input", None)
 
         data = {
             "run": {
@@ -120,11 +125,48 @@ class LedgerWriter:
                 "scenarios_run": [r.scenario_id for r in records],
             },
             "scenarios": dict(sorted(merged.items())),
+            "not_executed": dict(sorted(not_executed.items())),
             # 部分跑（--only）保留上次全量审计；无旧审计时仍记本次（聊胜于无）
             "r3_audit": asdict(r3) if full_run or old_audit is None else old_audit,
         }
 
         self._json_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(self._json_path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        _atomic_write(self._md_path, _render_md(data))
+        return self._json_path, self._md_path
+
+    def mark_not_executed(
+        self,
+        *,
+        key: str,
+        reason: str,
+        command: str,
+    ) -> tuple[Path, Path]:
+        """在不改写旧真实结果的前提下登记一个当前验证缺口。"""
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if self._json_path.is_file():
+            data = json.loads(self._json_path.read_text(encoding="utf-8"))
+        else:
+            data = {
+                "run": {
+                    "timestamp_utc": timestamp,
+                    "commit": git_short_commit(),
+                    "provider": "not-executed",
+                    "model": "not-executed",
+                    "scenarios_run": [],
+                },
+                "scenarios": {},
+                "r3_audit": asdict(R3Audit()),
+            }
+        gaps = data.setdefault("not_executed", {})
+        gaps[key] = {
+            "status": "NOT_EXECUTED",
+            "reason": reason,
+            "command": command,
+            "commit": git_short_commit(),
+            "timestamp_utc": timestamp,
+        }
+        data["not_executed"] = dict(sorted(gaps.items()))
         _atomic_write(self._json_path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         _atomic_write(self._md_path, _render_md(data))
         return self._json_path, self._md_path
@@ -170,6 +212,14 @@ def _render_md(data: dict) -> str:
         )
 
     r3 = data["r3_audit"]
+    gaps = data.get("not_executed", {})
+    if gaps:
+        lines += ["", "## 未执行验证", ""]
+        for key, gap in gaps.items():
+            lines.append(
+                f"- **{key}**：`{gap['status']}` — {gap['reason']} "
+                f"（`{gap['command']}`，{gap['timestamp_utc']} @ `{gap['commit']}`）"
+            )
     lines += [
         "",
         "## R3 可观测完整性审计（最近一次全量）",

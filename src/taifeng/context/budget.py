@@ -10,9 +10,13 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from taifeng.conversation.models import ResponseItem
+if TYPE_CHECKING:
+    from taifeng.conversation.models import ResponseItem
+    from taifeng.llm.image_input import ImageInputPolicy, InputCostEstimator
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -20,11 +24,61 @@ def estimate_text_tokens(text: str) -> int:
     return max(1, int(len(text) / 3.5))
 
 
-def estimate_item_tokens(item: ResponseItem) -> int:
-    """估算单条 ResponseItem 的 token 占用。"""
+def _estimate_image_tokens(
+    item: ResponseItem,
+    *,
+    image_input_policy: ImageInputPolicy | None,
+    input_cost_estimator: InputCostEstimator | None,
+    model: str,
+) -> int:
+    """估算 user item 内图片 token；有业务策略时复用完整 admission header。"""
+    raw = item.payload.get("attachments", [])
+    if not isinstance(raw, list):
+        return 0
+    images = [value for value in raw if isinstance(value, dict) and value.get("kind") == "image"]
+    if not images:
+        return 0
+    if image_input_policy is None or not image_input_policy.enabled:
+        return 1500 * len(images)
+    from taifeng.llm.image_input import (
+        ConservativeImageCostEstimator,
+        ImageAttachmentV1,
+        admit_image_attachments,
+    )
+
+    attachments = [ImageAttachmentV1.model_validate(value) for value in images]
+    inspected = admit_image_attachments(attachments, image_input_policy)
+    estimator = input_cost_estimator or ConservativeImageCostEstimator(
+        image_input_policy.unknown_model_token_ceiling
+    )
+    return sum(
+        estimator.estimate_image_tokens(
+            model=model,
+            media_type=image.attachment.media_type,
+            width=image.width,
+            height=image.height,
+            detail=image.attachment.detail,
+        )
+        for image in inspected
+    )
+
+
+def estimate_item_tokens(
+    item: ResponseItem,
+    *,
+    image_input_policy: ImageInputPolicy | None = None,
+    input_cost_estimator: InputCostEstimator | None = None,
+    model: str = "",
+) -> int:
+    """估算单条 ResponseItem 的 token 占用，图片走可注入保守估算器。"""
     payload = item.payload
     if item.kind in ("user_message", "assistant_message", "system_injection"):
-        return estimate_text_tokens(str(payload.get("text", "")))
+        return estimate_text_tokens(str(payload.get("text", ""))) + _estimate_image_tokens(
+            item,
+            image_input_policy=image_input_policy,
+            input_cost_estimator=input_cost_estimator,
+            model=model,
+        )
     if item.kind == "function_call":
         return estimate_text_tokens(
             str(payload.get("name", "")) + str(payload.get("arguments", ""))
@@ -38,8 +92,23 @@ def estimate_item_tokens(item: ResponseItem) -> int:
     return 50
 
 
-def estimate_history_tokens(items: list[ResponseItem]) -> int:
-    return sum(estimate_item_tokens(it) for it in items)
+def estimate_history_tokens(
+    items: list[ResponseItem],
+    *,
+    image_input_policy: ImageInputPolicy | None = None,
+    input_cost_estimator: InputCostEstimator | None = None,
+    model: str = "",
+) -> int:
+    """估算完整历史 token，并把统一图片策略传给每条 user item。"""
+    return sum(
+        estimate_item_tokens(
+            item,
+            image_input_policy=image_input_policy,
+            input_cost_estimator=input_cost_estimator,
+            model=model,
+        )
+        for item in items
+    )
 
 
 def estimate_item_bytes(item: ResponseItem) -> int:
@@ -50,7 +119,18 @@ def estimate_item_bytes(item: ResponseItem) -> int:
         value = payload.get(key)
         if value:
             parts.append(str(value))
-    return sum(len(p.encode("utf-8")) for p in parts)
+    size = sum(len(p.encode("utf-8")) for p in parts)
+    attachments = payload.get("attachments")
+    if isinstance(attachments, list) and attachments:
+        size += len(
+            json.dumps(
+                attachments,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+    return size
 
 
 def estimate_history_bytes(items: list[ResponseItem]) -> int:

@@ -121,6 +121,7 @@ class ApiRequest(BaseModel):
 ```
 src/taifeng/llm/providers/
 ├── openai_compat.py        # OpenAI / vLLM / Ollama / one-api 等 OpenAI-compat gateway（含 reasoning_content）
+├── openai/                 # 官方 OpenAI 双协议：Chat Completions + Responses（文字/图片）
 ├── anthropic_provider.py   # Anthropic messages API（cache_control / extended thinking，零 anthropic-sdk）
 ├── gemini_provider.py      # Gemini streamGenerateContent（零 google-genai-sdk）
 ├── deepseek_provider.py    # DeepSeek（openai_compat 薄子类，预设 base_url + prompt_cache_hit_tokens 映射）
@@ -143,6 +144,22 @@ engine = AgentEngine(
     ...
 )
 ```
+
+### OpenAI 图片输入与双协议
+
+OpenAI 不再由一个“兼容客户端”猜协议。业务按 endpoint 显式选择：
+
+| 客户端 | endpoint | 图片 wire | 状态恢复 |
+| --- | --- | --- | --- |
+| `OpenAIChatClient` | `/v1/chat/completions` | `image_url.url = data:<mime>;base64,...` | Chat message/tool history |
+| `OpenAIResponsesClient` | `/v1/responses` | `input_image.image_url = data:<mime>;base64,...` | JSONL 中的 ordered items + encrypted reasoning state |
+| `OpenAICompatClient` | 兼容 `/chat/completions` | 不支持，网络前拒绝 | 原 text-only 行为不变 |
+
+两套官方客户端均 `store=false`。Responses 还固定请求 `include=["reasoning.encrypted_content"]`，不传 `previous_response_id`。其 terminal accumulator 只在 `response.completed` 校验成功后发布唯一 `normalized_output`，TurnRunner 原子提交完整 sample 后才执行工具。
+
+图片正文以 `ImageAttachmentV1` canonical base64 落 conversation；`ApiRequest.input_items` 是有序事实源，provider 只在网络边界临时构造 Data URL。支持 MIME 为 PNG、JPEG、WebP 和单帧 GIF。业务必须显式注入 `ImageInputPolicy(enabled=True, ...)`，否则 durable append 前返回 `unsupported_modality`。
+
+图片 token 预算使用可注入 `InputCostEstimator`；未登记模型走 policy 的非零上界。最终 OpenAI wire JSON 仍受 `ContextBudget.max_request_bytes` 精确 UTF-8 字节门禁。
 
 ## 重试与失败转移
 

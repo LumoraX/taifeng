@@ -286,6 +286,10 @@ tokens until the hard limit)."`）+ emit `budget_hint_injected`。
 
 ## tool_use / tool_result 边界保护
 
+图片与 Responses 又增加一层边界：`context/boundaries.py` 先按 `llm_sample_id`、`origin_llm_sample_id` 和 call id 计算不可分割 closure。任何 sliding/handoff/surgical cut 都必须整体保留或整体删除 reasoning、assistant、并行 function call 与匹配 output；歧义历史 fail closed。
+
+压缩模型只能接收 `CompactionView`。该视图移除图片 base64/Data URL、provider state、`encrypted_content` 和 sample metadata，只留下可见文本与安全结构 marker；原 JSONL conversation 不被改写。图片预算由业务注入的 `InputCostEstimator` 估算，未知模型使用非零 ceiling，最终 wire bytes 另由 provider 精确门禁。
+
 参照 claw-code `compact.rs` 的关键发现：
 
 > Walk the boundary back until we start at a safe point. The first preserved

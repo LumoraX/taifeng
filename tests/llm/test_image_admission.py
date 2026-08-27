@@ -7,6 +7,8 @@ import hashlib
 
 import pytest
 
+from taifeng.context.budget import estimate_item_bytes, estimate_item_tokens
+from taifeng.conversation.models import user_message
 from taifeng.llm import ImageAttachmentV1 as PublicImageAttachmentV1
 from taifeng.llm import ImageInputPolicy as PublicImageInputPolicy
 from taifeng.llm.errors import (
@@ -137,6 +139,38 @@ def test_unknown_model_image_estimate_uses_policy_ceiling() -> None:
         )
         == 321
     )
+
+
+def test_context_budget_counts_image_tokens_and_body_bytes() -> None:
+    """上下文预算必须消费注入的图片估算器，且字节数不能忽略正文。"""
+    attachment = _attachment(_png(width=2, height=3))
+
+    class FixedEstimator:
+        """记录实际收到的图片 header，并返回稳定估值。"""
+
+        calls: list[tuple[int, int]] = []
+
+        def estimate_image_tokens(self, **kwargs: object) -> int:
+            self.calls.append((int(kwargs["width"]), int(kwargs["height"])))
+            return 777
+
+    estimator = FixedEstimator()
+    item = user_message(
+        "inspect",
+        thread_id="thread-image-budget",
+        attachments=[attachment.model_dump()],
+    )
+
+    tokens = estimate_item_tokens(
+        item,
+        image_input_policy=POLICY,
+        input_cost_estimator=estimator,
+        model="gpt-5.6",
+    )
+
+    assert tokens >= 777
+    assert estimator.calls == [(2, 3)]
+    assert estimate_item_bytes(item) >= len(attachment.content.encode("ascii"))
 
 
 def test_image_admission_types_are_available_from_public_llm_api() -> None:

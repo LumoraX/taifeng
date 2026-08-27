@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from capability_matrix import SCENARIOS, _verdict, run_scenario  # noqa: E402
+from test_openai_image_matrix import preflight_openai_image_matrix  # noqa: E402
 
 from taifeng.llm.providers import RoutingSimClient, SimTurn  # noqa: E402
 
@@ -60,6 +61,11 @@ SIM_ROUTES = {
 async def main() -> None:
     """对可静态化的 driver 场景逐个 sim 干跑，断言 PASS。"""
     failures: list[str] = []
+    try:
+        preflight_openai_image_matrix()
+        print("  ✅  openai_image    双协议图片 wire/脱敏预检")
+    except Exception as exc:  # noqa: BLE001 —— 汇总所有零消耗预检失败
+        failures.append(f"openai_image: {type(exc).__name__}: {exc}")
     for sc in SCENARIOS:
         routes = SIM_ROUTES.get(sc.demo_id)
         if routes is None:

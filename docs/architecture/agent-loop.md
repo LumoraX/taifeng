@@ -135,7 +135,7 @@ class AgentEngine:
 - **全局序号 `seq`**：每条 `EventMsg` 带单调 `seq`，在 `engine._emit` 入口同步分配（无 await 让出点 → 原子不重不漏）。作用域单 engine（= 单 session）；落库主键用 `(session_id, seq)`，`session_id` 由订阅方在 sink 边界提供、**不**盖在事件上（`engine.session_id` 只读属性）。全局 seq 连续性自检**仅** firehose（`subscribe_all`）成立。
 - **per-subscriber 投递序号 `delivery_seq`**：`subscribe_all_envelopes` / `subscribe_envelopes` 产出 `DeliveredEvent {event, delivery_seq}`；每订阅各自从 0 连续，队列满丢弃也烧号 → 收方跳号 = 它自己漏了（过滤订阅亦可精确自检）。`subscribe_all` / `subscribe` 仍向后兼容产出裸 `EventMsg`。
 - **队列有界大容量 + 高/低水位告警**：`event_queue_size` 默认 `65536`（有界 ⇒ 内存可预测、绝不 OOM；`<=0` 为无界 opt-in 自负 OOM）。`qsize` 上穿高水位（75%）打 `logger.warning`，回落低水位（50%）才重新武装（迟滞）+ `event_warn_cooldown_sec` 限频；告警走 logger 不走事件（防自放大）。
-- **LLM request 留痕**：`enable_request_capture`（默认关）开启后，`turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（`data = ApiRequest.model_dump()`，retry/重建各一条）；含敏感正文，`OtelTelemetrySink` 按 kind 整条跳过不外发。
+- **LLM request 留痕**：`enable_request_capture`（默认关）开启后，`turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（retry/重建各一条）；文字正文仍敏感，图片 base64/Data URL 则在事件生成前结构化替换为 `content_redacted` 描述。`OtelTelemetrySink` 按 kind 整条跳过不外发。
 
 > 「可靠 fail-stop 审计真相源」是独立的层2 课题（留 ADR 0019），不改造 EventMsg emit 路径。
 
@@ -183,6 +183,12 @@ async def run_turn(turn_ctx: TurnContext, cancel: CancellationToken) -> TurnOutc
                 return TurnOutcome.error(reason="context_overflow_unrecoverable")
             continue
 ```
+
+### 图片 admission 与 Responses durable gate
+
+`EnginePool.create(image_input_policy=..., input_cost_estimator=...)` 把业务策略传播到 root、call_skill、detached spawn、child Resume 与 manual compaction runner。`UserMessage.attachments` 在 actor enqueue 和 conversation append 之前完成 count、base64、decoded bytes、digest、MIME、dimensions/frame 检查；默认禁用或 client capability 不匹配时不留下脏历史。
+
+prompt 层只走一条 history 转换路径：普通 Chat 由 canonical items 派生 messages；Responses 保留 provider state、function call/output 的严格顺序。Responses attempt 必须观察到恰好一次 `normalized_output → completed`，随后按 `llm_sample_id` 原子提交 reasoning/assistant/function-call group；commit ack 之后才允许 tool dispatch。工具结果携带 `origin_llm_sample_id`，下一轮和冷恢复都按 sample closure 重放。
 
 ### 失败处置数据流（failure-suspension-policy）
 

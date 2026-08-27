@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -82,6 +83,57 @@ async def test_pool_injects_enabled_image_policy_into_request(
     assert isinstance(request.messages[-1].content, list)
     assert isinstance(request.messages[-1].content[0], TextPart)
     assert isinstance(request.messages[-1].content[1], ImagePart)
+
+
+@pytest.mark.asyncio
+async def test_request_capture_redacts_image_body(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """本地 request capture 只能记录图片描述，不能复制 base64 正文。"""
+    image = _image()
+    image_body = str(image["content"])
+    client = SimClient(
+        turns=[SimTurn(text="seen")],
+        capabilities=ModelCapabilities(
+            input_modalities=frozenset({"text", "image"}),
+            provider="sim",
+            protocol="sim",
+        ),
+    )
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        enable_request_capture=True,
+        image_input_policy=ImageInputPolicy(
+            enabled=True,
+            max_images=1,
+            max_item_bytes=1024,
+            max_total_bytes=1024,
+            allowed_media_types=frozenset({"image/png"}),
+        ),
+    )
+    engine = await pool.get_or_create(session_id="capture", entry_skill_id="code-reviewer")
+
+    submission_id = await engine.submit(
+        taifeng.UserMessage(text="inspect", attachments=[image])
+    )
+    capture: dict[str, object] | None = None
+    async for event in engine.subscribe(submission_id):
+        if event.msg.kind == "llm_request_recorded":
+            capture = event.msg.data
+        if event.msg.kind in ("turn_completed", "turn_failed"):
+            assert event.msg.kind == "turn_completed"
+            break
+    await pool.close()
+
+    assert capture is not None
+    encoded = json.dumps(capture, ensure_ascii=False, sort_keys=True)
+    assert image_body not in encoded
+    assert "base64_data" not in encoded
+    assert '"content_redacted": true' in encoded
+    assert '"media_type": "image/png"' in encoded
 
 
 @pytest.mark.asyncio

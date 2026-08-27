@@ -9,7 +9,7 @@
 | --- | --- | --- | --- |
 | `skills_dir` | (必填) | SKILL.md 加载根目录 | — |
 | `threads_dir` | (必填) | JSONL 持久化目录 | — |
-| `model_client` | (必填) | `ModelClient` 实现（OpenAICompat / Anthropic / Gemini / DeepSeek / LiteLLM / Mock 任选其一，详见 §1.3） | codex `ModelClient` |
+| `model_client` | (必填) | `ModelClient` 实现（OpenAI Chat / OpenAI Responses / OpenAICompat / Anthropic / Gemini / DeepSeek / LiteLLM / Sim 任选其一，详见 §1.3） | codex `ModelClient` |
 | `extra_tools` | `[]` | 额外注册的 `ToolSpec` | claw-code custom tools |
 | `compressors` | `[Handoff, Sliding]` | `CompressionStrategy` 列表；空列表禁用压缩。内置四档谱系：`OffloadStrategy`（无损落盘+stub，超大 tool 结果优先无损回收，构造参 `file_root` / `offload_bytes_threshold=8192` / `preview_head_lines·tail_lines=5`，应与 `file_read` 工具同 `root_dir`，参数见 [capabilities/compaction-offload-strategy.md](architecture/capabilities/compaction-offload-strategy.md)）/ `SurgicalTrimStrategy`（手术刀就地剪枝，推荐最高优先级，参数见 [capabilities/compaction-surgical-trim.md](architecture/capabilities/compaction-surgical-trim.md)）/ `HandoffCompactionStrategy`（LLM 摘要）/ `SlidingWindowStrategy`（滑窗兜底） | codex `CompactionConfig` |
 | `budget` | `ContextBudget()` 默认 200k window / 0.85 soft / 0.95 hard / 4 tail | 整体 token 预算 | claw-code `auto_compaction_input_tokens_threshold` |
@@ -24,6 +24,8 @@
 | **`now_factory`** | `time.time` | 壁钟工厂（TTL 到期计算用）；测试注入固定时钟可让到期立即触发 | — |
 | **`max_parallel_tool_calls`** | `1` | 单 turn 内**一批** tool call 的最大并发数（一条 assistant 消息里的多个 tool call / call_skill）。默认 `1` = 严格串行（等同历史行为，零回归）；设 `>1` 开启并发 fan-out。安全由 `ToolCallRuntime` 的 RwLock 兜底（parallel_safe 读类重叠、写类独占；call_skill 跳锁真并行）。结果按发起序配对回填历史，cache / resume 不受影响。声明式编排（SKILL.md `orchestration`）的 parallel 段同样受此旋钮限流，serial 段无论该值多大都强制串行。详见 `docs/architecture/agent-loop.md` 并发派发段 + 编排 turn 段 | codex `tools/parallel.rs` |
 | **`reasoning_passback`** | `True` | thinking 模型 reasoning 回传开关（reasoning-content-passback）。开：prompt 重建把落史的 `reasoning` item 附回该采样轮的合并 assistant 消息，provider 组装为 `reasoning_content`（deepseek-v4 等 thinking 模型对带 tool_calls 的 assistant 消息的续传硬性要求，不回传则挂起恢复/多轮续跑被 400 拒）。回传天然自限：history 无 reasoning item 即不回传，非 thinking 模型零变化；关闭场景仅限同 thread 中途从 thinking 切换到严格拒绝未知字段的 provider。落史本身无旋钮（R5）。详见 `docs/architecture/llm-client.md` reasoning 回传节 | — |
+| **`image_input_policy`** | `None`（= disabled） | 图片输入总闸与资源策略。只有显式传 `ImageInputPolicy(enabled=True, max_images=..., max_item_bytes=..., max_total_bytes=..., allowed_media_types=...)` 才接受图片；在 durable append 前验证 canonical base64、decoded size、SHA-256、MIME/header、dimensions 与单帧约束。root/child/spawn/resume runner 均继承 | — |
+| **`input_cost_estimator`** | `None`（启图时走 policy ceiling） | 图片 token 估算策略。可注入 `OpenAIImageCostEstimator()`；未知模型或未注入时使用 `unknown_model_token_ceiling` 非零上界。最终 wire bytes 仍由 `ContextBudget.max_request_bytes` 精确门禁 | — |
 | `auto_watch_skills` | `False` | 启用 SKILL.md 文件监听热更 | — |
 | `watch_poll_interval_seconds` | `1.0` | 文件监听轮询间隔 | — |
 | **`instruction_layers`** | `None` | `list[InstructionLayer]`；业务侧注入的系统指令层（类似 codex 的 AGENTS.md 角色，但走协议而非读文件）。详见下方 §1.1 | codex `~/.codex/AGENTS.md` |
@@ -32,7 +34,7 @@
 | **`event_high_water_ratio`** | `0.75` | 有界事件队列高水位比例。`qsize` 上穿 → 一条 high-water `logger.warning`（告警走 logger 不走事件，防自放大） | — |
 | **`event_low_water_ratio`** | `0.5` | 有界事件队列低水位比例。回落到此以下才重新武装下次告警（迟滞，防阈值附近刷屏） | — |
 | **`event_warn_cooldown_sec`** | `5` | 高水位告警限频秒数（即便持续高位，至多每 N 秒一条） | — |
-| **`enable_request_capture`** | `False` | **审计可观测 层1**：LLM request 全文留痕开关。开启后 `turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（`data = ApiRequest.model_dump()`，retry/重建各一条）；含敏感正文，OtelSink 按 kind 跳过不外发，可靠落盘/脱敏归业务 sink。默认关 = 零泄漏面 + 零行为变化 | codex request 留痕 |
+| **`enable_request_capture`** | `False` | **审计可观测 层1**：LLM request 留痕开关。开启后 build 后发送前 emit `LlmRequestRecorded`（retry/重建各一条）；文字正文仍敏感，但图片 base64/Data URL 在内核中替换为 MIME/size/detail/`content_redacted` 描述。OtelSink 按 kind 跳过不外发。默认关 = 零泄漏面 + 零行为变化 | codex request 留痕 |
 | **`skill_recall`** | `None`（= inline） | **skill 召回（发现）后端**：决定召回阶梯走哪一层。`None`（默认）= **inline / 工作记忆 / LLM 注意力**——全部可见 child 内联进 prompt 让 LLM 自己找，**不**注册 `search_skills`、**不**启用 deferred、**绝不**静默兜底关键词。可注入可选后端：`KeywordSkillRecall`（零依赖 BM25-lite，确定性）/ `LlmSkillRecall(model_client)`（LLM-as-recall，**非确定性**，pool 须能放进一次 prompt）/ 业务 RAG（实现 `SkillRecall` 协议，ADR 0017③）。注入后端后才启用 `search_skills` + deferred。在 `EnginePool.create`。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
 | **`recall_threshold`** | `50` | **skill 召回（发现）**：**仅在注入了召回后端时生效**。composite entry 的 `child_recall: auto` 模式下，**有后端**且 G4 过滤后可见 child 数 > 本阈值 → 自动切 deferred（child 装不进一次 prompt，改 `search_skills` 按需召回），否则 inline；**无后端恒 inline**。`child_recall: inline` 强制内联、`child_recall: deferred` 显式要召回（无后端则启动期抛 `SkillValidationError`），均优先于本阈值。`0` = 有后端且 child 数 >0 即 deferred。在 `EnginePool.create`。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
 | **`recall_default_top_k`** | `5` | **skill 召回（发现）**：**仅在注入了召回后端时生效**。`search_skills` 工具未显式传 `top_k` 时的默认召回候选数。必须 ≥1（否则构造期 `ValueError`）。在 `EnginePool.create` | — |
@@ -125,6 +127,8 @@ class TenantPolicySource:
 
 #### `OpenAICompatClient`（OpenAI / vLLM / Ollama / one-api 等 OpenAI-compat gateway）
 
+`OpenAICompatClient` 保持 text-only，不会因为模型名是 GPT-5.6 自动开启图片，也不写官方 OpenAI 新字段。官方 OpenAI 请在下面两种协议中显式选择。
+
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `api_key` | (必填) | Bearer token |
@@ -132,6 +136,20 @@ class TenantPolicySource:
 | `model` | `"gpt-4o-mini"` | 默认模型名 |
 | `extra_headers` | `None` | 额外 header（如自部署网关 token） |
 | `timeout_seconds` | `300.0` | httpx 超时 |
+
+#### `OpenAIChatClient`（官方 Chat Completions，文字 + 图片）
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `api_key` | (必填) | OpenAI Bearer token |
+| `model` | `"gpt-5.6"` | 默认模型名 |
+| `base_url` | `"https://api.openai.com/v1"` | API 根地址；固定调用 `/chat/completions` |
+| `extra_headers` | `None` | 额外 header |
+| `timeout_seconds` | `300.0` | httpx 超时 |
+
+#### `OpenAIResponsesClient`（官方 Responses，文字 + 图片）
+
+构造参数与 `OpenAIChatClient` 相同，但固定调用 `/responses`；请求始终 `store=false`、`include=["reasoning.encrypted_content"]`，不支持 `previous_response_id`。跨进程恢复由 `get_or_create(resume_thread_id=...)` 和 Taifeng JSONL 完成。
 
 #### `AnthropicClient`（Anthropic Claude API）
 

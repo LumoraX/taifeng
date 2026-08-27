@@ -46,6 +46,7 @@ from taifeng.llm.image_input import (
     DISABLED_IMAGE_POLICY,
     ImageInputPolicy,
     InputCostEstimator,
+    redact_image_bodies,
 )
 from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
 from taifeng.llm.providers.openai.responses import (
@@ -721,6 +722,15 @@ class TurnRunner:
         }))
         return new_history
 
+    def _history_token_estimate(self) -> int:
+        """按本 turn 的图片策略与业务估算器计算完整历史成本。"""
+        return estimate_history_tokens(
+            self.history_buffer,
+            image_input_policy=self.image_input_policy,
+            input_cost_estimator=self.input_cost_estimator,
+            model=self.entry_skill.model or "",
+        )
+
     async def _maybe_inject_budget_hint(self) -> None:
         """预算自知（budget-awareness，ADR 0017 规则②）：pre-turn 估算用量，穿越
         ``soft_limit`` 时往 history 尾追一条**中性预算事实**（用了百分之几 / 距 hard
@@ -731,7 +741,7 @@ class TurnRunner:
         语义把每个超限 episode 的额外 system 消息限到 1 条，避免反复刷新打断 cache。
         R1：只陈述客观事实，不含「该不该收敛」的产品意见——怎么做交给模型/业务侧。
         """
-        tokens = estimate_history_tokens(self.history_buffer)
+        tokens = self._history_token_estimate()
         inject, self._budget_notified = evaluate_budget_hint(
             tokens, self.budget, was_notified=self._budget_notified)
         if not inject:
@@ -1123,11 +1133,15 @@ class TurnRunner:
         # 新一轮 _run_sample 再次 build → 再 emit 一条,故「每次实发各一条」自然成立。
         # 默认关(enable_request_capture=False),零泄漏面 + 零行为变化。
         if self.enable_request_capture:
-            await self._emit(LlmRequestRecorded(data=request.model_dump()))
+            await self._emit(
+                LlmRequestRecorded(
+                    data=redact_image_bodies(request.model_dump(mode="json"))
+                )
+            )
 
         # G2b：发送前预检 —— 即便经过压缩，估算 token 仍超 hard limit 时 emit
         # 非阻塞告警（估算偏粗，不据此拒发；供业务侧主动限流 / 排查 provider 400）
-        preflight_tokens = estimate_history_tokens(self.history_buffer)
+        preflight_tokens = self._history_token_estimate()
         if self.budget.is_hard_exceeded(preflight_tokens):
             await self._emit(
                 ContextBudgetExceeded(
@@ -1819,7 +1833,7 @@ class TurnRunner:
         """
         if self.compressors is None:
             return
-        tokens = estimate_history_tokens(self.history_buffer)
+        tokens = self._history_token_estimate()
         if not force:
             if phase == "pre_turn" and not self.budget.is_soft_exceeded(tokens):
                 return

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 import tempfile
 import time
@@ -37,8 +38,13 @@ from _provider_bootstrap import (  # noqa: E402
     ProviderBootstrapError,
     build_model_client,
     load_dotenv_files,
+    resolve_bootstrap_env,
 )
 from _recorder import RecordingClient  # noqa: E402
+from test_openai_image_matrix import (  # noqa: E402
+    ImageMatrixResult,
+    run_openai_image_matrix,
+)
 
 load_dotenv_files()
 
@@ -346,6 +352,8 @@ def _verdict(res: Result) -> tuple[str, str]:
 async def main() -> None:
     parser = argparse.ArgumentParser(description="真实 LLM 能力矩阵跑测")
     parser.add_argument("--only", help="只跑指定 scenario_id（台账增量合并，其余标 stale）")
+    parser.add_argument("--provider", help="覆盖 LLM_BOOTSTRAP_PROVIDER")
+    parser.add_argument("--model", help="覆盖 LLM_BOOTSTRAP_MODEL")
     parser.add_argument(
         "--record", action="store_true",
         help="金样录制模式（需真实 key）：把 PASS 场景的事件流形状签名写入 "
@@ -353,6 +361,10 @@ async def main() -> None:
              "与 --only 组合时只更新该场景金样",
     )
     args = parser.parse_args()
+    if args.provider:
+        os.environ["LLM_BOOTSTRAP_PROVIDER"] = args.provider
+    if args.model:
+        os.environ["LLM_BOOTSTRAP_MODEL"] = args.model
     scenarios = SCENARIOS
     if args.only:
         scenarios = [sc for sc in SCENARIOS if sc.demo_id == args.only]
@@ -389,6 +401,24 @@ async def main() -> None:
                 results.append(r)
                 print(f"  ⚠️ 场景异常: {r.error}")
 
+        image_results: list[ImageMatrixResult] = []
+        if meta["provider"] == "openai" and args.only is None:
+            provider, api_key, resolved_model, base_url = resolve_bootstrap_env()
+            assert provider == "openai" and api_key is not None
+            print(f"\n{'━' * 70}\nOpenAI 图片双协议矩阵\n{'━' * 70}")
+            image_results = await run_openai_image_matrix(
+                api_key=api_key,
+                model=resolved_model,
+                base_url=base_url or "https://api.openai.com/v1",
+                logs_dir=logs_dir / "openai-image",
+            )
+            for result in image_results:
+                icon = "✅" if result.verdict == "PASS" else "❌"
+                print(
+                    f"  {icon}{result.verdict:4s}  {result.scenario_id:42s} "
+                    f"{result.note}"
+                )
+
         # ── 报告 A：能力成败矩阵 ──
         print(f"\n\n{'=' * 70}\nA. 能力成败矩阵\n{'=' * 70}")
         npass = 0
@@ -402,6 +432,9 @@ async def main() -> None:
                     f"grant={r.grants}")
             print(f"  {tag}  {r.scenario.demo_id:20s} {disp:42s} {note}")
         print(f"\n  小计：{npass}/{len(results)} 能力场景 PASS")
+        image_pass = sum(result.verdict == "PASS" for result in image_results)
+        if image_results:
+            print(f"  图片：{image_pass}/{len(image_results)} 双协议场景 PASS")
 
         # ── 报告 B：R3 可观测完整性审计 ──
         print(f"\n{'=' * 70}\nB. R3 可观测完整性审计\n{'=' * 70}")
@@ -442,6 +475,20 @@ async def main() -> None:
                 duration_s=r.duration_s,
                 commit=run_commit, timestamp_utc=now_utc,
             ))
+        for result in image_results:
+            ledger_records.append(ScenarioRecord(
+                scenario_id=result.scenario_id,
+                capability=result.capability,
+                verdict=result.verdict,
+                note=result.note,
+                expect=sorted(result.kinds) if result.verdict == "PASS" else [],
+                missing=[],
+                kinds=dict(result.kinds),
+                grants=0,
+                duration_s=result.duration_s,
+                commit=run_commit,
+                timestamp_utc=now_utc,
+            ))
         jp, mp = LedgerWriter().merge_and_write(
             provider=meta["provider"], model=meta["model"],
             records=ledger_records,
@@ -468,7 +515,11 @@ async def main() -> None:
             print(f"  金样已落盘: {len(flushed)} 个场景 → tests/llm/golden/ "
                   f"(截断签名滤除 {recorder.truncated_skipped} 条)")
 
-        ok = npass == len(results) and not unmapped
+        ok = (
+            npass == len(results)
+            and image_pass == len(image_results)
+            and not unmapped
+        )
         print(f"\n{'=' * 70}\n{'✅ 全能力场景真实 LLM 通过 + 日志完整' if ok else '⚠️ 见上方未通过/不完整项'}\n{'=' * 70}")
         if not ok:
             sys.exit(1)

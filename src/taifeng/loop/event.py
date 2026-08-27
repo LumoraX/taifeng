@@ -349,19 +349,19 @@ class ProviderRetry(_Msg):
 
 
 class LlmRequestRecorded(_Msg):
-    """审计可观测 层1：单次实际发往 provider 的 request 全文留痕。
+    """审计可观测 层1：单次实际发往 provider 的 request 留痕。
 
     在 ``turn.py`` build_api_request 之后、发送 provider 之前 emit（即便后续超时/
     失败，request 仍留痕）；受 ``enable_request_capture`` 全局开关控制（默认关，零
     泄漏面）。每次实际构建发送的 request 各一条（retry/压缩重建是新一轮构建 → 新一
     条），与 ``provider_retry`` 交错可还原「哪版 request」。
 
-    ⚠️ 含完整 prompt + conversation（敏感）：OtelSink **按 kind 整条跳过**不外发；
-    可靠落盘 / 脱敏 / 访问控制 / 保留期全归业务消费者（内核只留痕、不治理）。
+    ⚠️ 含完整文字 prompt + conversation（敏感），但图片正文始终替换成结构描述：
+    OtelSink **按 kind 整条跳过**不外发；可靠落盘 / 访问控制 / 保留期仍归业务消费者。
     """
 
     kind: Literal["llm_request_recorded"] = "llm_request_recorded"
-    """data = ApiRequest.model_dump()（model / system_prompt / messages / tools ...）。"""
+    """data = 图片正文脱敏后的 ApiRequest JSON（model / prompts / messages / tools ...）。"""
 
 
 class UserInputInjected(_Msg):

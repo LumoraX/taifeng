@@ -147,6 +147,7 @@ src/taifeng/
    ├─ build_prompt(entry_skill, history, tool_specs)
    │   ├─ <entry_skill> body 注入 system prompt
    │   └─ <available_child_skills> 子 skill 列表（仅 id + description，不含 body）
+   │   └─ 图片 attachment 重验后投影为 ordered TextPart/ImagePart
    │
    ├─ ModelClientSession.stream(prompt) → AsyncIterator[ResponseEvent]
    │   ├─ TextDelta → emit EventMsg.AssistantText
@@ -158,6 +159,7 @@ src/taifeng/
    │   │   └─ 子 turn 完成后结果 append 到 prompt.function_call_output
    │   ├─ ToolCallDone(其他) → ToolCallRuntime.dispatch（parallel_safe ? 读锁 : 写锁）
    │   ├─ ReasoningDelta → emit EventMsg.Reasoning
+   │   ├─ Responses NormalizedOutput → 原子提交完整 sample 后才执行工具
    │   └─ Completed → break inner loop
    │
    ├─ mid-turn 压缩检查（只能动 tail，保 cache anchor）→ 【pre_compact hook】
@@ -241,13 +243,17 @@ Taifeng 提供 **native 四件套 + LiteLLM 兜底** 的双层 provider 架构�
 
 | 场景 | 推荐 client | 说明 |
 | --- | --- | --- |
-| OpenAI / 自部署 OpenAI-compat gateway (vLLM, Ollama, one-api, new-api) | `OpenAICompatClient` | native httpx SSE，含 `reasoning_content` 流式支持 |
+| OpenAI 官方 Chat Completions（含图片） | `OpenAIChatClient` | `/v1/chat/completions`；文字/图片；`store=false` |
+| OpenAI 官方 Responses（含图片与 reasoning state） | `OpenAIResponsesClient` | `/v1/responses`；ordered items + JSONL 原子恢复；`store=false` |
+| 自部署 OpenAI-compat gateway (vLLM, Ollama, one-api, new-api) | `OpenAICompatClient` | text-only native httpx SSE，保持兼容字段与 `reasoning_content` |
 | Anthropic Claude（含 cache_control 精准控制 / messages API 流式） | `AnthropicClient` | native messages API，零 anthropic-sdk 依赖；cache 元数据直接从 `message_start.usage` 取 |
 | Google Gemini（AI Studio） | `GeminiClient` | native `streamGenerateContent`，零 google-genai-sdk 依赖；支持 query / header 双鉴权 |
 | DeepSeek（V3 / R1） | `DeepSeekClient` | OpenAI-compat 薄子类，预设官方 base_url；`prompt_cache_hit_tokens` 精准映射 |
 | AWS Bedrock / GCP Vertex / Azure OpenAI / Kimi / 其他自定义 endpoint | `LiteLLMClient` | 多 provider 兜底，依赖 LiteLLM SDK |
 
 四家 native client + LiteLLM 共享统一 `ModelClient` 协议 + `ResponseEvent` 流形状（`created → server_model → text_delta* → tool_call_done* → prompt_cache → completed`）。错误分类共享 `providers/_shared.py::classify_http_error`（基于 HTTP status code，比 LiteLLM 的 message 关键字匹配精准）。
+
+图片输入是业务 opt-in：只在注入 `ImageInputPolicy(enabled=True, ...)` 且 client capability 声明 `image` 时可进入 durable conversation。核心只持久化 canonical base64；两套 OpenAI adapter 在网络边界各自转换 wire。完整契约见 [LLM 图片输入](capabilities/llm-image-input.md)。
 
 native 路径优势：
 - 错误分类基于 httpx 异常类型（`ConnectError` / `ReadTimeout` 直接 → `TransientNetworkError`，可被 `retry_async` 重试），不再被 LiteLLM 黑盒包成 `InternalServerError` 误判

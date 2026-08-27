@@ -79,6 +79,7 @@ As of this branch, every capability below has landed as ✅ or 🧪. Feature-gap
 
 | Capability | Summary | Entry Point | Example | Contract | Real LLM Validation |
 | --- | --- | --- | --- | --- | --- |
+| **OpenAI image input (Chat + Responses)** | Canonical inline images, explicit disabled-by-default policy, separate official Chat/Responses wire, Responses encrypted-state replay and atomic cold recovery | `OpenAIChatClient` / `OpenAIResponsesClient` / `ImageInputPolicy` | [real image matrix](../examples/real_llm/test_openai_image_matrix.py) | [llm-image-input.md](architecture/capabilities/llm-image-input.md) ✅ | `openai_*_image_*` in [ledger](real-llm-ledger.md); must be run with a real OpenAI key |
 | **Native providers + LiteLLM fallback** | OpenAI-compatible, Anthropic, Gemini, and DeepSeek native HTTP clients, plus LiteLLM for broader coverage | `model_client=` | [real_llm/e2e.py](../examples/real_llm/e2e.py) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
 | **Unified `ResponseEvent` stream** | 11 event kinds normalize text, tool calls, reasoning, prompt cache, rate limits, structured output, and more | `ModelClient` protocol / `ResponseEvent` | [observability/](../examples/observability/) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
 | **Structured output** | Strongly typed output schemas are translated into provider-specific request shapes | `ResponseFormatSpec` / `structured_output` event | — | [llm-structured-output.md](architecture/capabilities/llm-structured-output.md) ✅ | — |
@@ -207,6 +208,8 @@ Runtime ops are submitted with `engine.submit(...)`.
 
 All exported symbols are listed in [`src/taifeng/__init__.py`](../src/taifeng/__init__.py) under `__all__`.
 
+图片接入的稳定根包符号为 `ImageAttachmentV1`、`ImageInputPolicy`、`TextPart`、`ImagePart`、`OpenAIChatClient` 和 `OpenAIResponsesClient`。`OpenAICompatClient` 的原导入路径保持不变且仍是 text-only。
+
 ---
 
 ## Verification Status
@@ -214,5 +217,6 @@ All exported symbols are listed in [`src/taifeng/__init__.py`](../src/taifeng/__
 - **Full regression**: `PYTHONPATH=src uv run pytest tests/`. CI uses the conformance simulator and does not call real APIs.
 - **Real LLM regression**: [`examples/real_llm/capability_matrix.py`](../examples/real_llm/capability_matrix.py) runs high-risk scenarios such as suspend/resume, rewind, spawn/join, peer messaging, and kernel knobs with real provider keys, then updates [`real-llm-ledger.md`](real-llm-ledger.md).
 - **Merge red line**: changes under `src/taifeng/{llm,loop,context,conversation}/` require a full real-LLM capability matrix run and a committed ledger update.
-- **Before burning keys**: [`examples/real_llm/selfcheck.py`](../examples/real_llm/selfcheck.py) runs the driver orchestration against the simulator.
+- **Before burning keys**: [`examples/real_llm/selfcheck.py`](../examples/real_llm/selfcheck.py) runs driver orchestration against the simulator and performs a zero-network OpenAI image fixture/wire/redaction preflight.
+- **OpenAI image regression**: `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider openai --model gpt-5.6` runs both official protocols. Without usable credentials it is **not executed**, regardless of CI results.
 - Capability boundaries and limitations are recorded in the matching contract documents.
