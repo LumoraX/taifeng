@@ -13,17 +13,17 @@ from typing import Literal
 # 这是供 telemetry 聚合的**稳定字符串**（与 ``kind`` 区分：kind 偏内部语义，
 # failure_class 是对外稳定契约，命名对齐 claw-code，跨版本不轻易改）。
 FailureClass = Literal[
-    "context_window",       # 上下文超窗
-    "provider_auth",        # 鉴权失败
+    "context_window",  # 上下文超窗
+    "provider_auth",  # 鉴权失败
     "provider_rate_limit",  # 限流
-    "provider_transport",   # 网络/传输层瞬时错误
-    "provider_internal",    # provider 5xx 内部错误
-    "invalid_request",      # 请求参数非法（模型名 / schema / 消息结构）
-    "content_filter",       # 内容安全拦截
-    "cancelled",            # 调用被取消
-    "request_size",         # 请求体过大（发送前预检，G2b body-size 用）
-    "runtime_io",           # 本地 IO 错误（非 LLM）
-    "unknown",              # 未分类
+    "provider_transport",  # 网络/传输层瞬时错误
+    "provider_internal",  # provider 5xx 内部错误
+    "invalid_request",  # 请求参数非法（模型名 / schema / 消息结构）
+    "content_filter",  # 内容安全拦截
+    "cancelled",  # 调用被取消
+    "request_size",  # 请求体过大（发送前预检，G2b body-size 用）
+    "runtime_io",  # 本地 IO 错误（非 LLM）
+    "unknown",  # 未分类
 ]
 
 # 每个 failure_class 的人类可读处置建议（telemetry / HITL UI 展示用）。
@@ -110,6 +110,24 @@ class InvalidRequestError(LLMError):
     failure_class: FailureClass = "invalid_request"
 
 
+class UnsupportedModalityError(InvalidRequestError):
+    """业务策略或客户端能力未允许指定输入模态。"""
+
+    kind = "unsupported_modality"
+
+
+class InvalidImageError(InvalidRequestError):
+    """图片 canonical 内容、签名或维度不符合输入契约。"""
+
+    kind = "invalid_image"
+
+
+class ImageCountExceededError(InvalidRequestError):
+    """图片数量超过业务策略允许的上限。"""
+
+    kind = "image_count_exceeded"
+
+
 class CancelledError(LLMError):
     retryable = False
     kind = "cancelled"
@@ -130,6 +148,12 @@ class RequestTooLargeError(LLMError):
         super().__init__(message)
         self.estimated_bytes = estimated_bytes
         self.max_bytes = max_bytes
+
+
+class AttachmentTooLargeError(RequestTooLargeError):
+    """单张图片或图片累计 decoded bytes 超过策略上限。"""
+
+    kind = "attachment_too_large"
 
 
 def classify_failure(exc: BaseException) -> tuple[FailureClass, str]:

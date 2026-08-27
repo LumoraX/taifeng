@@ -25,6 +25,14 @@ from taifeng.llm.errors import (
     suggested_action_for,
 )
 from taifeng.llm.events import EventKind, ResponseEvent
+from taifeng.llm.image_input import (
+    DISABLED_IMAGE_POLICY,
+    ConservativeImageCostEstimator,
+    ImageAttachmentV1,
+    ImageInputPolicy,
+    InputCostEstimator,
+    OpenAIImageCostEstimator,
+)
 from taifeng.llm.recovery import RecoveryPlan, RecoveryStep, recommend_recovery
 from taifeng.llm.retry import RetryConfig, retry_async
 from taifeng.llm.types import (
@@ -63,9 +71,13 @@ __all__ = [
     "InvalidRequestError",
     "LLMError",
     "ImagePart",
+    "ImageAttachmentV1",
+    "ImageInputPolicy",
+    "InputCostEstimator",
     "ModelCapabilities",
     "ModelClient",
     "ModelClientSession",
+    "OpenAIImageCostEstimator",
     "RateLimitError",
     "RateLimitSnapshot",
     "ProviderStateEnvelope",
@@ -77,6 +89,8 @@ __all__ = [
     "RetryConfig",
     "ServerError",
     "TokenUsage",
+    "ConservativeImageCostEstimator",
+    "DISABLED_IMAGE_POLICY",
     "TextPart",
     "ToolSpecRef",
     "TransientNetworkError",
