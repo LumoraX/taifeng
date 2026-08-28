@@ -49,13 +49,13 @@ from taifeng.llm.image_input import (
     redact_sensitive_request_data,
 )
 from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
+from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.responses_types import (
     NormalizedFunctionCallItem,
     NormalizedMessageItem,
     NormalizedOutputItem,
     NormalizedReasoningItem,
 )
-from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.audit_llm import (
     commit_audited_llm_response,
@@ -361,6 +361,12 @@ class TurnRunner:
     auto_retry_count: int = 0
     # 单 turn 内一批 tool call 的最大并发数；默认 1 = 严格串行（等同历史行为，零回归）
     max_parallel_tool_calls: int = 1
+    sample_scope_id: str | None = None
+    """Responses 逻辑采样作用域；与对外事件的 submission 归因解耦。
+
+    None 时沿用 ``submission_id``。detached child 的 Resume/Rewind 会保持事件归因
+    为 child thread，同时注入本次操作 id，避免新采样复用旧原子批次标识。
+    """
     # reasoning-content-passback:thinking 模型 reasoning 回传开关(prompt 重建时把
     # 落史的 reasoning item 附回相邻 assistant 消息)。默认开——回传天然自限:
     # history 无 reasoning item 即不回传,非 thinking 模型零变化。落史本身无旋钮
@@ -1320,7 +1326,7 @@ class TurnRunner:
                 )
             sample_id = _responses_sample_id(
                 thread_id=self.thread_id,
-                submission_id=self.submission_id,
+                submission_id=self.sample_scope_id or self.submission_id,
                 turn_index=self.turn_index,
                 iteration=iteration,
             )

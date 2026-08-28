@@ -239,7 +239,11 @@ class PeerMailbox:
             runner = eng._build_child_runner(  # noqa: SLF001
                 target=target,
                 child_thread_id=child_tid,
-                seed=history[0], cancel=cancel, history=history)
+                seed=history[0],
+                cancel=cancel,
+                history=history,
+                sample_scope_id=history[-1].id,
+            )
             drv._live_runners[child_tid] = runner  # noqa: SLF001
             try:
                 outcome = await runner.run()

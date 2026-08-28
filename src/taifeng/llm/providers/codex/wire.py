@@ -92,6 +92,23 @@ def _input_item(item: object) -> dict[str, Any]:
     raise InvalidHistoryError(f"unsupported Codex input item: {type(item).__name__}")
 
 
+def _partition_instructions(request: ApiRequest) -> tuple[list[str], list[dict[str, Any]]]:
+    """把动态 system history 折叠到顶层 instructions，并保留其余 item 顺序。"""
+    prompts = [prompt for prompt in request.system_prompt if prompt != ""]
+    input_items: list[dict[str, Any]] = []
+    for item in request.input_items:
+        if isinstance(item, ApiMessageItem) and item.role == "system":
+            if not isinstance(item.content, str):
+                raise InvalidHistoryError(
+                    "Codex system instructions must contain text only"
+                )
+            if item.content:
+                prompts.append(item.content)
+            continue
+        input_items.append(_input_item(item))
+    return prompts, input_items
+
+
 def _optional_fields(payload: dict[str, Any], request: ApiRequest) -> None:
     """加入 tools、structured output 和采样旋钮。"""
     if request.tools:
@@ -128,10 +145,10 @@ def build_codex_payload(
     default_model: str,
 ) -> dict[str, Any]:
     """构造独立 Codex request；不按模型名或域名猜 dialect。"""
-    prompts = [prompt for prompt in request.system_prompt if prompt != ""]
+    prompts, input_items = _partition_instructions(request)
     payload: dict[str, Any] = {
         "model": request.model or default_model,
-        "input": [_input_item(item) for item in request.input_items],
+        "input": input_items,
         "store": False,
         "stream": True,
         "include": ["reasoning.encrypted_content"],

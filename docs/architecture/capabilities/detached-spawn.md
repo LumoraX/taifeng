@@ -130,7 +130,7 @@ running → done | error | cancelled
 3. 中间各父层（链 > 2）：`_resume_parent_level` 逐层回填 call_skill output + 续跑。
 4. spawn 子 thread（链根）：`_settle_call_skill_output` 回填其 call_skill output + 核销 CHILD_SKILL 挂起 → 句柄回 running → `_build_child_runner` 重跑 → `_finalize_spawn`（终态 + barrier 检查）。
 
-**归因（R3 分轨）**：第 2–4 步续跑事件显式归到 **spawn 子 thread submission**（非本次 Resume `sub.id`），与首发一致——业务侧按 submission_id 分轨，否则 leaf 子步文本会错挂到 Resume 轨。
+**归因（R3 分轨）**：第 2–4 步续跑事件显式归到 **spawn 子 thread submission**（非本次 Resume `sub.id`），与首发一致——业务侧按 submission_id 分轨，否则 leaf 子步文本会错挂到 Resume 轨。Responses durable identity 与事件归因解耦：续跑/rewind 的 `sample_scope_id` 使用本次操作 `sub.id`，因此新采样不会与同一 child thread 的首轮 `llm_sample_id` 冲突。
 
 > 缺这条会导致：`resume_spawn` 把 CHILD_SKILL record 直接交 `SuspensionResolver` → `unhandled_suspend_reason: child_skill` → Rejected → 句柄永久卡 suspended（嵌套错峰 HITL 死锁）。是真实 MDT 拓扑（专科=编排子 skill 的 composite）的硬伤。
 

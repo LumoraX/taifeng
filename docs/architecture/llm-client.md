@@ -159,7 +159,9 @@ OpenAI 不再由一个“兼容客户端”猜协议。业务按 endpoint 显式
 `CodexResponsesClient` 是显式 `provider=codex, protocol=responses` 的独立客户端，不属于 OpenAI
 兼容分支，也不提供 Chat fallback。它要求业务提供合法 API-root `base_url`，endpoint 固定由
 `<base_url>/responses` 得到；`system_prompt` 过滤空字符串后逐字节用 `\n\n` 连接为顶层
-`instructions`，`input` 恒为 typed list。其稳定 dialect 名为 `codex-responses-v1`，完整契约见
+`instructions`；运行时 budget/memory/compaction system text 也从 typed history 折叠到该字段，避免
+代理拒绝 `input` 中的 system item。`input` 恒为 typed list。其稳定 dialect 名为
+`codex-responses-v1`，完整契约见
 [llm-codex-provider.md](capabilities/llm-codex-provider.md)。
 
 Codex SSE 以 `response.output_item.done.item` 为输出事实源，以唯一 `response.completed` 为完成门；

@@ -2059,6 +2059,7 @@ class AgentEngine:
         *,
         history: list[ResponseItem] | None = None,
         auto_retry_count: int = 0,
+        sample_scope_id: str | None = None,
     ) -> TurnRunner:
         """构造 detached spawn 的子 TurnRunner（镜像 turn.py::_spawn_sub_runner 的 kwargs）。
 
@@ -2074,6 +2075,7 @@ class AgentEngine:
             history: 续跑场景传入【已补齐 gap 的子 thread 完整历史】（从 store load_thread
                 读回）；首发场景为 None → 用 ``[seed]`` 起跑。两种场景都保持 call_stack 空，
                 即 detached 子 turn 永远是独立根 turn（resume 后仍是独立根，不依附父）。
+            sample_scope_id: 本次 Responses 逻辑采样作用域；事件仍按 child thread 分轨。
         """
         buffer = list(history) if history is not None else [seed]
         return TurnRunner(
@@ -2105,6 +2107,7 @@ class AgentEngine:
             failure_suspend_on_expire=self._failure_suspend_on_expire,
             auto_retry_count=auto_retry_count,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
+            sample_scope_id=sample_scope_id,
             reasoning_passback=self._reasoning_passback,
             enable_request_capture=self._enable_request_capture,
             capabilities=self._capabilities,
@@ -2846,6 +2849,7 @@ class AgentEngine:
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
             max_parallel_tool_calls=self._max_parallel_tool_calls,
+            sample_scope_id=sub.id,
             reasoning_passback=self._reasoning_passback,
             enable_request_capture=self._enable_request_capture,
             history_buffer=list(items),

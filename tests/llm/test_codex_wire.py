@@ -94,6 +94,24 @@ def test_codex_uses_top_level_instructions_and_ordered_list_input() -> None:
     assert payload["input"][3]["type"] == "function_call_output"
 
 
+def test_codex_folds_runtime_system_items_into_top_level_instructions() -> None:
+    """budget/memory/compaction 等动态 system item 走 instructions，不落 input。"""
+    request = ApiRequest(
+        model="gpt-5.6-luna",
+        system_prompt=["base"],
+        input_items=[
+            ApiMessageItem(role="user", content="first"),
+            ApiMessageItem(role="system", content="runtime budget hint"),
+            ApiMessageItem(role="assistant", content="ack"),
+        ],
+    )
+
+    payload = build_codex_payload(request, default_model="fallback")
+
+    assert payload["instructions"] == "base\n\nruntime budget hint"
+    assert [item["role"] for item in payload["input"]] == ["user", "assistant"]
+
+
 def test_codex_omits_empty_instructions_and_maps_tools_and_format() -> None:
     """可选字段必须使用 Codex/Responses 精确形状。"""
     request = ApiRequest(

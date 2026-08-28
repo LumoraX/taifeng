@@ -61,6 +61,10 @@ LLM_BOOTSTRAP_BASE_URL=https://your-codex-proxy.example/v1
   `instructions`。
 - 若过滤后无元素，请求必须省略 `instructions`；不得发送空字符串，也不得在 `input` 中生成 synthetic
   `role=system` message。
+- history 中 budget hint、memory page-in、compaction summary 等运行时 `role=system` text item 必须按
+  canonical 遍历顺序从 `input` 移除，并追加到静态 system prompt 之后的顶层 `instructions`；非文本
+  system content 网络前拒绝。该折叠保持 instruction authority，同时兼容不接受 input system item 的
+  `codex-responses-v1` 代理。
 - user/assistant message、function call、function output 与 reasoning state 必须按 canonical 顺序作为
   typed items 放入 `input`。
 
@@ -201,9 +205,11 @@ SHA-256 digest；digest 在内存中计算，不得先把原文写入临时文�
   strict audit 在 request 已 dispatch 后记 UNKNOWN、freeze，禁止自动重试。
 - completed 已验证但 response checkpoint 尚未 definite ack 即崩溃：结果仍为 UNKNOWN，freeze，禁止自动重试。
 - 所有 Codex logical sample（legacy `AtomicBatchMessageStore` 与 strict SessionJournal）统一使用
-  `(thread_id, submission_id, turn_index, iteration)` 确定性生成 `llm_sample_id`；strict conversation items
-  在 `llm_response_committed` 同一原子 batch 中携带该 ID，它与 Journal 的 operation/attempt ID 正交。
-  相同 logical sample 重放不得生成新 identity。
+  `(thread_id, sample_scope_id, turn_index, iteration)` 确定性生成 `llm_sample_id`；通常
+  `sample_scope_id=submission_id`。detached child 的 Resume/Rewind 为保持 UI 分轨会继续用 child thread id
+  作为事件 `submission_id`，但必须用本次 Resume/Rewind submission id 作为 sample scope，使新采样不复用
+  已提交原子批次。strict conversation items 在 `llm_response_committed` 同一原子 batch 中携带该 ID，它与
+  Journal 的 operation/attempt ID 正交。相同 logical sample 重放不得生成新 identity。
 - 当前 strict SessionJournal 不支持打开已有 Journal、resume 或跨进程 recovery。response checkpoint definite
   ack 后、`llm_response_committed` 原子 batch ack 前崩溃，或 sample ack 后、function call intent/output 收敛
   前崩溃，都必须进入 `UNKNOWN/freeze/RECOVERY_REQUIRED`，不得自动请求 provider、自动派发 tool 或声称已经

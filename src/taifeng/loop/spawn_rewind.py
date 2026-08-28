@@ -171,7 +171,13 @@ class SpawnRewindChain:
             f"spawn_rewind:{handle.handle_id}")
         drv._spawn_cancels[handle.handle_id] = cancel  # noqa: SLF001
         runner = eng._build_child_runner(  # noqa: SLF001
-            target, child_tid, buffer[0], cancel, history=buffer)
+            target,
+            child_tid,
+            buffer[0],
+            cancel,
+            history=buffer,
+            sample_scope_id=sub.id,
+        )
         if op.mode == "retry_tool":
             # 采样前先补跑被保留的悬空 call(与根路径 seed 注入同法)
             runner._seed_pending_call_id = cp.call_id  # noqa: SLF001

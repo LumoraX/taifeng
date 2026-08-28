@@ -210,7 +210,10 @@ class SpawnResumeChain:
         resumed_history = await eng._load_thread_items(child_tid)  # noqa: SLF001
         runner = eng._build_child_runner(  # noqa: SLF001
             target, child_tid, resumed_history[0], cancel,
-            history=resumed_history, auto_retry_count=auto_retries)
+            history=resumed_history,
+            auto_retry_count=auto_retries,
+            sample_scope_id=sub.id,
+        )
         drv._live_runners[child_tid] = runner  # peer-mailbox：续跑期也可被投递  # noqa: SLF001
         try:
             outcome = await runner.run()
@@ -321,7 +324,7 @@ class SpawnResumeChain:
             resumed_history = await eng._load_thread_items(child_tid)  # noqa: SLF001
             runner = eng._build_child_runner(  # noqa: SLF001
                 target, child_tid, resumed_history[0], cancel,
-                history=resumed_history)
+                history=resumed_history, sample_scope_id=sub.id)
             drv._live_runners[child_tid] = runner  # peer-mailbox：续跑期也可被投递  # noqa: SLF001
             try:
                 outcome = await runner.run()

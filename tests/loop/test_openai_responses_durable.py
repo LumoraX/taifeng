@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,9 +13,11 @@ import taifeng
 from taifeng.llm.client import ModelCapabilities
 from taifeng.llm.events import completed, normalized_output
 from taifeng.llm.types import ApiRequest, TokenUsage
+from taifeng.loop.submission import Resume, Rewind
+from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from taifeng.llm.events import ResponseEvent
@@ -88,6 +92,50 @@ def _done(items: list[dict[str, object]], *, end_turn: bool) -> list[ResponseEve
         normalized_output(items),
         completed(response_id="resp", usage=TokenUsage(), end_turn=end_turn),
     ]
+
+
+async def _wait_until(predicate: Callable[[], bool], *, attempts: int = 300) -> bool:
+    """短轮询 detached spawn 终态，避免测试依赖固定长等待。"""
+    for _ in range(attempts):
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+def _write_spawn_skills(root: Path) -> Path:
+    """写入可直接 spawn 的最小 host/worker skill 集。"""
+    skills = root / "responses-spawn-skills"
+    definitions = {
+        "host": """---
+name: host
+description: Responses spawn 测试入口
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [worker]
+max_call_depth: 3
+---
+# Host
+""",
+        "worker": """---
+name: worker
+description: Responses spawn 测试子任务
+version: 1.0.0
+type: composite
+model: mock-model
+tool_names: [request_user_input]
+max_call_depth: 2
+---
+# Worker
+""",
+    }
+    for name, body in definitions.items():
+        skill_dir = skills / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(body, encoding="utf-8")
+    return skills
 
 
 @pytest.mark.asyncio
@@ -212,3 +260,103 @@ async def test_invalid_responses_terminal_sequence_is_never_committed(
     assert terminal is not None
     assert terminal.kind == "turn_failed"
     assert [item.kind for item in items] == ["user_message"]
+
+
+@pytest.mark.asyncio
+async def test_responses_spawn_rewind_uses_a_new_logical_sample_scope(
+    tmp_path: Path, threads_dir: Path
+) -> None:
+    """同一 child thread 的主动 rewind 是新采样，不得撞首轮 batch id。"""
+    client = _ResponsesClient([
+        _done([{"type": "message", "output_index": 0, "text": "首次完成"}],
+              end_turn=True),
+        _done([{"type": "message", "output_index": 0, "text": "重推完成"}],
+              end_turn=True),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=_write_spawn_skills(tmp_path),
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="responses-spawn-rewind", entry_skill_id="host"
+    )
+    spawned = await engine.spawn_skill(skill_id="worker", args={}, reason="test")
+    handle_id = spawned["handle_id"]
+    child_thread_id = spawned["child_thread_id"]
+    assert await _wait_until(
+        lambda: engine.spawn_status([handle_id])[handle_id]["status"] == "done"
+    )
+
+    nodes = await engine.rewind_nodes_for(child_thread_id)
+    await engine.submit(Rewind(
+        node_id=nodes[0].node_id,
+        thread_id=child_thread_id,
+        mode="re_reason",
+    ))
+
+    assert await _wait_until(
+        lambda: engine.spawn_status([handle_id])[handle_id]["result"] == "重推完成"
+    )
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_responses_spawn_resume_uses_a_new_logical_sample_scope(
+    tmp_path: Path, threads_dir: Path
+) -> None:
+    """同一 child thread 的 HITL resume 是新采样，不得撞挂起前 batch id。"""
+    client = _ResponsesClient([
+        _done([
+            {
+                "type": "function_call",
+                "output_index": 0,
+                "call_id": "question-1",
+                "name": "request_user_input",
+                "arguments": '{"prompt":"请补充"}',
+            }
+        ], end_turn=False),
+        _done([{"type": "message", "output_index": 0, "text": "续跑完成"}],
+              end_turn=True),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=_write_spawn_skills(tmp_path),
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        extra_tools=[make_request_user_input_tool()],
+    )
+    engine = await pool.get_or_create(
+        session_id="responses-spawn-resume", entry_skill_id="host"
+    )
+    events = []
+
+    async def collect_events() -> None:
+        """侧录 spawn 挂起事件以取得待核销 request id。"""
+        async for event in engine.subscribe_all():
+            events.append(event)
+
+    collector = asyncio.create_task(collect_events())
+    await asyncio.sleep(0)
+    spawned = await engine.spawn_skill(skill_id="worker", args={}, reason="test")
+    handle_id = spawned["handle_id"]
+    child_thread_id = spawned["child_thread_id"]
+    assert await _wait_until(
+        lambda: engine.spawn_status([handle_id])[handle_id]["status"] == "suspended"
+    )
+    suspended = next(event for event in events if event.msg.kind == "spawn_suspended")
+    request_id = suspended.msg.data["pending"][0]["request_id"]
+
+    await engine.submit(Resume(
+        thread_id=child_thread_id,
+        resolutions={request_id: {"answer": "已补充"}},
+    ))
+
+    assert await _wait_until(
+        lambda: engine.spawn_status([handle_id])[handle_id]["result"] == "续跑完成"
+    )
+    collector.cancel()
+    with suppress(asyncio.CancelledError):
+        await collector
+    await pool.close()
