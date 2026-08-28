@@ -714,6 +714,7 @@ class AttemptObservableClientAdapter(AttemptObservableModelClient):
 def _reviewed_one_attempt_client_types() -> tuple[type[object], ...]:
     """返回仓库逐一审查过的 exact one-attempt client 类型。"""
     from taifeng.llm.providers.anthropic_provider import AnthropicClient
+    from taifeng.llm.providers.codex.responses import CodexResponsesClient
     from taifeng.llm.providers.deepseek_provider import DeepSeekClient
     from taifeng.llm.providers.gemini_provider import GeminiClient
     from taifeng.llm.providers.openai.chat import OpenAIChatClient
@@ -723,6 +724,7 @@ def _reviewed_one_attempt_client_types() -> tuple[type[object], ...]:
 
     return (
         AnthropicClient,
+        CodexResponsesClient,
         DeepSeekClient,
         GeminiClient,
         OpenAICompatClient,
