@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from taifeng.conversation import JsonlMessageStore, assistant_message, reasoning
 from taifeng.conversation.store import (
     AtomicBatchMessageStore,
+    BatchAppendAck,
     BatchConflictError,
 )
 
@@ -122,3 +124,26 @@ async def test_atomic_batch_retry_is_idempotent_and_conflict_is_stable(tmp_path:
         )
     loaded = await _loaded(store, thread_id)
     assert [entry.id for entry in loaded] == [original.id]
+
+
+@pytest.mark.asyncio
+async def test_atomic_batch_conflict_is_serialized_across_writer_instances(
+    tmp_path: Path,
+) -> None:
+    """两个 writer 对同一 batch 的不同内容只能有一个获得 durable ack。"""
+    first = JsonlMessageStore(tmp_path)
+    thread_id = await first.create_thread()
+    second = JsonlMessageStore(tmp_path)
+    item_a = assistant_message("first", thread_id=thread_id, model="gpt-5.6")
+    item_b = assistant_message("second", thread_id=thread_id, model="gpt-5.6")
+
+    results = await asyncio.gather(
+        first.append_atomic_batch([item_a], batch_id="same-batch"),
+        second.append_atomic_batch([item_b], batch_id="same-batch"),
+        return_exceptions=True,
+    )
+    await first.close()
+    await second.close()
+
+    assert sum(isinstance(value, BatchAppendAck) for value in results) == 1
+    assert sum(isinstance(value, BatchConflictError) for value in results) == 1

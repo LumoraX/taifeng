@@ -13,8 +13,8 @@
 写入策略：
 
 - 每条 ResponseItem 序列化为单行 JSON
-- 用 ``O_APPEND`` + 单次 ``write()`` 保证 PIPE_BUF 内原子（单行通常 < 4KB）
-- 不加跨进程锁；多进程 append 依赖 POSIX 4KB 写原子性
+- 同一 thread 的普通 append 与原子 batch 共用 advisory file lock
+- 文件读写、flush/fsync 和阻塞锁调用均在 anyio worker thread 执行
 
 参照：
 
@@ -29,6 +29,7 @@ import json
 import os
 import secrets
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -96,6 +97,55 @@ def _append_buffered(path: Path, content: str) -> None:
     """保持 legacy append 的无 fsync 行为与延迟边界。"""
     with path.open("a", encoding="utf-8") as stream:
         stream.write(content)
+
+
+def _open_lock_file(path: Path) -> Any:
+    """在线程 worker 中打开每个 thread 共用的跨 writer 锁文件。"""
+    return path.open("a+b")
+
+
+def _lock_exclusive(handle: Any) -> None:
+    """使用当前平台的 advisory file lock 阻塞取得排他所有权。"""
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        if handle.read(1) == b"":
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_and_close(handle: Any) -> None:
+    """释放 advisory lock 并关闭句柄；始终在 worker thread 执行。"""
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+@asynccontextmanager
+async def _exclusive_file_lock(path: Path) -> AsyncIterator[None]:
+    """异步持有跨 writer 锁，所有阻塞 lock 系统调用均下沉 worker。"""
+    handle = await anyio.to_thread.run_sync(_open_lock_file, path)
+    try:
+        await anyio.to_thread.run_sync(_lock_exclusive, handle)
+        yield
+    finally:
+        await anyio.to_thread.run_sync(_unlock_and_close, handle)
 
 
 def _legacy_item_line(item: ResponseItem) -> str:
@@ -180,6 +230,15 @@ class _ActiveBatch:
     item_lines: list[str]
 
 
+@dataclass(frozen=True, slots=True)
+class _ReadState:
+    """一次 JSONL 同步读取的可见状态与待异步上报损坏行。"""
+
+    items: tuple[ResponseItem, ...]
+    committed: dict[str, tuple[str, tuple[str, ...]]]
+    corrupt: tuple[tuple[int, Exception], ...]
+
+
 def _active_batch_from_frame(data: dict[str, Any]) -> _ActiveBatch | None:
     """仅接受字段类型完整的 begin frame。"""
     frame_id = data.get("frame_id")
@@ -216,6 +275,57 @@ def _frame_commits(active: _ActiveBatch, data: dict[str, Any]) -> bool:
         and actual_ids == active.item_ids
         and actual_digest == active.digest
     )
+
+
+def _read_state(path: Path) -> _ReadState:
+    """在线程 worker 中重放 bare items 与完整 committed frames。"""
+    if not path.exists():
+        return _ReadState((), {}, ())
+    result: list[ResponseItem] = []
+    committed: dict[str, tuple[str, tuple[str, ...]]] = {}
+    corrupt: list[tuple[int, Exception]] = []
+    active: _ActiveBatch | None = None
+    with path.open("r", encoding="utf-8") as stream:
+        for line_no, raw in enumerate(stream, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as exc:
+                corrupt.append((line_no, exc))
+                active = None
+                continue
+            if isinstance(data, dict) and data.get("__meta__"):
+                continue
+            frame = data.get("frame") if isinstance(data, dict) else None
+            if frame == "item_batch_begin":
+                active = _active_batch_from_frame(data)
+                continue
+            if frame == "item_batch_commit":
+                if active is not None and _frame_commits(active, data):
+                    identity = (active.digest, active.item_ids)
+                    if active.batch_id not in committed:
+                        result.extend(active.items)
+                        committed[active.batch_id] = identity
+                active = None
+                continue
+            try:
+                item = ResponseItem.model_validate(data)
+            except ValidationError as exc:
+                corrupt.append((line_no, exc))
+                active = None
+                continue
+            if active is None and "commit_batch_id" in item.metadata:
+                continue
+            if active is None:
+                result.append(item)
+            elif item.metadata.get("commit_batch_id") == active.batch_id:
+                active.items.append(item)
+                active.item_lines.append(_canonical_item_line(item))
+            else:
+                active = None
+    return _ReadState(tuple(result), committed, tuple(corrupt))
 
 
 def _is_audited_metadata(extra: dict[str, Any]) -> bool:
@@ -270,12 +380,8 @@ class JsonlMessageWriter:
     布局：``<threads_dir>/<thread_id>.jsonl``。每个 thread 一个文件，首行写 ``__meta__``
     元数据（自包含，可被 ``rebuild_index`` 还原 ``ThreadDirectory``）。
 
-    并发模型：
-
-    - 不加跨进程锁
-    - 每次 ``append`` 用 ``open(path, 'a')`` + 单次 ``write()``
-    - POSIX 在 PIPE_BUF（4KB）内保证不撕裂行
-    - 多 task / 多进程并发 append 同 thread：序列化结果完整，但顺序不保证全局严格
+    并发模型：同一 thread 的实例内 anyio lock 与跨 writer advisory file lock
+    共同串行化普通 append 和原子 batch，避免 committed 检查与追加之间竞态。
 
     可选 ``sink``：传入后，``load_history`` 跳过损坏行时会发 ``transcript_skipped_corrupt_line``
     事件；未传则静默跳过。
@@ -349,7 +455,7 @@ class JsonlMessageWriter:
         path = self._thread_path(thread_id)
         lock = self._append_locks.setdefault(thread_id, anyio.Lock())
         content = "".join(f"{_legacy_item_line(item)}\n" for item in items)
-        async with lock:
+        async with lock, _exclusive_file_lock(path.with_suffix(".lock")):
             await anyio.to_thread.run_sync(_append_buffered, path, content)
 
     async def append_atomic_batch(
@@ -367,7 +473,7 @@ class JsonlMessageWriter:
         descriptor = _describe_batch(items, batch_id)
         path = self._thread_path(thread_id)
         lock = self._append_locks.setdefault(thread_id, anyio.Lock())
-        async with lock:
+        async with lock, _exclusive_file_lock(path.with_suffix(".lock")):
             _, committed = await self._load_state(thread_id)
             existing = committed.get(batch_id)
             if existing is not None:
@@ -418,55 +524,10 @@ class JsonlMessageWriter:
     ) -> tuple[list[ResponseItem], dict[str, tuple[str, tuple[str, ...]]]]:
         """重放 bare items，并只发布校验完整的 framed batch。"""
         path = self._thread_path(thread_id)
-        if not path.exists():
-            return [], {}
-        result: list[ResponseItem] = []
-        committed: dict[str, tuple[str, tuple[str, ...]]] = {}
-        active: _ActiveBatch | None = None
-        with path.open("r", encoding="utf-8") as stream:
-            for line_no, raw in enumerate(stream, start=1):
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    await self._emit_corrupt(thread_id, line_no, exc)
-                    active = None
-                    continue
-                if isinstance(data, dict) and data.get("__meta__"):
-                    continue
-                frame = data.get("frame") if isinstance(data, dict) else None
-                if frame == "item_batch_begin":
-                    active = _active_batch_from_frame(data)
-                    continue
-                if frame == "item_batch_commit":
-                    if active is not None and _frame_commits(active, data):
-                        identity = (active.digest, active.item_ids)
-                        prior = committed.get(active.batch_id)
-                        if prior is None:
-                            result.extend(active.items)
-                            committed[active.batch_id] = identity
-                    active = None
-                    continue
-                try:
-                    item = ResponseItem.model_validate(data)
-                except ValidationError as exc:
-                    await self._emit_corrupt(thread_id, line_no, exc)
-                    active = None
-                    continue
-                if active is None and "commit_batch_id" in item.metadata:
-                    # framed item 永不降级成 legacy bare item；即使 begin/前序行损坏，
-                    # 也必须等完整的新 frame 重试后才可见。
-                    continue
-                if active is None:
-                    result.append(item)
-                elif item.metadata.get("commit_batch_id") == active.batch_id:
-                    active.items.append(item)
-                    active.item_lines.append(_canonical_item_line(item))
-                else:
-                    active = None
-        return result, committed
+        state = await anyio.to_thread.run_sync(_read_state, path)
+        for line_no, cause in state.corrupt:
+            await self._emit_corrupt(thread_id, line_no, cause)
+        return list(state.items), state.committed
 
     async def _emit_corrupt(self, thread_id: str, line_no: int, cause: Exception) -> None:
         """跳过损坏行时发事件（sink 未注入则静默）。
@@ -744,7 +805,7 @@ class JsonlMessageStore(MessageStore):
     async def append_batch(self, items: list[ResponseItem]) -> None:
         if not items:
             return
-        # 按 thread 分组转给 writer.append（writer 内部不再加锁，POSIX 4KB 原子保证）
+        # 按 thread 分组转给 writer.append；writer 统一持有跨 writer 文件锁。
         by_thread: dict[str, list[ResponseItem]] = {}
         for it in items:
             by_thread.setdefault(it.thread_id, []).append(it)

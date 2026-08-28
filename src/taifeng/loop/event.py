@@ -549,6 +549,7 @@ class ThreadResumed(_Msg):
         "item_count": int,
         "entry_skill_id_at_resume": str,
         "entry_skill_id_recorded": str | None,
+        "recovered_unknown_call_ids": list[str],
     }"""
 
 

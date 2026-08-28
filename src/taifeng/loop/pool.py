@@ -778,6 +778,9 @@ class EnginePool:
                 entry_skill_id=entry_skill_id,
                 cwd=cwd,
                 resume_thread_id=resume_thread_id,
+                recover_unknown_response_calls=(
+                    model_capabilities(self._model_client).protocol == "responses"
+                ),
             )
             audit_state = prepared.audit_state
             initial_history = prepared.initial_history
@@ -801,6 +804,7 @@ class EnginePool:
                 resume_thread_id=resume_thread_id,
                 entry_skill_id=entry_skill_id,
                 initial_history=initial_history,
+                recovered_unknown_call_ids=prepared.recovered_unknown_call_ids,
             )
             return engine
 

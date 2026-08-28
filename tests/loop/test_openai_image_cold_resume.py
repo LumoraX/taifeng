@@ -14,6 +14,7 @@ from taifeng.conversation.models import (
     function_call,
     function_call_output,
     reasoning,
+    suspension_item,
     user_message,
 )
 from taifeng.llm.errors import InvalidHistoryError
@@ -288,13 +289,142 @@ async def test_chat_cold_resume_rejects_responses_provider_state(
         resume_thread_id=thread_id,
     )
     entry, snapshot = await _skill(skills_dir)
-    request = _request(
-        cold_engine.history_snapshot(),
-        entry=entry,
-        snapshot=snapshot,
-        capabilities=chat.capabilities,
-    )
 
     with pytest.raises(InvalidHistoryError):
-        chat.session(cancel=CancellationToken())._build_payload(request)
+        _request(
+            cold_engine.history_snapshot(),
+            entry=entry,
+            snapshot=snapshot,
+            capabilities=chat.capabilities,
+        )
     await cold_pool.close()
+
+
+@pytest.mark.asyncio
+async def test_cold_resume_settles_orphan_response_call_as_unknown_without_retry(
+    skills_dir: Path,
+    threads_dir: Path,
+) -> None:
+    """冷恢复只追加稳定 unknown output，绝不重放结果未知的工具调用。"""
+    client = OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6")
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="orphan-call",
+        entry_skill_id="code-reviewer",
+    )
+    call = function_call(
+        "call-unknown",
+        "inspect",
+        '{"id":"A-17"}',
+        thread_id=engine.thread_id,
+    )
+    call.metadata = {"llm_sample_id": "sample-unknown", "provider_output_index": 0}
+    await pool.store.append_atomic_batch([call], batch_id="sample-unknown")
+    thread_id = engine.thread_id
+    await pool.close()
+
+    cold_pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6"),
+        compressors=[],
+    )
+    cold_engine = await cold_pool.get_or_create(
+        session_id="orphan-call-cold",
+        entry_skill_id="code-reviewer",
+        resume_thread_id=thread_id,
+    )
+    history = cold_engine.history_snapshot()
+    await cold_pool.close()
+
+    assert [item.kind for item in history] == [
+        "function_call",
+        "function_call_output",
+    ]
+    recovered = history[-1]
+    assert recovered.payload == {
+        "call_id": "call-unknown",
+        "output": "tool outcome unknown after process recovery; not retried",
+        "is_error": True,
+    }
+    assert recovered.metadata["origin_llm_sample_id"] == "sample-unknown"
+
+    second_pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6"),
+        compressors=[],
+    )
+    second_engine = await second_pool.get_or_create(
+        session_id="orphan-call-cold-again",
+        entry_skill_id="code-reviewer",
+        resume_thread_id=thread_id,
+    )
+    second_history = second_engine.history_snapshot()
+    await second_pool.close()
+
+    assert sum(item.kind == "function_call_output" for item in second_history) == 1
+
+
+@pytest.mark.asyncio
+async def test_cold_resume_preserves_tool_call_owned_by_active_suspension(
+    skills_dir: Path,
+    threads_dir: Path,
+) -> None:
+    """活跃 suspension 所属 call 仍等待业务裁决，不得被 unknown recovery 核销。"""
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6"),
+        compressors=[],
+    )
+    engine = await pool.get_or_create(
+        session_id="suspended-call",
+        entry_skill_id="code-reviewer",
+    )
+    call = function_call("call-waiting", "inspect", "{}", thread_id=engine.thread_id)
+    call.metadata = {"llm_sample_id": "sample-waiting", "provider_output_index": 0}
+    await pool.store.append_atomic_batch([call], batch_id="sample-waiting")
+    await pool.store.append(
+        suspension_item(
+            record_id="suspension-1",
+            submission_id="submission-1",
+            turn_index=1,
+            pending=[
+                {
+                    "request_id": "request-1",
+                    "reason": "permission",
+                    "payload_schema": {},
+                    "related_call_id": "call-waiting",
+                    "detail": {},
+                    "ttl_seconds": None,
+                    "on_expire": "abort",
+                }
+            ],
+            created_at=1,
+            thread_id=engine.thread_id,
+        )
+    )
+    thread_id = engine.thread_id
+    await pool.close()
+
+    cold_pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6"),
+        compressors=[],
+    )
+    cold_engine = await cold_pool.get_or_create(
+        session_id="suspended-call-cold",
+        entry_skill_id="code-reviewer",
+        resume_thread_id=thread_id,
+    )
+    history = cold_engine.history_snapshot()
+    await cold_pool.close()
+
+    assert [item.kind for item in history] == ["function_call", "suspension"]

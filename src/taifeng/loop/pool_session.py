@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -34,6 +35,99 @@ class PreparedPoolSession:
     thread_id: str
     initial_history: tuple[ResponseItem, ...]
     audit_state: AuditedSessionState | None
+    recovered_unknown_call_ids: tuple[str, ...] = ()
+
+
+def _active_suspension_call_ids(history: tuple[ResponseItem, ...]) -> set[str]:
+    """从 append-only marker 推导仍由业务 suspension 持有的 call ids。"""
+    resolved: set[str] = set()
+    suspensions: list[ResponseItem] = []
+    for item in history:
+        if item.kind == "system_injection" and item.payload.get("source") == "suspend_resolved":
+            text = str(item.payload.get("text", ""))
+            resolved.add(text.removeprefix("suspend_resolved:"))
+        elif item.kind == "suspension":
+            suspensions.append(item)
+    active: set[str] = set()
+    for item in suspensions:
+        if item.payload.get("record_id") in resolved:
+            continue
+        for pending in item.payload.get("pending", []):
+            if not isinstance(pending, dict):
+                continue
+            call_id = pending.get("related_call_id")
+            if isinstance(call_id, str) and call_id:
+                active.add(call_id)
+    return active
+
+
+def _unknown_outputs(
+    history: tuple[ResponseItem, ...],
+) -> dict[str, list[ResponseItem]]:
+    """按 Responses sample 分组构造稳定的未知工具结果，不执行工具。"""
+    from taifeng.conversation.models import ResponseItem
+
+    completed = {
+        str(item.payload.get("call_id"))
+        for item in history
+        if item.kind == "function_call_output" and item.payload.get("call_id")
+    }
+    active = _active_suspension_call_ids(history)
+    seen: set[str] = set()
+    grouped: dict[str, list[ResponseItem]] = {}
+    for call in history:
+        if call.kind != "function_call":
+            continue
+        call_id = call.payload.get("call_id")
+        sample_id = call.metadata.get("llm_sample_id")
+        if not isinstance(call_id, str) or not call_id or call_id in seen:
+            continue
+        seen.add(call_id)
+        if call_id in completed or call_id in active:
+            continue
+        if not isinstance(sample_id, str) or not sample_id:
+            continue
+        identity = hashlib.sha256(f"{sample_id}\0{call_id}".encode()).hexdigest()
+        grouped.setdefault(sample_id, []).append(
+            ResponseItem(
+                kind="function_call_output",
+                id=f"item_recovery_{identity[:24]}",
+                thread_id=call.thread_id,
+                created_at=call.created_at,
+                payload={
+                    "call_id": call_id,
+                    "output": "tool outcome unknown after process recovery; not retried",
+                    "is_error": True,
+                },
+                metadata={"origin_llm_sample_id": sample_id},
+            )
+        )
+    return grouped
+
+
+async def _settle_unknown_response_calls(
+    store: MessageStore,
+    history: tuple[ResponseItem, ...],
+) -> tuple[tuple[ResponseItem, ...], tuple[str, ...]]:
+    """以稳定原子 batch 收敛冷恢复 orphan calls，并重载 durable history。"""
+    from taifeng.conversation.store import AtomicBatchMessageStore
+
+    if not isinstance(store, AtomicBatchMessageStore):
+        raise TypeError("Responses recovery requires AtomicBatchMessageStore")
+    grouped = _unknown_outputs(history)
+    if not grouped:
+        return history, ()
+    recovered: list[str] = []
+    for sample_id, outputs in grouped.items():
+        digest = hashlib.sha256(sample_id.encode()).hexdigest()[:24]
+        await store.append_atomic_batch(
+            outputs,
+            batch_id=f"recovery:unknown_tool_outcome:{digest}",
+        )
+        recovered.extend(str(item.payload["call_id"]) for item in outputs)
+    iterator = await store.load_thread(history[0].thread_id)
+    reloaded = tuple([item async for item in iterator])
+    return reloaded, tuple(recovered)
 
 
 def _bind_audited_finish_owner(
@@ -63,6 +157,7 @@ async def prepare_pool_session(
     entry_skill_id: str,
     cwd: str | None,
     resume_thread_id: str | None,
+    recover_unknown_response_calls: bool = False,
 ) -> PreparedPoolSession:
     """按 pool 模式准备 audited bootstrap、legacy resume 或新 thread。"""
     if audit is not None:
@@ -87,7 +182,10 @@ async def prepare_pool_session(
         raise ValueError(
             f"resume_thread_id {resume_thread_id!r} not found or empty thread"
         )
-    return PreparedPoolSession(resume_thread_id, history, None)
+    recovered: tuple[str, ...] = ()
+    if recover_unknown_response_calls:
+        history, recovered = await _settle_unknown_response_calls(store, history)
+    return PreparedPoolSession(resume_thread_id, history, None, recovered)
 
 
 async def create_started_pool_engine(
@@ -178,6 +276,7 @@ async def finalize_resumed_engine(
     resume_thread_id: str | None,
     entry_skill_id: str,
     initial_history: tuple[ResponseItem, ...],
+    recovered_unknown_call_ids: tuple[str, ...] = (),
 ) -> None:
     """actor 启动后恢复 spawn state，并发出既有 ThreadResumed 事件。
 
@@ -199,6 +298,7 @@ async def finalize_resumed_engine(
                     "item_count": len(initial_history),
                     "entry_skill_id_at_resume": entry_skill_id,
                     "entry_skill_id_recorded": None,
+                    "recovered_unknown_call_ids": list(recovered_unknown_call_ids),
                 }
             ),
         )
