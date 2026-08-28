@@ -1,6 +1,6 @@
 [project]
 name = "taifeng"
-version = "2026.8.7.0"
+version = "2026.8.28.0"
 description = "让 LLM 自主调度文档化 skill 的 Python agent 微内核 —— 动 agent 的天地气"
 readme = "README.md"
 requires-python = ">=3.12"

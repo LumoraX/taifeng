@@ -178,12 +178,14 @@ class McpStdioClient:
 
     async def _initialize(self) -> None:
         """MCP initialize handshake。"""
+        from taifeng import __version__
+
         result = await self._send_request(
             "initialize",
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "taifeng", "version": "0.0.1"},
+                "clientInfo": {"name": "taifeng", "version": __version__},
             },
         )
         self._server_info = result.get("serverInfo", {}) if isinstance(result, dict) else {}

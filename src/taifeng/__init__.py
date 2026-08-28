@@ -5,7 +5,7 @@
 设计文档：docs/architecture/overview.md
 """
 
-__version__ = "0.0.1"
+__version__ = "2026.8.28.0"
 
 # 公共 API ——————————————————————————————————————
 

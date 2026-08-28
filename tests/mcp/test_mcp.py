@@ -37,10 +37,15 @@ def main():
         method = msg.get("method")
         msg_id = msg.get("id")
         if method == "initialize":
+            client_info = (msg.get("params") or {}).get("clientInfo") or {}
             reply(msg_id, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "fake-mcp", "version": "0.1.0"},
+                "serverInfo": {
+                    "name": "fake-mcp",
+                    "version": "0.1.0",
+                    "receivedClientVersion": client_info.get("version"),
+                },
             })
         elif method == "notifications/initialized":
             pass  # no response for notifications
@@ -101,10 +106,18 @@ def fake_server(tmp_path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_mcp_initialize_and_list(fake_server: Path) -> None:
+async def test_mcp_initialize_and_list(
+    fake_server: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import taifeng
+
+    runtime_version = "runtime-version-sentinel"
+    monkeypatch.setattr(taifeng, "__version__", runtime_version)
     client = await McpStdioClient.spawn([sys.executable, str(fake_server)])
     try:
         assert client.server_info.get("name") == "fake-mcp"
+        assert client.server_info.get("receivedClientVersion") == runtime_version
         tools = await client.list_tools()
         assert len(tools) == 2
         names = sorted(t["name"] for t in tools)
