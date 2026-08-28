@@ -181,7 +181,7 @@ Expected: PASS。
 - name: 运行版本一致性测试
   run: uv run --extra dev pytest tests/llm/test_public_imports.py tests/mcp/test_mcp.py::test_mcp_initialize_and_list tests/test_package_metadata.py -q
 - name: 校验发行产物
-  run: uv run scripts/verify_release_artifacts.py --dist-dir dist --expected-version "${GITHUB_REF_NAME#v}"
+  run: uv run --extra dev scripts/verify_release_artifacts.py --dist-dir dist --expected-version "${GITHUB_REF_NAME#v}"
 ```
 
 - [ ] **Step 6: 提交**
@@ -212,7 +212,7 @@ Expected: 全部退出 0。
 
 - [ ] **Step 3: 构建到空目录并执行双产物 smoke**
 
-Run: `dist_dir=$(mktemp -d); uv build --out-dir "$dist_dir"; uv run scripts/verify_release_artifacts.py --dist-dir "$dist_dir" --expected-version 2026.8.28.0`
+Run: `dist_dir=$(mktemp -d); uv build --out-dir "$dist_dir"; uv run --extra dev scripts/verify_release_artifacts.py --dist-dir "$dist_dir" --expected-version 2026.8.28.0`
 
 Expected: wheel/sdist metadata 与两个干净安装全部 PASS。
 
