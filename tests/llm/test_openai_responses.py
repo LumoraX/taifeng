@@ -197,6 +197,32 @@ def test_responses_rejects_foreign_provider_state_before_network() -> None:
         _session()._build_payload(request)
 
 
+def test_openai_responses_rejects_codex_provider_state() -> None:
+    """独立 Codex state 不得被 OpenAI client 静默重放。"""
+    request = ApiRequest(
+        model="gpt-5.6",
+        input_items=[
+            ApiProviderStateItem(
+                sample_id="sample-1",
+                output_index=0,
+                state=ProviderStateEnvelope(
+                    provider="codex",
+                    protocol="responses",
+                    item_type="reasoning",
+                    payload={
+                        "id": "rs_1",
+                        "type": "reasoning",
+                        "encrypted_content": "ciphertext",
+                    },
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(InvalidHistoryError):
+        _session()._build_payload(request)
+
+
 def test_responses_terminal_output_indexes_must_be_increasing() -> None:
     """terminal list 的 provider output order 不能靠客户端排序掩盖。"""
     accumulator = ResponsesAttemptAccumulator()

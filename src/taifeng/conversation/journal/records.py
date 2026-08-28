@@ -499,30 +499,33 @@ class _ProviderStateEnvelopeV1(JournalModel):
     payload: CanonicalMapping
 
     @model_validator(mode="after")
-    def _validate_openai_reasoning_projection(self) -> Self:
-        """OpenAI reasoning 只允许设计批准的白名单字段。"""
-        if (self.provider, self.protocol, self.item_type) != (
-            "openai",
-            "responses",
-            "reasoning",
-        ):
+    def _validate_responses_reasoning_projection(self) -> Self:
+        """OpenAI/Codex reasoning 只允许设计批准的白名单字段。"""
+        identity = (self.provider, self.protocol, self.item_type)
+        if identity not in {
+            ("openai", "responses", "reasoning"),
+            ("codex", "responses", "reasoning"),
+        }:
             return self
+        label = "Codex" if self.provider == "codex" else "OpenAI"
         allowed = {"id", "type", "encrypted_content", "summary", "status"}
         if unknown := set(self.payload) - allowed:
-            raise ValueError(f"unsupported OpenAI reasoning state fields: {sorted(unknown)}")
+            raise ValueError(
+                f"unsupported {label} reasoning state fields: {sorted(unknown)}"
+            )
         if not isinstance(self.payload.get("id"), str) or not self.payload["id"]:
-            raise ValueError("OpenAI reasoning state requires id")
+            raise ValueError(f"{label} reasoning state requires id")
         if self.payload.get("type") != "reasoning":
-            raise ValueError("OpenAI reasoning state type must be reasoning")
+            raise ValueError(f"{label} reasoning state type must be reasoning")
         encrypted = self.payload.get("encrypted_content")
         if not isinstance(encrypted, str) or not encrypted:
-            raise ValueError("OpenAI reasoning state requires encrypted_content")
+            raise ValueError(f"{label} reasoning state requires encrypted_content")
         summary = self.payload.get("summary")
         if summary is not None and not isinstance(summary, list):
-            raise ValueError("OpenAI reasoning state summary must be a list")
+            raise ValueError(f"{label} reasoning state summary must be a list")
         status = self.payload.get("status")
         if status is not None and not isinstance(status, str):
-            raise ValueError("OpenAI reasoning state status must be a string")
+            raise ValueError(f"{label} reasoning state status must be a string")
         return self
 
 
