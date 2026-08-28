@@ -22,6 +22,7 @@ from taifeng.llm.image_input import (
     ConservativeImageCostEstimator,
     ImageAttachmentV1,
     ImageInputPolicy,
+    OpenAIImageCostEstimator,
     admit_image_attachments,
 )
 
@@ -40,8 +41,42 @@ def _png(width: int = 1, height: int = 1) -> bytes:
 
 def _gif(frame_count: int = 1) -> bytes:
     """构造有指定 image descriptor 数量的最小 GIF header。"""
-    descriptor = b",\x00\x00\x00\x00\x01\x00\x01\x00\x00"
+    descriptor = b",\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x01\x00\x00"
     return b"GIF89a\x01\x00\x01\x00\x00\x00\x00" + descriptor * frame_count + b";"
+
+
+def _webp_chunk(fourcc: bytes, payload: bytes) -> bytes:
+    """构造单 chunk RIFF WebP，按偶数字节补齐 payload。"""
+    padding = b"\x00" if len(payload) % 2 else b""
+    body = b"WEBP" + fourcc + len(payload).to_bytes(4, "little") + payload + padding
+    return b"RIFF" + len(body).to_bytes(4, "little") + body
+
+
+def _vp8_webp(width: int, height: int) -> bytes:
+    """构造只含 lossy VP8 frame header 的 WebP。"""
+    payload = (
+        b"\x00\x00\x00\x9d\x01\x2a"
+        + width.to_bytes(2, "little")
+        + height.to_bytes(2, "little")
+    )
+    return _webp_chunk(b"VP8 ", payload)
+
+
+def _vp8l_webp(width: int, height: int) -> bytes:
+    """构造只含 lossless VP8L dimension bits 的 WebP。"""
+    bits = (width - 1) | ((height - 1) << 14)
+    return _webp_chunk(b"VP8L", b"\x2f" + bits.to_bytes(4, "little"))
+
+
+def _vp8x_webp(width: int, height: int, *, animated: bool) -> bytes:
+    """构造 VP8X canvas；animation flag 用于 admission 拒绝测试。"""
+    flags = 0x02 if animated else 0
+    payload = (
+        bytes([flags, 0, 0, 0])
+        + (width - 1).to_bytes(3, "little")
+        + (height - 1).to_bytes(3, "little")
+    )
+    return _webp_chunk(b"VP8X", payload)
 
 
 def _attachment(data: bytes, media_type: str = "image/png") -> ImageAttachmentV1:
@@ -112,6 +147,62 @@ def test_admission_rejects_animated_gif() -> None:
         admit_image_attachments([attachment], POLICY)
 
 
+def test_static_gif_comment_comma_is_not_a_second_frame() -> None:
+    """comment extension 中的逗号字节不能冒充 image descriptor。"""
+    header = b"GIF89a\x01\x00\x01\x00\x00\x00\x00"
+    data = _gif().replace(header, header + b"!\xfe\x01,\x00")
+
+    inspected = admit_image_attachments(
+        [_attachment(data, media_type="image/gif")],
+        POLICY,
+    )
+
+    assert [(image.width, image.height) for image in inspected] == [(1, 1)]
+
+
+@pytest.mark.parametrize(
+    ("data", "dimensions"),
+    [(_vp8_webp(13, 17), (13, 17)), (_vp8l_webp(19, 23), (19, 23))],
+)
+def test_webp_vp8_and_vp8l_dimensions_are_supported(
+    data: bytes,
+    dimensions: tuple[int, int],
+) -> None:
+    """常见 lossy/lossless WebP 不得因缺 VP8X 扩展头被拒绝。"""
+    policy = POLICY.__class__(
+        enabled=True,
+        max_images=1,
+        max_item_bytes=256,
+        max_total_bytes=256,
+        allowed_media_types=frozenset({"image/webp"}),
+    )
+
+    inspected = admit_image_attachments(
+        [_attachment(data, media_type="image/webp")],
+        policy,
+    )
+
+    assert (inspected[0].width, inspected[0].height) == dimensions
+
+
+def test_animated_vp8x_is_rejected() -> None:
+    """VP8X animation flag 必须进入单帧 admission 拒绝路径。"""
+    data = _vp8x_webp(11, 7, animated=True)
+    policy = ImageInputPolicy(
+        enabled=True,
+        max_images=1,
+        max_item_bytes=256,
+        max_total_bytes=256,
+        allowed_media_types=frozenset({"image/webp"}),
+    )
+
+    with pytest.raises(InvalidImageError, match="frame"):
+        admit_image_attachments(
+            [_attachment(data, media_type="image/webp")],
+            policy,
+        )
+
+
 def test_admission_applies_count_and_decoded_byte_limits() -> None:
     """数量闸先于正文，单项与总量都按 decoded bytes 计算。"""
     attachment = _attachment(_png())
@@ -139,6 +230,45 @@ def test_unknown_model_image_estimate_uses_policy_ceiling() -> None:
         )
         == 321
     )
+
+
+def test_gpt_56_1024_square_high_costs_1229_tokens() -> None:
+    """GPT-5.6 high 使用 32×32 patch 与 1.2 multiplier。"""
+    estimator = OpenAIImageCostEstimator()
+
+    assert estimator.estimate_image_tokens(
+        model="gpt-5.6-sol",
+        media_type="image/png",
+        width=1024,
+        height=1024,
+        detail="high",
+    ) == 1229
+
+
+def test_gpt_56_low_does_not_enlarge_small_image() -> None:
+    """官方 low 只缩入 512 方框，不把较小图片放大。"""
+    estimator = OpenAIImageCostEstimator()
+
+    assert estimator.estimate_image_tokens(
+        model="gpt-5.6-terra",
+        media_type="image/png",
+        width=1,
+        height=1,
+        detail="low",
+    ) == 2
+
+
+def test_gpt_56_high_applies_adjusted_patch_budget_resize() -> None:
+    """超预算图片按官方 adjusted shrink factor 计算真实 patch 覆盖。"""
+    estimator = OpenAIImageCostEstimator()
+
+    assert estimator.estimate_image_tokens(
+        model="gpt-5.6-luna",
+        media_type="image/png",
+        width=2048,
+        height=1536,
+        detail="high",
+    ) == 2942
 
 
 def test_context_budget_counts_image_tokens_and_body_bytes() -> None:

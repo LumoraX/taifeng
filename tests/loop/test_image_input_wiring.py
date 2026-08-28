@@ -266,3 +266,61 @@ async def test_resumed_child_runner_inherits_image_policy_and_estimator(
 
     assert captured[0].image_input_policy is policy
     assert captured[0].input_cost_estimator is estimator
+
+
+@pytest.mark.asyncio
+async def test_engine_estimate_tokens_uses_injected_image_estimator(
+    skills_dir: Path,
+    threads_dir: Path,
+) -> None:
+    """公共 estimate_tokens 与 turn preflight 必须共享同一图片预算配置。"""
+
+    class RecordingEstimator:
+        """记录 engine 传入的模型与图片尺寸。"""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int, int]] = []
+
+        def estimate_image_tokens(self, **kwargs: object) -> int:
+            self.calls.append(
+                (str(kwargs["model"]), int(kwargs["width"]), int(kwargs["height"]))
+            )
+            return 4321
+
+    estimator = RecordingEstimator()
+    policy = ImageInputPolicy(
+        enabled=True,
+        max_images=1,
+        max_item_bytes=1024,
+        max_total_bytes=1024,
+        allowed_media_types=frozenset({"image/png"}),
+    )
+    client = SimClient(
+        turns=[],
+        capabilities=ModelCapabilities(
+            input_modalities=frozenset({"text", "image"}),
+            provider="sim",
+            protocol="sim",
+        ),
+    )
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+        image_input_policy=policy,
+        input_cost_estimator=estimator,
+    )
+    engine = await pool.get_or_create(
+        session_id="estimate-image",
+        entry_skill_id="code-reviewer",
+    )
+    engine._history.append(  # noqa: SLF001
+        user_message("inspect", thread_id=engine.thread_id, attachments=[_image()])
+    )
+
+    estimated = engine.estimate_tokens()
+    await pool.close()
+
+    assert estimated >= 4321
+    assert estimator.calls == [("mock-model", 1, 1)]

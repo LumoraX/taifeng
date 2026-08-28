@@ -561,7 +561,12 @@ class AgentEngine:
         """估算当前 history 的 token 占用 —— 业务侧可据此决定是否 CompactNow。"""
         from taifeng.context.budget import estimate_history_tokens
 
-        return estimate_history_tokens(self._history)
+        return estimate_history_tokens(
+            self._history,
+            image_input_policy=self._image_input_policy,
+            input_cost_estimator=self._input_cost_estimator,
+            model=self._entry_skill.model or "",
+        )
 
     def usage_ratio(self) -> float:
         """当前 token 用量占 context_window 的比例（0.0 ~ 1.0+）。"""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import math
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -148,8 +149,11 @@ class OpenAIImageCostEstimator:
         height: int,
         detail: ImageDetail,
     ) -> int:
-        """为已登记 OpenAI GPT-5 模型应用保守的 low/high tile 上界。"""
+        """按模型族应用已登记的官方图片 token 规则。"""
         del media_type
+        normalized_model = model.rsplit("/", 1)[-1].lower()
+        if normalized_model.startswith("gpt-5.6"):
+            return _gpt_56_image_tokens(width, height, detail)
         if not model.startswith(("gpt-5", "gpt-4.1", "gpt-4o")):
             return self.unknown_model_token_ceiling
         if detail == "low":
@@ -158,6 +162,58 @@ class OpenAIImageCostEstimator:
             tiles = ((max(1, width) + 511) // 512) * ((max(1, height) + 511) // 512)
             return 85 + 170 * max(1, tiles)
         return self.unknown_model_token_ceiling  # pragma: no cover - Literal 已限制
+
+
+def _fit_dimensions(width: int, height: int, max_side: int) -> tuple[int, int]:
+    """保持宽高比缩入正方形上界，且绝不放大小图。"""
+    safe_width = max(1, width)
+    safe_height = max(1, height)
+    scale = min(1.0, max_side / safe_width, max_side / safe_height)
+    return max(1, math.floor(safe_width * scale)), max(
+        1, math.floor(safe_height * scale)
+    )
+
+
+def _patch_count(width: int, height: int) -> int:
+    """返回覆盖整数像素 canvas 所需的 32×32 patch 数。"""
+    return math.ceil(width / 32) * math.ceil(height / 32)
+
+
+def _fit_patch_budget(width: int, height: int, budget: int) -> tuple[int, int]:
+    """按官方 adjusted shrink factor 缩小并保证最终 patch 不超预算。"""
+    if _patch_count(width, height) <= budget:
+        return width, height
+    shrink = math.sqrt((32**2 * budget) / (width * height))
+    width_in_patches = width * shrink / 32
+    height_in_patches = height * shrink / 32
+    adjustment = min(
+        math.floor(width_in_patches) / width_in_patches,
+        math.floor(height_in_patches) / height_in_patches,
+    )
+    adjusted = shrink * adjustment
+    return max(1, math.floor(width * adjusted)), max(
+        1, math.floor(height * adjusted)
+    )
+
+
+def _gpt_56_image_tokens(
+    width: int,
+    height: int,
+    detail: ImageDetail,
+) -> int:
+    """计算 GPT-5.6 的 32×32 patch 数与 1.2 token multiplier。"""
+    if detail == "low":
+        resized_width, resized_height = _fit_dimensions(width, height, 512)
+    elif detail == "high":
+        resized_width, resized_height = _fit_dimensions(width, height, 2048)
+        resized_width, resized_height = _fit_patch_budget(
+            resized_width,
+            resized_height,
+            2500,
+        )
+    else:
+        resized_width, resized_height = _fit_dimensions(width, height, 65535)
+    return math.ceil(_patch_count(resized_width, resized_height) * 1.2)
 
 
 def _encoded_limit(decoded_limit: int) -> int:
@@ -198,27 +254,76 @@ def _inspect_png(data: bytes) -> tuple[int, int, int]:
     return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"), 1
 
 
+def _skip_gif_sub_blocks(data: bytes, offset: int) -> int:
+    """跳过 GIF extension/image data 的 size-prefixed sub-block 序列。"""
+    while offset < len(data):
+        size = data[offset]
+        offset += 1
+        if size == 0:
+            return offset
+        if offset + size > len(data):
+            raise InvalidImageError("GIF sub-block is truncated")
+        offset += size
+    raise InvalidImageError("GIF sub-block terminator is missing")
+
+
 def _inspect_gif(data: bytes) -> tuple[int, int, int]:
-    """解析 GIF logical screen 与 image descriptor 数量。"""
+    """按 block 结构解析 GIF logical screen 与 image descriptor。"""
     if len(data) < 14 or data[:6] not in (b"GIF87a", b"GIF89a"):
         raise InvalidImageError("GIF signature is invalid")
     width = int.from_bytes(data[6:8], "little")
     height = int.from_bytes(data[8:10], "little")
-    frames = data[13:].count(b",")
+    offset = 13
+    if data[10] & 0x80:
+        offset += 3 * (2 ** ((data[10] & 0x07) + 1))
+    frames = 0
+    while offset < len(data):
+        marker = data[offset]
+        if marker == 0x3B:
+            break
+        if marker == 0x21:
+            if offset + 2 > len(data):
+                raise InvalidImageError("GIF extension is truncated")
+            offset = _skip_gif_sub_blocks(data, offset + 2)
+            continue
+        if marker != 0x2C or offset + 10 > len(data):
+            raise InvalidImageError("GIF block structure is invalid")
+        packed = data[offset + 9]
+        offset += 10
+        if packed & 0x80:
+            offset += 3 * (2 ** ((packed & 0x07) + 1))
+        if offset >= len(data):
+            raise InvalidImageError("GIF image data is truncated")
+        offset = _skip_gif_sub_blocks(data, offset + 1)
+        frames += 1
     if frames == 0:
         raise InvalidImageError("GIF has no image frame")
     return width, height, frames
 
 
 def _inspect_webp(data: bytes) -> tuple[int, int, int]:
-    """解析 VP8X canvas 尺寸；其他 WebP header 统一拒绝而非猜测。"""
-    if len(data) < 30 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+    """解析 VP8X、lossy VP8 与 lossless VP8L 的 canvas 尺寸。"""
+    if len(data) < 20 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
         raise InvalidImageError("WebP signature is invalid")
-    if data[12:16] != b"VP8X":
-        raise InvalidImageError("WebP requires a VP8X header")
-    width = int.from_bytes(data[24:27], "little") + 1
-    height = int.from_bytes(data[27:30], "little") + 1
-    return width, height, 1
+    if int.from_bytes(data[4:8], "little") + 8 > len(data):
+        raise InvalidImageError("WebP RIFF body is truncated")
+    kind = data[12:16]
+    chunk_size = int.from_bytes(data[16:20], "little")
+    payload = data[20 : 20 + chunk_size]
+    if len(payload) != chunk_size:
+        raise InvalidImageError("WebP image header is truncated")
+    if kind == b"VP8X" and len(payload) >= 10:
+        width = int.from_bytes(payload[4:7], "little") + 1
+        height = int.from_bytes(payload[7:10], "little") + 1
+        return width, height, 2 if payload[0] & 0x02 else 1
+    if kind == b"VP8 " and len(payload) >= 10 and payload[3:6] == b"\x9d\x01\x2a":
+        width = int.from_bytes(payload[6:8], "little") & 0x3FFF
+        height = int.from_bytes(payload[8:10], "little") & 0x3FFF
+        return width, height, 1
+    if kind == b"VP8L" and len(payload) >= 5 and payload[0] == 0x2F:
+        bits = int.from_bytes(payload[1:5], "little")
+        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1, 1
+    raise InvalidImageError("WebP image header is invalid")
 
 
 def _inspect_jpeg(data: bytes) -> tuple[int, int, int]:
