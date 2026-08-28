@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
@@ -12,15 +13,15 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import anyio
 
-from taifeng.conversation.journal.canonical import validate_json_value
+from taifeng.conversation.journal.canonical import canonical_bytes, validate_json_value
 from taifeng.conversation.journal.errors import NonCanonicalValueError
 from taifeng.conversation.journal.records import (
     LlmStatus,
     StableErrorV1,
     stable_error,
 )
+from taifeng.llm.audit_redaction import RequestRedaction, project_attempt_request
 from taifeng.llm.client import ModelClientSession, model_capabilities
-from taifeng.llm.image_input import redact_sensitive_request_data
 
 if TYPE_CHECKING:
     from taifeng.llm.client import OneNetworkAttemptModelClient
@@ -54,9 +55,11 @@ class ModelAttemptRequest:
     provider: str
     model: str
     api_request: Mapping[str, object]
+    redactions: tuple[RequestRedaction, ...] = ()
+    canonical_attempt_sha256: str = ""
 
     def __post_init__(self) -> None:
-        """拒绝不稳定名称，并冻结完整 canonical API request。"""
+        """拒绝不稳定名称，并冻结安全 canonical API request。"""
         if not self.provider:
             raise ValueError("attempt provider must be non-empty")
         if not self.model:
@@ -69,12 +72,39 @@ class ModelAttemptRequest:
             "api_request",
             _freeze_json(normalized),
         )
+        if len({entry.path for entry in self.redactions}) != len(self.redactions):
+            raise ValueError("attempt redaction paths must be unique")
+        if tuple(
+            sorted(self.redactions, key=lambda entry: entry.path.encode("utf-8"))
+        ) != self.redactions:
+            raise ValueError("attempt redactions must be sorted")
+        digest = self.canonical_attempt_sha256
+        if not digest:
+            digest = hashlib.sha256(
+                canonical_bytes(
+                    {
+                        "provider": self.provider,
+                        "model": self.model,
+                        "api_request": normalized,
+                    }
+                )
+            ).hexdigest()
+            object.__setattr__(self, "canonical_attempt_sha256", digest)
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ValueError("attempt digest must be lowercase SHA-256")
 
     def api_request_dict(self) -> dict[str, Any]:
-        """返回供 durable DTO 使用的独立普通 JSON 副本。"""
+        """返回供 durable DTO 使用的安全 JSON 副本。"""
         value = _thaw_json(self.api_request)
         assert isinstance(value, dict)
         return value
+
+    def redactions_list(self) -> list[dict[str, str]]:
+        """返回按 RFC 6901 path 排序的 manifest 副本。"""
+        return [
+            {"path": entry.path, "kind": entry.kind}
+            for entry in self.redactions
+        ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,12 +535,17 @@ class _ObservedOneAttemptSession:
         self._cancel.raise_if_cancelled()
         model = request.model or self._session_model or self._default_model
         dispatched_request = request.model_copy(update={"model": model})
+        projection = project_attempt_request(
+            self._provider,
+            model,
+            dispatched_request,
+        )
         attempt_request = ModelAttemptRequest(
             provider=self._provider,
             model=model,
-            api_request=redact_sensitive_request_data(
-                dispatched_request.model_dump(mode="json")
-            ),
+            api_request=projection.api_request_safe,
+            redactions=projection.redactions,
+            canonical_attempt_sha256=projection.canonical_attempt_sha256,
         )
         permit = await self._observer.before_attempt(attempt_request)
         if type(permit) is not ModelAttemptPermit:

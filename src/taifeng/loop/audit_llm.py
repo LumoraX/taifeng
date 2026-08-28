@@ -12,7 +12,7 @@ from taifeng.conversation.journal.models import ActorRef
 from taifeng.conversation.journal.records import (
     JournalIdentities,
     JournalRecordFactory,
-    LlmRequestCommittedV1,
+    LlmRequestCommittedV2,
     LlmResponseCheckpointV1,
     LlmResponseCommittedV1,
     LlmStatus,
@@ -195,12 +195,14 @@ class JournalModelAttemptObserver:
         record = self._factory.build(
             operation_id=self._operation_id,
             record_type="llm_request_committed",
-            payload=LlmRequestCommittedV1(
+            payload=LlmRequestCommittedV2(
                 turn_index=self._turn_index,
                 iteration=self._iteration,
                 provider=request.provider,
                 model=request.model,
-                api_request=request.api_request_dict(),
+                api_request_safe=request.api_request_dict(),
+                redactions=tuple(request.redactions_list()),
+                canonical_attempt_sha256=request.canonical_attempt_sha256,
                 effect_kind="external_non_idempotent",
                 idempotency_key=None,
                 reconciliation="manual",

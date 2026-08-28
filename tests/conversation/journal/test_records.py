@@ -30,6 +30,7 @@ from taifeng.conversation.journal.records import (
     JournalIdentities,
     JournalRecordFactory,
     LlmRequestCommittedV1,
+    LlmRequestCommittedV2,
     LlmResponseCheckpointV1,
     LlmResponseCommittedV1,
     LlmStatus,
@@ -55,6 +56,7 @@ from taifeng.conversation.journal.records import (
     UnsupportedConversationItemError,
     conversation_item_record,
     deserialize_response_item,
+    parse_llm_request_committed,
     record_id,
     serialize_response_item,
     stable_error,
@@ -119,6 +121,17 @@ def _payload_examples() -> list[object]:
             model="sim",
             api_request={"messages": []},
             effect_kind="external",
+            reconciliation="manual",
+        ),
+        LlmRequestCommittedV2(
+            turn_index=0,
+            iteration=0,
+            provider="codex",
+            model="gpt-5.6-luna",
+            api_request_safe={"input": []},
+            redactions=(),
+            canonical_attempt_sha256="a" * 64,
+            effect_kind="external_non_idempotent",
             reconciliation="manual",
         ),
         LlmResponseCheckpointV1(
@@ -187,9 +200,10 @@ def _payload_examples() -> list[object]:
 
 
 def test_all_payload_dtos_are_versioned_frozen_and_extra_forbidden() -> None:
-    """V1 payload 必须统一版本、深度不可变且禁止透传字段。"""
+    """业务 payload 必须显式版本化、深度不可变且禁止透传字段。"""
     for payload in _payload_examples():
-        assert payload.payload_version == 1  # type: ignore[attr-defined]
+        expected = 2 if isinstance(payload, LlmRequestCommittedV2) else 1
+        assert payload.payload_version == expected  # type: ignore[attr-defined]
         with pytest.raises(ValidationError):
             type(payload).model_validate(
                 {**payload.model_dump(mode="python"), "unexpected": True}  # type: ignore[attr-defined]
@@ -198,6 +212,21 @@ def test_all_payload_dtos_are_versioned_frozen_and_extra_forbidden() -> None:
     started = _payload_examples()[3]
     with pytest.raises(TypeError, match="frozen JsonValue"):
         started.budget_snapshot["iterations"] = 9  # type: ignore[attr-defined, index]
+
+
+def test_llm_request_reader_accepts_v1_v2_and_rejects_unknown_version() -> None:
+    """旧 request intent 只读兼容，新写形状必须走 V2。"""
+    v1 = next(
+        item for item in _payload_examples() if isinstance(item, LlmRequestCommittedV1)
+    )
+    v2 = next(
+        item for item in _payload_examples() if isinstance(item, LlmRequestCommittedV2)
+    )
+
+    assert isinstance(parse_llm_request_committed(v1.model_dump()), LlmRequestCommittedV1)
+    assert isinstance(parse_llm_request_committed(v2.model_dump()), LlmRequestCommittedV2)
+    with pytest.raises(ValueError, match="unsupported llm request payload version"):
+        parse_llm_request_committed({**v2.model_dump(), "payload_version": 3})
 
 
 @pytest.mark.parametrize(

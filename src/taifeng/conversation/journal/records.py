@@ -85,6 +85,12 @@ class PayloadModel(JournalModel):
     payload_version: Literal[1] = 1
 
 
+class PayloadModelV2(JournalModel):
+    """显式升级业务 payload 的 V2 冻结基类。"""
+
+    payload_version: Literal[2] = 2
+
+
 class LlmStatus(StrEnum):
     """LLM attempt/logical response 的稳定终态。"""
 
@@ -260,6 +266,42 @@ class LlmRequestCommittedV1(PayloadModel):
     effect_kind: NonEmptyStr
     idempotency_key: str | None = None
     reconciliation: NonEmptyStr
+
+
+class RedactionEntryV1(JournalModel):
+    """request 安全投影中一个被删除值的稳定地址。"""
+
+    path: NonEmptyStr
+    kind: Literal["image_base64", "provider_encrypted_content"]
+
+
+class LlmRequestCommittedV2(PayloadModelV2):
+    """不复制敏感正文的 LLM network attempt durable intent。"""
+
+    turn_index: NonNegativeInt
+    iteration: NonNegativeInt
+    provider: NonEmptyStr
+    model: NonEmptyStr
+    api_request_safe: CanonicalMapping
+    redactions: tuple[RedactionEntryV1, ...]
+    canonical_attempt_sha256: HashHex
+    effect_kind: NonEmptyStr
+    idempotency_key: str | None = None
+    reconciliation: NonEmptyStr
+
+
+def parse_llm_request_committed(
+    payload: object,
+) -> LlmRequestCommittedV1 | LlmRequestCommittedV2:
+    """按 payload_version 读取 request intent；新 writer 只产生 V2。"""
+    if not isinstance(payload, dict):
+        raise ValueError("llm request payload must be an object")
+    version = payload.get("payload_version")
+    if version == 1:
+        return LlmRequestCommittedV1.model_validate(payload)
+    if version == 2:
+        return LlmRequestCommittedV2.model_validate(payload)
+    raise ValueError(f"unsupported llm request payload version: {version!r}")
 
 
 class LlmResponseCheckpointV1(PayloadModel):
@@ -647,7 +689,7 @@ class JournalRecordFactory:
         *,
         operation_id: str,
         record_type: str,
-        payload: PayloadModel,
+        payload: PayloadModel | PayloadModelV2,
         attempt_id: str | None = None,
         ordinal: int = 0,
         occurred_at: datetime | None = None,
@@ -658,7 +700,7 @@ class JournalRecordFactory:
         causation_id: str | None = None,
         correlation_id: str | None = None,
     ) -> JournalRecord:
-        """把 V1 payload canonicalize，同时保留调用方提供的全部内容。"""
+        """把版本化 payload canonicalize，同时保留调用方提供的全部内容。"""
         return JournalRecord(
             schema_version=1,
             session_id=self.session_id,

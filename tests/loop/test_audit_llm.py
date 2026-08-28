@@ -202,13 +202,16 @@ async def test_request_record_contains_complete_canonical_payload(
     assert record.thread_id == "thread_1"
     assert record.submission_id == "submission_1"
     assert record.turn_id == "thread_1:submission_1:turn:3"
+    attempt = _attempt_request()
     assert record.payload == {
-        "payload_version": 1,
+        "payload_version": 2,
         "turn_index": 3,
         "iteration": 2,
         "provider": "provider-a",
         "model": "model-a",
-        "api_request": _api_request().model_dump(mode="json"),
+        "api_request_safe": _api_request().model_dump(mode="json"),
+        "redactions": [],
+        "canonical_attempt_sha256": attempt.canonical_attempt_sha256,
         "effect_kind": "external_non_idempotent",
         "idempotency_key": None,
         "reconciliation": "manual",

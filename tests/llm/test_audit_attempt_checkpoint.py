@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING
 
 import anyio
@@ -316,10 +317,10 @@ async def test_attempt_observer_receives_redacted_sensitive_request(
         captured = observer.requests[0].api_request_dict()
         observer.allow_ack.set()
 
-    encoded = str(captured)
+    encoded = json.dumps(captured, sort_keys=True)
     assert image_body not in encoded
     assert "ciphertext" not in encoded
-    assert "encrypted_content" not in encoded
+    assert '"encrypted_content":' not in encoded
 
 
 class _ErrorSession(_CompletedSession):
