@@ -1,6 +1,6 @@
-"""native provider 共享纯函数 —— 错误分类 / SSE 解析 / usage 字段提取。
+"""native provider 共享边界 —— 错误分类 / 可取消 SSE / usage 字段提取。
 
-本模块刻意只放**纯函数**（无 IO、无可变状态），让三家 native session
+除可取消 SSE 迭代器外，本模块只放纯函数，让三家 native session
 （OpenAICompat / Anthropic / Gemini）+ DeepSeek 薄子类共享统一的：
 
 - HTTP 错误 → ``LLMError`` 分类（基于 status code + body 关键字）
@@ -12,12 +12,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Mapping
+
+    from taifeng.loop.cancellation import CancellationToken
 
 from taifeng.llm.errors import (
     AuthenticationError,
@@ -228,6 +231,38 @@ def _parse_retry_after(body: str) -> float | None:
 # ---------------------------------------------------------------------------
 # SSE 解析
 # ---------------------------------------------------------------------------
+
+
+async def iter_lines_with_cancel(
+    response: Any,
+    cancel: CancellationToken,
+) -> AsyncIterator[str]:
+    """竞争下一行与 turn token，让 stalled HTTP read 也能被立即取消。"""
+    iterator = response.aiter_lines().__aiter__()
+    while True:
+        line_task = asyncio.create_task(anext(iterator))
+        cancel_task = asyncio.create_task(cancel.wait_cancelled())
+        try:
+            done, _ = await asyncio.wait(
+                {line_task, cancel_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_task in done:
+                line_task.cancel()
+                await asyncio.gather(line_task, return_exceptions=True)
+                cancel.raise_if_cancelled()
+            cancel_task.cancel()
+            await asyncio.gather(cancel_task, return_exceptions=True)
+            try:
+                line = line_task.result()
+            except StopAsyncIteration:
+                return
+            yield line
+        except BaseException:
+            line_task.cancel()
+            cancel_task.cancel()
+            await asyncio.gather(line_task, cancel_task, return_exceptions=True)
+            raise
 
 # `data: [DONE]` 标记 → None（流结束）；解析失败 → None 静默跳过
 def parse_sse_data(line: str) -> dict[str, Any] | None:

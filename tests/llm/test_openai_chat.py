@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 
+import httpx
 import pytest
 
 from taifeng.llm.client import ModelCapabilities
 from taifeng.llm.errors import (
     InvalidHistoryError,
+    InvalidResponseError,
     RequestTooLargeError,
     UnsupportedCombinationError,
     UnsupportedModalityError,
@@ -42,13 +45,17 @@ _IMAGE = ImagePart(
 )
 
 
-def _chat_session(*, model: str = "gpt-5.6") -> OpenAIChatSession:
+def _chat_session(
+    *,
+    model: str = "gpt-5.6",
+    cancel: CancellationToken | None = None,
+) -> OpenAIChatSession:
     """构造不发起网络请求的官方 Chat session。"""
     return OpenAIChatSession(
         base_url="https://api.openai.com/v1",
         api_key="sk-test",
         model=model,
-        cancel=CancellationToken(),
+        cancel=cancel or CancellationToken(),
     )
 
 
@@ -208,3 +215,71 @@ def test_openai_compat_rejects_provider_state_before_serialization() -> None:
 
     with pytest.raises(InvalidHistoryError):
         _compat_session()._build_payload(request)
+
+
+@pytest.mark.asyncio
+async def test_chat_clean_eof_without_done_or_finish_reason_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """部分 delta 后直接 EOF 不是可提交终态。"""
+    body = (
+        b'data: {"choices":[{"delta":{"content":"partial"},'
+        b'"finish_reason":null}]}\n\n'
+    )
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, content=body))
+    original = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", patched)
+
+    with pytest.raises(InvalidResponseError, match="terminal marker"):
+        async for _ in _chat_session().stream(
+            ApiRequest(model="gpt-5.6", messages=[])
+        ):
+            pass
+
+
+class _StalledBody(httpx.AsyncByteStream):
+    """进入第一次 read 后无限等待，供 token cancellation 竞争测试。"""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def __aiter__(self):
+        self.started.set()
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover - 保持 async generator 形态
+            yield b""
+
+
+@pytest.mark.asyncio
+async def test_chat_stalled_read_is_interrupted_by_cancel_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSE 无数据时 CancelTurn 仍须立即中断活动 read。"""
+    body = _StalledBody()
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, stream=body))
+    original = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", patched)
+    cancel = CancellationToken(name="chat-stalled")
+
+    async def consume() -> None:
+        async for _ in _chat_session(cancel=cancel).stream(
+            ApiRequest(model="gpt-5.6", messages=[])
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(body.started.wait(), timeout=1)
+    cancel.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)

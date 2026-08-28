@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -47,13 +48,13 @@ _IMAGE = ImagePart(
 )
 
 
-def _session() -> OpenAIResponsesSession:
+def _session(cancel: CancellationToken | None = None) -> OpenAIResponsesSession:
     """构造不发请求的 Responses session。"""
     return OpenAIResponsesSession(
         base_url="https://api.openai.com/v1",
         api_key="sk-test",
         model="gpt-5.6",
-        cancel=CancellationToken(),
+        cancel=cancel or CancellationToken(),
     )
 
 
@@ -301,11 +302,28 @@ async def test_responses_emits_one_normalized_output_before_completed(
     """interleaved preview 最终收敛为唯一有序 normalized_output。"""
     body = _sse(
         {"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.6"}},
-        {"type": "response.output_item.added", "output_index": 2, "item": {"type": "function_call", "call_id": "call_1", "name": "inspect", "arguments": ""}},
+        {
+            "type": "response.output_item.added",
+            "output_index": 2,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "inspect",
+                "arguments": "",
+            },
+        },
         {"type": "response.reasoning_summary_text.delta", "output_index": 0, "delta": "检查图片"},
         {"type": "response.output_text.delta", "output_index": 1, "delta": "库存 A-17"},
-        {"type": "response.function_call_arguments.delta", "output_index": 2, "delta": '{"id":"A-17"}'},
-        {"type": "response.function_call_arguments.done", "output_index": 2, "arguments": '{"id":"A-17"}'},
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 2,
+            "delta": '{"id":"A-17"}',
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "output_index": 2,
+            "arguments": '{"id":"A-17"}',
+        },
         _completed_response(),
     )
     transport = httpx.MockTransport(lambda _: httpx.Response(200, content=body))
@@ -362,3 +380,46 @@ async def test_responses_rejects_delta_terminal_mismatch(
             ApiRequest(model="gpt-5.6", messages=[])
         ):
             pass
+
+
+class _StalledResponsesBody(httpx.AsyncByteStream):
+    """进入第一次 Responses read 后无限等待。"""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def __aiter__(self):
+        self.started.set()
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover - 保持 async generator 形态
+            yield b""
+
+
+@pytest.mark.asyncio
+async def test_responses_stalled_read_is_interrupted_by_cancel_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Responses SSE stalled 时 token cancellation 必须抢占网络 read。"""
+    body = _StalledResponsesBody()
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, stream=body))
+    original = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", patched)
+    cancel = CancellationToken(name="responses-stalled")
+
+    async def consume() -> None:
+        async for _ in _session(cancel).stream(
+            ApiRequest(model="gpt-5.6", messages=[])
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(body.started.wait(), timeout=1)
+    cancel.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)

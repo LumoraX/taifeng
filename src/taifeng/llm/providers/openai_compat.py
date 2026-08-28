@@ -19,6 +19,7 @@ from taifeng.llm.client import ModelCapabilities, ModelClient, OneNetworkAttempt
 from taifeng.llm.errors import (
     ContentFilterError,
     InvalidRequestError,
+    InvalidResponseError,
     TransientNetworkError,
 )
 from taifeng.llm.events import (
@@ -41,6 +42,7 @@ from taifeng.llm.providers._shared import (
     extract_rate_limit_snapshot,
     extract_request_id,
     extract_usage_openai_family,
+    iter_lines_with_cancel,
 )
 from taifeng.llm.types import ApiRequest, TokenUsage
 
@@ -165,6 +167,8 @@ class OpenAICompatSession:
         full_text_parts: list[str] = []
         # G3：服务端 request-id（成功 → completed 回流；失败 → 回填到 error）
         request_id: str | None = None
+        terminal_seen = False
+        self._last_finish_reason = None
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             try:
@@ -189,8 +193,7 @@ class OpenAICompatSession:
                     snapshot = extract_rate_limit_snapshot(resp.headers)
                     if snapshot is not None:
                         yield rate_limits(snapshot)
-                    async for line in resp.aiter_lines():
-                        self._cancel.raise_if_cancelled()
+                    async for line in iter_lines_with_cancel(resp, self._cancel):
                         if not line:
                             continue
                         if line.startswith(":"):
@@ -199,6 +202,7 @@ class OpenAICompatSession:
                             continue
                         data_str = line[6:].strip()
                         if data_str == "[DONE]":
+                            terminal_seen = True
                             break
                         try:
                             chunk = json.loads(data_str)
@@ -209,6 +213,8 @@ class OpenAICompatSession:
                             if ev.kind == "text_delta":
                                 full_text_parts.append(ev.data.get("text", ""))
                             yield ev
+                        if self._last_finish_reason is not None:
+                            terminal_seen = True
             except httpx.TimeoutException as e:
                 raise TransientNetworkError(f"timeout: {e}") from e
             except httpx.TransportError as e:
@@ -220,6 +226,11 @@ class OpenAICompatSession:
                 # 硬失败；归到 TransientNetworkError 后 kind=transient_network → retry_async
                 # 退避重试命中，且 retryable=True 触发 turn SYSTEM_RETRY 挂起恢复。
                 raise TransientNetworkError(f"transport: {e}") from e
+
+        if not terminal_seen:
+            raise InvalidResponseError(
+                "Chat stream ended without [DONE] or finish_reason terminal marker"
+            )
 
         # finish_reason 异常终止保护：content_filter 表示响应被模型/网关安全策略主动拦截，
         # 返回空 content + 0 token。旧实现完全丢弃 finish_reason，把「被拦截」伪造成

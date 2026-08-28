@@ -35,6 +35,7 @@ from taifeng.llm.providers._shared import (
     extract_rate_limit_snapshot,
     extract_request_id,
     extract_usage_openai_family,
+    iter_lines_with_cancel,
     parse_sse_data,
 )
 from taifeng.llm.providers.openai._shared import (
@@ -447,8 +448,7 @@ class OpenAIResponsesSession:
                     snapshot = extract_rate_limit_snapshot(response.headers)
                     if snapshot is not None:
                         yield rate_limits(snapshot)
-                    async for line in response.aiter_lines():
-                        self._cancel.raise_if_cancelled()
+                    async for line in iter_lines_with_cancel(response, self._cancel):
                         event = parse_sse_data(line)
                         if event is None:
                             continue
