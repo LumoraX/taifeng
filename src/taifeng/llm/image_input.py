@@ -317,10 +317,10 @@ def admit_image_attachments(
     return inspected
 
 
-def redact_image_bodies(value: object) -> Any:
-    """递归脱敏 request JSON 中的图片正文，只保留可审核结构描述。"""
+def redact_sensitive_request_data(value: object) -> Any:
+    """递归脱敏 request JSON 中的图片正文与 provider 加密状态。"""
     if isinstance(value, list):
-        return [redact_image_bodies(item) for item in value]
+        return [redact_sensitive_request_data(item) for item in value]
     if not isinstance(value, dict):
         return value
     if value.get("type") == "image" and "base64_data" in value:
@@ -331,4 +331,16 @@ def redact_image_bodies(value: object) -> Any:
             "detail": value.get("detail"),
             "content_redacted": True,
         }
-    return {key: redact_image_bodies(item) for key, item in value.items()}
+    redacted = {
+        key: redact_sensitive_request_data(item)
+        for key, item in value.items()
+        if key != "encrypted_content"
+    }
+    if "encrypted_content" in value:
+        redacted["provider_state_redacted"] = True
+    return redacted
+
+
+def redact_image_bodies(value: object) -> Any:
+    """兼容旧调用名，统一执行完整敏感请求脱敏。"""
+    return redact_sensitive_request_data(value)

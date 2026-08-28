@@ -46,7 +46,7 @@ from taifeng.llm.image_input import (
     DISABLED_IMAGE_POLICY,
     ImageInputPolicy,
     InputCostEstimator,
-    redact_image_bodies,
+    redact_sensitive_request_data,
 )
 from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
 from taifeng.llm.providers.openai.responses import (
@@ -1135,7 +1135,9 @@ class TurnRunner:
         if self.enable_request_capture:
             await self._emit(
                 LlmRequestRecorded(
-                    data=redact_image_bodies(request.model_dump(mode="json"))
+                    data=redact_sensitive_request_data(
+                        request.model_dump(mode="json")
+                    )
                 )
             )
 

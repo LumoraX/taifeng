@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from taifeng.llm.client import ModelCapabilities, ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
@@ -85,8 +85,8 @@ class NormalizedFunctionCallItem(_NormalizedItem):
     """terminal function call。"""
 
     type: Literal["function_call"] = "function_call"
-    call_id: str
-    name: str
+    call_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
     arguments: str
 
 
@@ -282,10 +282,16 @@ class ResponsesAttemptAccumulator:
         if kind == "function_call":
             arguments = str(raw.get("arguments", ""))
             self._match_preview(self._arguments, index, arguments, "function arguments")
+            call_id = str(raw.get("call_id", ""))
+            name = str(raw.get("name", ""))
+            if not call_id or not name:
+                raise InvalidResponseError(
+                    "Responses function call identity must be non-empty"
+                )
             return NormalizedFunctionCallItem(
                 output_index=index,
-                call_id=str(raw.get("call_id", "")),
-                name=str(raw.get("name", "")),
+                call_id=call_id,
+                name=name,
                 arguments=arguments,
             )
         raise InvalidResponseError(f"unsupported Responses output item: {kind}")
@@ -385,7 +391,6 @@ class OpenAIResponsesSession:
                     "name": tool.name,
                     "description": tool.description,
                     "parameters": tool.input_schema,
-                    "strict": True,
                 }
                 for tool in request.tools
             ]

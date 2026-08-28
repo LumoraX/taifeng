@@ -146,6 +146,7 @@ def test_responses_maps_ordered_items_images_tools_and_format() -> None:
     assert payload["input"][4]["type"] == "function_call_output"
     assert payload["tools"][0]["name"] == "inspect"
     assert "function" not in payload["tools"][0]
+    assert "strict" not in payload["tools"][0]
     assert payload["text"]["format"]["name"] == "result"
     assert payload["reasoning"] == {"effort": "medium"}
 
@@ -213,6 +214,30 @@ def test_responses_terminal_output_indexes_must_be_increasing() -> None:
                         "output_index": 0,
                         "content": [{"type": "output_text", "text": "earlier"}],
                     },
+                ]
+            }
+        )
+
+
+@pytest.mark.parametrize(("call_id", "name"), [("", "inspect"), ("call_1", "")])
+def test_responses_terminal_function_call_requires_non_empty_identity(
+    call_id: str,
+    name: str,
+) -> None:
+    """terminal function call 必须先校验稳定身份，才能进入 durable history。"""
+    accumulator = ResponsesAttemptAccumulator()
+
+    with pytest.raises(InvalidResponseError):
+        accumulator.finalize(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "output_index": 0,
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": "{}",
+                    }
                 ]
             }
         )

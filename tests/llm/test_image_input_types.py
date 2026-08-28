@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 from pydantic import ValidationError
 
 from taifeng.llm import ImagePart as PublicImagePart
 from taifeng.llm.client import model_capabilities
+from taifeng.llm.image_input import redact_image_bodies
 from taifeng.llm.types import (
     ApiMessage,
     ApiMessageItem,
@@ -94,3 +96,20 @@ def test_legacy_client_defaults_to_text_only_capabilities() -> None:
 def test_image_part_is_available_from_public_llm_api() -> None:
     """业务侧无需依赖内部 types 模块即可声明图片输入。"""
     assert PublicImagePart is ImagePart
+
+
+def test_sensitive_request_redaction_removes_image_and_encrypted_state() -> None:
+    """durable request 快照不得保留图片正文或 provider 密文。"""
+    request = {
+        "input_items": [_image_part().model_dump(mode="json")],
+        "provider_state": {
+            "payload": {"encrypted_content": "encrypted-state"},
+        },
+    }
+
+    redacted = redact_image_bodies(request)
+    encoded = json.dumps(redacted)
+
+    assert PNG_BASE64 not in encoded
+    assert "encrypted-state" not in encoded
+    assert "encrypted_content" not in encoded

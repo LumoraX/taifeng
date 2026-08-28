@@ -504,6 +504,10 @@ def build_api_request(
         item.kind == "reasoning" and item.payload.get("provider_state") is not None
         for item in history
     )
+    if contains_provider_state and not resolved_capabilities.accepts_provider_state:
+        raise InvalidHistoryError(
+            "model client does not accept persisted provider state"
+        )
     use_ordered_items = (
         resolved_capabilities.protocol == "responses" or contains_provider_state
     )

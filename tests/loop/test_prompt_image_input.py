@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from pathlib import Path
 
 import pytest
 
-from taifeng.conversation.models import user_message
+from taifeng.conversation.models import reasoning, user_message
 from taifeng.llm.client import ModelCapabilities
-from taifeng.llm.errors import UnsupportedModalityError
+from taifeng.llm.errors import InvalidHistoryError, UnsupportedModalityError
 from taifeng.llm.image_input import ImageAttachmentV1, ImageInputPolicy
 from taifeng.llm.types import ImagePart, TextPart
-from taifeng.loop.prompt import history_to_api_messages
+from taifeng.loop.prompt import build_api_request, history_to_api_messages
+from taifeng.skill.definition import SkillDefinition
+from taifeng.skill.registry import SkillSnapshot
 
 
 def _attachment() -> dict[str, object]:
@@ -78,5 +81,50 @@ def test_image_attachment_fails_closed_when_client_is_text_only() -> None:
             image_input_policy=IMAGE_POLICY,
             model_capabilities=ModelCapabilities(
                 input_modalities=frozenset({"text"}), provider="legacy", protocol="chat"
+            ),
+        )
+
+
+def test_provider_state_is_rejected_when_client_does_not_accept_it() -> None:
+    """切换到不接受 provider state 的客户端时必须在网络前失败。"""
+    state = reasoning("", thread_id="t").model_copy(
+        update={
+            "payload": {
+                "text": "",
+                "summary": "",
+                "provider_state": {
+                    "provider": "openai",
+                    "protocol": "responses",
+                    "item_type": "reasoning",
+                    "payload": {"id": "rs_1", "encrypted_content": "ciphertext"},
+                },
+            },
+            "metadata": {"llm_sample_id": "sample-1"},
+        }
+    )
+    entry = SkillDefinition(
+        id="entry",
+        name="entry",
+        description="测试入口",
+        version="1.0.0",
+        body="入口",
+        body_path=Path("_test_entry.md"),
+        type="composite",
+        entry=True,
+        tool_names=frozenset({"noop"}),
+    )
+
+    with pytest.raises(InvalidHistoryError):
+        build_api_request(
+            entry=entry,
+            snapshot=SkillSnapshot(version=1, skills=(entry,)),
+            history=[state],
+            tools=[],
+            model="model-a",
+            model_input_capabilities=ModelCapabilities(
+                input_modalities=frozenset({"text"}),
+                provider="openai",
+                protocol="chat",
+                accepts_provider_state=False,
             ),
         )

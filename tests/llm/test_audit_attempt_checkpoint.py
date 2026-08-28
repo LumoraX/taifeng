@@ -28,7 +28,15 @@ from taifeng.llm.events import (
     tool_call_done,
 )
 from taifeng.llm.providers.sim import SimClient
-from taifeng.llm.types import ApiMessage, ApiRequest, TokenUsage
+from taifeng.llm.types import (
+    ApiMessage,
+    ApiMessageItem,
+    ApiProviderStateItem,
+    ApiRequest,
+    ImagePart,
+    ProviderStateEnvelope,
+    TokenUsage,
+)
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
@@ -116,12 +124,13 @@ class _CheckpointBarrierObserver:
         self.allow_ack = anyio.Event()
         self.acked = anyio.Event()
         self.outcomes: list[object] = []
+        self.requests: list[ModelAttemptRequest] = []
 
     async def before_attempt(
         self,
         request: ModelAttemptRequest,
     ) -> ModelAttemptPermit:
-        del request
+        self.requests.append(request)
         return _permit()
 
     async def after_attempt(
@@ -248,6 +257,69 @@ async def test_complete_checkpoint_ack_precedes_all_visible_events(
     assert checkpoint.checkpoint_record_id.endswith(
         f":llm_response_checkpoint:{checkpoint.attempt_id}:0"
     )
+
+
+@pytest.mark.anyio
+async def test_attempt_observer_receives_redacted_sensitive_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """strict audit observer 不得取得图片正文或 Responses 加密状态。"""
+    inner = SimClient(turns=[])
+    provider_session = _CompletedSession()
+    monkeypatch.setattr(inner, "session", lambda **_: provider_session)
+    observer = _CheckpointBarrierObserver()
+    client = AttemptObservableClientAdapter(
+        inner,
+        provider="openai",
+        default_model="gpt-5.6",
+    )
+    session = client.session_with_attempt_observer(
+        cancel=CancellationToken(name="turn"),
+        attempt_observer=observer,
+    )
+    image_body = "aW1hZ2UtYm9keQ=="
+    request = ApiRequest(
+        model="gpt-5.6",
+        input_items=[
+            ApiMessageItem(
+                role="user",
+                content=[
+                    ImagePart(
+                        media_type="image/png",
+                        base64_data=image_body,
+                        size=10,
+                        sha256="0" * 64,
+                    )
+                ],
+            ),
+            ApiProviderStateItem(
+                sample_id="sample-1",
+                output_index=0,
+                state=ProviderStateEnvelope(
+                    provider="openai",
+                    protocol="responses",
+                    item_type="reasoning",
+                    payload={"id": "rs_1", "encrypted_content": "ciphertext"},
+                ),
+            ),
+        ],
+    )
+
+    async def consume() -> None:
+        async with session as entered:
+            async for _ in entered.stream(request):
+                pass
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(consume)
+        await observer.after_entered.wait()
+        captured = observer.requests[0].api_request_dict()
+        observer.allow_ack.set()
+
+    encoded = str(captured)
+    assert image_body not in encoded
+    assert "ciphertext" not in encoded
+    assert "encrypted_content" not in encoded
 
 
 class _ErrorSession(_CompletedSession):

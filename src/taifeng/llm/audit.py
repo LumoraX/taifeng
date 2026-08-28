@@ -20,6 +20,7 @@ from taifeng.conversation.journal.records import (
     stable_error,
 )
 from taifeng.llm.client import ModelClientSession, model_capabilities
+from taifeng.llm.image_input import redact_sensitive_request_data
 
 if TYPE_CHECKING:
     from taifeng.llm.client import OneNetworkAttemptModelClient
@@ -507,7 +508,9 @@ class _ObservedOneAttemptSession:
         attempt_request = ModelAttemptRequest(
             provider=self._provider,
             model=model,
-            api_request=dispatched_request.model_dump(mode="json"),
+            api_request=redact_sensitive_request_data(
+                dispatched_request.model_dump(mode="json")
+            ),
         )
         permit = await self._observer.before_attempt(attempt_request)
         if type(permit) is not ModelAttemptPermit:
