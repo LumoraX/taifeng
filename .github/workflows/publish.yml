@@ -24,6 +24,17 @@ jobs:
       - name: 安装 uv
         uses: astral-sh/setup-uv@v5
 
+      - name: 校验锁文件
+        run: uv lock --check
+
+      - name: 校验运行时版本与核心依赖
+        run: >-
+          uv run --extra dev pytest
+          tests/llm/test_public_imports.py
+          tests/mcp/test_mcp.py::test_mcp_initialize_and_list
+          tests/test_package_metadata.py
+          -q
+
       - name: 构建 wheel 与 sdist
         run: uv build
 
@@ -36,6 +47,12 @@ jobs:
             echo "::error::tag ($tag_version) 与 pyproject version ($proj_version) 不一致"
             exit 1
           fi
+
+      - name: 校验 wheel 与 sdist 干净安装
+        run: >-
+          uv run scripts/verify_release_artifacts.py
+          --dist-dir dist
+          --expected-version "${GITHUB_REF_NAME#v}"
 
       - name: 发布到 PyPI（Trusted Publishing）
         run: uv publish --trusted-publishing always
