@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Literal
-
-from pydantic import BaseModel, ConfigDict, Field
+from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.client import ModelCapabilities, ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
@@ -43,6 +41,13 @@ from taifeng.llm.providers.openai._shared import (
     build_openai_headers,
     enforce_openai_wire_size,
 )
+from taifeng.llm.responses_types import (
+    NormalizedFunctionCallItem,
+    NormalizedMessageItem,
+    NormalizedOutputItem,
+    NormalizedReasoningItem,
+    NormalizedRefusalItem,
+)
 from taifeng.llm.types import (
     ApiFunctionCallItem,
     ApiFunctionCallOutputItem,
@@ -58,52 +63,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from taifeng.loop.cancellation import CancellationToken
-
-
-class _NormalizedItem(BaseModel):
-    """不可变、禁止额外字段的 terminal output 基类。"""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    output_index: int
-
-
-class NormalizedReasoningItem(_NormalizedItem):
-    """可见 reasoning 摘要及可选加密续传状态。"""
-
-    type: Literal["reasoning"] = "reasoning"
-    visible_text: str = ""
-    state: ProviderStateEnvelope | None = None
-
-
-class NormalizedMessageItem(_NormalizedItem):
-    """terminal assistant text。"""
-
-    type: Literal["message"] = "message"
-    text: str
-
-
-class NormalizedFunctionCallItem(_NormalizedItem):
-    """terminal function call。"""
-
-    type: Literal["function_call"] = "function_call"
-    call_id: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    arguments: str
-
-
-class NormalizedRefusalItem(_NormalizedItem):
-    """terminal refusal；只参与错误分类，不进入 durable history。"""
-
-    type: Literal["refusal"] = "refusal"
-    text: str
-
-
-type NormalizedOutputItem = (
-    NormalizedReasoningItem
-    | NormalizedMessageItem
-    | NormalizedFunctionCallItem
-    | NormalizedRefusalItem
-)
 
 
 def _input_content(

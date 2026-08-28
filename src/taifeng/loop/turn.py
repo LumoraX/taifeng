@@ -49,7 +49,7 @@ from taifeng.llm.image_input import (
     redact_sensitive_request_data,
 )
 from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
-from taifeng.llm.providers.openai.responses import (
+from taifeng.llm.responses_types import (
     NormalizedFunctionCallItem,
     NormalizedMessageItem,
     NormalizedOutputItem,
