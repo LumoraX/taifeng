@@ -172,11 +172,12 @@ async def test_concurrent_spawn_orchestrated_completion_order(
 ) -> None:
     """④ 并发 spawn：SimCoordinator 编排「B 必先于 A 完成」，事件序确定可断言。"""
     client = RoutingSimClient(routes={
-        # style-checker 被 spawn 两次：第 1 实例等信号（A）、第 2 实例点信号（B）
-        "style-checker": [
-            SimTurn(text="A-结论", await_signal="b-done"),
-            SimTurn(text="B-结论", emit_signal="b-done"),
+        # 两个后台 task 的 stream 启动顺序不受 spawn_skill 返回顺序约束，
+        # 因此按 seed 参数显式路由 A/B，不能依赖同一路由游标抢占次序。
+        '"case": "A"': [
+            SimTurn(text="A-结论", await_signal="b-spawn-completed")
         ],
+        '"case": "B"': [SimTurn(text="B-结论")],
         "code-reviewer": [SimTurn(text="主控")],
     })
     pool = await taifeng.EnginePool.create(
@@ -192,12 +193,18 @@ async def test_concurrent_spawn_orchestrated_completion_order(
         async for ev in engine.subscribe_all():
             if ev.msg.kind == "spawn_completed":
                 completed_order.append(ev.msg.data["handle_id"])
+                if ev.msg.data["result"] == "B-结论":
+                    client.coordinator.signal("b-spawn-completed")
                 if len(completed_order) >= 2:
                     return
 
     task = asyncio.create_task(watch())
-    h_a = (await engine.spawn_skill(skill_id="style-checker", args={}, reason="A"))["handle_id"]
-    h_b = (await engine.spawn_skill(skill_id="style-checker", args={}, reason="B"))["handle_id"]
+    h_a = (await engine.spawn_skill(
+        skill_id="style-checker", args={"case": "A"}, reason="A"
+    ))["handle_id"]
+    h_b = (await engine.spawn_skill(
+        skill_id="style-checker", args={"case": "B"}, reason="B"
+    ))["handle_id"]
 
     assert await _wait(lambda: all(
         engine.spawn_status([h])[h]["status"] == "done" for h in (h_a, h_b)
