@@ -403,7 +403,7 @@ async def main() -> None:
 
         image_results: list[ImageMatrixResult] = []
         if meta["provider"] == "openai" and args.only is None:
-            provider, api_key, resolved_model, base_url = resolve_bootstrap_env()
+            provider, _, api_key, resolved_model, base_url = resolve_bootstrap_env()
             assert provider == "openai" and api_key is not None
             print(f"\n{'━' * 70}\nOpenAI 图片双协议矩阵\n{'━' * 70}")
             image_results = await run_openai_image_matrix(

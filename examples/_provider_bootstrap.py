@@ -19,9 +19,10 @@
 
     # 新形态（推荐）
     LLM_BOOTSTRAP_PROVIDER=openai|anthropic|gemini|deepseek
+    LLM_BOOTSTRAP_PROTOCOL=chat|responses                  # 仅 openai；默认 chat
     LLM_BOOTSTRAP_API_KEY=...
     LLM_BOOTSTRAP_MODEL=...                              # 可省，按 provider 默认
-    LLM_BOOTSTRAP_BASE_URL=...                           # 可省，仅 openai 兼容网关需要
+    LLM_BOOTSTRAP_BASE_URL=...                           # 可省，OpenAI 端点或兼容网关
 
     # 旧形态（向后兼容；隐式 provider=openai）
     LLM_BOOTSTRAP_OPENAI_API_KEY=...
@@ -29,7 +30,7 @@
     LLM_BOOTSTRAP_OPENAI_BASE_URL=...
 
 各 provider 默认模型：
-    openai   → gpt-4o-mini                        （走 OpenAICompatClient）
+    openai   → gpt-4o-mini                        （默认走 OpenAIChatClient）
     anthropic→ claude-haiku-4-5-20251001          （走 AnthropicClient）
     gemini   → gemini-2.0-flash-exp               （走 GeminiClient）
     deepseek → deepseek-chat                      （走 DeepSeekClient）
@@ -39,14 +40,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from taifeng.llm.client import ModelClient
 from taifeng.llm.providers import (
     AnthropicClient,
     DeepSeekClient,
     GeminiClient,
-    OpenAICompatClient,
 )
+from taifeng.llm.providers.openai import OpenAIChatClient, OpenAIResponsesClient
+
+if TYPE_CHECKING:
+    from taifeng.llm.client import ModelClient
 
 
 class ProviderBootstrapError(RuntimeError):
@@ -149,10 +153,11 @@ def load_dotenv_files(*extra_paths: Path) -> list[Path]:
     return loaded
 
 
-def resolve_bootstrap_env() -> tuple[str, str | None, str, str | None]:
-    """从 env 解析 ``(provider, api_key, model, base_url)``。
+def resolve_bootstrap_env() -> tuple[str, str | None, str | None, str, str | None]:
+    """从 env 解析 ``(provider, protocol, api_key, model, base_url)``。
 
-    兼容新旧两套命名。未知 provider 抛 ``ProviderBootstrapError``。
+    OpenAI protocol 默认 ``chat``，可选 ``responses``；其他 provider 不接受
+    protocol。兼容新旧两套凭据命名。未知组合抛 ``ProviderBootstrapError``。
     """
     provider = (os.environ.get("LLM_BOOTSTRAP_PROVIDER") or "").lower().strip()
 
@@ -166,6 +171,22 @@ def resolve_bootstrap_env() -> tuple[str, str | None, str, str | None]:
         raise ProviderBootstrapError(
             f"unknown LLM_BOOTSTRAP_PROVIDER={provider!r}; "
             f"expected one of {sorted(_DEFAULT_MODELS)}",
+        )
+
+    configured_protocol = (
+        os.environ.get("LLM_BOOTSTRAP_PROTOCOL") or ""
+    ).lower().strip()
+    protocol: str | None = None
+    if provider == "openai":
+        protocol = configured_protocol or "chat"
+        if protocol not in {"chat", "responses"}:
+            raise ProviderBootstrapError(
+                f"unknown OpenAI protocol={protocol!r}; "
+                "expected 'chat' or 'responses'",
+            )
+    elif configured_protocol:
+        raise ProviderBootstrapError(
+            "LLM_BOOTSTRAP_PROTOCOL is only valid for provider='openai'",
         )
 
     # api_key：新形态 → 旧形态（仅 openai）
@@ -185,21 +206,21 @@ def resolve_bootstrap_env() -> tuple[str, str | None, str, str | None]:
     if not base_url and provider == "openai":
         base_url = os.environ.get("LLM_BOOTSTRAP_OPENAI_BASE_URL")
 
-    return provider, api_key, model, base_url
+    return provider, protocol, api_key, model, base_url
 
 
 def build_model_client(
     *,
     require_api_key: bool = True,
     timeout_seconds: float = 300.0,
-) -> tuple[ModelClient, dict[str, str]]:
+) -> tuple[ModelClient, dict[str, str | int]]:
     """按 env 构造 native ``ModelClient`` + 返回 meta（用于日志）。
 
     ``require_api_key=True``（默认）时若 api_key 缺失会 raise
     ``ProviderBootstrapError``；某些场景（如 web_ui demo 启动时 key 还没设）
     可传 ``False`` 让构造继续，调用 LLM 时再失败。
     """
-    provider, api_key, model, base_url = resolve_bootstrap_env()
+    provider, protocol, api_key, model, base_url = resolve_bootstrap_env()
 
     if not api_key:
         if require_api_key:
@@ -211,7 +232,10 @@ def build_model_client(
         api_key = ""
 
     if provider == "openai":
-        client: ModelClient = OpenAICompatClient(
+        openai_client_type = (
+            OpenAIResponsesClient if protocol == "responses" else OpenAIChatClient
+        )
+        client: ModelClient = openai_client_type(
             api_key=api_key,
             model=model,
             base_url=base_url or "https://api.openai.com/v1",
@@ -239,6 +263,8 @@ def build_model_client(
         raise ProviderBootstrapError(f"unsupported provider: {provider}")
 
     meta: dict[str, str | int] = {"provider": provider, "model": model}
+    if protocol is not None:
+        meta["protocol"] = protocol
     if base_url:
         meta["base_url"] = base_url
     if api_key:

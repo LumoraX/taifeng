@@ -6,7 +6,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| [_provider_bootstrap.py](_provider_bootstrap.py) | 从环境变量 + `.env` 构造 `ModelClient`，支持 openai / anthropic / gemini / deepseek |
+| [_provider_bootstrap.py](_provider_bootstrap.py) | 从环境变量 + `.env` 构造 `ModelClient`，支持 openai / anthropic / gemini / deepseek；OpenAI 再由 `LLM_BOOTSTRAP_PROTOCOL=chat\|responses` 选择官方协议 |
 
 ## 单文件示例（按主题分组）
 
@@ -68,7 +68,13 @@
 | [real_llm/doom_verify.py](real_llm/doom_verify.py) | **doom-loop 真实验证**（ADR 0021）：强指令逼真 LLM 连续同参调用 → 先警后断（warn → circuit_open → turn 以 doom_loop_circuit_open 终止） |
 | [real_llm/grant_subagent_verify.py](real_llm/grant_subagent_verify.py) | **grant 子 agent 硬墙真实验证**（ADR 0022 决策五）：同一 skill 树 + 同一组 grant，A/B 只翻 `subagent_approval_mode` —— inherit 子内 grant(leaf) 命中、auto_deny 子内 grant(leaf) 被硬墙挡住（leaf 被拒），root 锚点 grant(mid) 两次都命中 |
 
-运行前：`export LLM_BOOTSTRAP_PROVIDER=openai LLM_BOOTSTRAP_API_KEY=sk-...`
+运行前：`export LLM_BOOTSTRAP_PROVIDER=openai LLM_BOOTSTRAP_PROTOCOL=responses LLM_BOOTSTRAP_API_KEY=sk-... LLM_BOOTSTRAP_MODEL=gpt-5.6`
+也可以把仓库根目录 `.env.example` 复制为 `.env`，再只填写 API key。
+
+OpenAI 的 provider 与 protocol 是两级统一配置：`provider=openai` 选择厂商，
+`protocol=chat|responses`（默认 `chat`）选择官方 wire adapter。图片输入仍由业务在
+`EnginePool.create(...)` 显式注入 `ImageInputPolicy(enabled=True, ...)`，`.env` 不会
+替业务全局开启图片接收。
 运行：`PYTHONPATH=src uv run python examples/real_llm/<file>.py`
 
 ### `permission/` —— 权限策略
