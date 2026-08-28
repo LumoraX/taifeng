@@ -155,11 +155,13 @@ OpenAI 不再由一个“兼容客户端”猜协议。业务按 endpoint 显式
 | `OpenAIResponsesClient` | `/v1/responses` | `input_image.image_url = data:<mime>;base64,...` | JSONL 中的 ordered items + encrypted reasoning state |
 | `OpenAICompatClient` | 兼容 `/chat/completions` | 不支持，网络前拒绝 | 原 text-only 行为不变 |
 
-两套官方客户端均 `store=false`。Responses 还固定请求 `include=["reasoning.encrypted_content"]`，不传 `previous_response_id`。其 terminal accumulator 只在 `response.completed` 校验成功后发布唯一 `normalized_output`，TurnRunner 原子提交完整 sample 后才执行工具。
+两套官方客户端均 `store=false`。Responses 还固定请求 `include=["reasoning.encrypted_content"]`，不传 `previous_response_id`。其 function tool 不强制发送 `strict=true`，terminal accumulator 先拒绝空 `call_id`/`name`，再只在 `response.completed` 校验成功后发布唯一 `normalized_output`；TurnRunner 原子提交完整 sample 后才执行工具。history 若含 provider state 而目标客户端未声明接受能力，prompt 构建在网络前 fail closed。
 
-图片正文以 `ImageAttachmentV1` canonical base64 落 conversation；`ApiRequest.input_items` 是有序事实源，provider 只在网络边界临时构造 Data URL。支持 MIME 为 PNG、JPEG、WebP 和单帧 GIF。业务必须显式注入 `ImageInputPolicy(enabled=True, ...)`，否则 durable append 前返回 `unsupported_modality`。
+图片正文以 `ImageAttachmentV1` canonical base64 落 conversation；`ApiRequest.input_items` 是有序事实源，provider 只在网络边界临时构造 Data URL。支持 MIME 为 PNG、JPEG、WebP 和单帧 GIF；GIF 按 block 计帧，WebP 支持 VP8/VP8L/VP8X 并拒绝 VP8X 动画标志。业务必须显式注入 `ImageInputPolicy(enabled=True, ...)`，否则 durable append 前返回 `unsupported_modality`。
 
-图片 token 预算使用可注入 `InputCostEstimator`；未登记模型走 policy 的非零上界。最终 OpenAI wire JSON 仍受 `ContextBudget.max_request_bytes` 精确 UTF-8 字节门禁。
+图片 token 预算使用可注入 `InputCostEstimator`；GPT-5.6 Sol/Terra/Luna 按 32×32 patch、detail resize/patch budget 与 1.2 multiplier 估算，未知模型走 policy 的非零上界。公共 `AgentEngine.estimate_tokens()` 与 turn preflight 复用同一策略、估算器和 entry model。最终 OpenAI wire JSON 仍受 `ContextBudget.max_request_bytes` 精确 UTF-8 字节门禁。
+
+普通 request capture 与 strict attempt observer 共用敏感请求脱敏：图片正文替换为 descriptor，`encrypted_content` 键和值均移除。Chat 仅在 `[DONE]` 或非空 `finish_reason` 后完成；Chat/Responses 都通过可取消 SSE 行迭代器竞争 read 与 turn token，使 stalled 网络读取可被立即中断。
 
 ## 重试与失败转移
 

@@ -19,6 +19,7 @@
 
 - 当业务未注入 enabled ImageInputPolicy 时，系统必须在任何 durable acceptance 和网络请求前拒绝图片，错误 kind 为 unsupported_modality。
 - 当客户端不声明 image capability 时，系统必须在网络请求前拒绝图片，且不得将 ImagePart 静默降级为文本。
+- 当 history 含 provider state 而客户端未声明 `accepts_provider_state=True` 时，prompt 构建必须在网络前抛出 `InvalidHistoryError`，不得静默丢弃或跨协议投影。
 - 当图片的 base64、size、digest、signature、尺寸、frame count 或资源上限不合法时，系统必须在入队前拒绝，且不得写入 user conversation item。
 - 当客户端是旧 custom client 或 OpenAICompatClient 时，系统必须默认 text-only。
 
@@ -29,14 +30,26 @@
 - Responses 只可在 response.completed 后以唯一 normalized_output 形成 durable assistant text、reasoning、function call 和工具调度；流式 delta 仅是预览。
 - Responses 的 `normalized_output` 必须恰好一次且先于唯一 `completed`；缺失、乱序或重复终态均不得提交。
 - Responses reasoning 的 `encrypted_content` 随 sample 原子持久化并手工重放；Taifeng JSONL 是恢复事实源，不使用 `previous_response_id`。
+- Responses function tool 默认不发送 `strict`；由 OpenAI 对兼容 schema 自动启用 strict，对不兼容 schema 使用官方 fallback。结构化输出的 `response_format.strict` 不受影响。
+- Responses terminal function call 的 `call_id` 与 `name` 必须是非空字符串；不合法输出在进入 durable history 前失败。
 - `OpenAICompatClient` 保持 text-only。图片能力只存在于 `OpenAIChatClient` 和 `OpenAIResponsesClient`，不能根据模型名自动打开。
+- Chat 只有观察到 `[DONE]` 或非空 `finish_reason` 才能发布 `completed`；部分 delta 后 EOF 必须失败。Chat 与 Responses 的 stalled SSE read 都必须由 turn `CancellationToken` 抢占。
 
 ## 持久化、压缩与可观测性
 
 - Responses 成功输出组必须以 llm_sample_id 作为稳定 batch id 原子提交；冷恢复不得看见未 commit 的部分输出。
+- 默认 JSONL 的普通 append 与原子 batch 必须共用同一跨 writer advisory file lock；committed 检查与 durable append 位于同一临界区，文件读写和阻塞锁调用不得占用 actor event loop。
+- 冷恢复遇到带 `llm_sample_id`、无 matching output 且不属于活跃 suspension 的 function call 时，必须以稳定 recovery batch 追加 `is_error=True` 的 unknown outcome，明确“不重试”；禁止自动重放可能有外部副作用的工具。
 - 压缩必须按完整 sample group 删除或保留 reasoning、assistant、function call 与 tool output；compaction prompt 不得包含 provider_state、encrypted_content 或图片正文。
-- telemetry、日志与 request capture 必须只暴露图片数、decoded bytes、MIME、detail 与估算 token，绝不得包含 base64、Data URL、图片 bytes 或 encrypted_content。
+- telemetry、日志、普通 request capture 与 strict attempt observer 必须只暴露图片数、decoded bytes、MIME、detail 与估算 token，绝不得包含 base64、Data URL、图片 bytes、`encrypted_content` 键或密文值。
 - `enable_request_capture=True` 仍保留文字 prompt，但每个图片 part 必须替换为 `content_redacted` 结构描述；OTel 继续整条跳过 request capture。
+
+## 格式解析与 GPT-5.6 预算
+
+- GIF 必须按 extension、image descriptor 与 data sub-block 结构计帧；任意 comment/application 数据字节不得被误判为帧。
+- WebP 必须接受 `VP8 `、`VP8L` 与 `VP8X` header；`VP8X` animation flag 必须进入单帧拒绝路径。
+- GPT-5.6 Sol/Terra/Luna 使用 32×32 patch 与 1.2 multiplier。`low` 只缩入 512×512，`high` 同时受 2048×2048 与 2500 patch 限制，`original`/`auto` 缩入 65535×65535 且无 patch budget；所有缩放保持宽高比且不放大小图。
+- `AgentEngine.estimate_tokens()` 与 turn preflight 必须使用同一 `ImageInputPolicy`、`InputCostEstimator` 和 entry model。
 
 ## 业务接入
 
