@@ -146,6 +146,7 @@ async def test_responses_terminal_groups_are_atomic_and_replayed_in_order(
         "assistant_message",
     ]
     first_sample = items[1].metadata["llm_sample_id"]
+    assert first_sample == f"{engine.thread_id}:{submission_id}:turn:0:llm:1"
     assert items[2].metadata["llm_sample_id"] == first_sample
     assert items[3].metadata["origin_llm_sample_id"] == first_sample
     assert items[1].payload["provider_state"] == _STATE

@@ -33,6 +33,7 @@ from taifeng.llm.image_input import (
     InputCostEstimator,
     OpenAIImageCostEstimator,
 )
+from taifeng.llm.providers.codex import CodexResponsesClient
 from taifeng.llm.providers.openai import OpenAIChatClient, OpenAIResponsesClient
 from taifeng.llm.recovery import RecoveryPlan, RecoveryStep, recommend_recovery
 from taifeng.llm.retry import RetryConfig, retry_async
@@ -66,6 +67,7 @@ __all__ = [
     "CacheBreakpoint",
     "CancelledError",
     "ContentFilterError",
+    "CodexResponsesClient",
     "ContextOverflowError",
     "EventKind",
     "FailureClass",

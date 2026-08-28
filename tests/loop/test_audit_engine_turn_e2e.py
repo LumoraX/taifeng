@@ -351,7 +351,16 @@ async def test_openai_responses_image_state_and_tool_origin_survive_strict_audit
     reasoning = next(item for item in items if item.kind == "reasoning")
     call = next(item for item in items if item.kind == "function_call")
     output = next(item for item in items if item.kind == "function_call_output")
+    request_record = next(
+        entry for entry in committed if entry.record_type == "llm_request_committed"
+    )
+    expected_sample_id = (
+        f"{engine.thread_id}:{request_record.submission_id}:"
+        f"turn:{request_record.payload['turn_index']}:"
+        f"llm:{request_record.payload['iteration']}"
+    )
     assert reasoning.payload["provider_state"]["payload"]["encrypted_content"] == "ciphertext"
+    assert reasoning.metadata["llm_sample_id"] == expected_sample_id
     assert call.metadata["llm_sample_id"] == reasoning.metadata["llm_sample_id"]
     assert output.metadata["origin_llm_sample_id"] == call.metadata["llm_sample_id"]
     assert requests[0]["input"][1]["content"][1]["type"] == "input_image"

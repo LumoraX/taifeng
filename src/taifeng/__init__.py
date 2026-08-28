@@ -79,6 +79,7 @@ from taifeng.instructions import (
 from taifeng.llm import (
     ApiMessage,
     ApiRequest,
+    CodexResponsesClient,
     ImageAttachmentV1,
     ImageInputPolicy,
     ImagePart,
@@ -204,6 +205,7 @@ __all__ = [
     "CompressionOrchestrator",
     "CompressionResult",
     "CompressionStrategy",
+    "CodexResponsesClient",
     "ConservativeFailurePolicy",
     "DeliveredEvent",
     "DenialBreaker",

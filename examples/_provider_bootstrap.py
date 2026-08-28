@@ -18,8 +18,8 @@
 支持两套环境变量命名：
 
     # 新形态（推荐）
-    LLM_BOOTSTRAP_PROVIDER=openai|anthropic|gemini|deepseek
-    LLM_BOOTSTRAP_PROTOCOL=chat|responses                  # 仅 openai；默认 chat
+    LLM_BOOTSTRAP_PROVIDER=openai|codex|anthropic|gemini|deepseek
+    LLM_BOOTSTRAP_PROTOCOL=chat|responses       # openai；codex 只允许 responses
     LLM_BOOTSTRAP_API_KEY=...
     LLM_BOOTSTRAP_MODEL=...                              # 可省，按 provider 默认
     LLM_BOOTSTRAP_BASE_URL=...                           # 可省，OpenAI 端点或兼容网关
@@ -31,6 +31,7 @@
 
 各 provider 默认模型：
     openai   → gpt-4o-mini                        （默认走 OpenAIChatClient）
+    codex    → gpt-5.6-luna                       （走独立 CodexResponsesClient）
     anthropic→ claude-haiku-4-5-20251001          （走 AnthropicClient）
     gemini   → gemini-2.0-flash-exp               （走 GeminiClient）
     deepseek → deepseek-chat                      （走 DeepSeekClient）
@@ -41,9 +42,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from taifeng.llm.providers import (
     AnthropicClient,
+    CodexResponsesClient,
     DeepSeekClient,
     GeminiClient,
 )
@@ -59,6 +62,7 @@ class ProviderBootstrapError(RuntimeError):
 
 _DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o-mini",
+    "codex": "gpt-5.6-luna",
     "anthropic": "claude-haiku-4-5-20251001",
     "gemini": "gemini-2.0-flash-exp",
     "deepseek": "deepseek-chat",
@@ -153,11 +157,34 @@ def load_dotenv_files(*extra_paths: Path) -> list[Path]:
     return loaded
 
 
+def _normalize_codex_base_url(value: str | None) -> str:
+    """校验并规范化 Codex 代理 API root，不推断任何代理域名。"""
+    if not value:
+        raise ProviderBootstrapError("Codex base URL is required")
+    normalized = value.rstrip("/")
+    try:
+        parsed = urlsplit(normalized)
+        _ = parsed.port
+    except ValueError as exc:
+        raise ProviderBootstrapError("Codex base URL is invalid") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ProviderBootstrapError(
+            "Codex base URL must be an absolute HTTP(S) URL with a hostname"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ProviderBootstrapError("Codex base URL must not contain userinfo")
+    if parsed.query or parsed.fragment:
+        raise ProviderBootstrapError("Codex base URL must not contain query or fragment")
+    if parsed.path.endswith("/responses"):
+        raise ProviderBootstrapError("Codex base URL must be an API root, not /responses")
+    return normalized
+
+
 def resolve_bootstrap_env() -> tuple[str, str | None, str | None, str, str | None]:
     """从 env 解析 ``(provider, protocol, api_key, model, base_url)``。
 
-    OpenAI protocol 默认 ``chat``，可选 ``responses``；其他 provider 不接受
-    protocol。兼容新旧两套凭据命名。未知组合抛 ``ProviderBootstrapError``。
+    OpenAI protocol 默认 ``chat``，Codex 固定 ``responses``；其他 provider 不接受
+    protocol。只有 OpenAI 兼容旧变量。未知组合抛 ``ProviderBootstrapError``。
     """
     provider = (os.environ.get("LLM_BOOTSTRAP_PROVIDER") or "").lower().strip()
 
@@ -184,6 +211,12 @@ def resolve_bootstrap_env() -> tuple[str, str | None, str | None, str, str | Non
                 f"unknown OpenAI protocol={protocol!r}; "
                 "expected 'chat' or 'responses'",
             )
+    elif provider == "codex":
+        protocol = configured_protocol or "responses"
+        if protocol != "responses":
+            raise ProviderBootstrapError(
+                f"unknown Codex protocol={protocol!r}; expected 'responses'"
+            )
     elif configured_protocol:
         raise ProviderBootstrapError(
             "LLM_BOOTSTRAP_PROTOCOL is only valid for provider='openai'",
@@ -205,6 +238,8 @@ def resolve_bootstrap_env() -> tuple[str, str | None, str | None, str, str | Non
     base_url = os.environ.get("LLM_BOOTSTRAP_BASE_URL")
     if not base_url and provider == "openai":
         base_url = os.environ.get("LLM_BOOTSTRAP_OPENAI_BASE_URL")
+    if provider == "codex":
+        base_url = _normalize_codex_base_url(base_url)
 
     return provider, protocol, api_key, model, base_url
 
@@ -241,6 +276,14 @@ def build_model_client(
             base_url=base_url or "https://api.openai.com/v1",
             timeout_seconds=timeout_seconds,
         )
+    elif provider == "codex":
+        assert base_url is not None
+        client = CodexResponsesClient(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+        )
     elif provider == "anthropic":
         client = AnthropicClient(
             api_key=api_key,
@@ -265,6 +308,8 @@ def build_model_client(
     meta: dict[str, str | int] = {"provider": provider, "model": model}
     if protocol is not None:
         meta["protocol"] = protocol
+    if provider == "codex":
+        meta["dialect"] = "codex-responses-v1"
     if base_url:
         meta["base_url"] = base_url
     if api_key:
