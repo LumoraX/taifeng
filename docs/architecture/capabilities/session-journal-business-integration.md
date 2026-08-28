@@ -15,7 +15,8 @@ Journal durable ack 之后的内存态或可重建投影，不得领先 Journal�
 
 未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。本阶段不支持已有 Journal、resume、
 HITL/审批、suspend、compaction/rewind、memory、instruction 更新、hooks、orchestration、detached spawn、
-barrier、peer、跨进程 recovery、redaction、加密、WORM 或外置 blob。
+barrier、peer、跨进程 recovery、Timeline/export 通用 redaction、加密、WORM 或外置 blob。LLM request intent
+的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
 
 ## 2. 唯一事实源与提交顺序
 
@@ -199,7 +200,64 @@ CancelTurn 只取消 target turn 及其 child effect subtree。freeze 和 Shutdo
 不可用时 CancelTurn/Shutdown 可作为安全降级动作执行，但不得伪造 durable record，health/introspection
 必须报告 `audit_complete=false`；若 emergency close 确定成功则独立报告 `lease_released=true`。
 
-## 8. LLM checkpoint-before-delta
+## 8. LLM request intent data minimization 与 checkpoint-before-delta
+
+所有新写入的 `llm_request_committed` 使用 `LlmRequestCommittedV2`；V1 只用于读取已有 records，不得继续
+产生。V2 在 `effect_kind/idempotency_key/reconciliation` 之外固定包含：
+
+```python
+class RedactionEntryV1:
+    path: str  # RFC 6901 JSON Pointer
+    kind: Literal["image_base64", "provider_encrypted_content"]
+
+class LlmRequestCommittedV2:
+    payload_version: Literal[2]
+    turn_index: int
+    iteration: int
+    provider: str
+    model: str
+    api_request_safe: Mapping[str, JsonValue]
+    redactions: tuple[RedactionEntryV1, ...]
+    canonical_attempt_sha256: str  # 64 位小写 hex
+    effect_kind: str
+    idempotency_key: str | None
+    reconciliation: str
+```
+
+`api_request_safe` 从 provider-neutral `ApiRequest.model_dump(mode="json")` 生成，不是最终 provider wire body：
+
+- image part 删除 `base64_data`，保留 `type/media_type/size/sha256/detail`，并加入
+  `content_redacted={"kind":"image_base64","redacted":true}`；
+- provider-state payload 删除 `encrypted_content`，保留已批准字段，并加入
+  `provider_state_redacted={"kind":"provider_encrypted_content","redacted":true}`；
+- 若原对象已含将要生成的 marker key，或发现已知敏感 key 出现在未批准的结构位置，必须 fail closed；
+- 非敏感字段逐值保留，不得 trim 或用 `repr`/`str` 改写。
+
+每个被删除值产生一条 manifest entry。`path` 指向原完整 `ApiRequest` 中被删除字段，按 RFC 6901 对 `~`/`/`
+转义；entries 必须按 path 的 UTF-8 bytes 升序排列，path 不得重复。当前只允许上述两个 kind，未知 kind 拒绝。
+无敏感字段时 `api_request_safe` 与原 request 相同且 `redactions=()`。
+
+digest preimage 精确为：
+
+```json
+{"provider":"<provider>","model":"<model>","api_request":<脱敏前 ApiRequest.model_dump(mode="json")>}
+```
+
+对该对象使用仓库 RFC 8785 canonical JSON bytes 后计算 SHA-256。它绑定 provider-neutral attempt intent，
+不声称是最终 wire-body digest，也不单独证明已经 dispatch；只有关联同一 `request_record_id` 的 attempt
+checkpoint 才证明执行越过网络边界并形成已知/未知终态。
+
+Canonical conformance vector：
+
+```text
+bytes = {"api_request":{"cache_breakpoints":[],"input_items":[{"content":"ping","output_index":null,"role":"user","sample_id":null,"type":"message"}],"max_output_tokens":null,"messages":[{"content":"ping","reasoning":null,"role":"user","tool_call_id":null,"tool_calls":null}],"metadata":{},"model":"gpt-5.6-luna","parallel_tool_calls":true,"reasoning_effort":null,"response_format":null,"system_prompt":[],"temperature":null,"tools":[]},"model":"gpt-5.6-luna","provider":"codex"}
+sha256 = ca2f8ff5fcb8a45b8725d71e1943da15346e5ae2006adc6232e4b1cbd8fc13eb
+```
+
+attempt observer 只能取得 V2 安全投影/manifest/digest；完整敏感 request 只允许在内存中传给 provider client，
+不得进入 observer、request capture、日志或 telemetry。
+
+### 8.1 checkpoint-before-delta
 
 audit 模式只接受能暴露每个真实网络 attempt 的 ModelClient。每个 attempt：
 

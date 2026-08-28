@@ -23,9 +23,10 @@ canonical `MessageStore` / `SessionJournal` conversation item 和最终 response
 
 1. 与原 request 结构同形的安全投影：图片仅保留 media type、size、SHA-256、detail descriptor；
    `encrypted_content` 键和值删除并留下 redaction marker。
-2. redaction manifest：列出被替换/删除字段的稳定 JSON path 与 redaction kind，不保存原值。
-3. 脱敏前完整 canonical `ApiRequest` 字节的 SHA-256 digest，用于把 intent 与实际网络 attempt 关联并检测
-   safe projection 被替换；digest 只在内存计算，原文字节不得先写旁路文件。
+2. redaction manifest：使用 RFC 6901 JSON Pointer 列出被删除字段，按 path 的 UTF-8 bytes 排序、不重复，
+   kind 只允许 `image_base64` 与 `provider_encrypted_content`。
+3. 对 `provider + model + 脱敏前 ApiRequest.model_dump(mode="json")` 的 RFC 8785 canonical bytes 计算
+   SHA-256；它绑定 provider-neutral attempt intent，不是最终 wire-body digest。原文字节不得先写旁路文件。
 
 Provider wire 的 Data URL 是 canonical `ImagePart` 的确定性临时投影；唯一事实源仍是授权的 canonical
 conversation/provider-state store。attempt observer、普通 request capture、OTel、日志和 debug repr 都只允许
@@ -42,7 +43,8 @@ conversation/provider-state store。attempt observer、普通 request capture、
 
 ### 正向
 
-- request intent 仍能证明某个 canonical request 被 dispatch，同时不会复制图片正文或 reasoning ciphertext。
+- request intent 能证明某个 canonical dispatch 意图已 durable 提交；只有关联 checkpoint 才证明 attempt 已越过
+  网络边界并形成已知/未知终态，同时不会复制图片正文或 reasoning ciphertext。
 - 不需要在本阶段引入密钥管理和加密 blob 生命周期。
 - request capture、strict observer 与 telemetry 可以复用同一 fail-closed redactor。
 

@@ -137,8 +137,9 @@ payload 规则：
 - 只允许 terminal output item 类型 `reasoning`、`message`、`function_call`；hosted tool、computer use、
   image generation 或其他 item 类型全部 fail closed。
 - message content part 只允许 `output_text` 与 `refusal`。`refusal` delta/part 必须遵守同样的索引、配对和
-  逐字节一致性校验；任一非空 refusal 以 `ContentFilterError` 结束 attempt，不进入 durable conversation，
-  不发布 normalized/completed。
+  逐字节一致性校验；refusal 不得与 `output_text` 混合。任一非空 refusal 以 `ContentFilterError` 结束
+  attempt，不进入 durable conversation、不发布 normalized/completed；空 refusal part 是 invalid response，
+  同样不得提交。
 - 输出索引必须从 `0` 开始连续递增；不得重复、跳号、倒序或使用 bool/非整数。
 - 每个索引必须恰好经历一次 `response.output_item.added`，随后是零或多个与 item 类型匹配的 delta，
   最后恰好一次 `response.output_item.done`。delta/done 在 added 前到达、done 缺失或重复均须拒绝。
@@ -178,10 +179,12 @@ payload 规则：
 | `LlmRequestRecorded`、普通 request capture | 仅 media type/size/SHA-256/detail descriptor | 删除键和值 | 禁止 Data URL/base64/ciphertext |
 | telemetry、OTel、日志、错误、debug repr | 仅 descriptor/digest | 禁止 | 不得输出正文、Data URL、密文或持久 secret |
 
-`llm_request_committed` 必须同时保存安全投影、redaction manifest 与脱敏前 canonical `ApiRequest` 的 SHA-256
-digest；digest 在内存中计算，不得先把原文写入临时文件或旁路 sink。它按 ADR 0027 修订 ADR 0025 对敏感
-request 的“完整实发 request”要求：canonical conversation/provider state 仍是恢复事实源，而 request intent
-提供可关联、可校验但不可独立反解的证据。
+`llm_request_committed` 必须按
+[SessionJournal business integration](session-journal-business-integration.md) §8 的
+`LlmRequestCommittedV2` 精确字段，同时保存安全投影、redaction manifest 与脱敏前 canonical attempt 的
+SHA-256 digest；digest 在内存中计算，不得先把原文写入临时文件或旁路 sink。它按 ADR 0027 修订 ADR 0025
+对敏感 request 的要求：canonical conversation/provider state 仍是恢复事实源，而 request intent 只证明已
+提交 dispatch 意图；关联 checkpoint 才证明 attempt 越过网络边界并形成终态。
 
 任何新增 sink 默认属于未授权 sink，除非契约明确把它列为 canonical recovery store。脱敏必须在事件/observer
 对象构造前完成，不能依赖下游消费者自行清洗。
@@ -196,8 +199,10 @@ request 的“完整实发 request”要求：canonical conversation/provider st
 - done items 到达但 completed 未到达即崩溃/EOF：结果为 unknown/incomplete，不提交 sample，不执行工具；
   strict audit 在 request 已 dispatch 后记 UNKNOWN、freeze，禁止自动重试。
 - completed 已验证但 response checkpoint 尚未 definite ack 即崩溃：结果仍为 UNKNOWN，freeze，禁止自动重试。
-- legacy `AtomicBatchMessageStore` 的 `llm_sample_id` 必须继续由
-  `(thread_id, submission_id, turn_index, iteration)` 确定性生成；相同 logical sample 重放不得生成新 identity。
+- 所有 Codex logical sample（legacy `AtomicBatchMessageStore` 与 strict SessionJournal）统一使用
+  `(thread_id, submission_id, turn_index, iteration)` 确定性生成 `llm_sample_id`；strict conversation items
+  在 `llm_response_committed` 同一原子 batch 中携带该 ID，它与 Journal 的 operation/attempt ID 正交。
+  相同 logical sample 重放不得生成新 identity。
 - 当前 strict SessionJournal 不支持打开已有 Journal、resume 或跨进程 recovery。response checkpoint definite
   ack 后、`llm_response_committed` 原子 batch ack 前崩溃，或 sample ack 后、function call intent/output 收敛
   前崩溃，都必须进入 `UNKNOWN/freeze/RECOVERY_REQUIRED`，不得自动请求 provider、自动派发 tool 或声称已经
