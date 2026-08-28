@@ -63,3 +63,46 @@ def test_real_image_result_clears_not_executed_gap(tmp_path: Path) -> None:
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert "openai_image_input" not in data["not_executed"]
+
+
+def test_real_codex_result_clears_only_codex_not_executed_gap(tmp_path: Path) -> None:
+    """Codex 真实记录只清自己的缺口，不得冒充 OpenAI 官方验收。"""
+    json_path = tmp_path / "ledger.json"
+    md_path = tmp_path / "ledger.md"
+    writer = LedgerWriter(json_path=json_path, md_path=md_path)
+    writer.mark_not_executed(
+        key="openai_image_input",
+        reason="missing official key",
+        command="openai image matrix",
+    )
+    writer.mark_not_executed(
+        key="codex_image_input",
+        reason="missing proxy key",
+        command="codex image matrix",
+    )
+
+    writer.merge_and_write(
+        provider="codex",
+        model="gpt-5.6-luna",
+        records=[
+            ScenarioRecord(
+                scenario_id="codex_image_single",
+                capability="Codex image",
+                verdict="PASS",
+                note="",
+                expect=["completed"],
+                missing=[],
+                kinds={"completed": 1},
+                grants=0,
+                duration_s=1.0,
+                commit="abc",
+                timestamp_utc="2026-08-28 00:00:00 UTC",
+            )
+        ],
+        r3=R3Audit(),
+        full_run=False,
+    )
+
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "codex_image_input" not in data["not_executed"]
+    assert "openai_image_input" in data["not_executed"]

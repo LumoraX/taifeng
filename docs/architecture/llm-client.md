@@ -122,6 +122,7 @@ class ApiRequest(BaseModel):
 src/taifeng/llm/providers/
 ├── openai_compat.py        # OpenAI / vLLM / Ollama / one-api 等 OpenAI-compat gateway（含 reasoning_content）
 ├── openai/                 # 官方 OpenAI 双协议：Chat Completions + Responses（文字/图片）
+├── codex/                  # 独立 Codex Responses dialect（instructions / typed input / done-item）
 ├── anthropic_provider.py   # Anthropic messages API（cache_control / extended thinking，零 anthropic-sdk）
 ├── gemini_provider.py      # Gemini streamGenerateContent（零 google-genai-sdk）
 ├── deepseek_provider.py    # DeepSeek（openai_compat 薄子类，预设 base_url + prompt_cache_hit_tokens 映射）
@@ -145,7 +146,7 @@ engine = AgentEngine(
 )
 ```
 
-### OpenAI 图片输入与双协议
+### OpenAI 图片输入、双协议与独立 Codex provider
 
 OpenAI 不再由一个“兼容客户端”猜协议。业务按 endpoint 显式选择：
 
@@ -155,13 +156,24 @@ OpenAI 不再由一个“兼容客户端”猜协议。业务按 endpoint 显式
 | `OpenAIResponsesClient` | `/v1/responses` | `input_image.image_url = data:<mime>;base64,...` | JSONL 中的 ordered items + encrypted reasoning state |
 | `OpenAICompatClient` | 兼容 `/chat/completions` | 不支持，网络前拒绝 | 原 text-only 行为不变 |
 
+`CodexResponsesClient` 是显式 `provider=codex, protocol=responses` 的独立客户端，不属于 OpenAI
+兼容分支，也不提供 Chat fallback。它要求业务提供合法 API-root `base_url`，endpoint 固定由
+`<base_url>/responses` 得到；`system_prompt` 过滤空字符串后逐字节用 `\n\n` 连接为顶层
+`instructions`，`input` 恒为 typed list。其稳定 dialect 名为 `codex-responses-v1`，完整契约见
+[llm-codex-provider.md](capabilities/llm-codex-provider.md)。
+
+Codex SSE 以 `response.output_item.done.item` 为输出事实源，以唯一 `response.completed` 为完成门；
+`completed.response.output=[]` 合法，非空时必须与 done items canonical 等价。只有 clean EOF 后才发布
+唯一 `normalized_output → completed`。它只接受 exact `codex/responses/reasoning` state，OpenAI 与 Codex
+state 双向隔离，不能按模型名、域名或返回形状隐式换 dialect。
+
 两套官方客户端均 `store=false`。Responses 还固定请求 `include=["reasoning.encrypted_content"]`，不传 `previous_response_id`。其 function tool 不强制发送 `strict=true`，terminal accumulator 先拒绝空 `call_id`/`name`，再只在 `response.completed` 校验成功后发布唯一 `normalized_output`；TurnRunner 原子提交完整 sample 后才执行工具。history 若含 provider state 而目标客户端未声明接受能力，prompt 构建在网络前 fail closed。
 
 图片正文以 `ImageAttachmentV1` canonical base64 落 conversation；`ApiRequest.input_items` 是有序事实源，provider 只在网络边界临时构造 Data URL。支持 MIME 为 PNG、JPEG、WebP 和单帧 GIF；GIF 按 block 计帧，WebP 支持 VP8/VP8L/VP8X 并拒绝 VP8X 动画标志。业务必须显式注入 `ImageInputPolicy(enabled=True, ...)`，否则 durable append 前返回 `unsupported_modality`。
 
-图片 token 预算使用可注入 `InputCostEstimator`；GPT-5.6 Sol/Terra/Luna 按 32×32 patch、detail resize/patch budget 与 1.2 multiplier 估算，未知模型走 policy 的非零上界。公共 `AgentEngine.estimate_tokens()` 与 turn preflight 复用同一策略、估算器和 entry model。最终 OpenAI wire JSON 仍受 `ContextBudget.max_request_bytes` 精确 UTF-8 字节门禁。
+图片 token 预算使用可注入 `InputCostEstimator`；GPT-5.6 Sol/Terra/Luna 按 32×32 patch、detail resize/patch budget 与 1.2 multiplier 估算，未知模型走 policy 的非零上界。公共 `AgentEngine.estimate_tokens()` 与 turn preflight 复用同一策略、估算器和 entry model。最终 OpenAI/Codex wire JSON 均受 `ContextBudget.max_request_bytes` 精确 UTF-8 字节门禁。
 
-普通 request capture 与 strict attempt observer 共用敏感请求脱敏：图片正文替换为 descriptor，`encrypted_content` 键和值均移除。Chat 仅在 `[DONE]` 或非空 `finish_reason` 后完成；Chat/Responses 都通过可取消 SSE 行迭代器竞争 read 与 turn token，使 stalled 网络读取可被立即中断。
+普通 request capture 与 strict attempt observer 共用敏感请求脱敏：图片正文替换为 descriptor，`encrypted_content` 键和值均移除。strict request intent 使用 V2 safe projection、排序唯一的 RFC 6901 redaction manifest 与脱敏前 canonical attempt SHA-256；observer 从不接收图片正文或 ciphertext。Chat 仅在 `[DONE]` 或非空 `finish_reason` 后完成；Chat/Responses 都通过可取消 SSE 行迭代器竞争 read 与 turn token，使 stalled 网络读取可被立即中断。
 
 ## 重试与失败转移
 

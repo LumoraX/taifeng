@@ -80,6 +80,7 @@ As of this branch, every capability below has landed as ✅ or 🧪. Feature-gap
 | Capability | Summary | Entry Point | Example | Contract | Real LLM Validation |
 | --- | --- | --- | --- | --- | --- |
 | **OpenAI image input (Chat + Responses)** | Canonical inline images, explicit disabled-by-default policy, separate official wires, sensitive-request redaction, GPT-5.6 patch budgeting, cancellable terminal streams, cross-writer atomic JSONL and no-retry unknown-outcome cold recovery | `OpenAIChatClient` / `OpenAIResponsesClient` / `ImageInputPolicy` | [real image matrix](../examples/real_llm/test_openai_image_matrix.py) | [llm-image-input.md](architecture/capabilities/llm-image-input.md) ✅ | `openai_*_image_*` in [ledger](real-llm-ledger.md); `NOT_EXECUTED` without a real OpenAI key |
+| **Independent Codex Responses provider** | Explicit `provider=codex`; top-level instructions, typed input list, image/tool input, done-item terminal facts, isolated encrypted reasoning state, safe request audit, cancellation, and legacy JSONL cold resume; no Chat fallback or hidden OpenAI switching | `CodexResponsesClient` / `ImageInputPolicy` | [Codex real matrix](../examples/real_llm/test_codex_image_matrix.py) | [llm-codex-provider.md](architecture/capabilities/llm-codex-provider.md) ✅ | `codex_*` in [ledger](real-llm-ledger.md); `NOT_EXECUTED` without an authorized proxy key/base URL |
 | **Native providers + LiteLLM fallback** | OpenAI-compatible, Anthropic, Gemini, and DeepSeek native HTTP clients, plus LiteLLM for broader coverage | `model_client=` | [real_llm/e2e.py](../examples/real_llm/e2e.py) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
 | **Unified `ResponseEvent` stream** | 11 event kinds normalize text, tool calls, reasoning, prompt cache, rate limits, structured output, and more | `ModelClient` protocol / `ResponseEvent` | [observability/](../examples/observability/) | [llm-provider-native.md](architecture/capabilities/llm-provider-native.md) ✅ | [`composite_dispatch`](real-llm-ledger.md) |
 | **Structured output** | Strongly typed output schemas are translated into provider-specific request shapes | `ResponseFormatSpec` / `structured_output` event | — | [llm-structured-output.md](architecture/capabilities/llm-structured-output.md) ✅ | — |
@@ -208,7 +209,7 @@ Runtime ops are submitted with `engine.submit(...)`.
 
 All exported symbols are listed in [`src/taifeng/__init__.py`](../src/taifeng/__init__.py) under `__all__`.
 
-图片接入的稳定根包符号为 `ImageAttachmentV1`、`ImageInputPolicy`、`TextPart`、`ImagePart`、`OpenAIChatClient` 和 `OpenAIResponsesClient`。`OpenAICompatClient` 的原导入路径保持不变且仍是 text-only。
+图片接入的稳定根包符号为 `ImageAttachmentV1`、`ImageInputPolicy`、`TextPart`、`ImagePart`、`OpenAIChatClient`、`OpenAIResponsesClient` 和 `CodexResponsesClient`。`OpenAICompatClient` 的原导入路径保持不变且仍是 text-only。
 
 ---
 
@@ -217,6 +218,7 @@ All exported symbols are listed in [`src/taifeng/__init__.py`](../src/taifeng/__
 - **Full regression**: `PYTHONPATH=src uv run pytest tests/`. CI uses the conformance simulator and does not call real APIs.
 - **Real LLM regression**: [`examples/real_llm/capability_matrix.py`](../examples/real_llm/capability_matrix.py) runs high-risk scenarios such as suspend/resume, rewind, spawn/join, peer messaging, and kernel knobs with real provider keys, then updates [`real-llm-ledger.md`](real-llm-ledger.md).
 - **Merge red line**: changes under `src/taifeng/{llm,loop,context,conversation}/` require a full real-LLM capability matrix run and a committed ledger update.
-- **Before burning keys**: [`examples/real_llm/selfcheck.py`](../examples/real_llm/selfcheck.py) runs driver orchestration against the simulator and performs a zero-network OpenAI image fixture/wire/redaction preflight.
+- **Before burning keys**: [`examples/real_llm/selfcheck.py`](../examples/real_llm/selfcheck.py) runs driver orchestration against the simulator and performs zero-network OpenAI and Codex image/wire/state/redaction preflights.
 - **OpenAI image regression**: `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider openai --model gpt-5.6` runs both official protocols. Without usable credentials it is **not executed**, regardless of CI results.
+- **Codex provider regression**: with unified Codex bootstrap key/base URL configured, `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider codex --model gpt-5.6-luna` runs instructions, single/multi-image, image tool call, encrypted-state hot replay, and legacy JSONL cold resume. Without usable proxy credentials it is **not executed**.
 - Capability boundaries and limitations are recorded in the matching contract documents.

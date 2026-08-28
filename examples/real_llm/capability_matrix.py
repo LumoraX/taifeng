@@ -41,6 +41,7 @@ from _provider_bootstrap import (  # noqa: E402
     resolve_bootstrap_env,
 )
 from _recorder import RecordingClient  # noqa: E402
+from test_codex_image_matrix import run_codex_image_matrix  # noqa: E402
 from test_openai_image_matrix import (  # noqa: E402
     ImageMatrixResult,
     run_openai_image_matrix,
@@ -127,7 +128,9 @@ def _post_turn_hook_runner() -> object:
 # 能力矩阵 —— skill 包与 web_ui DEMOS 同源；prompt 取代表性输入
 SCENARIOS: list[Scenario] = [
     Scenario("composite_dispatch", "code_review", "programmer",
-             "请审查这段代码：\n```python\ndef login(u, p):\n    q = \"SELECT * FROM users WHERE name='\" + u + \"'\"\n    return db.exec(q)\n```",
+             "请审查这段代码：\n```python\ndef login(u, p):\n"
+             "    q = \"SELECT * FROM users WHERE name='\" + u + \"'\"\n"
+             "    return db.exec(q)\n```",
              capability="composite call_skill 派发 + HITL",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("read_skill_lazy", "read_skill_lazy", "knowledge-router",
@@ -139,7 +142,9 @@ SCENARIOS: list[Scenario] = [
              capability="声明式编排 parallel/serial/when",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("concurrent_fanout", "concurrent_fanout", "research-fanout",
-             "请就『家用储能电池的主流技术路线』做调研：请**同时**从网络、学术、新闻三个相互独立的信息源各自取证（在同一条消息里 fan-out 三个 call_skill 并发执行），最后综合成结论。",  # 原主题连续三次触发网关 content filter，中性化改写
+             "请就『家用储能电池的主流技术路线』做调研：请**同时**从网络、学术、"
+             "新闻三个相互独立的信息源各自取证（在同一条消息里 fan-out 三个 "
+             "call_skill 并发执行），最后综合成结论。",  # 中性化以避免网关 filter
              capability="并发 fan-out（LLM 自主并行派发）",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("research_pipeline", "research_assistant", "research-lead",
@@ -147,11 +152,13 @@ SCENARIOS: list[Scenario] = [
              capability="串行 pipeline（采集→提炼→写作）",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("product_review", "product_review", "product-manager",
-             "请评审以下 PRD：做一个面向独立开发者的 LLM agent 可观测面板，提供事件流、token 占比、压缩可视化。",
+             "请评审以下 PRD：做一个面向独立开发者的 LLM agent 可观测面板，"
+             "提供事件流、token 占比、压缩可视化。",
              capability="fan-out 多 reviewer + 评分聚合",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("numeric_loop", "numeric_loop", "numeric-tuner",
-             "请把 current=10.0 调谐到 target=42.0，用 run_script(apply_delta) 多轮逼近，误差 ±0.5 即可。",
+             "请把 current=10.0 调谐到 target=42.0，用 run_script(apply_delta) "
+             "多轮逼近，误差 ±0.5 即可。",
              capability="多轮 run_script 数值调谐（工具循环）",
              expect={"tool_call_started", "turn_completed"}),
     Scenario("compression", "compression_showcase", "chatty-assistant",
@@ -159,7 +166,8 @@ SCENARIOS: list[Scenario] = [
              capability="上下文压缩（sliding，小窗触发）",
              expect={"turn_completed"}, sliding=True, ctx_window=1024),
     Scenario("selective_approval", "selective_approval", "analysis-orchestrator",
-             "请对这份方案同时安排两项评审：产品需求评估与战略定位分析。方案：面向开发者的智能体引擎工具包，提供事件流观测与上下文管理。",  # 原措辞触发网关 content filter（连续两次复现），中性化改写
+             "请对这份方案同时安排两项评审：产品需求评估与战略定位分析。方案："
+             "面向开发者的智能体引擎工具包，提供事件流观测与上下文管理。",
              capability="差异化授权 + 多路派发",
              expect={"skill_dispatched", "turn_completed"}),
     Scenario("travel_planner", "travel_planner", "trip-planner",
@@ -391,7 +399,10 @@ async def main() -> None:
         logs_dir.mkdir(parents=True)
         results: list[Result] = []
         for i, sc in enumerate(scenarios, 1):
-            print(f"\n{'━' * 70}\n[{i}/{len(scenarios)}] {sc.demo_id} —— {sc.capability}\n{'━' * 70}")
+            print(
+                f"\n{'━' * 70}\n[{i}/{len(scenarios)}] "
+                f"{sc.demo_id} —— {sc.capability}\n{'━' * 70}"
+            )
             if recorder is not None:
                 recorder.begin_scenario(sc.demo_id)
             try:
@@ -418,6 +429,27 @@ async def main() -> None:
                     f"  {icon}{result.verdict:4s}  {result.scenario_id:42s} "
                     f"{result.note}"
                 )
+        elif meta["provider"] == "codex" and args.only is None:
+            provider, protocol, api_key, resolved_model, base_url = resolve_bootstrap_env()
+            assert (
+                provider == "codex"
+                and protocol == "responses"
+                and api_key is not None
+                and base_url is not None
+            )
+            print(f"\n{'━' * 70}\nCodex 独立 provider 图片/state 矩阵\n{'━' * 70}")
+            image_results = await run_codex_image_matrix(
+                api_key=api_key,
+                model=resolved_model,
+                base_url=base_url,
+                logs_dir=logs_dir / "codex-image",
+            )
+            for result in image_results:
+                icon = "✅" if result.verdict == "PASS" else "❌"
+                print(
+                    f"  {icon}{result.verdict:4s}  {result.scenario_id:42s} "
+                    f"{result.note}"
+                )
 
         # ── 报告 A：能力成败矩阵 ──
         print(f"\n\n{'=' * 70}\nA. 能力成败矩阵\n{'=' * 70}")
@@ -434,7 +466,7 @@ async def main() -> None:
         print(f"\n  小计：{npass}/{len(results)} 能力场景 PASS")
         image_pass = sum(result.verdict == "PASS" for result in image_results)
         if image_results:
-            print(f"  图片：{image_pass}/{len(image_results)} 双协议场景 PASS")
+            print(f"  Provider 专属：{image_pass}/{len(image_results)} 场景 PASS")
 
         # ── 报告 B：R3 可观测完整性审计 ──
         print(f"\n{'=' * 70}\nB. R3 可观测完整性审计\n{'=' * 70}")
@@ -520,7 +552,12 @@ async def main() -> None:
             and image_pass == len(image_results)
             and not unmapped
         )
-        print(f"\n{'=' * 70}\n{'✅ 全能力场景真实 LLM 通过 + 日志完整' if ok else '⚠️ 见上方未通过/不完整项'}\n{'=' * 70}")
+        summary = (
+            "✅ 全能力场景真实 LLM 通过 + 日志完整"
+            if ok
+            else "⚠️ 见上方未通过/不完整项"
+        )
+        print(f"\n{'=' * 70}\n{summary}\n{'=' * 70}")
         if not ok:
             sys.exit(1)
 

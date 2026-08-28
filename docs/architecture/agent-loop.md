@@ -188,7 +188,7 @@ async def run_turn(turn_ctx: TurnContext, cancel: CancellationToken) -> TurnOutc
 
 `EnginePool.create(image_input_policy=..., input_cost_estimator=...)` 把业务策略传播到 root、call_skill、detached spawn、child Resume 与 manual compaction runner。`UserMessage.attachments` 在 actor enqueue 和 conversation append 之前完成 count、base64、decoded bytes、digest、MIME、dimensions/frame 检查；默认禁用或 client capability 不匹配时不留下脏历史。
 
-prompt 层只走一条 history 转换路径：普通 Chat 由 canonical items 派生 messages；Responses 保留 provider state、function call/output 的严格顺序。Responses attempt 必须观察到恰好一次 `normalized_output → completed`，随后按 `llm_sample_id` 原子提交 reasoning/assistant/function-call group；commit ack 之后才允许 tool dispatch。工具结果携带 `origin_llm_sample_id`，下一轮和冷恢复都按 sample closure 重放。
+prompt 层只走一条 history 转换路径：普通 Chat 由 canonical items 派生 messages；OpenAI/Codex Responses 保留 provider state、function call/output 的严格顺序。Codex 把 system prompt 投影为顶层 `instructions`，不生成 synthetic system item。provider terminal 必须收敛为恰好一次 `normalized_output → completed`；Codex 在内部还要求 done-item facts、唯一 completed gate 与 clean EOF。Loop 随后以 `(thread_id, submission_id, turn_index, iteration)` 确定性生成 `llm_sample_id`，原子提交 reasoning/assistant/function-call group，commit ack 之后才允许 tool dispatch。工具结果携带 `origin_llm_sample_id`，下一轮和冷恢复都按 sample closure 重放。
 
 ### 失败处置数据流（failure-suspension-policy）
 

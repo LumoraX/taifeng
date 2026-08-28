@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from capability_matrix import SCENARIOS, _verdict, run_scenario  # noqa: E402
+from test_codex_image_matrix import preflight_codex_image_matrix  # noqa: E402
 from test_openai_image_matrix import preflight_openai_image_matrix  # noqa: E402
 
 from taifeng.llm.providers import RoutingSimClient, SimTurn  # noqa: E402
@@ -66,6 +67,11 @@ async def main() -> None:
         print("  ✅  openai_image    双协议图片 wire/脱敏预检")
     except Exception as exc:  # noqa: BLE001 —— 汇总所有零消耗预检失败
         failures.append(f"openai_image: {type(exc).__name__}: {exc}")
+    try:
+        preflight_codex_image_matrix()
+        print("  ✅  codex_image     instructions/list/done/state/脱敏预检")
+    except Exception as exc:  # noqa: BLE001 —— 汇总所有零消耗预检失败
+        failures.append(f"codex_image: {type(exc).__name__}: {exc}")
     for sc in SCENARIOS:
         routes = SIM_ROUTES.get(sc.demo_id)
         if routes is None:

@@ -115,6 +115,8 @@ class LedgerWriter:
         if any(rec.scenario_id.startswith("openai_") and "_image_" in rec.scenario_id
                for rec in records):
             not_executed.pop("openai_image_input", None)
+        if any(rec.scenario_id.startswith("codex_") for rec in records):
+            not_executed.pop("codex_image_input", None)
 
         data = {
             "run": {
