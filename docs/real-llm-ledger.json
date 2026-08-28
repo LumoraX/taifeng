@@ -541,8 +541,8 @@
       "status": "NOT_EXECUTED",
       "reason": "OpenAI API key unavailable in this verification environment; real GPT-5.6 Chat/Responses image matrix was not executed",
       "command": "PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider openai --model gpt-5.6",
-      "commit": "6b33c94",
-      "timestamp_utc": "2026-08-28 03:12:49 UTC"
+      "commit": "6bd5d62",
+      "timestamp_utc": "2026-08-28 03:18:47 UTC"
     }
   }
 }

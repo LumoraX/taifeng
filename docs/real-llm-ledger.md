@@ -32,7 +32,7 @@
 
 ## 未执行验证
 
-- **openai_image_input**：`NOT_EXECUTED` — OpenAI API key unavailable in this verification environment; real GPT-5.6 Chat/Responses image matrix was not executed （`PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider openai --model gpt-5.6`，2026-08-28 03:12:49 UTC @ `6b33c94`）
+- **openai_image_input**：`NOT_EXECUTED` — OpenAI API key unavailable in this verification environment; real GPT-5.6 Chat/Responses image matrix was not executed （`PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider openai --model gpt-5.6`，2026-08-28 03:18:47 UTC @ `6bd5d62`）
 
 ## R3 可观测完整性审计（最近一次全量）
 
