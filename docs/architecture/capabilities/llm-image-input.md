@@ -41,9 +41,14 @@
 
 ## 持久化、压缩与可观测性
 
-- Responses 成功输出组必须以 llm_sample_id 作为稳定 batch id 原子提交；冷恢复不得看见未 commit 的部分输出。
+- Responses 成功输出组必须以 llm_sample_id 作为稳定 batch id 原子提交；任何 store 都不得暴露未 commit 的
+  部分输出。
 - 默认 JSONL 的普通 append 与原子 batch 必须共用同一跨 writer advisory file lock；committed 检查与 durable append 位于同一临界区，文件读写和阻塞锁调用不得占用 actor event loop。
-- 冷恢复遇到带 `llm_sample_id`、无 matching output 且不属于活跃 suspension 的 function call 时，必须以稳定 recovery batch 追加 `is_error=True` 的 unknown outcome，明确“不重试”；禁止自动重放可能有外部副作用的工具。
+- 以下 cold-resume 规则只适用于 legacy `AtomicBatchMessageStore`：遇到带 `llm_sample_id`、无 matching output
+  且不属于活跃 suspension 的 function call 时，以稳定 recovery batch 追加 `is_error=True` 的 unknown
+  outcome，明确“不重试”；禁止自动重放可能有外部副作用的工具。strict SessionJournal 当前不支持
+  resume/跨进程 recovery，必须按其 capability gate 与 [Codex provider 契约](llm-codex-provider.md) §7 进入
+  `UNKNOWN/freeze/RECOVERY_REQUIRED`。
 - 压缩必须按完整 sample group 删除或保留 reasoning、assistant、function call 与 tool output；compaction prompt 不得包含 provider_state、encrypted_content 或图片正文。
 - telemetry、日志、普通 request capture 与 strict attempt observer 必须只暴露图片数、decoded bytes、MIME、
   SHA-256、detail 与估算 token，绝不得包含 base64、Data URL、图片 bytes、`encrypted_content` 键或密文值。

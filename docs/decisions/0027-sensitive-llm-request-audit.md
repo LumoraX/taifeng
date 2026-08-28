@@ -43,8 +43,9 @@ conversation/provider-state store。attempt observer、普通 request capture、
 
 ### 正向
 
-- request intent 能证明某个 canonical dispatch 意图已 durable 提交；只有关联 checkpoint 才证明 attempt 已越过
-  网络边界并形成已知/未知终态，同时不会复制图片正文或 reasoning ciphertext。
+- request intent 能证明某个 canonical dispatch 意图已 durable 提交；关联 checkpoint 只证明 attempt 已进入
+  受审计 client 执行阶段并形成 durable 已知/未知终态，不证明请求字节实际离开进程，同时不会复制图片正文
+  或 reasoning ciphertext。
 - 不需要在本阶段引入密钥管理和加密 blob 生命周期。
 - request capture、strict observer 与 telemetry 可以复用同一 fail-closed redactor。
 

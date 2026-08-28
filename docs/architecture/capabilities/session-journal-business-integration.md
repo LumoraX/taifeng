@@ -41,8 +41,11 @@ Tool outcome 不得重复写 LLM response 已记录的 `function_call`；output 
 
 ## 3. 版本与 identity
 
-业务 payload 使用 frozen、`extra="forbid"` 的 Pydantic V1 DTO，均含 `payload_version=1`，并在进入 core
-前转成 canonical JsonValue。现有 Phase 1 初始化三记录是 V0 canonical vectors，保持原 bytes 和 record id。
+业务 payload 使用 frozen、`extra="forbid"` 的版本化 Pydantic DTO，并在进入 core 前转成 canonical
+JsonValue。除明确升级的 record 外，当前 payload 均为 V1、含 `payload_version=1`；
+`llm_request_committed` reader 必须先检查 `payload_version`，将 `1` 解析为只读兼容
+`LlmRequestCommittedV1`、将 `2` 解析为 `LlmRequestCommittedV2`，其他版本 fail closed，writer 只允许产生
+V2。现有 Phase 1 初始化三记录是 V0 canonical vectors，保持原 bytes 和 record id。
 
 | 对象 | Identity |
 | --- | --- |
@@ -244,8 +247,9 @@ digest preimage 精确为：
 ```
 
 对该对象使用仓库 RFC 8785 canonical JSON bytes 后计算 SHA-256。它绑定 provider-neutral attempt intent，
-不声称是最终 wire-body digest，也不单独证明已经 dispatch；只有关联同一 `request_record_id` 的 attempt
-checkpoint 才证明执行越过网络边界并形成已知/未知终态。
+不声称是最终 wire-body digest，也不单独证明已经 dispatch；关联同一 `request_record_id` 的 attempt
+checkpoint 只证明 attempt 已进入受审计 client 执行阶段并形成 durable 已知/未知终态，也不证明请求字节
+实际离开进程。
 
 Canonical conformance vector：
 

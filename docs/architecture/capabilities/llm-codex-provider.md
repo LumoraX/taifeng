@@ -184,7 +184,8 @@ payload 规则：
 `LlmRequestCommittedV2` 精确字段，同时保存安全投影、redaction manifest 与脱敏前 canonical attempt 的
 SHA-256 digest；digest 在内存中计算，不得先把原文写入临时文件或旁路 sink。它按 ADR 0027 修订 ADR 0025
 对敏感 request 的要求：canonical conversation/provider state 仍是恢复事实源，而 request intent 只证明已
-提交 dispatch 意图；关联 checkpoint 才证明 attempt 越过网络边界并形成终态。
+提交 dispatch 意图；关联 checkpoint 只证明 attempt 已进入受审计 client 执行阶段并形成 durable 终态，
+不证明请求字节实际离开进程。
 
 任何新增 sink 默认属于未授权 sink，除非契约明确把它列为 canonical recovery store。脱敏必须在事件/observer
 对象构造前完成，不能依赖下游消费者自行清洗。
