@@ -1,7 +1,8 @@
 # Codex Responses Provider 能力契约
 
-> 决策背景见 [ADR 0026](../../decisions/0026-independent-codex-provider.md)。本契约的
-> wire dialect 稳定名为 `codex-responses-v1`。
+> Provider 决策见 [ADR 0026](../../decisions/0026-independent-codex-provider.md)，敏感 request 审计修订见
+> [ADR 0027](../../decisions/0027-sensitive-llm-request-audit.md)。本契约的 wire dialect 稳定名为
+> `codex-responses-v1`。
 
 ## 1. 范围与身份
 
@@ -89,6 +90,11 @@ Canonical 示例：
 投影。assistant/system 图片必须在网络前拒绝。请求固定 `store=false`、`stream=true`、
 `include=["reasoning.encrypted_content"]`，不得发送 `previous_response_id`。
 
+Codex 图片输入规范性继承 [LLM 图片输入契约](llm-image-input.md)：provider 声明 image capability 不会自动
+启用业务图片输入；调用方仍须显式注入默认关闭的 `ImageInputPolicy`，并在 durable acceptance 前完成 canonical
+base64、MIME/文件签名、宽高/单帧、单项/总尺寸、SHA-256 与图片数量门禁。GPT-5.6 输入 token 估算和最终请求
+字节门禁必须复用该契约的同一 estimator/policy，不得在 Codex client 另设宽松路径。
+
 ### 3.2 Tool、function output 与 structured output
 
 - 每个 tool 必须使用扁平形状
@@ -128,6 +134,11 @@ payload 规则：
 
 ### 5.1 事件配对与索引
 
+- 只允许 terminal output item 类型 `reasoning`、`message`、`function_call`；hosted tool、computer use、
+  image generation 或其他 item 类型全部 fail closed。
+- message content part 只允许 `output_text` 与 `refusal`。`refusal` delta/part 必须遵守同样的索引、配对和
+  逐字节一致性校验；任一非空 refusal 以 `ContentFilterError` 结束 attempt，不进入 durable conversation，
+  不发布 normalized/completed。
 - 输出索引必须从 `0` 开始连续递增；不得重复、跳号、倒序或使用 bool/非整数。
 - 每个索引必须恰好经历一次 `response.output_item.added`，随后是零或多个与 item 类型匹配的 delta，
   最后恰好一次 `response.output_item.done`。delta/done 在 added 前到达、done 缺失或重复均须拒绝。
@@ -147,8 +158,9 @@ payload 规则：
   `total_tokens == input_tokens + output_tokens`；存在的 token detail 字段必须是 object，所含计数也必须为
   非 bool 的非负整数。
 - done items 是 Codex 输出事实源。若 `completed.response.output` 是空 list，则仅使用已验证 done items；若
-  是非空 list，则它必须与 done items 在索引、顺序、类型、身份和所有白名单正文/状态字段上 canonical
-  等价，否则 fail closed。非 list 的 output 一律拒绝。
+  是非空 list，则数组 position 就是隐式 `output_index`，显式 `output_index` 若存在必须等于 position；该
+  数组必须与 done items 在索引、顺序、类型、身份和所有白名单正文/状态字段上 canonical 等价，否则 fail
+  closed。非 list 的 output 一律拒绝。
 - `response.failed`、`response.incomplete` 与 `error` 是失败终态。提前 EOF、重复 completed、completed 前
   缺少 done、或 completed 后 EOF 前出现任何新的非空 SSE data event 均须失败。
 - 客户端只在 completed 校验成功且确认其后无新 event 时，按顺序发布唯一 `normalized_output`，随后发布
@@ -161,10 +173,15 @@ payload 规则：
 | sink | 图片正文 | `encrypted_content` | 要求 |
 | --- | --- | --- | --- |
 | canonical `MessageStore` / `SessionJournal` conversation item、最终 response checkpoint | 可保存 | 可保存 | 恢复事实源；完整性、访问控制、加密与保留期由部署方治理 |
-| strict `llm_request_committed` intent | 仅 descriptor/digest | 删除键和值 | observer 只能收到结构化脱敏 request |
+| strict `llm_request_committed` intent | 仅 descriptor + 全量 request digest | 删除键和值，仅保留全量 request digest | observer 只能收到结构化安全投影 |
 | strict attempt checkpoint / logical response | 不应含 request 图片 | 可保存 | 仅保存 verified normalized provider state 以支持恢复 |
 | `LlmRequestRecorded`、普通 request capture | 仅 media type/size/SHA-256/detail descriptor | 删除键和值 | 禁止 Data URL/base64/ciphertext |
 | telemetry、OTel、日志、错误、debug repr | 仅 descriptor/digest | 禁止 | 不得输出正文、Data URL、密文或持久 secret |
+
+`llm_request_committed` 必须同时保存安全投影、redaction manifest 与脱敏前 canonical `ApiRequest` 的 SHA-256
+digest；digest 在内存中计算，不得先把原文写入临时文件或旁路 sink。它按 ADR 0027 修订 ADR 0025 对敏感
+request 的“完整实发 request”要求：canonical conversation/provider state 仍是恢复事实源，而 request intent
+提供可关联、可校验但不可独立反解的证据。
 
 任何新增 sink 默认属于未授权 sink，除非契约明确把它列为 canonical recovery store。脱敏必须在事件/observer
 对象构造前完成，不能依赖下游消费者自行清洗。
@@ -179,12 +196,15 @@ payload 规则：
 - done items 到达但 completed 未到达即崩溃/EOF：结果为 unknown/incomplete，不提交 sample，不执行工具；
   strict audit 在 request 已 dispatch 后记 UNKNOWN、freeze，禁止自动重试。
 - completed 已验证但 response checkpoint 尚未 definite ack 即崩溃：结果仍为 UNKNOWN，freeze，禁止自动重试。
-- response checkpoint definite ack 后、`llm_response_committed` 原子 batch ack 前崩溃：恢复必须从 checkpoint
-  重建并原子提交同一 `llm_sample_id`，不得再次请求 provider。
-- `llm_response_committed` ack 后、function call intent ack 前崩溃：恢复从已提交 sample 继续，将 call 按
-  output index 生成稳定 intent；不得重新调用 provider。
-- function call intent ack 后、function output ack 前崩溃：沿 SessionJournal effect-kind/reconciliation 规则
-  收敛；外部非幂等或结果不明必须 UNKNOWN/freeze，不得猜测成功或自动重复副作用。
+- legacy `AtomicBatchMessageStore` 的 `llm_sample_id` 必须继续由
+  `(thread_id, submission_id, turn_index, iteration)` 确定性生成；相同 logical sample 重放不得生成新 identity。
+- 当前 strict SessionJournal 不支持打开已有 Journal、resume 或跨进程 recovery。response checkpoint definite
+  ack 后、`llm_response_committed` 原子 batch ack 前崩溃，或 sample ack 后、function call intent/output 收敛
+  前崩溃，都必须进入 `UNKNOWN/freeze/RECOVERY_REQUIRED`，不得自动请求 provider、自动派发 tool 或声称已经
+  恢复。checkpoint/record 中的稳定 operation、attempt、submission、turn、iteration identity 仅为未来显式
+  recovery 阶段保留；在 SessionJournal 活契约和 capability gate 扩展前不得实现自动恢复。
+- legacy store 不提供跨崩溃 exactly-once 保证；已提交 function call 与缺失 output 的冷恢复只可按现有
+  MessageStore resume 契约处理，外部非幂等或结果不明不得猜测成功或自动重复副作用。
 - strict audit 只接受仓库逐一 allowlist 的 exact `CodexResponsesClient` one-attempt 类型：一次 `stream` 必须
   恰好对应一次 HTTP request，client 内部不得 retry；每次 attempt 必须遵守
   request-intent definite ack → dispatch → response-checkpoint definite ack → buffered events 的顺序。
@@ -198,7 +218,8 @@ payload 规则：
 - done-item accumulator、空 completed output、非空 completed output 等价/冲突、索引和 event 配对；
 - completed 的 ID/status/usage、completed 后事件、失败终态、EOF、取消；
 - provider-state payload 白名单和 Codex/OpenAI/其他 provider 双向隔离；
-- 上述 crash window、原子 ack 恢复、strict audit one-attempt 与所有未授权 sink 脱敏。
+- 上述 crash-window 分类、stable sample identity、`RECOVERY_REQUIRED` 门禁、strict audit one-attempt 与所有
+  未授权 sink 脱敏。
 
 Sim/Mock 只证明协议、持久化与故障语义，不证明视觉理解。真实矩阵必须使用 `provider=codex`，覆盖纯文本
 instructions、单图、多图顺序、图片工具调用、encrypted state 热重放与 JSONL 冷恢复。只有代理返回合法非零
