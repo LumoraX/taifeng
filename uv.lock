@@ -2124,6 +2124,7 @@ anthropic = [
 dev = [
     { name = "fastapi" },
     { name = "mypy" },
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -2159,6 +2160,7 @@ requires-dist = [
     { name = "opentelemetry-api", marker = "extra == 'telemetry-otel'", specifier = ">=1.27" },
     { name = "opentelemetry-exporter-otlp", marker = "extra == 'telemetry-otel'", specifier = ">=1.27" },
     { name = "opentelemetry-sdk", marker = "extra == 'telemetry-otel'", specifier = ">=1.27" },
+    { name = "packaging", marker = "extra == 'dev'", specifier = ">=24" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },

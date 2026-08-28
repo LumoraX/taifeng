@@ -10,16 +10,27 @@ on:
       - "v*"
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
-    # environment 名需与 PyPI trusted publisher 配置中的一致
-    environment: pypi
-    permissions:
-      # OIDC 令牌签发权限 —— Trusted Publishing 必需，缺它会鉴权失败
-      id-token: write
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 校验 tag 与 main
+        run: |
+          git fetch origin main --no-tags
+          if [ "$GITHUB_SHA" != "$(git rev-parse origin/main)" ]; then
+            echo "::error::tag commit 必须等于 origin/main HEAD"
+            exit 1
+          fi
+          tag_version="${GITHUB_REF_NAME#v}"
+          proj_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "$tag_version" != "$proj_version" ]; then
+            echo "::error::tag ($tag_version) 与 pyproject version ($proj_version) 不一致"
+            exit 1
+          fi
 
       - name: 安装 uv
         uses: astral-sh/setup-uv@v5
@@ -38,21 +49,36 @@ jobs:
       - name: 构建 wheel 与 sdist
         run: uv build
 
-      - name: 校验 tag 版本与 pyproject 版本一致
-        # 防止打错 tag：tag 去掉前缀 v 后必须等于 pyproject.toml 的 version
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          proj_version="$(uv version --short)"
-          if [ "$tag_version" != "$proj_version" ]; then
-            echo "::error::tag ($tag_version) 与 pyproject version ($proj_version) 不一致"
-            exit 1
-          fi
-
       - name: 校验 wheel 与 sdist 干净安装
         run: >-
-          uv run scripts/verify_release_artifacts.py
+          uv run --extra dev scripts/verify_release_artifacts.py
           --dist-dir dist
           --expected-version "${GITHUB_REF_NAME#v}"
+
+      - name: 保存已验证发行产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    # environment 名需与 PyPI trusted publisher 配置中的一致
+    environment: pypi
+    permissions:
+      # 只有纯发布 job 拥有 OIDC 令牌签发权限
+      id-token: write
+    steps:
+      - name: 下载已验证发行产物
+        uses: actions/download-artifact@v4
+        with:
+          name: pypi-dist
+          path: dist/
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
 
       - name: 发布到 PyPI（Trusted Publishing）
         run: uv publish --trusted-publishing always
