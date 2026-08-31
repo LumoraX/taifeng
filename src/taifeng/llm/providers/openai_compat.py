@@ -244,6 +244,17 @@ class OpenAICompatSession:
             err.request_id = request_id
             yield error(message=str(err), kind=err.kind, retryable=err.retryable)
             raise err
+        if self._last_finish_reason and (
+            self._last_finish_reason.startswith("function_call_filter")
+            or "MALFORMED_FUNCTION_CALL" in self._last_finish_reason
+        ):
+            err = InvalidResponseError(
+                "response stopped by provider function call filter "
+                f"(finish_reason={self._last_finish_reason})"
+            )
+            err.request_id = request_id
+            yield error(message=str(err), kind=err.kind, retryable=err.retryable)
+            raise err
 
         # tool_call_done events
         for acc in tool_calls_acc.values():

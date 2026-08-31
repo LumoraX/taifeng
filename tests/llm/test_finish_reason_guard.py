@@ -11,7 +11,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from taifeng.llm.errors import ContentFilterError
+from taifeng.llm.errors import ContentFilterError, InvalidResponseError
 from taifeng.llm.providers import OpenAICompatClient
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
@@ -21,6 +21,12 @@ from taifeng.loop.cancellation import CancellationToken
 CONTENT_FILTER_SSE = (
     b'data: {"choices":[{"delta":{"content":"","role":"assistant"},"finish_reason":null,"index":0}]}\n\n'
     b'data: {"choices":[{"delta":{"content":""},"finish_reason":"content_filter","index":0}]}\n\n'
+    b'data: {"choices":[],"usage":{"prompt_tokens":910,"completion_tokens":0,"total_tokens":910}}\n\n'
+    b"data: [DONE]\n\n"
+)
+
+MALFORMED_FUNCTION_CALL_SSE = (
+    b'data: {"choices":[{"delta":{"role":"assistant","extra_content":{"google":{"thought_signature":"sig-1"}}},"finish_reason":"function_call_filter: MALFORMED_FUNCTION_CALL","index":0}]}\n\n'
     b'data: {"choices":[],"usage":{"prompt_tokens":910,"completion_tokens":0,"total_tokens":910}}\n\n'
     b"data: [DONE]\n\n"
 )
@@ -93,6 +99,45 @@ async def test_content_filter_finish_reason_raises() -> None:
     err_ev = next(e for e in captured if e.kind == "error")
     assert err_ev.data.get("kind") == "content_filter"
     assert "completed" not in kinds, "content_filter 不得伪造成功 completed"
+
+
+async def test_malformed_function_call_finish_reason_raises() -> None:
+    """Gemini function_call_filter 截停 → 抛 InvalidResponseError，不得伪造成空完成。"""
+    captured: list = []
+    with pytest.raises(InvalidResponseError):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=MALFORMED_FUNCTION_CALL_SSE,
+                headers={"content-type": "text/event-stream"},
+            )
+
+        transport = httpx.MockTransport(handler)
+        orig = httpx.AsyncClient
+
+        def patched(*args, **kwargs):  # noqa: ANN002, ANN003
+            kwargs["transport"] = transport
+            return orig(*args, **kwargs)
+
+        httpx.AsyncClient = patched  # type: ignore[misc]
+        try:
+            client = OpenAICompatClient(
+                base_url="https://api.example.com/v1", api_key="sk-test", model="m"
+            )
+            sess = client.session(cancel=CancellationToken())
+            async with sess as s:
+                req = ApiRequest(model="m", messages=[ApiMessage(role="user", content="hi")])
+                async for ev in s.stream(req):
+                    captured.append(ev)
+        finally:
+            httpx.AsyncClient = orig  # type: ignore[misc]
+
+    kinds = [e.kind for e in captured]
+    assert "error" in kinds
+    err_ev = next(e for e in captured if e.kind == "error")
+    assert err_ev.data.get("kind") == "invalid_response"
+    assert "function_call_filter" in err_ev.data.get("message", "")
+    assert "completed" not in kinds
 
 
 async def test_normal_stop_still_completes() -> None:

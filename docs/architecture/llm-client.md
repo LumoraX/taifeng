@@ -222,6 +222,9 @@ native 三家成功时还会 emit `rate_limits`（`RateLimitSnapshot`）+ 回填
    而是先 emit `error` 事件再抛 `ContentFilterError`（与 HTTP 错误路径一致）→ turn `success=False` →
    `call_skill` 回 `ToolResult.error(is_error=true)`。旧实现完全忽略 finish_reason，把「被拦截」伪造成
    「成功的空 completed」——真实事故根因（Gemini 经网关对部分子 skill prompt 误杀，且**非确定性**）。
+   Google AI Studio 的 OpenAI-compatible 端点还可能返回
+   `finish_reason="function_call_filter: MALFORMED_FUNCTION_CALL"`；该信号同样必须按显式 provider
+   错误处理，emit `error` 并抛 `InvalidResponseError`，不得伪造成空完成。
 2. **无显式错误的空 → 容忍继续（Loop 层不臆断）**：`loop/turn.py` 对「无 text + 无 tool call」的终止轮按
    **正常完成**处理（`success=True`、`final_text=""`），`call_skill` 回 `ToolResult.ok("")`，父 turn 拿到
    空结果继续即可。内核**不**把「空」臆断成异常——空可能源于 prompt / skill，归因交业务侧（避免把上游/业务
