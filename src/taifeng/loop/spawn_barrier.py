@@ -189,14 +189,25 @@ class JoinBarrierCoordinator:
         cancel = eng._root_cancel.child(f"barrier:{barrier.barrier_id}")  # noqa: SLF001
         runner = eng._build_child_runner(  # noqa: SLF001
             target, then_thread_id, seed, cancel, history=[seed])
-        # 聚合 turn 后台独立跑(不阻塞主 actor / 不回写本 engine 状态)
+        # 先广播 fired，再启动聚合 turn：订阅方要用 then_thread_id 预先开会诊轨。
+        # 若先启动 child runner，极快的模型可能抢在 fired 事件前发 assistant_text，
+        # 下游只能把这段文本归到未知/root 轨。
+        drv._fired_barriers.add(barrier.barrier_id)  # noqa: SLF001
+        await eng._emit(EventMsg(  # noqa: SLF001
+            submission_id=barrier.barrier_id,
+            msg=JoinBarrierFired(data={
+                "barrier_id": barrier.barrier_id,
+                "then_thread_id": then_thread_id,
+            }),
+        ))
+
+        # 聚合 turn 后台独立跑(不阻塞主 actor / 不回写本 engine 状态)。
         drv._start_owned_task(  # noqa: SLF001
             runner.run(),
             name=f"barrier:{barrier.barrier_id}",
         )
 
-        # 幂等:先入守卫集再落 fired 标记 + emit(防止并发 _check_barriers 重入触发)
-        drv._fired_barriers.add(barrier.barrier_id)  # noqa: SLF001
+        # 持久化 fired 标记，供冷恢复幂等重建。
         from taifeng.conversation.models import join_barrier_fired_item
 
         marker = join_barrier_fired_item(
@@ -207,13 +218,6 @@ class JoinBarrierCoordinator:
         async with eng._lock:  # noqa: SLF001
             eng._history.append(marker)  # noqa: SLF001
         await eng._store.append(marker)  # noqa: SLF001
-        await eng._emit(EventMsg(  # noqa: SLF001
-            submission_id=barrier.barrier_id,
-            msg=JoinBarrierFired(data={
-                "barrier_id": barrier.barrier_id,
-                "then_thread_id": then_thread_id,
-            }),
-        ))
 
     # -----------------------------------------------------------------
     # detached-spawn 冷恢复:从 parent thread 持久项重建句柄表 + barrier + 守卫集

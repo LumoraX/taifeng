@@ -601,6 +601,83 @@ async def test_join_barrier_fires_when_all_done(skills_dir, threads_dir):
 
 
 @pytest.mark.asyncio
+async def test_join_barrier_fired_precedes_then_thread_output(tmp_path, threads_dir):
+    """join_barrier_fired 必须先于会诊 turn 文本，便于订阅方先建轨。"""
+    skills = tmp_path / "skills"
+    for sid, body in {
+        "order-root": """---
+name: order-root
+description: 顺序测试根
+version: 1.0.0
+type: composite
+entry: true
+child_skills: [order-a, order-b, order-consult]
+tool_names: [spawn_skill]
+---
+ORDER_ROOT_MARK
+""",
+        "order-a": """---
+name: order-a
+description: 顺序测试 A
+version: 1.0.0
+type: atomic
+---
+ORDER_A_MARK
+""",
+        "order-b": """---
+name: order-b
+description: 顺序测试 B
+version: 1.0.0
+type: atomic
+---
+ORDER_B_MARK
+""",
+        "order-consult": """---
+name: order-consult
+description: 顺序测试会诊
+version: 1.0.0
+type: atomic
+---
+ORDER_CONSULT_MARK
+""",
+    }.items():
+        d = skills / sid
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(body, encoding="utf-8")
+
+    client = RoutingSimClient(routes={
+        "ORDER_A_MARK": [SimTurn(text="结论A")],
+        "ORDER_B_MARK": [SimTurn(text="结论B")],
+        "ORDER_CONSULT_MARK": [SimTurn(text="汇总:综合A+B")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills, threads_dir=threads_dir, model_client=client, compressors=[])
+    engine = await pool.get_or_create(session_id="s4-order", entry_skill_id="order-root")
+    observed: list[tuple[str, str]] = []
+    then_tid = {"value": None}
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind == "join_barrier_fired":
+                then_tid["value"] = ev.msg.data["then_thread_id"]
+                observed.append((ev.msg.kind, ev.submission_id))
+            elif ev.submission_id == then_tid["value"] and ev.msg.kind == "assistant_text":
+                observed.append((ev.msg.kind, ev.submission_id))
+                return
+
+    task = asyncio.create_task(watch())
+    a = (await engine.spawn_skill(skill_id="order-a", args={}, reason="x"))["handle_id"]
+    b = (await engine.spawn_skill(skill_id="order-b", args={}, reason="x"))["handle_id"]
+    await engine.set_join_barrier([a, b], then_skill_id="order-consult")
+    assert await _wait(lambda: len(observed) >= 2)
+
+    assert observed[0][0] == "join_barrier_fired"
+    assert observed[1] == ("assistant_text", then_tid["value"])
+    task.cancel()
+    await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_join_barrier_with_failed_expert(expert_skills, threads_dir):
     """一个专家挂起后被 kill(cancelled 终态)→ barrier 仍触发,聚合输入含取消终态。
 
