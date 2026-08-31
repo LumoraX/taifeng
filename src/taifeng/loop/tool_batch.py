@@ -38,6 +38,7 @@ class ToolCallRequest:
         arguments: 已 json 解析的参数 dict
         arguments_raw: 原始参数字符串(写 function_call item 用,保持与 LLM 原样一致)
         parallel_safe: 该工具是否 parallel_safe(供 PreToolUseHook 透传)
+        extra_content: provider 专属 tool_call 扩展字段，派发不解释，仅供落史回放
     """
 
     index: int
@@ -46,6 +47,7 @@ class ToolCallRequest:
     arguments: dict[str, Any]
     arguments_raw: str
     parallel_safe: bool
+    extra_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

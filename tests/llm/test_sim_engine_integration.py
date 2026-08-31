@@ -13,14 +13,32 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 import taifeng
 from taifeng.context.strategies.sliding import SlidingWindowStrategy
+from taifeng.llm.client import TEXT_ONLY_CAPABILITIES
+from taifeng.llm.events import (
+    completed,
+    created,
+    prompt_cache,
+    server_model,
+    text_delta,
+    tool_call_delta,
+    tool_call_done,
+)
 from taifeng.llm.providers import RoutingSimClient, SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import ThreadRollback
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from taifeng.llm.events import ResponseEvent
+    from taifeng.llm.types import ApiRequest
+    from taifeng.loop.cancellation import CancellationToken
 
 
 async def _run_turn(engine: taifeng.AgentEngine, text: str) -> str:
@@ -39,6 +57,60 @@ async def _wait(cond, tries: int = 200) -> bool:
             return True
         await asyncio.sleep(0.01)
     return False
+
+
+class _ExtraContentToolSession:
+    """模拟 provider 在 tool_call_done 上返回专属扩展字段。"""
+
+    def __init__(self, client: "_ExtraContentToolClient") -> None:
+        self._client = client
+
+    async def __aenter__(self) -> "_ExtraContentToolSession":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        pass
+
+    async def stream(self, request: "ApiRequest") -> "AsyncIterator[ResponseEvent]":
+        self._client.requests.append(request)
+        yield created()
+        yield server_model("sim-extra")
+        if len(self._client.requests) == 1:
+            yield text_delta("需要读取子技能")
+            yield tool_call_delta(
+                call_id="call-extra",
+                name="read_skill",
+                delta='{"skill_id":"style-checker"}',
+            )
+            yield prompt_cache(cache_read=0, cache_creation=0)
+            yield tool_call_done(
+                call_id="call-extra",
+                name="read_skill",
+                arguments='{"skill_id":"style-checker"}',
+                extra_content={"google": {"thought_signature": "sig-1"}},
+            )
+            yield completed(response_id=None, usage=TokenUsage(), end_turn=False)
+            return
+        yield text_delta("完成")
+        yield prompt_cache(cache_read=0, cache_creation=0)
+        yield completed(response_id=None, usage=TokenUsage(), end_turn=True)
+
+
+class _ExtraContentToolClient:
+    """记录请求的最小 ModelClient，用于验证 tool 扩展字段回放。"""
+
+    capabilities = TEXT_ONLY_CAPABILITIES
+
+    def __init__(self) -> None:
+        self.requests: list[ApiRequest] = []
+
+    def session(
+        self,
+        *,
+        cancel: "CancellationToken",
+        model: str | None = None,
+    ) -> _ExtraContentToolSession:
+        return _ExtraContentToolSession(self)
 
 
 @pytest.mark.asyncio
@@ -85,6 +157,40 @@ async def test_resume_rebuild_prefix_consistent_and_callid_paired(
     # 续接请求里必须带回第一轮的工具结果（闭环验证工具结果真的回传了）
     assert client.ledger.saw_function_call("c1")
     assert client.ledger.function_call_output_text("c1") is not None
+
+
+@pytest.mark.asyncio
+async def test_tool_dispatch_history_preserves_provider_extra_content(
+    skills_dir: Path,
+    threads_dir: Path,
+) -> None:
+    """非 audit 派发落史必须保留 provider 专属 tool_call 扩展字段。"""
+    client = _ExtraContentToolClient()
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir,
+        threads_dir=threads_dir,
+        model_client=client,
+        compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s-extra", entry_skill_id="code-reviewer")
+    assert await _run_turn(engine, "第一问") == "turn_completed"
+    await pool.close()
+
+    second_request = client.requests[1]
+    assistant_with_tool = next(
+        message for message in second_request.messages if message.tool_calls
+    )
+    assert assistant_with_tool.tool_calls == [
+        {
+            "id": "call-extra",
+            "type": "function",
+            "function": {
+                "name": "read_skill",
+                "arguments": '{"skill_id":"style-checker"}',
+            },
+            "extra_content": {"google": {"thought_signature": "sig-1"}},
+        }
+    ]
 
 
 @pytest.mark.asyncio

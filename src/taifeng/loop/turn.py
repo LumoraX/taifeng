@@ -1217,6 +1217,11 @@ class TurnRunner:
                                     "call_id": ev.data["call_id"],
                                     "name": ev.data["name"],
                                     "arguments": ev.data.get("arguments", "{}"),
+                                    **(
+                                        {"extra_content": ev.data["extra_content"]}
+                                        if "extra_content" in ev.data
+                                        else {}
+                                    ),
                                 }
                             )
                     elif ev.kind == "normalized_output":
@@ -1366,6 +1371,7 @@ class TurnRunner:
                         name=tc["name"],
                         arguments=tc["arguments"],
                         thread_id=self.thread_id,
+                        extra_content=tc.get("extra_content"),
                     ))
             # 观测 session 在 checkpoint definite ack 后暴露 lineage；缺失即 attempt
             # 未收敛，fail closed 冻结（不得在无 durable 最终响应时继续产生效果）。
@@ -1431,6 +1437,7 @@ class TurnRunner:
                     arguments=arguments,
                     arguments_raw=arguments_str,
                     parallel_safe=parallel_safe,
+                    extra_content=tc.get("extra_content"),
                 )
             )
 
@@ -1499,6 +1506,7 @@ class TurnRunner:
                 name=req.name,
                 arguments=req.arguments_raw,
                 thread_id=self.thread_id,
+                extra_content=req.extra_content,
             )
             # audit：function_call 已在最终响应批中 durable + 应用到 hot history，
             # 此处不得重复入史 / 直写 projection store（transcript 唯一写者是

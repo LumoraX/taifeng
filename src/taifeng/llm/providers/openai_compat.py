@@ -84,6 +84,7 @@ class OpenAICompatSession:
         self._last_usage: TokenUsage | None = None
         # 本次流最后一个非空 finish_reason —— 用于流末判定异常终止（content_filter 等）。
         self._last_finish_reason: str | None = None
+        self._pending_extra_content: dict[str, Any] | None = None
 
     async def __aenter__(self) -> OpenAICompatSession:
         return self
@@ -162,13 +163,14 @@ class OpenAICompatSession:
         yield created()
         yield server_model(payload["model"])
 
-        tool_calls_acc: dict[int, dict[str, Any]] = {}
+        tool_calls_acc: dict[Any, dict[str, Any]] = {}
         # P1 structured_output：累积全文用于流末解析
         full_text_parts: list[str] = []
         # G3：服务端 request-id（成功 → completed 回流；失败 → 回填到 error）
         request_id: str | None = None
         terminal_seen = False
         self._last_finish_reason = None
+        self._pending_extra_content = None
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             try:
@@ -263,6 +265,7 @@ class OpenAICompatSession:
                     call_id=acc["id"],
                     name=acc["name"],
                     arguments=acc.get("arguments", ""),
+                    extra_content=acc.get("extra_content"),
                 )
 
         # P1 structured_output：流末若请求带 response_format → 尝试 json 解析
@@ -289,7 +292,7 @@ class OpenAICompatSession:
     async def _process_chunk(
         self,
         chunk: dict[str, Any],
-        tool_calls_acc: dict[int, dict[str, Any]],
+        tool_calls_acc: dict[Any, dict[str, Any]],
     ) -> AsyncIterator[ResponseEvent]:
         choices = chunk.get("choices") or []
         if choices:
@@ -299,6 +302,11 @@ class OpenAICompatSession:
             if fr:
                 self._last_finish_reason = fr
             delta = choices[0].get("delta") or {}
+            extra_content = delta.get("extra_content")
+            if isinstance(extra_content, dict):
+                self._pending_extra_content = extra_content
+                for acc in tool_calls_acc.values():
+                    acc.setdefault("extra_content", extra_content)
             text = delta.get("content")
             if text:
                 yield text_delta(text)
@@ -306,12 +314,19 @@ class OpenAICompatSession:
             if rc:
                 yield reasoning_delta(rc)
             for tc in delta.get("tool_calls") or []:
-                idx = tc.get("index", 0)
-                acc = tool_calls_acc.setdefault(
-                    idx, {"id": "", "name": "", "arguments": ""}
-                )
+                # Gemini OpenAI-compatible 的 stream 可能省略 index，但每个
+                # tool_call 带稳定 id；此时必须按 id 分组，否则多次独立调用会
+                # 被错误拼成一个 malformed arguments。
+                idx = tc.get("index")
+                key = ("index", idx) if idx is not None else ("id", tc.get("id", 0))
+                acc = tool_calls_acc.setdefault(key, {"id": "", "name": "", "arguments": ""})
                 if tc.get("id"):
                     acc["id"] = tc["id"]
+                    if self._pending_extra_content is not None:
+                        acc.setdefault("extra_content", self._pending_extra_content)
+                tc_extra_content = tc.get("extra_content")
+                if isinstance(tc_extra_content, dict):
+                    acc["extra_content"] = tc_extra_content
                 fn = tc.get("function") or {}
                 if fn.get("name"):
                     acc["name"] = fn["name"]

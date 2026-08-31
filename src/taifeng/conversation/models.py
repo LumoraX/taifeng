@@ -89,11 +89,25 @@ def assistant_message(text: str, *, thread_id: str, model: str) -> ResponseItem:
     )
 
 
-def function_call(call_id: str, name: str, arguments: str, *, thread_id: str) -> ResponseItem:
+def function_call(
+    call_id: str,
+    name: str,
+    arguments: str,
+    *,
+    thread_id: str,
+    extra_content: dict[str, Any] | None = None,
+) -> ResponseItem:
+    payload: dict[str, Any] = {
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    }
+    if extra_content is not None:
+        payload["extra_content"] = extra_content
     return ResponseItem(
         kind="function_call",
         thread_id=thread_id,
-        payload={"call_id": call_id, "name": name, "arguments": arguments},
+        payload=payload,
     )
 
 

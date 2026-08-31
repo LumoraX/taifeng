@@ -140,6 +140,31 @@ def test_rebuild_merges_round_and_attaches_reasoning() -> None:
     assert [tc["id"] for tc in (msgs[1].tool_calls or [])] == ["c1"]
 
 
+def test_rebuild_preserves_tool_call_extra_content() -> None:
+    """function_call 的 provider 扩展字段必须回放进下一轮 tool_calls。"""
+    items = [
+        user_message("帮我查一下", thread_id=TID),
+        assistant_message("", thread_id=TID, model="m"),
+        function_call(
+            call_id="c1",
+            name="ask",
+            arguments="{}",
+            thread_id=TID,
+            extra_content={"google": {"thought_signature": "sig-1"}},
+        ),
+        function_call_output(call_id="c1", output="答案", thread_id=TID),
+    ]
+    msgs = history_to_api_messages(items)
+    assert msgs[1].tool_calls == [
+        {
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "ask", "arguments": "{}"},
+            "extra_content": {"google": {"thought_signature": "sig-1"}},
+        }
+    ]
+
+
 def test_rebuild_merges_parallel_fc_interleaved() -> None:
     """同轮并行双 fc(落史配对交错 fc,fco,fc,fco):全部归并到该轮 assistant。"""
     items = [

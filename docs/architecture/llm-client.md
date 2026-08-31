@@ -233,6 +233,17 @@ native 三家成功时还会 emit `rate_limits`（`RateLimitSnapshot`）+ 回填
 > 决策记录：曾尝试在 loop 层加「空即异常」守卫（`EmptyCompletionError`），后按评审改为上述判据——
 > 空非错误、继续即可，只有 LLM 显式信号（finish_reason / error / 非 200）才判错。
 
+### Google OpenAI-compatible tool call 回放
+
+Google AI Studio 的 OpenAI-compatible `chat/completions` 流式响应会在 tool call delta 或 assistant delta
+上附带 provider 专属 `extra_content.google.thought_signature`。taifeng 不解释该字段，但必须把它作为
+tool call 的扩展字段全程透传：`tool_call_done` → `function_call` 落史 → `history_to_api_messages`
+重建下一轮 `ApiMessage.tool_calls`。丢失该字段会导致后续 Gemini turn 无法延续 provider 所需状态。
+
+同一端点还可能在 stream tool call delta 中省略 OpenAI 常见的 `index`，但提供稳定 `id`。OpenAI-compatible
+accumulator 因此按 `index` 优先、缺失时按 `id` 分组，避免把多个独立 tool call 的 arguments 拼成一个
+malformed JSON。
+
 ## Sticky 路由 & subagent 头
 
 native provider 实现可在请求里带额外 header（如 `extra_headers`），供业务侧 provider gateway

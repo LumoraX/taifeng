@@ -62,11 +62,21 @@ def tool_call_delta(call_id: str, name: str | None, delta: str) -> ResponseEvent
     )
 
 
-def tool_call_done(call_id: str, name: str, arguments: str) -> ResponseEvent:
-    return ResponseEvent(
-        kind="tool_call_done",
-        data={"call_id": call_id, "name": name, "arguments": arguments},
-    )
+def tool_call_done(
+    call_id: str,
+    name: str,
+    arguments: str,
+    *,
+    extra_content: dict[str, Any] | None = None,
+) -> ResponseEvent:
+    data: dict[str, Any] = {
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    }
+    if extra_content is not None:
+        data["extra_content"] = extra_content
+    return ResponseEvent(kind="tool_call_done", data=data)
 
 
 def reasoning_delta(delta: str) -> ResponseEvent:

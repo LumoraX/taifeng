@@ -242,7 +242,7 @@ def _item_to_api_message(
 
 def _fc_to_tool_call(it: ResponseItem) -> dict[str, Any]:
     """function_call item → OpenAI 形态的 tool_call dict。"""
-    return {
+    tool_call = {
         "id": it.payload.get("call_id", ""),
         "type": "function",
         "function": {
@@ -250,6 +250,10 @@ def _fc_to_tool_call(it: ResponseItem) -> dict[str, Any]:
             "arguments": it.payload.get("arguments", "{}"),
         },
     }
+    extra_content = it.payload.get("extra_content")
+    if isinstance(extra_content, dict):
+        tool_call["extra_content"] = extra_content
+    return tool_call
 
 
 def history_to_api_messages(

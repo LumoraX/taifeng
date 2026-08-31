@@ -71,6 +71,107 @@ async def test_openai_compat_streams_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openai_compat_preserves_google_tool_call_extra_content() -> None:
+    """Google OpenAI-compatible 的 thought_signature 必须跟 tool_call 一起保留。"""
+
+    sse = (
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","extra_content":{"google":{"thought_signature":"sig-1"}},"function":{"name":"lookup","arguments":"{\\"q\\":"}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"x\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        b'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+
+    transport = httpx.MockTransport(handler)
+    orig_async_client = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return orig_async_client(*args, **kwargs)
+
+    httpx.AsyncClient = patched  # type: ignore[misc]
+    try:
+        client = OpenAICompatClient(
+            base_url="https://api.example.com/v1",
+            api_key="sk-test",
+            model="gpt-4o-mini",
+        )
+        sess = client.session(cancel=CancellationToken())
+        events = []
+        async with sess as s:
+            req = ApiRequest(
+                model="gpt-4o-mini",
+                messages=[ApiMessage(role="user", content="hi")],
+            )
+            async for ev in s.stream(req):
+                events.append(ev)
+    finally:
+        httpx.AsyncClient = orig_async_client  # type: ignore[misc]
+
+    done = next(e for e in events if e.kind == "tool_call_done")
+    assert done.data["call_id"] == "call_1"
+    assert done.data["name"] == "lookup"
+    assert done.data["arguments"] == '{"q":"x"}'
+    assert done.data["extra_content"] == {"google": {"thought_signature": "sig-1"}}
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_uses_tool_call_id_when_index_missing() -> None:
+    """Gemini 流式 tool_call 可缺 index，此时必须按 id 分组避免把多 call 拼坏。"""
+
+    sse = (
+        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"ckd\\",\\"reason\\":\\"r1\\"}"}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_2","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"metabolic\\",\\"reason\\":\\"r2\\"}"}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_3","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"lung-nodule\\",\\"reason\\":\\"r3\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        b'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+
+    transport = httpx.MockTransport(handler)
+    orig_async_client = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return orig_async_client(*args, **kwargs)
+
+    httpx.AsyncClient = patched  # type: ignore[misc]
+    try:
+        client = OpenAICompatClient(
+            base_url="https://api.example.com/v1",
+            api_key="sk-test",
+            model="gpt-4o-mini",
+        )
+        sess = client.session(cancel=CancellationToken())
+        events = []
+        async with sess as s:
+            req = ApiRequest(
+                model="gpt-4o-mini",
+                messages=[ApiMessage(role="user", content="hi")],
+            )
+            async for ev in s.stream(req):
+                events.append(ev)
+    finally:
+        httpx.AsyncClient = orig_async_client  # type: ignore[misc]
+
+    done_events = [e for e in events if e.kind == "tool_call_done"]
+    assert [event.data["call_id"] for event in done_events] == [
+        "call_1",
+        "call_2",
+        "call_3",
+    ]
+    assert [event.data["arguments"] for event in done_events] == [
+        '{"skill_id":"ckd","reason":"r1"}',
+        '{"skill_id":"metabolic","reason":"r2"}',
+        '{"skill_id":"lung-nodule","reason":"r3"}',
+    ]
+
+
+@pytest.mark.asyncio
 async def test_openai_compat_remote_protocol_error_is_transient() -> None:
     """流中途服务器断连（httpx.RemoteProtocolError）→ 归 TransientNetworkError（可重试）。
 
