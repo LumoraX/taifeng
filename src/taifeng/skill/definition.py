@@ -126,6 +126,8 @@ class SkillDefinition:
         registry 未注册项由消费点过滤（可见集只管「声明层应可见什么」）。
         """
         auto = frozenset({"run_script"}) if self.scripts else frozenset()
+        if self.frontmatter_raw.get("strict_tool_names") is True:
+            return self.tool_names | auto
         return self.tool_names | {"read_skill", "call_skill"} | auto
 
     def validate(self) -> None:

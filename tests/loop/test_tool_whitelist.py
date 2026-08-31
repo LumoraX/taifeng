@@ -72,6 +72,27 @@ def test_composite_union_of_declared_and_auto() -> None:
     )
 
 
+def test_strict_tool_names_hides_builtin_skill_tools() -> None:
+    """strict_tool_names=True：只暴露声明工具与脚本工具，隐藏内核 skill 工具。"""
+    sk = _skill(type_="composite", tool_names=frozenset({"spawn_skill"}))
+    sk = SkillDefinition(
+        id=sk.id,
+        name=sk.name,
+        description=sk.description,
+        version=sk.version,
+        body=sk.body,
+        body_path=sk.body_path,
+        type=sk.type,
+        entry=sk.entry,
+        child_skills=sk.child_skills,
+        tool_names=sk.tool_names,
+        max_call_depth=sk.max_call_depth,
+        frontmatter_raw={"strict_tool_names": True},
+    )
+
+    assert sk.visible_tool_names() == frozenset({"spawn_skill"})
+
+
 def test_scripts_only_composite_is_legal() -> None:
     """空壳校验放宽：scripts-only composite 有 agency，合法。"""
     _skill(type_="composite", with_script=True).validate()

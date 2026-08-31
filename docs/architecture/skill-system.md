@@ -115,6 +115,21 @@ skill 设计者可在三种编排间自由选择：
 
 > ⚠️ 脚本经 `run_script` 在 **subprocess 隔离**中执行（argv spawn + env 白名单 + stdin DEVNULL），**不能** in-process `import taifeng...` 回调 `call_skill`。需要"脚本里再调子 skill"的确定性流程，请用**声明式编排**而非脚本。
 
+### 严格工具面（strict_tool_names）
+
+默认情况下，composite skill 除 frontmatter 中声明的 `tool_names` 外，还会自动看到内核 skill 工具
+`read_skill` 与 `call_skill`；这是多数 ReAct 编排器的默认能力面。若某个 entry 只允许模型调用声明工具，
+可在 frontmatter 加：
+
+```yaml
+tool_names: [spawn_skill]
+strict_tool_names: true
+```
+
+此时 `visible_tool_names()` 只返回声明工具与脚本自动派生的 `run_script`，不会再自动加入
+`read_skill` / `call_skill`。该开关用于收窄 LLM 的选择面，不替代执行期 `tool-whitelist`
+校验；实际派发仍必须命中本轮请求里注入过的工具。
+
 ## 核心抽象
 
 ```python

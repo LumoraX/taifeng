@@ -8,7 +8,7 @@
 
 | 结构 | 模块 | 要点 |
 | --- | --- | --- |
-| `SkillDefinition.visible_tool_names()` | `skill/definition.py` | 可见集**单一真相**：`tool_names ∪ {read_skill, call_skill} ∪（scripts 非空 → {run_script}）`；atomic / composite 一致；消费点不得内联重复集合逻辑 |
+| `SkillDefinition.visible_tool_names()` | `skill/definition.py` | 可见集**单一真相**：默认 `tool_names ∪ {read_skill, call_skill} ∪（scripts 非空 → {run_script}）`；`strict_tool_names: true` 时仅 `tool_names ∪（scripts 非空 → {run_script}）`；消费点不得内联重复集合逻辑 |
 | `dispatch_batch(..., visible_tools=)` | `loop/tool_batch.py` | 必填参数：本轮**实际注入请求**的工具名集（registry 过滤后，与请求严格同源） |
 | `ToolResult.error(reason="not_offered")` | `tool/spec.py`（复用） | 拒绝执行的机读原因；输出文本 `tool_not_offered: <name>` |
 
@@ -19,6 +19,7 @@
 3. **传入基准按调用点**：turn 主路径传请求名集（严格同源）；retry_tool 重跑传声明层 `visible_tool_names()`（热重载移除声明则如实拒）；声明式编排 turn 同源传入（只合成 call_skill，内核发起非幻觉面）。
 4. **豁免面**：engine 的 resume 重放（原始派发已校验且人已批准）与业务直发工具 Op（非 LLM 发起）不经 batch 层，不做校验。
 5. **composite 空壳校验**：`child_skills / tool_names / scripts` 至少其一（scripts-only composite 有 agency，合法）；atomic 仍禁声明 tool_names。
+6. **严格工具面**：需要把入口 LLM 限定为声明工具的 skill 可声明 `strict_tool_names: true`。该开关不会改变 `tool_names` 校验，只改变内核自动注入工具；适合只允许 `spawn_skill` 等窄入口的编排器，避免 provider 在多工具选择面上生成不可接受的 function call。
 
 ## 测试接入
 
@@ -39,3 +40,4 @@
 
 - 「声明但 registry 未注册」仍是静默不可见（如 scripts 声明但引擎未配 script_executors 时 run_script 可见但执行报错）——收紧另立 change。
 - 校验只覆盖 LLM 发起的 batch 路径；业务直发 Op 的安全由业务侧自担。
+- `strict_tool_names` 是声明层工具面收窄，不是权限系统；执行期仍以本轮实际注入的 `visible_tools` 做最终拒绝。
