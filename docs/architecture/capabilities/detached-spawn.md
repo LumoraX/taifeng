@@ -157,13 +157,22 @@ running → done | error | cancelled
 
 触发条件：`handle_ids` 内**全部**句柄到达终态（done / error / cancelled）。任意一个句柄到达终态后检查；全部终态才触发。
 
-触发时：
+触发时（**顺序即契约**，见下）：
 - `then_args_template=None` → 聚合 args = `{handle_id: {status, result}}` for **全部** handles（含 failed / cancelled，不丢弃）
-- 聚合 turn 通过 `_build_child_runner`（call_stack 为空）以**独立根 turn**发起
-- 追加 `join_barrier_fired` 标记（幂等：`_fired_barriers` 内存集合 + store 标记，重复触发 no-op）
+- 先入 `_fired_barriers` 内存守卫集（防并发 check 重入触发）
 - emit `join_barrier_fired{barrier_id, then_thread_id}`
+- 再通过 `_build_child_runner`（call_stack 为空）以**独立根 turn**发起聚合 turn
+- 追加 `join_barrier_fired` 标记到父 thread（只服务冷恢复幂等重建，不参与热路径去重）
 
 **v1 仅支持「全终态」触发**；any / 超时触发留后续。
+
+##### 顺序保证：fired 先于聚合轨任何输出
+
+`join_barrier_fired` SHALL 在聚合 turn 产生**任何** `submission_id == then_thread_id` 的事件之前 emit。
+
+订阅方只能从该事件的 `then_thread_id` 得知聚合轨的轨道键（见 `docs/capability-matrix.md` §Multi-Track
+Concurrency Observability）。若先启动聚合 runner 再广播，快模型的 `assistant_text` 会抢跑，订阅方无从归轨、
+只能落到未知/root 轨——**这是订阅方无法自行补救的顺序缺陷**，故顺序属契约而非实现细节。
 
 #### Scenario: 全 done 触发聚合
 
@@ -171,6 +180,7 @@ running → done | error | cancelled
 - **WHEN** A、B、C 全部完成（done）
 - **THEN** 自动起一次 `"joint-review"` skill turn，args = `{A: {status:"done",result:...}, B:..., C:...}`
 - **AND** emit `join_barrier_fired{barrier_id, then_thread_id}`
+- **AND** 该 `join_barrier_fired` 先于聚合轨（`submission_id == then_thread_id`）的任何事件到达订阅方
 - **AND** `join_barrier_fired` 标记落父 thread，重复 check 幂等
 
 #### Scenario: 含失败专家仍触发聚合
