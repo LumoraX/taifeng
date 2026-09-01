@@ -242,7 +242,11 @@ def test_render_prompt_filters_ineligible_with_caps(tmp_path: Path) -> None:
 # T6 effective_child_recall：inline / deferred 生效模式裁定（单一真相）
 # ============================================================================
 
-from taifeng.skill.definition import SkillDefinition, SkillExposure
+from taifeng.skill.definition import (
+    SkillDefinition,
+    SkillExposure,
+    SkillRequirements,
+)
 from taifeng.skill.visibility import effective_child_recall
 
 
@@ -446,3 +450,71 @@ exposure:
 
     with pytest.raises(SkillValidationError, match="child_recall=deferred"):
         render_system_prompt(entry, snap)
+
+
+# --- G4a 模态门控（工具图片附件特性引入） ---
+
+
+def _make_modality_skill(modalities: frozenset[str]) -> SkillDefinition:
+    """构造最小 composite，仅用于模态门控单测（形状照 _make_entry）。"""
+    return SkillDefinition(
+        id="vision",
+        name="vision",
+        description="测试模态门控",
+        version="1.0.0",
+        body="# vision",
+        body_path=Path("skills/vision/SKILL.md"),
+        type="composite",
+        tool_names=frozenset({"observe_frame"}),
+        requires=SkillRequirements(modalities=modalities),
+    )
+
+
+def test_empty_modalities_requirement_is_always_eligible() -> None:
+    """不声明模态要求的 skill 不受影响 —— 既有 skill 零回归。"""
+    assert is_skill_eligible(_make_modality_skill(frozenset()), RuntimeCapabilities())
+
+
+def test_skill_requiring_image_tool_output_is_hidden_when_unavailable() -> None:
+    """要图片工具输出的 skill，在不具备该能力的环境下不可用。"""
+    skill = _make_modality_skill(frozenset({"tool_output_image"}))
+    caps = RuntimeCapabilities(modalities=frozenset({"text"}))
+
+    assert is_skill_eligible(skill, caps) is False
+
+
+def test_skill_requiring_image_tool_output_is_eligible_when_available() -> None:
+    """能力具备时正常可用。"""
+    skill = _make_modality_skill(frozenset({"tool_output_image"}))
+    caps = RuntimeCapabilities(modalities=frozenset({"text", "tool_output_image"}))
+
+    assert is_skill_eligible(skill, caps) is True
+
+
+def test_derive_modality_tags_reads_client_declaration_only() -> None:
+    """标签由内核从 client 自己的声明派生 —— 业务无需手工同步两个真相源。"""
+    from taifeng.llm.client import ModelCapabilities
+    from taifeng.skill.eligibility import derive_modality_tags
+
+    responses = ModelCapabilities(
+        input_modalities=frozenset({"text", "image"}),
+        provider="openai",
+        protocol="responses",
+        tool_output_modalities=frozenset({"text", "image"}),
+    )
+    assert derive_modality_tags(responses) == frozenset(
+        {"text", "input_image", "tool_output_image"}
+    )
+
+    chat = ModelCapabilities(
+        input_modalities=frozenset({"text", "image"}),
+        provider="openai",
+        protocol="chat",
+    )
+    # user 消息能带图但 tool 结果不能 —— 派生标签必须如实区分
+    assert derive_modality_tags(chat) == frozenset({"text", "input_image"})
+
+    text_only = ModelCapabilities(
+        input_modalities=frozenset({"text"}), provider="p", protocol="chat"
+    )
+    assert derive_modality_tags(text_only) == frozenset({"text"})

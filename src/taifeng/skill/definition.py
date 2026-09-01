@@ -48,9 +48,19 @@ class SkillRequirements:
     """需要已设置的环境变量名（只看「是否存在」，不读值）。"""
     os: frozenset[str] = frozenset()
     """需要的 OS（``linux`` / ``darwin`` / ``windows``）；空=任意。"""
+    modalities: frozenset[str] = frozenset()
+    """需要的模型模态能力标签（如 ``tool_output_image`` / ``input_image``）。
+
+    与 bins / env / os 的差别只在**谁来填**能力侧：这些标签由内核从注入的
+    ``ModelClient`` 自己声明的 ``ModelCapabilities`` 派生（见
+    ``eligibility.derive_modality_tags``），业务不必手工同步——同一事实若有
+    「client 声明」与「业务汇报」两个真相源，必然漂移。
+
+    R1 不变：本类仍只声明「需要什么」，不读取任何运行时状态。
+    """
 
     def is_empty(self) -> bool:
-        return not (self.bins or self.env or self.os)
+        return not (self.bins or self.env or self.os or self.modalities)
 
 
 @dataclass(frozen=True)

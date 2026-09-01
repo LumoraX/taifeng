@@ -128,3 +128,82 @@ def test_provider_state_is_rejected_when_client_does_not_accept_it() -> None:
                 accepts_provider_state=False,
             ),
         )
+
+
+# --- G4a 模态门控接线（工具图片附件特性引入） ---
+
+
+def _vision_child() -> SkillDefinition:
+    """声明「需要图片工具输出」的子 skill。"""
+    from taifeng.skill.definition import SkillRequirements
+
+    return SkillDefinition(
+        id="vision",
+        name="vision",
+        description="看图专用",
+        version="1.0.0",
+        body="看图",
+        body_path=Path("_test_vision.md"),
+        type="composite",
+        tool_names=frozenset({"observe_frame"}),
+        requires=SkillRequirements(modalities=frozenset({"tool_output_image"})),
+    )
+
+
+def _gate_entry() -> SkillDefinition:
+    return SkillDefinition(
+        id="entry",
+        name="entry",
+        description="测试入口",
+        version="1.0.0",
+        body="入口",
+        body_path=Path("_test_entry.md"),
+        type="composite",
+        entry=True,
+        child_skills=frozenset({"vision"}),
+    )
+
+
+def _build_with(caps: ModelCapabilities) -> str:
+    """用给定 client 能力构建请求，返回 system prompt 全文。"""
+    from taifeng.skill.eligibility import RuntimeCapabilities
+
+    entry, child = _gate_entry(), _vision_child()
+    request = build_api_request(
+        entry=entry,
+        snapshot=SkillSnapshot(version=1, skills=(entry, child)),
+        history=[],
+        tools=[],
+        model="model-a",
+        capabilities=RuntimeCapabilities(),
+        model_input_capabilities=caps,
+    )
+    return "\n".join(request.system_prompt)
+
+
+def test_vision_child_hidden_when_client_cannot_carry_tool_images() -> None:
+    """要图片工具输出的 child 在 text-only client 下不出现在可派发列表 —— 路由期
+    fail-fast，避免派发之后才在渲染期降级。"""
+    prompt = _build_with(
+        ModelCapabilities(
+            input_modalities=frozenset({"text", "image"}),
+            provider="openai",
+            protocol="chat",  # user 消息能带图，但 tool 结果不能
+        )
+    )
+
+    assert "vision" not in prompt
+
+
+def test_vision_child_visible_when_client_carries_tool_images() -> None:
+    """能力具备时正常可见——门控不误伤。"""
+    prompt = _build_with(
+        ModelCapabilities(
+            input_modalities=frozenset({"text", "image"}),
+            provider="openai",
+            protocol="responses",
+            tool_output_modalities=frozenset({"text", "image"}),
+        )
+    )
+
+    assert "vision" in prompt

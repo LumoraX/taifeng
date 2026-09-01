@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.client import TEXT_ONLY_CAPABILITIES, ModelCapabilities
@@ -494,16 +495,33 @@ def build_api_request(
     image_input_policy: ImageInputPolicy | None = None,
     model_input_capabilities: ModelCapabilities | None = None,
 ) -> ApiRequest:
+    resolved_policy = image_input_policy or DISABLED_IMAGE_POLICY
+    resolved_capabilities = model_input_capabilities or TEXT_ONLY_CAPABILITIES
+    # G4a 模态门控：把 client 自己声明的能力派生成标签并入 RuntimeCapabilities，
+    # 使「要图片工具输出的 skill」在拿不到图片的环境下根本不出现在可派发列表里
+    # （路由期 fail-fast，优于派发后在渲染期降级）。业务无需手工同步这些标签——
+    # 同一事实若有「client 声明」与「业务汇报」两个来源必然漂移；业务自定义
+    # 标签保留，两者取并集。
+    resolved_runtime = capabilities
+    if capabilities is not None:
+        # 局部 import：与本文件 render_system_prompt 内的 skill.visibility 同形，
+        # 避免 loop → skill 的模块级导入环。
+        from taifeng.skill.eligibility import derive_modality_tags
+
+        resolved_runtime = replace(
+            capabilities,
+            modalities=(
+                capabilities.modalities | derive_modality_tags(resolved_capabilities)
+            ),
+        )
     system_prompt = render_system_prompt(
         entry,
         snapshot,
         instructions=instructions,
-        capabilities=capabilities,
+        capabilities=resolved_runtime,
         recall_threshold=recall_threshold,
         has_recall_backend=has_recall_backend,
     )
-    resolved_policy = image_input_policy or DISABLED_IMAGE_POLICY
-    resolved_capabilities = model_input_capabilities or TEXT_ONLY_CAPABILITIES
     contains_provider_state = any(
         item.kind == "reasoning" and item.payload.get("provider_state") is not None
         for item in history
