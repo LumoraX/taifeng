@@ -48,6 +48,11 @@ class CompactionView:
                 )
             elif item.kind == "function_call_output":
                 output = truncate_middle(str(item.payload.get("output", "")), 1500)
+                # 图片正文绝不进摘要 prompt（会撑爆且泄漏 base64），只留计数痕迹：
+                # 图被压缩淘汰后，这行是模型唯一能看到的「这里曾有图」证据。
+                attachments = item.payload.get("attachments") or []
+                if attachments:
+                    output = f"{output}\n[含 {len(attachments)} 张图片]"
                 projected.append(
                     _ViewItem(
                         "工具结果",

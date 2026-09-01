@@ -84,7 +84,14 @@ def estimate_item_tokens(
             str(payload.get("name", "")) + str(payload.get("arguments", ""))
         ) + 10  # 调用结构开销
     if item.kind == "function_call_output":
-        return estimate_text_tokens(str(payload.get("output", "")))
+        # 工具返回的图片同样计量：不计等于内核自己的资源账是假的，
+        # 且会让 soft/hard limit 在含图会话里形同虚设。
+        return estimate_text_tokens(str(payload.get("output", ""))) + _estimate_image_tokens(
+            item,
+            image_input_policy=image_input_policy,
+            input_cost_estimator=input_cost_estimator,
+            model=model,
+        )
     if item.kind == "reasoning":
         return estimate_text_tokens(str(payload.get("text", "")))
     if item.kind == "compacted":

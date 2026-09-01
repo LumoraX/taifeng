@@ -218,6 +218,13 @@ class _AuditedToolConvergence:
         status: ToolStatus,
     ) -> ResponseItem:
         """原子提交单个 tool_outcome_committed + 唯一 function_call_output 会话项。"""
+        # strict audit 的批形态是「单个 outcome + 唯一 fco 会话项」，图片附件需要
+        # 第二条会话项才能表达，属能力契约违约 → fail closed 冻结整个 Session。
+        # 不静默丢图：丢了模型看不见、审计也无从追溯，比直接停下更危险。
+        if result.attachments:
+            raise self._coordinator.freeze(
+                RuntimeError("audit_tool_attachment_unsupported")
+            )
         operation_id = self._identities.tool(self._turn_id, req.call_id)
         intent_record_id = self._intent_ids[req.call_id]
         is_error = status is not ToolStatus.SUCCESS

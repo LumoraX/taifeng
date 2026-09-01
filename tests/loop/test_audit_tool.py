@@ -416,3 +416,34 @@ async def test_parallel_partial_completion_orders_outcomes_by_index(
     assert [e.payload["call_id"] for e in outcomes] == ["call_a", "call_b"]
     assert [e.payload["status"] for e in outcomes] == ["success", "error"]
     assert state.coordinator.health is AuditHealth.HEALTHY
+
+
+@pytest.mark.anyio
+async def test_tool_attachments_are_unsupported_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """strict audit 的批形态是「单个 outcome + 唯一 fco 会话项」，附件需要第二条
+    会话项 → 能力契约违约，必须冻结整个 Session 而非静默丢图。"""
+    from taifeng.llm.image_input import ImageAttachmentV1
+
+    state, _core = await _bootstrapped_state(tmp_path)
+    req = _request(0, "call_a", "file_write")
+    registry = _Registry(
+        {"file_write": _spec(
+            "file_write",
+            effect_kind="external_non_idempotent",
+            reconciliation="manual",
+        )}
+    )
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        + (1).to_bytes(4, "big") + (1).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    attachment = ImageAttachmentV1.from_bytes(png, media_type="image/png")
+    result = ToolResult.ok("frame", attachments=(attachment,))
+
+    with pytest.raises(SessionAuditFrozenError):
+        await _run(state, [req], registry, lambda: [_outcome(req, result)])
+
+    assert state.coordinator.health is not AuditHealth.HEALTHY
