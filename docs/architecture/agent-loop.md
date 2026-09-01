@@ -293,6 +293,8 @@ class ToolCallRuntime:
 
 **可见才可执行（tool-whitelist）**：`dispatch_batch` 必填 `visible_tools`——本轮实际注入请求的工具名集（由 `SkillDefinition.visible_tool_names()` ∩ registry 派生，与请求严格同源）。LLM 幻觉调用集合外的工具在 PreToolUse hook **之前**被拒：is_error 的 `function_call_output` 核销 call_id（`tool_not_offered`），不消耗 hook / 权限 / 锁，turn 不中断；engine 的 resume 重放与业务直发 Op 不经此层（豁免）。详见 `capabilities/tool-whitelist.md`。
 
+**结算可带图（tool-image-attachment）**：阶段 3 回填 `function_call_output` 的两处结算点（批量循环与 `retry_tool`）收敛在 `TurnRunner._settle_tool_output`。工具经 `ToolResult.attachments` 返回的图片在此完成 **durable append 之前**的 admission，通过后写进同一条 fco 的 payload——**不合成 `user_message`**，故 turn 边界锚点与同轮合并均不受影响。附件违反策略时该次调用判错（`tool_attachment_rejected`）而非上抛出批，以保住 fc/fco 配对。详见 `capabilities/tool-image-attachment.md`。
+
 ```
 阶段 1（顺序、按发起序）：解析 arguments + 计算 parallel_safe + emit ToolCallStarted + 建 ToolCallRequest（暂不写历史）
 阶段 2（并发）：emit ToolBatchDispatched{count, max_parallel}

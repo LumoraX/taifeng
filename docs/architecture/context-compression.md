@@ -250,6 +250,15 @@ class OffloadStrategy:
 
 > `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim / Offload 四档谱系**。
 > 占位符前缀（`[duplicate` / `[pruned:` / `[offloaded:`）统一在 `context/placeholders.py`，被 SurgicalTrim 与 Offload 共用为幂等守卫。
+
+### 工具图片附件的处置
+
+`function_call_output` 可携带图片附件（见 [capabilities/tool-image-attachment.md](capabilities/tool-image-attachment.md)），三处因此有别于纯文本结果：
+
+- **去重摘要覆盖附件**：`_output_digest` 以「文本 + 排序后的附件 sha256」为指纹。只哈希文本会把「文本相同、图片不同」的两条判成重复，静默丢掉一张图。
+- **剪枝连图一起丢**：`_rewrite` 在替换 output 时一并移除 `attachments`，并在占位符里留下 `[已剪枝 N 张图片]`。只剪文本会留下真正昂贵的那半边（一张图 ≈ 千级 token）。
+- **Offload 回避带图条目**：该档的契约是「无损可回溯」，但图片落盘后 `file_read` 回来是文本、模型看不见；兑现不了就不接手，交给诚实有损的 SurgicalTrim。
+- **摘要 prompt 只留计数**：`CompactionView` 从不读 `attachments`，base64 正文绝不进 LLM 摘要输入；图被淘汰后，`[含 N 张图片]` 是模型唯一能看到的「这里曾有图」证据。
 > 单条工具结果的超长截断仍走 `context/truncate.py::truncate_middle`（G6b，被 surgical soft-trim 复用），不是独立 CompressionStrategy。
 
 ## 压缩后状态保活（postcompact re-injection，E1）

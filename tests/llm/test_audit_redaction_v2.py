@@ -112,3 +112,42 @@ def test_sensitive_key_outside_approved_shape_fails_closed() -> None:
 
     with pytest.raises(SensitiveRequestShapeError):
         project_attempt_request("codex", "gpt-5.6-luna", request)
+
+
+def test_image_nested_in_function_call_output_is_redacted() -> None:
+    """嵌在 function_call_output 里的图片同样必须脱敏。
+
+    脱敏判据是「形状」（``type == "image"`` 且带 base64_data）而非「位置」，
+    工具附件因此复用同一条通路、零改动即被覆盖。本用例锁死该性质，防止未来
+    有人把判据改成按 item 位置枚举而漏掉工具侧。
+    """
+    from taifeng.llm.types import ApiFunctionCallOutputItem
+
+    image_bytes = b"tool-frame-body"
+    image_body = base64.b64encode(image_bytes).decode("ascii")
+    request = ApiRequest(
+        model="gpt-5.6-luna",
+        input_items=[
+            ApiFunctionCallOutputItem(
+                call_id="c1",
+                origin_sample_id="sample-1",
+                output=[
+                    TextPart(text="frame 1023"),
+                    ImagePart(
+                        media_type="image/png",
+                        base64_data=image_body,
+                        size=len(image_bytes),
+                        sha256=hashlib.sha256(image_bytes).hexdigest(),
+                        detail="high",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    projection = project_attempt_request("codex", "gpt-5.6-luna", request)
+
+    encoded = json.dumps(projection.api_request_safe, sort_keys=True)
+    assert image_body not in encoded
+    assert "frame 1023" in encoded  # 文本仍保留，只脱敏图片正文
+    assert {entry.kind for entry in projection.redactions} == {"image_base64"}

@@ -4,6 +4,12 @@
 
 本能力仅接受完整内联 canonical base64 的 PNG、JPEG、WebP 与非动画 GIF 图片输入。它不支持 URL、临时路径、file id、音频、视频、PDF 或图片生成。
 
+**入口限于 user 消息。** 工具经 `function_call_output` 回传图片是另一条能力，
+见 [tool-image-attachment](tool-image-attachment.md)——它复用本契约的
+`ImageAttachmentV1` canonical 形态、admission、成本估算与脱敏规则，但另有自己的
+协议分档（`tool_output_modalities`）与降级语义（能力不足时 in-band 占位符，
+而非本契约的抛错）。
+
 ## 数据契约
 
 - 当用户消息不含图片时，系统必须保持 ApiMessage.content 为原始 str。
