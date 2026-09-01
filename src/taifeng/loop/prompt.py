@@ -520,7 +520,11 @@ def _history_to_api_input_items(
             output.append(
                 ApiFunctionCallOutputItem(
                     call_id=call_id,
-                    output=str(item.payload.get("output", "")),
+                    output=_tool_output_content(
+                        item,
+                        image_input_policy=image_input_policy,
+                        model_capabilities=model_capabilities,
+                    ),
                     origin_sample_id=origin,
                 )
             )

@@ -165,3 +165,73 @@ def test_image_tool_output_does_not_break_sample_merge() -> None:
 
     assert [m.role for m in messages] == ["assistant", "tool", "tool"]
     assert len(messages[0].tool_calls or []) == 2
+
+
+# --- Responses 有序 items 路径 ---
+
+
+def _tagged(item, sample: str = "s1", *, origin: bool = False):
+    """给 item 打 llm_sample_id / origin_llm_sample_id（模拟 responses 原子批）。"""
+    key = "origin_llm_sample_id" if origin else "llm_sample_id"
+    return item.model_copy(update={"metadata": {**item.metadata, key: sample}})
+
+
+def test_responses_path_keeps_image_inside_function_call_output() -> None:
+    """图片留在 fco 内部，不外溢成独立 message —— 这正是不合成 user_message 的点。"""
+    from taifeng.llm.types import ApiFunctionCallOutputItem
+    from taifeng.loop.prompt import _history_to_api_input_items
+
+    history = [
+        _tagged(assistant_message("取一帧", thread_id=T, model="m")),
+        _tagged(function_call("c1", "observe_frame", "{}", thread_id=T)),
+        _tagged(
+            function_call_output(
+                "c1", "frame 1023", thread_id=T, attachments=[_payload()]
+            ),
+            origin=True,
+        ),
+    ]
+
+    items, _ = _history_to_api_input_items(
+        history, image_input_policy=POLICY, model_capabilities=IMAGE_CAPS
+    )
+
+    assert [i.type for i in items] == [
+        "message",
+        "function_call",
+        "function_call_output",
+    ]
+    fco = items[-1]
+    assert isinstance(fco, ApiFunctionCallOutputItem)
+    assert isinstance(fco.output, list)
+    assert isinstance(fco.output[0], TextPart)
+    assert isinstance(fco.output[1], ImagePart)
+
+
+def test_responses_path_plain_output_stays_string() -> None:
+    """无附件时 output 仍是裸字符串 —— wire 逐位不变。"""
+    from taifeng.loop.prompt import _history_to_api_input_items
+
+    history = [
+        _tagged(function_call("c1", "noop", "{}", thread_id=T)),
+        _tagged(function_call_output("c1", "ok", thread_id=T), origin=True),
+    ]
+
+    items, _ = _history_to_api_input_items(
+        history, image_input_policy=POLICY, model_capabilities=IMAGE_CAPS
+    )
+
+    assert items[-1].output == "ok"
+
+
+def test_messages_to_input_items_does_not_silently_drop_parts() -> None:
+    """兼容投影不得把 parts 静默变成空串 —— 那是无声的图片丢失。"""
+    from taifeng.llm.types import ApiMessage, messages_to_input_items
+
+    message = ApiMessage(
+        role="tool", content=[TextPart(text="frame 1023")], tool_call_id="c1"
+    )
+
+    items = messages_to_input_items([message])
+
+    assert items[0].output != ""

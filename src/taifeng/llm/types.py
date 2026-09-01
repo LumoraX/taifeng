@@ -137,11 +137,17 @@ class ApiFunctionCallItem(_FrozenPart):
 
 
 class ApiFunctionCallOutputItem(_FrozenPart):
-    """与函数调用配对的工具结果。"""
+    """与函数调用配对的工具结果。
+
+    ``output`` 是 ``PartContent``：纯文本工具保持 ``str``（wire 逐位不变），
+    带图工具为 ``[TextPart, ImagePart, ...]``。Responses 协议原生接受这两种
+    形态——参照 codex ``FunctionCallOutputBody`` 的 untagged ``Text |
+    ContentItems``，差异 Y 见 ``ToolResult.attachments`` 的说明。
+    """
 
     type: Literal["function_call_output"] = "function_call_output"
     call_id: str = Field(min_length=1)
-    output: str
+    output: PartContent
     origin_sample_id: str = Field(min_length=1)
 
 
@@ -192,7 +198,9 @@ def messages_to_input_items(messages: list[ApiMessage]) -> list[ApiInputItem]:
             out.append(
                 ApiFunctionCallOutputItem(
                     call_id=message.tool_call_id or legacy_sample_id,
-                    output=message.content if isinstance(message.content, str) else "",
+                    # 直接透传 PartContent：早先这里对非 str 兜底成 ""，会把工具
+                    # 返回的图片连同文本一起静默吞掉（无声的数据丢失）。
+                    output=message.content,
                     origin_sample_id=legacy_sample_id,
                 )
             )
