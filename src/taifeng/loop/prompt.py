@@ -177,6 +177,79 @@ def render_system_prompt(
     return body
 
 
+TOOL_IMAGE_OMITTED_TEMPLATE = (
+    "<{count} image(s) omitted: this model cannot receive images in tool results>"
+)
+"""能力不足时的 in-band 占位符 —— **兜底网，不是主路径**。
+
+主路径是 G4a 模态门控：声明 ``requires.modalities`` 的 skill 在拿不到图片的
+环境下压根不被 offer，配置错误在路由期就暴露。本占位符只覆盖门控之外的残余
+场景（skill 未声明要求、热重载换了 client、业务自建 RuntimeCapabilities 漏报）。
+
+参照 codex ``sanitize_mcp_tool_result_for_model``（差异 Y：taifeng 按
+``tool_output_modalities`` 判定，而非按 provider 硬编码）。**不抛异常**的理由：
+模型不支持图片是选型事实而非错误，炸掉整个 turn 在多 skill 场景下会让一条
+专科轨拖垮整个 join barrier；占位符让失败留在轨内，且模型能看见「这里本来有图」。
+准入期失败（策略未启用 / 校验不过）仍然如实抛 —— 见 ``admit_tool_attachments``。
+"""
+
+
+def _extract_images(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """从 item payload 取出 kind=="image" 的附件，非法形状按无附件处理。"""
+    raw = payload.get("attachments", [])
+    if not isinstance(raw, list):
+        return []
+    return [
+        attachment
+        for attachment in raw
+        if isinstance(attachment, dict) and attachment.get("kind") == "image"
+    ]
+
+
+def _to_image_parts(
+    images: list[dict[str, Any]], policy: ImageInputPolicy
+) -> list[ImagePart]:
+    """canonical attachment payload → provider-neutral ImagePart（含 admission）。"""
+    attachments = [ImageAttachmentV1.model_validate(image) for image in images]
+    return [
+        ImagePart(
+            media_type=image.attachment.media_type,
+            base64_data=image.attachment.content,
+            size=image.attachment.size,
+            sha256=image.attachment.sha256,
+            detail=image.attachment.detail,
+        )
+        for image in admit_image_attachments(attachments, policy)
+    ]
+
+
+def _tool_output_content(
+    it: ResponseItem,
+    *,
+    image_input_policy: ImageInputPolicy,
+    model_capabilities: ModelCapabilities,
+) -> str | list[TextPart | ImagePart]:
+    """``function_call_output`` 的内容投影（Chat / Responses 两条路径共用）。
+
+    - 无附件 → 裸字符串（与既有逐位一致）
+    - 有附件且能力足够 → 文本在首项、图片按序在后的 parts
+    - 有附件但能力不足 → 文本 + in-band 占位符（见 ``TOOL_IMAGE_OMITTED_TEMPLATE``）
+    """
+    text = str(it.payload.get("output", ""))
+    images = _extract_images(it.payload)
+    if not images:
+        return text
+    if "image" not in model_capabilities.tool_output_modalities:
+        notice = TOOL_IMAGE_OMITTED_TEMPLATE.format(count=len(images))
+        return f"{text}\n{notice}" if text else notice
+    parts: list[TextPart | ImagePart] = []
+    if text:
+        # 空文本不生成 TextPart —— 空项白占 API 数组槽位
+        parts.append(TextPart(text=text))
+    parts.extend(_to_image_parts(images, image_input_policy))
+    return parts
+
+
 def _item_to_api_message(
     it: ResponseItem,
     *,
@@ -190,37 +263,20 @@ def _item_to_api_message(
     """
     if it.kind == "user_message":
         text = str(it.payload.get("text", ""))
-        raw_attachments = it.payload.get("attachments", [])
-        images = (
-            [
-                attachment
-                for attachment in raw_attachments
-                if isinstance(attachment, dict) and attachment.get("kind") == "image"
-            ]
-            if isinstance(raw_attachments, list)
-            else []
-        )
+        images = _extract_images(it.payload)
         if not images:
             return ApiMessage(role="user", content=text)
+        # user 消息侧维持既有语义：能力不足**抛错**而非降级。与工具侧的差别是
+        # 有意的——用户明确塞了图却看不到，属输入被吞，必须让调用方知道；工具
+        # 侧的图是 agent 自己取的，降级留在轨内更合适。
         if "image" not in model_capabilities.input_modalities:
             from taifeng.llm.errors import UnsupportedModalityError
 
             raise UnsupportedModalityError("model client does not support image input")
-        attachments = [ImageAttachmentV1.model_validate(image) for image in images]
-        inspected = admit_image_attachments(attachments, image_input_policy)
         parts: list[TextPart | ImagePart] = []
         if text:
             parts.append(TextPart(text=text))
-        parts.extend(
-            ImagePart(
-                media_type=image.attachment.media_type,
-                base64_data=image.attachment.content,
-                size=image.attachment.size,
-                sha256=image.attachment.sha256,
-                detail=image.attachment.detail,
-            )
-            for image in inspected
-        )
+        parts.extend(_to_image_parts(images, image_input_policy))
         return ApiMessage(role="user", content=parts)
     if it.kind == "system_injection":
         # suspend_resolved 是 resume 的幂等记账 marker（engine._find_active_suspension
@@ -352,7 +408,11 @@ def _convert_history(
             out.append(
                 ApiMessage(
                     role="tool",
-                    content=str(it.payload.get("output", "")),
+                    content=_tool_output_content(
+                        it,
+                        image_input_policy=image_input_policy,
+                        model_capabilities=model_capabilities,
+                    ),
                     tool_call_id=str(it.payload.get("call_id", "")),
                 )
             )
