@@ -338,3 +338,58 @@ def test_from_bytes_output_passes_admission() -> None:
 
     assert len(inspected) == 1
     assert (inspected[0].width, inspected[0].height) == (2, 3)
+
+
+def test_admit_tool_attachments_empty_is_noop_under_disabled_policy() -> None:
+    """无附件时即便策略关闭也不报错 —— 非图片工具零影响。"""
+    from taifeng.llm.image_input import admit_tool_attachments
+
+    assert admit_tool_attachments((), DISABLED_IMAGE_POLICY) == []
+
+
+def test_admit_tool_attachments_rejects_when_policy_disabled() -> None:
+    """策略未启用却返回附件 → 如实拒绝，不静默丢图。"""
+    from taifeng.llm.image_input import admit_tool_attachments
+
+    attachment = ImageAttachmentV1.from_bytes(_png(), media_type="image/png")
+
+    with pytest.raises(UnsupportedModalityError):
+        admit_tool_attachments((attachment,), DISABLED_IMAGE_POLICY)
+
+
+def test_admit_tool_attachments_enforces_count_limit() -> None:
+    """超出 max_images 如实抛，不截断。"""
+    from taifeng.llm.image_input import admit_tool_attachments
+
+    attachment = ImageAttachmentV1.from_bytes(_png(), media_type="image/png")
+    policy = ImageInputPolicy(enabled=True, max_images=1)
+
+    with pytest.raises(ImageCountExceededError):
+        admit_tool_attachments((attachment, attachment), policy)
+
+
+def test_admit_tool_attachments_enforces_byte_limit() -> None:
+    """超出单项字节上限如实抛。"""
+    from taifeng.llm.image_input import admit_tool_attachments
+
+    attachment = ImageAttachmentV1.from_bytes(_png(), media_type="image/png")
+    policy = ImageInputPolicy(
+        enabled=True, max_images=2, max_item_bytes=1, max_total_bytes=1
+    )
+
+    with pytest.raises(AttachmentTooLargeError):
+        admit_tool_attachments((attachment,), policy)
+
+
+def test_admit_tool_attachments_returns_persistable_payloads_in_order() -> None:
+    """通过后返回可直接落 JSONL 的 dict，带 kind 判别键，顺序与入参一致。"""
+    from taifeng.llm.image_input import admit_tool_attachments
+
+    first = ImageAttachmentV1.from_bytes(_png(1, 1), media_type="image/png")
+    second = ImageAttachmentV1.from_bytes(_png(2, 2), media_type="image/png")
+    policy = ImageInputPolicy(enabled=True, max_images=2)
+
+    payloads = admit_tool_attachments((first, second), policy)
+
+    assert [p["kind"] for p in payloads] == ["image", "image"]
+    assert [p["sha256"] for p in payloads] == [first.sha256, second.sha256]

@@ -451,6 +451,42 @@ def admit_image_attachments(
     return inspected
 
 
+def admit_tool_attachments(
+    attachments: tuple[ImageAttachmentV1, ...], policy: ImageInputPolicy
+) -> list[dict[str, Any]]:
+    """工具附件的入口准入 —— 必须在 durable append **之前**执行。
+
+    与 user 消息入口同源复用 ``admit_image_attachments`` 的数量 / 字节 / MIME /
+    尺寸 / 帧数校验；``ImageAttachmentV1`` 自身在构造期已保证 base64 canonical、
+    size 与 sha256 三者自洽。
+
+    为什么必须前置：渲染期才失败意味着脏 item 已经落进 JSONL，冷恢复重放时会在
+    同一处反复炸，且无法靠重试恢复——只能改数据。
+
+    Args:
+        attachments: 工具返回的附件元组。空元组直接短路返回（非图片工具零影响，
+            此时即便策略未启用也不报错）。
+        policy: 业务注入的图片输入策略。
+
+    Returns:
+        可直接落 JSONL 的 payload dict 列表，顺序与入参一致。
+
+    Raises:
+        UnsupportedModalityError: 策略未启用却返回了附件，或 MIME 不被允许。
+        ImageCountExceededError: 附件数超出 ``max_images``。
+        AttachmentTooLargeError: 解码字节超出上限。
+        InvalidImageError: size / sha256 / 尺寸 / 帧数不合法。
+    """
+    if not attachments:
+        return []
+    if not policy.enabled:
+        raise UnsupportedModalityError(
+            "tool returned image attachments but image input policy is disabled"
+        )
+    admit_image_attachments(list(attachments), policy)
+    return [attachment.model_dump() for attachment in attachments]
+
+
 def redact_sensitive_request_data(value: object) -> Any:
     """递归脱敏 request JSON 中的图片正文与 provider 加密状态。"""
     if isinstance(value, list):
