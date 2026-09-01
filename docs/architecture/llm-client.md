@@ -201,15 +201,16 @@ async def retry_async(func, config, cancel) -> Any:
 
 `retryable_kinds` 匹配 `LLMError.kind`（见 `llm/errors.py`）。**不重试的错误**：
 - `4xx` 客户端错误（除 429）—— 是 bug，重试无用
-- `content_filter` —— provider 拒绝，重试是浪费
+- `content_filter` —— provider 拒绝，重试是浪费（**前提**：端点如实上报 finish_reason；见下方 `trust_finish_reason`）
 - `context_overflow` —— 必须先压缩，重试是死循环
 - `cancelled` —— 取消是用户意图
 
 ### 错误分类与恢复（G3）
 
-`llm/errors.py` 把异常分类到 `FailureClass`（11 桶：`context_window` / `provider_auth` / `provider_rate_limit` /
-`provider_transport` / `provider_internal` / `invalid_request` / `content_filter` / `cancelled` /
-`request_size` / `runtime_io` / `unknown`），每类带 `suggested_action`。`llm/recovery.py::recommend_recovery(failure_class)`
+`llm/errors.py` 把异常分类到 `FailureClass`（12 桶：`context_window` / `provider_auth` / `provider_rate_limit` /
+`provider_transport` / `provider_internal` / `invalid_request` / `content_filter` /
+`provider_unreliable_finish` / `cancelled` / `request_size` / `runtime_io` / `unknown`），每类带
+`suggested_action`。`llm/recovery.py::recommend_recovery(failure_class)`
 产出机读 `RecoveryPlan{steps, auto_retry_once, escalate}`，随 `TurnFailed.data['recovery']` 透出——**内核只产出建议，业务侧编排执行**（R1）。
 native 三家成功时还会 emit `rate_limits`（`RateLimitSnapshot`）+ 回填 `LLMError.request_id`（服务端 request-id）。
 
@@ -225,6 +226,16 @@ native 三家成功时还会 emit `rate_limits`（`RateLimitSnapshot`）+ 回填
    Google AI Studio 的 OpenAI-compatible 端点还可能返回
    `finish_reason="function_call_filter: MALFORMED_FUNCTION_CALL"`；该信号同样必须按显式 provider
    错误处理，emit `error` 并抛 `InvalidResponseError`，不得伪造成空完成。
+1b. **`finish_reason` 不可信的端点（`trust_finish_reason=False`）**：部分 OpenAI 兼容网关会把上游
+   **一切未枚举**的终止原因塌缩成 `content_filter`——实测 new-api `v1.0.0-rc.25` 的 Gemini→OpenAI
+   响应转换 `default:` 分支即如此，`MALFORMED_FUNCTION_CALL` / `MALFORMED_RESPONSE` / `OTHER` 全被
+   贴成 `content_filter`。同一网关的 Gemini 原生透传端点上，同一份载荷失败时真实 `finishReason` 是
+   `MALFORMED_FUNCTION_CALL`、`blockReason` 恒为 `None`——**不是安全拦截，而是可重试的瞬时抖动**。
+   此时该标签不具判别力：接入方在构造 `OpenAICompatClient` 时显式声明 `trust_finish_reason=False`，
+   零产出的 `content_filter` 改抛可重试的 `UnreliableFinishError`
+   （`failure_class="provider_unreliable_finish"`，恢复配方 `BACKOFF_RETRY → ESCALATE`）。
+   **内核不嗅探、不启发式猜测**——端点是否可信是接入方按事实声明的前置条件（R1：策略由业务侧注入）。
+   有产出（text / tool call）的流不受影响，仍按成功处理。
 2. **无显式错误的空 → 容忍继续（Loop 层不臆断）**：`loop/turn.py` 对「无 text + 无 tool call」的终止轮按
    **正常完成**处理（`success=True`、`final_text=""`），`call_skill` 回 `ToolResult.ok("")`，父 turn 拿到
    空结果继续即可。内核**不**把「空」臆断成异常——空可能源于 prompt / skill，归因交业务侧（避免把上游/业务

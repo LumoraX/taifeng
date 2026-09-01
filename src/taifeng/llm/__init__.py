@@ -21,6 +21,7 @@ from taifeng.llm.errors import (
     RequestTooLargeError,
     ServerError,
     TransientNetworkError,
+    UnreliableFinishError,
     classify_failure,
     suggested_action_for,
 )
@@ -99,6 +100,7 @@ __all__ = [
     "TextPart",
     "ToolSpecRef",
     "TransientNetworkError",
+    "UnreliableFinishError",
     "classify_failure",
     "model_capabilities",
     "recommend_recovery",

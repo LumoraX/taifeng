@@ -20,6 +20,7 @@ FailureClass = Literal[
     "provider_internal",  # provider 5xx 内部错误
     "invalid_request",  # 请求参数非法（模型名 / schema / 消息结构）
     "content_filter",  # 内容安全拦截
+    "provider_unreliable_finish",  # provider/网关未如实上报终止原因（finish_reason 不可信）
     "cancelled",  # 调用被取消
     "request_size",  # 请求体过大（发送前预检，G2b body-size 用）
     "runtime_io",  # 本地 IO 错误（非 LLM）
@@ -35,6 +36,10 @@ _SUGGESTED_ACTION: dict[FailureClass, str] = {
     "provider_internal": "provider 端故障，退避后重试",
     "invalid_request": "请求参数非法，检查模型名 / 工具 schema / 消息结构",
     "content_filter": "内容被安全策略拦截，调整输入后重试",
+    "provider_unreliable_finish": (
+        "网关未如实上报终止原因（常见于兼容网关把上游未知 finishReason 塌缩成 content_filter），"
+        "退避后重试通常可恢复"
+    ),
     "cancelled": "调用被取消，无需处理",
     "request_size": "请求体过大，精简消息 / 附件后重试",
     "runtime_io": "本地 IO 错误，检查磁盘 / 文件路径 / 权限",
@@ -88,6 +93,23 @@ class ContentFilterError(LLMError):
     retryable = False
     kind = "content_filter"
     failure_class: FailureClass = "content_filter"
+
+
+class UnreliableFinishError(LLMError):
+    """流以**不可信的** finish_reason 终止，且本次调用零产出。
+
+    仅在接入方显式声明端点 ``trust_finish_reason=False`` 时抛出。动因：某些
+    OpenAI 兼容网关会把上游一切未枚举的终止原因塌缩成 ``content_filter``
+    （实测 new-api v1.0.0-rc.25 的 Gemini→OpenAI 响应转换 ``default:`` 分支），
+    使得「模型输出了畸形 tool call」这类**瞬时可重试**故障被伪装成「内容被安全
+    策略拦截」这类**终态**故障。此时该标签不具判别力，按可重试处置。
+
+    与 ``ContentFilterError`` 的分工：端点可信时真安全拦截仍走前者（终态）。
+    """
+
+    retryable = True
+    kind = "unreliable_finish"
+    failure_class: FailureClass = "provider_unreliable_finish"
 
 
 class ContextOverflowError(LLMError):

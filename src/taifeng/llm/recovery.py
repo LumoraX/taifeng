@@ -81,6 +81,12 @@ _RECIPES: dict[FailureClass, RecoveryPlan] = {
         "content_filter", (RecoveryStep.ADJUST_INPUT,),
         auto_retry_once=False, escalate=True,
     ),
+    # 网关未如实上报终止原因：标签不具判别力，真实原因多为瞬时（如畸形 tool call），
+    # 故与 provider_internal 同形——先退避重试，仍失败再上报人工。
+    "provider_unreliable_finish": RecoveryPlan(
+        "provider_unreliable_finish", (RecoveryStep.BACKOFF_RETRY, RecoveryStep.ESCALATE),
+        auto_retry_once=True, escalate=True,
+    ),
     "cancelled": RecoveryPlan(
         "cancelled", (RecoveryStep.NONE,),
         auto_retry_once=False, escalate=False,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 
 from taifeng.llm.errors import FailureClass
@@ -42,14 +44,12 @@ def test_unknown_fallback_escalates() -> None:
     assert RecoveryStep.ESCALATE in plan.steps
 
 
-@pytest.mark.parametrize(
-    "cls",
-    [
-        "context_window", "provider_auth", "provider_rate_limit",
-        "provider_transport", "provider_internal", "invalid_request",
-        "content_filter", "cancelled", "request_size", "runtime_io", "unknown",
-    ],
-)
+# 从 FailureClass Literal **派生**清单，而非手抄——手抄清单在新增桶时会静默漏覆盖
+# （本测试原为手抄，新增 provider_unreliable_finish 时未被拦下）。
+_ALL_FAILURE_CLASSES = get_args(FailureClass)
+
+
+@pytest.mark.parametrize("cls", _ALL_FAILURE_CLASSES)
 def test_every_class_has_recipe_and_serializes(cls: FailureClass) -> None:
     plan = recommend_recovery(cls)
     assert plan.failure_class == cls

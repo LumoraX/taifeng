@@ -136,6 +136,7 @@ class TenantPolicySource:
 | `model` | `"gpt-4o-mini"` | 默认模型名 |
 | `extra_headers` | `None` | 额外 header（如自部署网关 token） |
 | `timeout_seconds` | `300.0` | httpx 超时 |
+| `trust_finish_reason` | `True` | 端点是否如实上报 `finish_reason`。置 `False` 时零产出的 `content_filter` 归入**可重试**的 `UnreliableFinishError` 而非终态 `ContentFilterError`——用于会把上游未知 finishReason 塌缩成 `content_filter` 的兼容网关（见 llm-client.md §异常终止与空回复） |
 
 #### `OpenAIChatClient`（官方 Chat Completions，文字 + 图片）
 

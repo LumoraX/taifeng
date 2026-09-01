@@ -20,7 +20,9 @@ from taifeng.llm.errors import (
     ContentFilterError,
     InvalidRequestError,
     InvalidResponseError,
+    LLMError,
     TransientNetworkError,
+    UnreliableFinishError,
 )
 from taifeng.llm.events import (
     ResponseEvent,
@@ -63,6 +65,7 @@ class OpenAICompatSession:
         extra_headers: dict[str, str] | None = None,
         timeout_seconds: float = 300.0,
         previous_cache_read: int = 0,
+        trust_finish_reason: bool = True,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -80,6 +83,9 @@ class OpenAICompatSession:
         if extra_headers:
             self._headers.update(extra_headers)
         self._timeout = timeout_seconds
+        # 端点是否如实上报 finish_reason。False 时零产出的 content_filter 不再判为
+        # 终态安全拦截，而归入可重试的 UnreliableFinishError（见 errors.UnreliableFinishError）。
+        self._trust_finish_reason = trust_finish_reason
         self._previous_cache_read = previous_cache_read
         self._last_usage: TokenUsage | None = None
         # 本次流最后一个非空 finish_reason —— 用于流末判定异常终止（content_filter 等）。
@@ -240,8 +246,15 @@ class OpenAICompatSession:
         # 这里在流末把它显式暴露为既有分类 ContentFilterError：先 emit error 事件（与 HTTP 错误
         # 路径一致），再抛异常让上层 turn 判失败、call_skill 回 is_error=true。
         if self._last_finish_reason == "content_filter" and not tool_calls_acc:
-            err = ContentFilterError(
+            # 端点声明 finish_reason 不可信时（如 new-api：把上游一切未枚举的
+            # finishReason —— MALFORMED_FUNCTION_CALL / MALFORMED_RESPONSE / OTHER ——
+            # 一律塌缩成 content_filter），该标签不足以判定「被安全策略拦截」，
+            # 归入可重试的 UnreliableFinishError；可信端点保持终态语义不变。
+            err_cls = ContentFilterError if self._trust_finish_reason else UnreliableFinishError
+            err: LLMError = err_cls(
                 "response blocked by content filter (finish_reason=content_filter)"
+                if self._trust_finish_reason
+                else "stream ended with untrusted finish_reason=content_filter and no output"
             )
             err.request_id = request_id
             yield error(message=str(err), kind=err.kind, retryable=err.retryable)
@@ -367,12 +380,14 @@ class OpenAICompatClient(OneNetworkAttemptModelClient, ModelClient):
         model: str = "gpt-4o-mini",
         extra_headers: dict[str, str] | None = None,
         timeout_seconds: float = 300.0,
+        trust_finish_reason: bool = True,
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
         self._default_model = model
         self._extra_headers = extra_headers
         self._timeout_seconds = timeout_seconds
+        self._trust_finish_reason = trust_finish_reason
         self._previous_cache_read = 0
 
     def session(
@@ -389,6 +404,7 @@ class OpenAICompatClient(OneNetworkAttemptModelClient, ModelClient):
             extra_headers=self._extra_headers,
             timeout_seconds=self._timeout_seconds,
             previous_cache_read=self._previous_cache_read,
+            trust_finish_reason=self._trust_finish_reason,
         )
 
     def record_cache_read(self, value: int) -> None:
