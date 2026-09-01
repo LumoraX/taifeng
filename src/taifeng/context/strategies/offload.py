@@ -141,6 +141,11 @@ class OffloadStrategy:
                 continue
             if it.payload["call_id"] not in names:
                 continue
+            # 图片无法无损回溯：base64 落盘后 file_read 回来是文本，模型看不见。
+            # 本策略的定位是「无损可回溯」，兑现不了就不该接手——交给诚实有损的
+            # SurgicalTrim（它会连图一起剪并留计数痕迹）。
+            if it.payload.get("attachments"):
+                continue
             output = it.payload["output"]
             if is_placeholder(output):
                 continue

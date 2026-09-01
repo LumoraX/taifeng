@@ -214,3 +214,22 @@ async def test_offload_cancel_before_write_skips(tmp_path: Path) -> None:
         await strat.compress(_ctx(_history()), InitialContextInjection.DO_NOT_INJECT)
     # 取消在 scope 边界被吞;断言未落盘
     assert not (tmp_path / "_offload" / TID / "c1").exists()
+
+
+def test_should_skip_results_carrying_image_attachments() -> None:
+    """带图的 fco 不进候选 —— 本策略的契约是「无损可回溯」，而图片落盘后
+    file_read 回来是文本、模型看不见，兑现不了就不该接手（交给 SurgicalTrim）。"""
+    history = [
+        user_message("看一下", thread_id=TID),
+        function_call("c1", "observe_frame", "{}", thread_id=TID),
+        function_call_output(
+            call_id="c1",
+            output=BIG,
+            thread_id=TID,
+            attachments=[{"kind": "image", "sha256": "a" * 64}],
+        ),
+        assistant_message("好", thread_id=TID, model="m"),
+    ]
+    strat = _strategy(Path("/tmp"))  # noqa: S108 — should_trigger 不落盘
+
+    assert strat.should_trigger(_ctx(history)) is None

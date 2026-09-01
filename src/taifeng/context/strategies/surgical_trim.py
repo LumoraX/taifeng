@@ -57,9 +57,39 @@ def _build_name_index(history: list[ResponseItem]) -> dict[str, str]:
     }
 
 
+def _output_digest(item: ResponseItem) -> str:
+    """fco 去重摘要 —— 必须同时覆盖文本与图片附件。
+
+    只哈希 ``output`` 文本会把「文本相同、图片不同」的两条判成重复，静默丢掉
+    一张不同的图（正确性 bug，不是优化问题）。附件以其 canonical ``sha256``
+    参与：它本就是内容身份，无需二次哈希图片正文。排序后参与，使同一组图片的
+    顺序差异不构成内容差异。
+
+    非加密用途 —— 仅做内容指纹去重（对标 hermes md5[:12]）。
+    """
+    text = str(item.payload.get("output", ""))
+    digests = sorted(
+        str(attachment.get("sha256", ""))
+        for attachment in item.payload.get("attachments") or []
+    )
+    material = "\0".join([text, *digests])
+    return hashlib.md5(
+        material.encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:12]
+
+
 def _rewrite(item: ResponseItem, new_output: str) -> ResponseItem:
-    """就地替换 output payload —— 保留 item 其余字段（id / thread_id 等，R5 身份不变）。"""
+    """就地替换 output payload —— 保留 item 其余字段（id / thread_id 等，R5 身份不变）。
+
+    带附件时**一并丢弃附件**并在占位符里留计数痕迹：只剪文本会留下真正昂贵的
+    那半边（一张图 ≈ 千级 token，文本仅数百字符），使本策略对含图会话形同虚设。
+    丢弃是有损的——这正是 surgical_trim 的定位；需要无损请用 offload（但它不
+    处理图片，见该策略说明）。
+    """
     payload = dict(item.payload)
+    attachments = payload.pop("attachments", None)
+    if attachments:
+        new_output = f"{new_output}[已剪枝 {len(attachments)} 张图片]"
     payload["output"] = new_output
     return item.model_copy(update={"payload": payload})
 
@@ -179,10 +209,7 @@ class SurgicalTrimStrategy:
             text = history[i].payload["output"]
             if len(text) < self._min_dedup_chars:
                 continue
-            # 非加密用途 —— 仅做内容指纹去重（对标 hermes md5[:12]）
-            digest = hashlib.md5(
-                text.encode("utf-8"), usedforsecurity=False
-            ).hexdigest()[:12]
+            digest = _output_digest(history[i])
             kept = seen.get(digest)
             if kept is None:
                 seen[digest] = i  # 反扫首见 = 最新一份，保留
