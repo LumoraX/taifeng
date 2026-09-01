@@ -40,7 +40,8 @@ class ResponseItem(BaseModel):
     - user_message:           {"text": str, "attachments": list[dict]}
     - assistant_message:      {"text": str, "model": str}
     - function_call:          {"call_id": str, "name": str, "arguments": str}
-    - function_call_output:   {"call_id": str, "output": str, "is_error": bool}
+    - function_call_output:   {"call_id": str, "output": str, "is_error": bool,
+                               "attachments"?: list[dict]}  # 仅带图工具才有该键
     - reasoning:              {"text": str, "summary": str}
     - compacted:              {"summary": str, "replaced_range": [int, int], "cache_invalidated": bool}
     - system_injection:       {"text": str, "source": str}
@@ -117,11 +118,31 @@ def function_call_output(
     *,
     thread_id: str,
     is_error: bool = False,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> ResponseItem:
+    """构造工具结果 item。
+
+    Args:
+        call_id: 与 function_call 配对的调用 id。
+        output: 权威**文本**投影 —— 压缩视图 / telemetry / 协议能力不足时的
+            降级档都读它。
+        thread_id: 所属 thread。
+        is_error: 是否为错误结果。
+        attachments: 已通过 admission 的图片 payload 列表。空或 None 时
+            **不写该键**，payload 逐键与既有一致（冷恢复重放与审计比对依赖
+            这个形状，写空键会让老新数据分叉）。
+    """
+    payload: dict[str, Any] = {
+        "call_id": call_id,
+        "output": output,
+        "is_error": is_error,
+    }
+    if attachments:
+        payload["attachments"] = attachments
     return ResponseItem(
         kind="function_call_output",
         thread_id=thread_id,
-        payload={"call_id": call_id, "output": output, "is_error": is_error},
+        payload=payload,
     )
 
 
