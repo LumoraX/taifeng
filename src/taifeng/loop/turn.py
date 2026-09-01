@@ -36,9 +36,13 @@ from taifeng.conversation.models import (
 from taifeng.conversation.store import AtomicBatchMessageStore
 from taifeng.llm.client import model_capabilities
 from taifeng.llm.errors import (
+    AttachmentTooLargeError,
+    ImageCountExceededError,
+    InvalidImageError,
     InvalidResponseError,
     LLMError,
     RequestTooLargeError,
+    UnsupportedModalityError,
     UnsupportedPersistenceCapabilityError,
     classify_failure,
 )
@@ -46,6 +50,7 @@ from taifeng.llm.image_input import (
     DISABLED_IMAGE_POLICY,
     ImageInputPolicy,
     InputCostEstimator,
+    admit_tool_attachments,
     redact_sensitive_request_data,
 )
 from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
@@ -1538,12 +1543,7 @@ class TurnRunner:
                 # resume 时由 SuspensionRecord 重导，再补回对应 function_call_output。
                 suspended_pending.append(outcome.suspend)
                 continue
-            fco_item = function_call_output(
-                call_id=req.call_id,
-                output=outcome.result.output,
-                thread_id=self.thread_id,
-                is_error=outcome.result.is_error,
-            )
+            fco_item = self._settle_tool_output(req.call_id, outcome.result)
             origin_sample_id = origin_samples.get(req.call_id)
             if origin_sample_id:
                 fco_item = fco_item.model_copy(
@@ -1747,12 +1747,48 @@ class TurnRunner:
         outcome = outcomes[0]
         if outcome.suspend is not None:
             raise _BatchSuspend((outcome.suspend,))
-        fco = function_call_output(
-            call_id=call_id, output=outcome.result.output,
-            thread_id=self.thread_id, is_error=outcome.result.is_error,
-        )
+        fco = self._settle_tool_output(call_id, outcome.result)
         self.history_buffer.append(fco)
         await self.store.append(fco)
+
+    def _settle_tool_output(self, call_id: str, result: Any) -> ResponseItem:
+        """把 ToolResult 结算成 function_call_output item（两处结算点共用）。
+
+        图片附件在此完成 **durable append 之前**的 admission。违规**不上抛出批**：
+        抛出会让本次派发只剩一条无 output 的悬空 ``function_call``，fc/fco 配对
+        断裂 → OpenAI-compat 直接 400。转成该次调用的错误结果，既保住配对，又把
+        原因如实送进模型视野让它自行纠正。
+
+        Args:
+            call_id: 与 function_call 配对的调用 id。
+            result: 工具返回的 ``ToolResult``。
+
+        Returns:
+            可直接入史的 ``function_call_output`` item。
+        """
+        try:
+            attachments = admit_tool_attachments(
+                result.attachments, self.image_input_policy
+            )
+        except (
+            AttachmentTooLargeError,
+            ImageCountExceededError,
+            InvalidImageError,
+            UnsupportedModalityError,
+        ) as exc:
+            return function_call_output(
+                call_id=call_id,
+                output=f"tool_attachment_rejected: {exc}",
+                thread_id=self.thread_id,
+                is_error=True,
+            )
+        return function_call_output(
+            call_id=call_id,
+            output=result.output,
+            thread_id=self.thread_id,
+            is_error=result.is_error,
+            attachments=attachments,
+        )
 
     async def _persist_suspension(self, pending: tuple[Any, ...]) -> Any:
         """把本次挂起落 store 并返回 SuspensionRecord（R5 跨进程 resume 的真相）。
