@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from taifeng.llm.types import ToolSpecRef
 
 if TYPE_CHECKING:
+    from taifeng.llm.image_input import ImageAttachmentV1
     from taifeng.loop.cancellation import CancellationToken
 
 
@@ -28,9 +29,28 @@ class ToolResult:
     data: dict[str, Any] = field(default_factory=dict)
     """额外元数据，不进 LLM 视野，供 telemetry 使用。"""
 
+    attachments: tuple[ImageAttachmentV1, ...] = ()
+    """LLM 可见的图片附件；空元组 = 与既有行为逐位一致。
+
+    与 ``output`` 的分工：``output`` 始终是**权威文本投影**（压缩视图 /
+    telemetry / 协议能力不足时的降级档都读它），``attachments`` 只承载额外的
+    非文本部分，两者不重复表达同一内容。渲染时 ``output`` 在前、附件按序在后。
+
+    参照 codex ``FunctionCallOutputBody``（Text | ContentItems 双形态 +
+    ``to_text()`` 有损投影）。差异 Y：taifeng 用两个并列字段而非 untagged
+    union —— 全仓数十处 ``result.output`` 的 str 消费者（doom-loop 记账、
+    denial breaker、审计 ``ToolOutcomeCommittedV1``、编排回填）因此一行不用改。
+    """
+
     @classmethod
-    def ok(cls, output: str, **data: Any) -> ToolResult:
-        return cls(output=output, is_error=False, data=data)
+    def ok(
+        cls,
+        output: str,
+        *,
+        attachments: tuple[ImageAttachmentV1, ...] = (),
+        **data: Any,
+    ) -> ToolResult:
+        return cls(output=output, is_error=False, data=data, attachments=attachments)
 
     @classmethod
     def error(cls, message: str, **data: Any) -> ToolResult:
