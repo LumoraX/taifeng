@@ -20,6 +20,8 @@ from taifeng.llm.providers.codex import CodexResponsesClient
 from taifeng.llm.providers.codex.accumulator import CodexResponsesAccumulator
 from taifeng.llm.providers.codex.wire import build_codex_payload
 from taifeng.llm.types import (
+    ApiFunctionCallItem,
+    ApiFunctionCallOutputItem,
     ApiMessageItem,
     ApiProviderStateItem,
     ApiRequest,
@@ -106,6 +108,58 @@ async def _run_image(
     shared._assert_serial(parsed.get("serial"))
     shared._assert_geometry(parsed.get("geometry"), color="blue", shape="triangle")
     return _kinds(events, "single_image_verified")
+
+
+def _tool_image_output_request(model: str) -> ApiRequest:
+    """构造「工具返回图片」的历史：user 提问 → function_call → 带图 fco。
+
+    这是 tool-image-attachment 能力的承重形态：``function_call_output.output``
+    是 ``[TextPart, ImagePart]`` 而非 ``str``。与 ``_tool_request`` 方向相反——
+    那条是图片在**输入侧**驱动 function call，本条是图片**从工具回来**。
+    """
+    return ApiRequest(
+        model=model,
+        input_items=[
+            ApiMessageItem(
+                role="user",
+                content=(
+                    "Call observe_frame, then report the colored geometry that the "
+                    "tool returned, in lowercase English."
+                ),
+            ),
+            ApiFunctionCallItem(
+                call_id="call_frame_1",
+                name="observe_frame",
+                arguments="{}",
+                sample_id="sample_frame_1",
+                output_index=0,
+            ),
+            ApiFunctionCallOutputItem(
+                call_id="call_frame_1",
+                output=[
+                    TextPart(text="frame 1023 captured"),
+                    shared._image_part(shared._fixture_attachment()),
+                ],
+                origin_sample_id="sample_frame_1",
+            ),
+        ],
+        response_format=shared._schema(
+            "tool_frame_codex", {"geometry": {"type": "string"}}
+        ),
+    )
+
+
+async def _run_tool_image_output(client: ModelClient, model: str) -> Counter[str]:
+    """验证工具**返回**的图片真的被模型看见（不只是被端点接受）。
+
+    断言取自图内专有信息（蓝色三角形）：只有真正读到像素才答得出，
+    因此能区分「wire 收下了」与「模型看见了」这两件不同的事。
+    """
+    events = await _events(client, _tool_image_output_request(model))
+    shared._assert_usage(events)
+    parsed = shared._structured(events)
+    shared._assert_geometry(parsed.get("geometry"), color="blue", shape="triangle")
+    return _kinds(events, "tool_image_output_verified")
 
 
 async def _run_tool(client: ModelClient, model: str) -> Counter[str]:
@@ -376,6 +430,11 @@ async def run_codex_image_matrix(
             "codex_image_tool_call",
             "Codex 图片驱动 function call",
             lambda: _run_tool(client, model),
+        ),
+        (
+            "codex_tool_image_output",
+            "Codex 工具返回图片（function_call_output 带 input_image）",
+            lambda: _run_tool_image_output(client, model),
         ),
     )
     results = [

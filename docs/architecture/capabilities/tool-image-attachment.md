@@ -74,14 +74,12 @@ Anthropic 的 `tool_result` 原生支持内嵌 image block，但该 provider 当
 
 CI 全部走 Sim；真实 LLM 回归走 `examples/real_llm/capability_matrix.py`，结果落 `docs/real-llm-ledger.md`。
 
-**真实端点验证现状（如实记录）**：`--provider codex` 全量 24 场景 PASS，证明本能力
-**无回归**——但矩阵内**没有任何常驻场景真正跑「工具返回图片」这条路径**
-（`codex_image_tool_call` 是图片在**输入侧**驱动 function call，方向相反）。
-
-承重假设「Responses 的 `function_call_output` 接受 `input_image`」已由一次性活端点
-探针坐实：请求被接受，且 gpt-5.6-luna 复述出**只存在于图内**的信息（答
-“A blue triangle.”），证明模型不只收下请求、是真的看见了。探针跑完即弃，
-**常驻场景待补**——补齐前本行即该能力真实验证的全部依据。
+**真实端点验证**：`examples/real_llm/test_codex_image_matrix.py::codex_tool_image_output`
+是本能力的常驻回归场景——历史含 `function_call_output.output = [TextPart, ImagePart]`，
+断言走 structured output，要求模型报出**只存在于图内**的几何信息（蓝色三角形）。
+它区分「wire 收下了」与「模型看见了」两件不同的事：前者只证明不 400，后者才证明
+能力成立。与 `codex_image_tool_call` 方向相反（那条是图片在**输入侧**驱动 function
+call）。结果落 `docs/real-llm-ledger.md`。
 
 ## R1–R5 影响
 
