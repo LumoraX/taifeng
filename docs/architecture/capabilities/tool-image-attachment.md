@@ -72,7 +72,16 @@ Anthropic 的 `tool_result` 原生支持内嵌 image block，但该 provider 当
 - `tests/skill/test_skill_visibility.py` —— 模态门控与标签派生
 - `tests/loop/test_prompt_image_input.py` —— 门控接线（text-only 隐藏 / responses 可见，互为对照）
 
-CI 全部走 Sim；真实 LLM 验证走 `examples/real_llm/capability_matrix.py`，结果落 `docs/real-llm-ledger.md`。
+CI 全部走 Sim；真实 LLM 回归走 `examples/real_llm/capability_matrix.py`，结果落 `docs/real-llm-ledger.md`。
+
+**真实端点验证现状（如实记录）**：`--provider codex` 全量 24 场景 PASS，证明本能力
+**无回归**——但矩阵内**没有任何常驻场景真正跑「工具返回图片」这条路径**
+（`codex_image_tool_call` 是图片在**输入侧**驱动 function call，方向相反）。
+
+承重假设「Responses 的 `function_call_output` 接受 `input_image`」已由一次性活端点
+探针坐实：请求被接受，且 gpt-5.6-luna 复述出**只存在于图内**的信息（答
+“A blue triangle.”），证明模型不只收下请求、是真的看见了。探针跑完即弃，
+**常驻场景待补**——补齐前本行即该能力真实验证的全部依据。
 
 ## R1–R5 影响
 
