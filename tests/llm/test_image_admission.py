@@ -307,3 +307,34 @@ def test_image_admission_types_are_available_from_public_llm_api() -> None:
     """业务侧可通过稳定 LLM API 显式配置图片输入。"""
     assert PublicImageAttachmentV1 is ImageAttachmentV1
     assert PublicImageInputPolicy is ImageInputPolicy
+
+
+def test_from_bytes_computes_canonical_fields() -> None:
+    """from_bytes 应自动算出 base64、size 与 sha256，且字段自洽通过构造期校验。"""
+    raw = _png()
+
+    attachment = ImageAttachmentV1.from_bytes(raw, media_type="image/png", detail="high")
+
+    assert attachment.kind == "image"
+    assert attachment.media_type == "image/png"
+    assert attachment.size == len(raw)
+    assert attachment.sha256 == hashlib.sha256(raw).hexdigest()
+    assert base64.b64decode(attachment.content) == raw
+    assert attachment.detail == "high"
+
+
+def test_from_bytes_defaults_detail_to_auto() -> None:
+    """不指定 detail 时沿用契约默认值 auto。"""
+    assert ImageAttachmentV1.from_bytes(_png(), media_type="image/png").detail == "auto"
+
+
+def test_from_bytes_output_passes_admission() -> None:
+    """from_bytes 的产物必须能直接通过 admission —— 这正是它存在的意义。"""
+    attachment = ImageAttachmentV1.from_bytes(_png(2, 3), media_type="image/png")
+
+    inspected = admit_image_attachments(
+        [attachment], ImageInputPolicy(enabled=True, max_images=1)
+    )
+
+    assert len(inspected) == 1
+    assert (inspected[0].width, inspected[0].height) == (2, 3)

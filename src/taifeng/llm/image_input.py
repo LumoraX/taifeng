@@ -50,6 +50,35 @@ class ImageAttachmentV1(BaseModel):
             raise ValueError("image attachment content must not be a Data URL")
         return value
 
+    @classmethod
+    def from_bytes(
+        cls,
+        data: bytes,
+        *,
+        media_type: ImageMediaType,
+        detail: ImageDetail = "auto",
+    ) -> ImageAttachmentV1:
+        """从原始字节构造 canonical attachment（自动算 base64 / size / sha256）。
+
+        工具作者返回图片附件的便捷入口——手写 base64 与 digest 容易出错，且错了
+        要到 admission 才暴露。这里一次算对，三个字段天然自洽。
+
+        Args:
+            data: 图片原始字节（非 base64、非 Data URL）。
+            media_type: 图片 MIME；须在 ``SUPPORTED_IMAGE_MEDIA_TYPES`` 内。
+            detail: provider 侧细节档位，默认 ``auto``。
+
+        Returns:
+            字段自洽、可直接通过 admission 的 ``ImageAttachmentV1``。
+        """
+        return cls(
+            media_type=media_type,
+            size=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+            content=base64.b64encode(data).decode("ascii"),
+            detail=detail,
+        )
+
 
 @dataclass(frozen=True)
 class ImageInputPolicy:
