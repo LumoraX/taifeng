@@ -52,6 +52,35 @@ def reject_provider_state(items: list[Any], *, protocol: str) -> None:
         raise InvalidHistoryError(f"provider state cannot be replayed with OpenAI {protocol}")
 
 
+def tool_output_content(content: PartContent) -> str | list[dict[str, Any]]:
+    """把 ``function_call_output`` 的内容投影为 Responses content items。
+
+    纯文本保持**裸字符串**（wire 与既有逐位一致，非图片工具零影响）；带图时投影
+    为 ``input_text`` / ``input_image`` 数组 —— Responses 协议原生接受这两种形态
+    （参照 codex ``FunctionCallOutputBody`` 的 untagged Text | ContentItems）。
+
+    空文本项直接丢弃：它不承载信息，却白占 API 数组槽位（对齐 codex #40737）。
+    Data URL 只在此处临时构造，canonical base64 不带前缀地留在 conversation 层。
+    """
+    if isinstance(content, str):
+        return content
+    mapped: list[dict[str, Any]] = []
+    for part in content:
+        if isinstance(part, TextPart):
+            if not part.text:
+                continue
+            mapped.append({"type": "input_text", "text": part.text})
+        elif isinstance(part, ImagePart):
+            mapped.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{part.media_type};base64,{part.base64_data}",
+                    "detail": part.detail,
+                }
+            )
+    return mapped
+
+
 def chat_content(content: PartContent) -> str | list[dict[str, Any]]:
     """把 provider-neutral parts 映射为 OpenAI Chat content parts。"""
     if isinstance(content, str):

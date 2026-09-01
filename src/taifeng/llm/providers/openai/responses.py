@@ -40,6 +40,7 @@ from taifeng.llm.providers.openai._shared import (
     OPENAI_DEFAULT_BASE_URL,
     build_openai_headers,
     enforce_openai_wire_size,
+    tool_output_content,
 )
 from taifeng.llm.responses_types import (
     NormalizedFunctionCallItem,
@@ -122,7 +123,7 @@ def _input_item(item: object) -> dict[str, Any]:
         return {
             "type": "function_call_output",
             "call_id": item.call_id,
-            "output": item.output,
+            "output": tool_output_content(item.output),
         }
     if isinstance(item, ApiProviderStateItem):
         return _provider_state_payload(item)
