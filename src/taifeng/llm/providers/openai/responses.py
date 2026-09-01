@@ -503,6 +503,8 @@ class OpenAIResponsesClient(OneNetworkAttemptModelClient, ModelClient):
         provider="openai",
         protocol="responses",
         accepts_provider_state=True,
+        # Responses 的 function_call_output 原生接受 input_image content item
+        tool_output_modalities=frozenset({"text", "image"}),
     )
 
     def __init__(

@@ -67,6 +67,7 @@ def test_responses_declares_stateful_image_capabilities() -> None:
         provider="openai",
         protocol="responses",
         accepts_provider_state=True,
+        tool_output_modalities=frozenset({"text", "image"}),
     )
 
 

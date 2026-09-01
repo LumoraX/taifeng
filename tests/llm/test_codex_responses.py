@@ -128,6 +128,7 @@ def test_codex_client_declares_independent_capabilities() -> None:
         provider="codex",
         protocol="responses",
         accepts_provider_state=True,
+        tool_output_modalities=frozenset({"text", "image"}),
     )
 
 

@@ -25,6 +25,15 @@ class ModelCapabilities:
     provider: str
     protocol: str
     accepts_provider_state: bool = False
+    tool_output_modalities: frozenset[Literal["text", "image"]] = frozenset({"text"})
+    """``function_call_output`` 能承载的模态。
+
+    与 ``input_modalities`` **分开**声明：OpenAI Chat 的 user 消息能带图，但
+    tool 消息的 content 只能是字符串，两者能力不同；合并声明必然误判。
+
+    默认 text-only —— 与 ``input_modalities`` 同规矩：能力一律显式打开，
+    **不得**据模型名或域名自动推断。
+    """
 
 
 TEXT_ONLY_CAPABILITIES = ModelCapabilities(

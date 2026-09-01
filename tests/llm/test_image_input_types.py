@@ -113,3 +113,35 @@ def test_sensitive_request_redaction_removes_image_and_encrypted_state() -> None
     assert PNG_BASE64 not in encoded
     assert "encrypted-state" not in encoded
     assert "encrypted_content" not in encoded
+
+
+def test_tool_output_modalities_defaults_to_text_only() -> None:
+    """未声明的 client 一律 text-only —— 能力必须显式打开，不按模型名猜。"""
+    from taifeng.llm.client import TEXT_ONLY_CAPABILITIES, ModelCapabilities
+
+    assert TEXT_ONLY_CAPABILITIES.tool_output_modalities == frozenset({"text"})
+
+    # user 消息能带图 ≠ tool 结果能带图：两种能力必须分开声明
+    caps = ModelCapabilities(
+        input_modalities=frozenset({"text", "image"}),
+        provider="p",
+        protocol="chat",
+    )
+    assert caps.tool_output_modalities == frozenset({"text"})
+
+
+def test_responses_clients_declare_image_tool_output() -> None:
+    """只有 Responses 协议原生接受 fco 带图，故只有这两个 client 声明。"""
+    from taifeng.llm.providers.codex.responses import CodexResponsesClient
+    from taifeng.llm.providers.openai.responses import OpenAIResponsesClient
+
+    assert "image" in OpenAIResponsesClient.capabilities.tool_output_modalities
+    assert "image" in CodexResponsesClient.capabilities.tool_output_modalities
+
+
+def test_chat_client_does_not_declare_image_tool_output() -> None:
+    """Chat 的 tool 消息 content 只能是字符串，不得声明 image tool 输出。"""
+    from taifeng.llm.providers.openai.chat import OpenAIChatClient
+
+    assert "image" in OpenAIChatClient.capabilities.input_modalities
+    assert "image" not in OpenAIChatClient.capabilities.tool_output_modalities
