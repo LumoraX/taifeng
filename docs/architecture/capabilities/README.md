@@ -32,6 +32,7 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | [script-execution](script-execution.md) | `ScriptDescriptor` / `ScriptExecutor`, implicit discovery, subprocess isolation, timeout / cancellation, and script events |
 | [tool-whitelist](tool-whitelist.md) | Single source of truth for visible tools, `run_script` integration, dispatch-side `not_offered` checks, and replay exemptions |
 | [tool-builtins-extended](tool-builtins-extended.md) | `apply_patch` atomicity, `BackgroundTaskRegistry`, `http_request`, and builtin `parallel_safe` behavior |
+| [tool-image-attachment](tool-image-attachment.md) | 工具返回图片附件：`ToolResult.attachments`、落盘前 admission、`tool_output_modalities` 协议分档、fco 内 `PartContent` 投影与 wire `input_image`、`requires.modalities` 路由期门控、能力不足时 in-band 降级，以及内核/业务边界 |
 | [mcp-server](mcp-server.md) | `McpStdioServer`, MCP handshake, tools, resources, bidirectional JSON-RPC elicitation, and CLI `mcp serve` |
 | [telemetry-otel](telemetry-otel.md) | `OtelSinkConfig`, `OtelTelemetrySink`, EventMsg-to-OTel mapping, PII filtering, counters, and fire-and-forget export |
 | [turn-rewind](turn-rewind.md) | Addressable intra-turn nodes, `Rewind` op, `RewindCheckpoint`, `rewind_nodes()`, event classes, rejection paths, R2 expectations, and R5 append-only behavior |
@@ -66,6 +67,7 @@ Aligned with [llm-client.md](../llm-client.md).
 | --- | --- |
 | [llm-provider-native](llm-provider-native.md) | Native provider contract, `ResponseEvent` stream shape, Anthropic / Gemini / DeepSeek field mapping, cache field priority, error classification, and `record_cache_read` |
 | [llm-codex-provider](llm-codex-provider.md) | 独立 `codex-responses-v1` provider：顶层 instructions、有序 typed input、done-item 终态、provider-state 隔离、恢复与脱敏边界 |
+| [llm-image-input](llm-image-input.md) | 用户消息图片输入：`ImageAttachmentV1` / `ImagePart` canonical 形态、admission 与成本估算、OpenAI Chat/Responses 与 Codex 协议映射、持久化压缩与脱敏边界 |
 | [llm-structured-output](llm-structured-output.md) | `ResponseFormatSpec`, `structured_output` events, provider translation, and parse failure strategy |
 | [llm-sim-conformance](llm-sim-conformance.md) | Stateful conformance simulator, protocol checks, token accounting, prefix-cache ledger, full-fidelity chunks, fault injection, deterministic timing, and request ledger |
 
