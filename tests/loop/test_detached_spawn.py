@@ -601,6 +601,55 @@ async def test_join_barrier_fires_when_all_done(skills_dir, threads_dir):
 
 
 @pytest.mark.asyncio
+async def test_join_barrier_concurrent_check_fires_once(skills_dir, threads_dir):
+    """并发 _check_barriers 只触发一次聚合：守卫置位与检查之间不得有 await。
+
+    历史 race：``_check_barriers`` 查过守卫集后调 ``_fire_barrier``，而后者要先过
+    ``store.create_thread`` / ``store.append`` 两个 await 才把 id 记进守卫集。两个并发
+    检查（``set_join_barrier`` 收尾一个、子 skill 终态 ``_finalize_spawn`` 一个）会在这两个
+    await 处交错、双双越过守卫 → 同一 barrier 起两次聚合 turn。
+    """
+    # 剧本给足：双触发时会多起一轮聚合 turn，剧本耗尽会以 SimScriptExhausted 崩掉，
+    # 掩盖掉本测试真正要断言的「fired 次数」。
+    client = RoutingSimClient(routes={
+        "style-checker": [SimTurn(text="结论A")] * 4,
+        "code-reviewer": [SimTurn(text="汇总")] * 4,
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[])
+    engine = await pool.get_or_create(session_id="s4-race", entry_skill_id="code-reviewer")
+    fired: list[str] = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind == "join_barrier_fired":
+                fired.append(ev.msg.data["barrier_id"])
+
+    task = asyncio.create_task(watch())
+    a = (await engine.spawn_skill(skill_id="style-checker", args={}, reason="x"))["handle_id"]
+    assert await _wait(lambda: engine.spawn_status([a])[a]["status"] == "done")
+
+    # 直接把 barrier 放进表：绕开 set_join_barrier 收尾自带的那次 _check_barriers，
+    # 才能构造出「未 fired + 全终态」这一 race 窗口，再并发触发两次检查。
+    from taifeng.loop.spawn_handle import JoinBarrier
+
+    drv = engine._spawn  # noqa: SLF001
+    drv._spawn_handles.barriers["jb_race"] = JoinBarrier(  # noqa: SLF001
+        barrier_id="jb_race",
+        handle_ids=(a,),
+        then_skill_id="code-reviewer",
+        then_args_template=None,
+    )
+    await asyncio.gather(drv._check_barriers(), drv._check_barriers())  # noqa: SLF001
+
+    assert await _wait(lambda: len(fired) >= 1), "barrier 应触发"
+    await asyncio.sleep(0.05)  # 给潜在的第二次 emit 留出观察窗口
+    assert len(fired) == 1, f"并发检查下 barrier 只应触发一次: {fired}"
+    task.cancel()
+    await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_join_barrier_fired_precedes_then_thread_output(tmp_path, threads_dir):
     """join_barrier_fired 必须先于会诊 turn 文本，便于订阅方先建轨。"""
     skills = tmp_path / "skills"

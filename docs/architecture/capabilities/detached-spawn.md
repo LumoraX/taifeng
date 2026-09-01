@@ -158,13 +158,33 @@ running → done | error | cancelled
 触发条件：`handle_ids` 内**全部**句柄到达终态（done / error / cancelled）。任意一个句柄到达终态后检查；全部终态才触发。
 
 触发时（**顺序即契约**，见下）：
+- 全终态判定通过后**立即**把 barrier_id 记入 `_fired_barriers` 内存守卫集（详见下「幂等保证」）
 - `then_args_template=None` → 聚合 args = `{handle_id: {status, result}}` for **全部** handles（含 failed / cancelled，不丢弃）
-- 先入 `_fired_barriers` 内存守卫集（防并发 check 重入触发）
 - emit `join_barrier_fired{barrier_id, then_thread_id}`
 - 再通过 `_build_child_runner`（call_stack 为空）以**独立根 turn**发起聚合 turn
 - 追加 `join_barrier_fired` 标记到父 thread（只服务冷恢复幂等重建，不参与热路径去重）
 
 **v1 仅支持「全终态」触发**；any / 超时触发留后续。
+
+##### 幂等保证：守卫置位与检查之间不得有 await
+
+每个 barrier SHALL 至多触发一次聚合 turn，并发 `_check_barriers` 亦然。
+
+实现约束：`_check_barriers` 判定「未 fired 且全终态」后，SHALL 在**执行任何 await 之前**把
+barrier_id 记入 `_fired_barriers`。检查与置位同处一个事件循环步内才构成原子操作。
+
+这条不是风格偏好——`_fire_barrier` 内要先过 `store.create_thread` / `store.append` 两个 await
+才走到广播。守卫置位若放在那之后，两个并发检查（`set_join_barrier` 收尾一个、句柄终态
+`_finalize_spawn` 一个）会在这两个 await 处交错、双双越过守卫，同一 barrier 起**两次**聚合 turn。
+
+**失败语义**：守卫先于 `_fire_barrier` 置位，故其中途抛错（如 `join_barrier_skill_missing`）时该
+barrier 不重试。这是有意的——then_skill 缺失属声明层错误，重试必然重复失败。
+
+#### Scenario: 并发检查只触发一次
+
+- **GIVEN** barrier 的句柄集已全终态且尚未 fired
+- **WHEN** 两个 `_check_barriers` 并发执行
+- **THEN** `join_barrier_fired` 恰好 emit 一次，聚合 turn 只起一次
 
 ##### 顺序保证：fired 先于聚合轨任何输出
 

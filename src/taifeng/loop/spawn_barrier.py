@@ -138,10 +138,20 @@ class JoinBarrierCoordinator:
             if not drv._spawn_handles.all_terminal(  # noqa: SLF001
                     list(barrier.handle_ids)):
                 continue  # 尚未全终态,等下一次终态事件
+            # 守卫置位必须紧跟检查、其间不得有 await。_fire_barrier 内要先过
+            # store.create_thread / store.append 两个 await 才走到广播——置位若放在
+            # 那之后,两个并发 _check_barriers(set_join_barrier 收尾一个、句柄终态
+            # _finalize_spawn 一个)会在这两个 await 处交错、双双越过守卫,同一 barrier
+            # 起两次聚合 turn。检查与置位同处一个事件循环步内才是原子的。
+            drv._fired_barriers.add(barrier.barrier_id)  # noqa: SLF001
             await self._fire_barrier(barrier)
 
     async def _fire_barrier(self, barrier: JoinBarrier) -> None:
         """触发一个 barrier:起 then_skill 独立聚合 turn,落 fired 标记 + emit。
+
+        **前置**:调用方(``_check_barriers``)已把 barrier_id 记入 ``_fired_barriers``
+        守卫集。故本方法中途抛错(如 ``join_barrier_skill_missing``)时该 barrier 不会被
+        重试——这是有意的:then_skill 缺失属声明层错误,重试必然重复失败。
 
         聚合输入:then_args_template(若给)否则默认 = {handle_id: {status, result}},
         **含失败/取消句柄**(非 done 终态不丢弃,聚合需看到全部子任务结局)。
@@ -192,7 +202,7 @@ class JoinBarrierCoordinator:
         # 先广播 fired，再启动聚合 turn：订阅方要用 then_thread_id 预先开会诊轨。
         # 若先启动 child runner，极快的模型可能抢在 fired 事件前发 assistant_text，
         # 下游只能把这段文本归到未知/root 轨。
-        drv._fired_barriers.add(barrier.barrier_id)  # noqa: SLF001
+        # (幂等守卫已由调用方 _check_barriers 在进入本方法前置位,此处不再重复置位)
         await eng._emit(EventMsg(  # noqa: SLF001
             submission_id=barrier.barrier_id,
             msg=JoinBarrierFired(data={
