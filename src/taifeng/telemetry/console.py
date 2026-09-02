@@ -69,6 +69,8 @@ _KIND_TAG = {
     "peer_agent_woken": ("peer", _Colors.CYAN, "⏰"),
     "peer_wait_started": ("peer", _Colors.GRAY, "⧖"),
     "peer_wait_resolved": ("peer", _Colors.GRAY, "⧗"),
+    "peer_wait_any_started": ("peer", _Colors.GRAY, "⧖ⁿ"),
+    "peer_wait_any_resolved": ("peer", _Colors.GRAY, "⧗ⁿ"),
     "turn_completed": ("turn", _Colors.GREEN, "✓"),
     "turn_failed": ("turn", _Colors.RED, "✗"),
     # turn_suspended 是独立终结态(挂起等待 Resume)——黄色 ⏸ 与完成/失败区分
@@ -189,6 +191,20 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         parts.append(
             f"handle={data.get('handle_id')} outcome={data.get('outcome')}"
             f" status={data.get('status')}"
+        )
+    elif ev.msg.kind == "peer_wait_any_started":
+        ids = data.get("handle_ids", [])
+        parts.append(
+            f"handles[{len(ids)}]={','.join(ids)}"
+            f" timeout={data.get('timeout_seconds')}s"
+        )
+    elif ev.msg.kind == "peer_wait_any_resolved":
+        settled = data.get("settled_ids", [])
+        pending = data.get("pending_ids", [])
+        parts.append(
+            f"outcome={data.get('outcome')}"
+            f" settled[{len(settled)}]={','.join(settled) or '-'}"
+            f" pending[{len(pending)}]={','.join(pending) or '-'}"
         )
     elif ev.msg.kind == "pinned_state_reinjected":
         names = ",".join(s.get("name", "?") for s in data.get("sources", []))
