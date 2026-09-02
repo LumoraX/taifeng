@@ -76,8 +76,8 @@ orchestration:
 ```
 
 **结构**：线性 fork-join（series-parallel，DAG 的确定性子集），非任意依赖图。顺序由列表位置定义，
-结构上不可能有环；引用必须 ∈ `child_skills`（复用白名单 + 环检测）。升级到真 DAG 的后路见
-`docs/architecture/capabilities/skill-orchestration.md` §7（加法式扩展，不破坏 `steps` 写法）。
+结构上不可能有环；引用必须 ∈ `child_skills`（复用白名单 + 环检测）。扩展边界与后路（为何不做任意 DAG / 不做循环原语、
+以及唯一保留的加法式切片）见 `docs/architecture/capabilities/skill-orchestration.md` 的「扩展边界与后路」节。
 
 **执行语义（纯编排器）**：声明了 orchestration 的 entry turn **不采样 LLM**，引擎按 `steps` 确定性驱动
 子 skill（每个子 skill 内部仍各自走 LLM）。每个 child 收到 `{"input": <entry 种子>}`；**serial / when 段**
