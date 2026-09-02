@@ -98,26 +98,26 @@ OpenAI 的 provider 与 protocol 是两级统一配置：`provider=openai` 选�
 
 ## 多文件示例（每个目录一个完整 demo）
 
-| 目录 | 说明 |
-| --- | --- |
-| [code_review/](code_review/) | programmer ↔ code-review 双 skill 派发 (HITL 演示底座) |
-| [numeric_loop/](numeric_loop/) | LLM 自主多轮 `run_script(apply_delta)` 数值调谐 |
-| [travel_planner/](travel_planner/) | 三路 fan-out 子 skill（航班/酒店/活动）+ 综合输出 |
-| [research_assistant/](research_assistant/) | 三步串行 pipeline：采集 → 提炼 → 写作 |
-| [product_review/](product_review/) | fan-out 三个 reviewer + 评分聚合 + HITL |
-| [selective_approval/](selective_approval/) | 按 scope/target 模式选择性审批 |
-| [permission_grants/](permission_grants/) | **可复用审批 grant**（ADR 0022）：预签发 grant 绕过 prompter + revoke 回落（grant 绝不越 deny） |
-| [doom_loop/](doom_loop/) | **doom-loop 先警后断**（ADR 0021）：重复同调用空转 → warn → circuit-open 终止 |
-| [subagent_isolation/](subagent_isolation/) | 子 skill 隔离策略（mode-auto / mode-strict） |
-| [memory/](memory/) | 业务侧实现 `MemoryStore`（K3 长期记忆 backend）：4 个 swap 钩子 prefetch/writeback/on_pre_evict/on_session_end 端到端触发 + 跨 turn 召回 |
+| 目录 | 说明 | 需要 key |
+| --- | --- | --- |
+| [code_review/](code_review/) | programmer ↔ code-review 双 skill 派发 (HITL 演示底座) | **是** |
+| [numeric_loop/](numeric_loop/) | LLM 自主多轮 `run_script(apply_delta)` 数值调谐 | **是** |
+| [travel_planner/](travel_planner/) | 三路 fan-out 子 skill（航班/酒店/活动）+ 综合输出 | **是** |
+| [research_assistant/](research_assistant/) | 三步串行 pipeline：采集 → 提炼 → 写作 | **是** |
+| [product_review/](product_review/) | fan-out 三个 reviewer + 评分聚合 + HITL | **是** |
+| [selective_approval/](selective_approval/) | 按 scope/target 模式选择性审批 | **是** |
+| [permission_grants/](permission_grants/) | **可复用审批 grant**（ADR 0022）：预签发 grant 绕过 prompter + revoke 回落（grant 绝不越 deny） | 否（Mock） |
+| [doom_loop/](doom_loop/) | **doom-loop 先警后断**（ADR 0021）：重复同调用空转 → warn → circuit-open 终止 | 否（Mock） |
+| [subagent_isolation/](subagent_isolation/) | 子 skill 隔离策略（mode-auto / mode-strict） | 否（Mock） |
+| [memory/](memory/) | 业务侧实现 `MemoryStore`（K3 长期记忆 backend）：4 个 swap 钩子 prefetch/writeback/on_pre_evict/on_session_end 端到端触发 + 跨 turn 召回 | 否（Mock） |
 | [memory/knowledge_demo.py](memory/knowledge_demo.py) | **知识库接入三件套**：继承 NullMemoryStore 三行只读源 + `CompositeMemoryStore` 双源组合 + `memory_query_builder` 近 N 轮检索语境（解多轮指代） | 否（Mock） |
-| [hooks_showcase/](hooks_showcase/) | 业务钩子 pre/post_skill_dispatch 按*运行时 args* 动态拦截（钩子 vs 声明式权限规则） |
-| [post_turn_review/](post_turn_review/) | **post_turn 钩子**:turn 收尾自我审计 / 记忆固化 —— 每轮真终态后**确定性**固化结论（收尾的同步一步;跨 turn 顺序须等 `post_turn_hook_fired` 再提交下一轮） |
-| [mcp_showcase/](mcp_showcase/) | taifeng 作为 MCP client：spawn 自带的最小 MCP server 子进程 + 注册其工具远程调用（已注册进 web_ui）|
-| [mcp_basic/](mcp_basic/) | MCP stdio client 连外部 server，自动注册工具 |
-| [mcp_hitl/](mcp_hitl/) | MCP 工具调用走 permission gate |
-| [suspend_resume/](suspend_resume/) | 表单采集型 HITL 挂起 → 释放实例 → 跨实例重建 → Resume 续跑（R5 头条故事）|
-| [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）；**含两个 detached 交互 demo**：`multi_expert_consult`（并发多专家 + 错峰 HITL + 联合会诊）和 `turn_rewind`（节点回访 + re_reason / retry_tool 重跑）。无 key 自动化 smoke：`PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py` |
+| [hooks_showcase/](hooks_showcase/) | 业务钩子 pre/post_skill_dispatch 按*运行时 args* 动态拦截（钩子 vs 声明式权限规则） | 否（Mock） |
+| [post_turn_review/](post_turn_review/) | **post_turn 钩子**:turn 收尾自我审计 / 记忆固化 —— 每轮真终态后**确定性**固化结论（收尾的同步一步;跨 turn 顺序须等 `post_turn_hook_fired` 再提交下一轮） | 否（Mock） |
+| [mcp_showcase/](mcp_showcase/) | taifeng 作为 MCP client：spawn 自带的最小 MCP server 子进程 + 注册其工具远程调用（已注册进 web_ui） | 否（Mock） |
+| [mcp_basic/](mcp_basic/) | MCP stdio client 连外部 server，自动注册工具 | 否（Mock） |
+| [mcp_hitl/](mcp_hitl/) | MCP 工具调用走 permission gate | 否（Mock） |
+| [suspend_resume/](suspend_resume/) | 表单采集型 HITL 挂起 → 释放实例 → 跨实例重建 → Resume 续跑（R5 头条故事） | 否（Mock） |
+| [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）；**含两个 detached 交互 demo**：`multi_expert_consult`（并发多专家 + 错峰 HITL + 联合会诊）和 `turn_rewind`（节点回访 + re_reason / retry_tool 重跑）。无 key 自动化 smoke：`PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py` | **是** |
 
 ### 编排 / 并发范式 + 懒加载（skill-as-context）
 

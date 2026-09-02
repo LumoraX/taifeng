@@ -29,17 +29,34 @@ PYTHONPATH=src uv run pytest tests/test_engine_e2e.py -v
 # 跑单个测试
 PYTHONPATH=src uv run pytest tests/test_dispatch.py::test_circular_reference_detection -v
 
-# 端到端示例（examples/basic/ 与各 pattern demo 均走 SimClient，无需 API key）
+# 端到端示例 —— 分两类，**不是所有 demo 都免 key**（判据：脚本内是否调 build_model_client）
+# ① 纯 SimClient，无需 API key
 PYTHONPATH=src uv run python examples/basic/minimal_chat.py
 PYTHONPATH=src uv run python examples/basic/composite_skill.py
 PYTHONPATH=src uv run python examples/basic/instructions_basic.py   # 指令分层注入 + 热更
 PYTHONPATH=src uv run python examples/basic/skill_with_script.py    # SKILL.md scripts 运行时
 PYTHONPATH=src uv run python examples/orchestration/demo.py         # 声明式编排（parallel/serial/when）
-PYTHONPATH=src uv run python examples/mcp_basic/demo.py             # taifeng 作为 MCP server
-# 其余 pattern demo：research_assistant / travel_planner / code_review / product_review /
-#   numeric_loop / mcp_hitl / selective_approval / subagent_isolation / observability /
-#   permission / persistence / turn_rewind / multi_expert_consult / web_ui —— 见 examples/<name>/demo.py（或 server.py）
-PYTHONPATH=src uv run python examples/real_llm/e2e.py               # 需要真实 LLM API key（real_llm/ 下均是）
+PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py  # detached spawn + join-barrier
+PYTHONPATH=src uv run python examples/turn_rewind/demo.py           # 节点回访 re_reason / retry_tool
+#   其余同类：audit_observability / compression_showcase / concurrent_fanout / doom_loop /
+#   hooks_showcase / kernel_knobs / mcp_basic / mcp_hitl / mcp_showcase / memory /
+#   peer_messaging / permission_grants / post_turn_review / read_skill_lazy /
+#   skill_outcome_fleet / step_pipeline / subagent_isolation / suspend_resume
+#
+# ② 需要真实 LLM key（脚本自读 .env 的 LLM_BOOTSTRAP_*）
+#   code_review / dual_track / numeric_loop / product_review / research_assistant /
+#   selective_approval / travel_planner —— 见 examples/<name>/demo.py
+#   web_ui/server.py 与 step_pipeline/server.py 同样需 key（常驻 HTTP 服务，不自行退出）
+PYTHONPATH=src uv run python examples/real_llm/e2e.py               # real_llm/ 下均需 key
+#   ⚠️ 端点若拒 role=system（报 System messages are not allowed），用
+#      LLM_BOOTSTRAP_PROVIDER=codex 覆盖 .env 的 provider 再跑
+#
+# ③ 无 demo.py 的目录（别照 <name>/demo.py 找）：
+#   observability/audit_index_hook.py、permission/web_prompter.py、
+#   persistence/{postgres,redis}_thread_directory.py、form_hitl（只含 skills/，无入口脚本）
+#
+# ⚠️ 多数 demo 末尾无条件 return 0 —— **退出码 0 不等于跑通**，必须看输出里有没有
+#    [TURN ✗] / isError=True / ❌ 之类的带内失败标记
 
 # CLI（用于排查 SKILL.md 目录）
 PYTHONPATH=src uv run python -m taifeng skill list <skills_dir>
