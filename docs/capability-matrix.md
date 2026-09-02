@@ -205,7 +205,7 @@ Runtime ops are submitted with `engine.submit(...)`.
 
 ### Builtin Tools
 
-`read_skill` · `call_skill` · `file_read` · `file_write` · `shell_exec` · `apply_patch` · `http_request` · `run_in_background` · `wait_for_task` · `run_script` · `request_user_input` · `spawn_skill` · `await_skills` · `join_skill` · `kill_skill` · `send_message` · `wait_peer` · `todo_write`
+`read_skill` · `call_skill` · `file_read` · `file_write` · `shell_exec` · `apply_patch` · `http_request` · `run_in_background` · `wait_for_task` · `run_script` · `request_user_input` · `spawn_skill` · `await_skills` · `join_skill` · `kill_skill` · `send_message` · `wait_peer` · `wait_any` · `todo_write`
 
 ### Public API Symbols
 

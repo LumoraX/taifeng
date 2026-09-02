@@ -11,6 +11,7 @@
     - run_in_background / wait_for_task —— shell 长任务后台执行（M4）
     - http_request —— 受 PermissionPolicy(scope='network') 审批的 HTTP 调用（P0）
     - spawn_skill / await_skills / join_skill / kill_skill —— detached-spawn LLM 入口
+    - wait_peer / wait_any —— turn 内阻塞等待(等一个 / 等任一)
 """
 
 from taifeng.tool.builtins.apply_patch import make_apply_patch_tool
@@ -36,7 +37,10 @@ from taifeng.tool.builtins.spawn_skill import (
     make_spawn_skill_tool,
 )
 from taifeng.tool.builtins.todo import TodoStore, make_todo_write_tool
-from taifeng.tool.builtins.wait_peer import make_wait_peer_tool
+from taifeng.tool.builtins.wait_peer import (
+    make_wait_any_tool,
+    make_wait_peer_tool,
+)
 
 __all__ = [
     "TodoStore",
@@ -59,6 +63,7 @@ __all__ = [
     "make_todo_write_tool",
     "make_shell_exec_tool",
     "make_spawn_skill_tool",
+    "make_wait_any_tool",
     "make_wait_peer_tool",
     "make_wait_for_task_tool",
 ]

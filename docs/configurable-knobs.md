@@ -807,6 +807,7 @@ pool = await EnginePool.create(
 | --- | --- |
 | `make_send_message_tool()` | 谱系内点对点发消息：target = child_thread_id / handle_id / `"parent"`；mode = `queue_only`（入队/落史）/ `trigger_turn`（空闲唤醒，运行中自动降级、root 拒绝、suspended 只落史） |
 | `make_wait_peer_tool()` | turn 内阻塞等单个 spawn 句柄终态；`timeout_seconds` **必填**（互等死锁的唯一保底）；超时返回 error 结果（turn 不失败） |
+| `make_wait_any_tool()` | turn 内 **any-of-N** 等待：一组句柄中任一终态即唤醒，返回当时**全部**已终态 `{settled, pending}`；`timeout_seconds` 同样必填；零终态到期返回 error 结果（turn 不失败） |
 
 业务侧程序化投递走 `engine.submit(SendToPeer(target_thread_id=…, text=…, mode=…))` 或直调 `engine.deliver_peer_message(...)`，与工具完全同一路径。
 

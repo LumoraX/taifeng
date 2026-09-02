@@ -188,6 +188,7 @@ from taifeng.tool.builtins import (
     make_run_in_background_tool,
     make_send_message_tool,
     make_todo_write_tool,
+    make_wait_any_tool,
     make_wait_for_task_tool,
     make_wait_peer_tool,
 )
@@ -244,6 +245,7 @@ __all__ = [
     "make_apply_patch_tool",
     "make_send_message_tool",
     "make_todo_write_tool",
+    "make_wait_any_tool",
     "make_wait_peer_tool",
     "make_run_in_background_tool",
     "make_wait_for_task_tool",

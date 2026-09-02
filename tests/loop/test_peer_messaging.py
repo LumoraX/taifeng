@@ -19,7 +19,10 @@ from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.submission import SendToPeer
 from taifeng.tool.builtins.send_message import make_send_message_tool
 from taifeng.tool.builtins.spawn_skill import make_spawn_skill_tool
-from taifeng.tool.builtins.wait_peer import make_wait_peer_tool
+from taifeng.tool.builtins.wait_peer import (
+    make_wait_any_tool,
+    make_wait_peer_tool,
+)
 from taifeng.tool.spec import ToolResult, ToolSpec
 
 
@@ -518,4 +521,215 @@ async def test_llm_sibling_messaging_e2e(peer_skills, threads_dir) -> None:
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["result"] == "结合家族史的补充结论")
     task.cancel()
+    await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# wait_any —— any-of-N 等待(等待原语的中间档:等一个 / 等任一 / 等全部)
+# 用独立 fixture 而非扩展 peer_skills:需要「一慢一快」两种子 skill 才能确定性地
+# 造出「部分终态」,而给共享 fixture 加 child 会改动其他用例的 prompt。
+# ---------------------------------------------------------------------------
+
+_WA_COORD = """---
+name: wa-coord
+description: any 等待协调者
+version: 1.0.0
+type: composite
+entry: true
+child_skills: [wa-slow, wa-fast]
+tool_names: [spawn_skill, wait_any]
+max_call_depth: 3
+---
+# WA_COORD_MARK 协调者
+"""
+
+_WA_SLOW = """---
+name: wa-slow
+description: 慢专家(钉在门上)
+version: 1.0.0
+type: composite
+tool_names: [gate_wait]
+max_call_depth: 2
+---
+# WA_SLOW_MARK 慢专家
+"""
+
+_WA_FAST = """---
+name: wa-fast
+description: 快专家(立即完成)
+version: 1.0.0
+type: atomic
+---
+# WA_FAST_MARK 快专家
+"""
+
+
+@pytest.fixture
+def wait_any_skills(tmp_path):
+    """wa-coord(entry)+ wa-slow(门控)+ wa-fast(立即完成)三 skill 目录。"""
+    skills = tmp_path / "wa_skills"
+    for name, body in (("wa-coord", _WA_COORD), ("wa-slow", _WA_SLOW),
+                       ("wa-fast", _WA_FAST)):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text(body, encoding="utf-8")
+    return skills
+
+
+def _wa_routes() -> dict:
+    """慢专家钉在 gate_wait 上;快专家一轮即完成。"""
+    return {
+        "WA_SLOW_MARK": [
+            SimTurn(text="慢-等门", tool_calls=[
+                {"id": "g1", "name": "gate_wait", "arguments": "{}"}]),
+            SimTurn(text="慢-完成"),
+        ],
+        "WA_FAST_MARK": [SimTurn(text="快-完成"), SimTurn(text="快-完成2")],
+    }
+
+
+async def _make_wa_engine(skills, threads_dir, gate):
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills, threads_dir=threads_dir,
+        model_client=RoutingSimClient(routes=_wa_routes()), compressors=[],
+        extra_tools=[make_spawn_skill_tool(), make_wait_any_tool(),
+                     _gate_tool(gate)])
+    engine = await pool.get_or_create(
+        session_id="wa", entry_skill_id="wa-coord")
+    return pool, engine
+
+
+@pytest.mark.asyncio
+async def test_wait_any_wakes_on_first_terminal(wait_any_skills,
+                                                threads_dir) -> None:
+    """任一终态即唤醒:快专家跑完就返回,不等仍被门钉住的慢专家。
+
+    同时校验两个 wait_any 事件的 data 形态(R3)。
+    """
+    gate = asyncio.Event()
+    pool, engine = await _make_wa_engine(wait_any_skills, threads_dir, gate)
+    events = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            if ev.msg.kind.startswith("peer_wait_any_"):
+                events.append(ev.msg)
+
+    task = asyncio.create_task(watch())
+    slow = (await engine.spawn_skill(
+        skill_id="wa-slow", args={}, reason="s"))["handle_id"]
+    fast = (await engine.spawn_skill(
+        skill_id="wa-fast", args={}, reason="f"))["handle_id"]
+
+    from taifeng.loop.cancellation import CancellationToken
+
+    out = await engine.wait_spawn_any(
+        handle_ids=[slow, fast], timeout_seconds=5.0,
+        cancel=CancellationToken(name="wa"))
+    # 快专家终态即唤醒;慢专家仍钉在门上 → 落 pending,不被等
+    assert out["outcome"] == "terminal"
+    assert list(out["settled"]) == [fast]
+    assert out["settled"][fast]["status"] == "done"
+    assert out["pending"] == [slow]
+    assert engine.spawn_status([slow])[slow]["status"] == "running"
+
+    assert await _wait(lambda: len(events) == 2)
+    started, resolved = events[0], events[1]
+    assert started.kind == "peer_wait_any_started"
+    assert started.data["handle_ids"] == [slow, fast]
+    assert started.data["timeout_seconds"] == 5.0
+    assert resolved.kind == "peer_wait_any_resolved"
+    assert resolved.data == {"settled_ids": [fast], "pending_ids": [slow],
+                             "outcome": "terminal"}
+
+    gate.set()
+    await _wait(lambda: engine.spawn_status([slow])[slow]["status"] == "done")
+    task.cancel()
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_any_collects_all_settled_at_wake(wait_any_skills,
+                                                     threads_dir) -> None:
+    """唤醒时收走当时**全部**已终态句柄,且已终态时立即返回(不空转一个轮询周期)。"""
+    gate = asyncio.Event()
+    pool, engine = await _make_wa_engine(wait_any_skills, threads_dir, gate)
+    a = (await engine.spawn_skill(
+        skill_id="wa-fast", args={}, reason="a"))["handle_id"]
+    b = (await engine.spawn_skill(
+        skill_id="wa-fast", args={}, reason="b"))["handle_id"]
+    # 两个都跑到终态后再等 —— 构造「同一轮询周期内多个已终态」
+    assert await _wait(lambda: all(
+        engine.spawn_status([h])[h]["status"] == "done" for h in (a, b)))
+
+    from taifeng.loop.cancellation import CancellationToken
+
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    out = await engine.wait_spawn_any(
+        handle_ids=[a, b], timeout_seconds=5.0,
+        cancel=CancellationToken(name="wa2"))
+    elapsed = loop.time() - t0
+
+    assert out["outcome"] == "terminal"
+    assert set(out["settled"]) == {a, b}, "同批多个终态须一次收全,不逼调用方复调"
+    assert out["pending"] == []
+    assert elapsed < 0.05, f"已终态应立即返回,实测等了 {elapsed:.3f}s"
+    gate.set()
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_any_timeout_and_arg_rejections(wait_any_skills,
+                                                   threads_dir) -> None:
+    """全 pending 至超时不失败 turn;空集 / 未知句柄显式抛(禁 silent fallback)。"""
+    gate = asyncio.Event()
+    pool, engine = await _make_wa_engine(wait_any_skills, threads_dir, gate)
+    slow = (await engine.spawn_skill(
+        skill_id="wa-slow", args={}, reason="s"))["handle_id"]
+
+    from taifeng.loop.cancellation import CancellationToken
+
+    # 1. 全 pending → timeout(settled 空、pending 全量,turn 不失败)
+    out = await engine.wait_spawn_any(
+        handle_ids=[slow], timeout_seconds=0.2,
+        cancel=CancellationToken(name="wa3"))
+    assert out["outcome"] == "timeout"
+    assert out["settled"] == {} and out["pending"] == [slow]
+
+    # 2. 空集永不可能被满足 → 显式抛,不静默等到超时
+    with pytest.raises(ValueError, match="empty_handle_ids"):
+        await engine.wait_spawn_any(
+            handle_ids=[], timeout_seconds=1.0,
+            cancel=CancellationToken(name="wa4"))
+
+    # 3. 未知句柄 → 显式抛,不跳过它继续等其余(禁 silent skip)
+    with pytest.raises(ValueError, match="unknown_spawn_handle"):
+        await engine.wait_spawn_any(
+            handle_ids=[slow, "ghost"], timeout_seconds=1.0,
+            cancel=CancellationToken(name="wa5"))
+
+    gate.set()
+    await _wait(lambda: engine.spawn_status([slow])[slow]["status"] == "done")
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_any_cancel_cascades(wait_any_skills, threads_dir) -> None:
+    """等待期间取消 → 立即中止(CancelledError 沿既有取消路径,R4)。"""
+    gate = asyncio.Event()
+    pool, engine = await _make_wa_engine(wait_any_skills, threads_dir, gate)
+    slow = (await engine.spawn_skill(
+        skill_id="wa-slow", args={}, reason="s"))["handle_id"]
+
+    from taifeng.loop.cancellation import CancellationToken
+
+    token = CancellationToken(name="wa-cancel")
+    wait_task = asyncio.create_task(engine.wait_spawn_any(
+        handle_ids=[slow], timeout_seconds=30.0, cancel=token))
+    await asyncio.sleep(0.05)
+    token.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait_task
+    gate.set()
+    await _wait(lambda: engine.spawn_status([slow])[slow]["status"] == "done")
     await pool.close()

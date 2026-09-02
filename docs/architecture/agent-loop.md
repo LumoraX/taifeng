@@ -576,6 +576,7 @@ join-barrier（全终态触发）：
 | `kill_skill` | `engine.kill_spawn(handle_id)` | R4：杀单个，兄弟不受影响 |
 | `send_message` | `engine.deliver_peer_message(target, text, mode)` | peer 点对点投递（thread_id / handle_id / "parent" 寻址，双模式） |
 | `wait_peer` | `engine.wait_spawn_terminal(handle_id, timeout_seconds)` | turn 内阻塞等单个句柄终态（timeout **必填**防互等死锁） |
+| `wait_any` | `engine.wait_spawn_any(handle_ids, timeout_seconds)` | turn 内 any-of-N：任一终态即唤醒，收走当时全部已终态（timeout 同样必填） |
 
 **注**：detached-spawn 能力**无新 Op**——发起 / 查询 / 取消全部通过 LLM 工具或业务直调 engine API 完成，不走 Submission 队列（与 turn 无关的 out-of-band 操作）。
 
@@ -626,7 +627,7 @@ steering 解决「用户 → 运行中 turn」；peer-mailbox 把同一 seam 推
 - **Op + 工具同路径**：`SendToPeer{target_thread_id, text, mode}` 与 `send_message` 工具都收敛到 `engine.deliver_peer_message`（SpawnDriver 实现）。寻址 = child_thread_id / handle_id / `"parent"`（解析为谱系 root）；未知目标显式 error。
 - **双模式**：`queue_only`（运行中投目标 runner 的 `pending_input`——B1 同一队列；空闲即时 `store.append` 落史，R5）；`trigger_turn`（空闲 spawn child 落史后以续跑范式唤醒新 detached turn，emit `peer_agent_woken`；运行中自动降级 `mode_downgraded=true`；root 拒绝；suspended 只落史——挂起只能由 Resume 解除）。
 - **消息形态**：`user_message` + payload `source="peer", from_thread`（不新增 kind）；事件 `peer_message_sent` 不含正文。
-- **wait_peer**：turn 内轮询句柄表等单个终态，与 `await_skills`（barrier，turn 结束后聚合）分工互补。
+- **wait_peer / wait_any**：turn 内轮询句柄表等终态——前者等**一个**、后者等**任一**（唤醒时收走当时全部已终态），与 `await_skills`（barrier，turn 结束后等**全部**再聚合）构成「等一个 / 等任一 / 等全部」三档。中间那档对标 codex `wait_agent`：缺它则错峰完成的 N 个子任务只能盯死一个或等最慢的。
 
 完整契约见 [`capabilities/peer-mailbox-messaging.md`](capabilities/peer-mailbox-messaging.md)。
 

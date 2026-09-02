@@ -332,6 +332,27 @@ class PeerWaitResolved(_Msg):
     kind: Literal["peer_wait_resolved"] = "peer_wait_resolved"
 
 
+class PeerWaitAnyStarted(_Msg):
+    """wait_any 开始 any-of-N 等待。data = {"handle_ids": list[str], "timeout_seconds"}
+
+    与 PeerWaitStarted 分开而非复用:data 形状不同(单个 handle_id vs 句柄集),
+    复用会逼订阅方按字段存在性做分支判断,损害归因性(R3)。
+    """
+
+    kind: Literal["peer_wait_any_started"] = "peer_wait_any_started"
+
+
+class PeerWaitAnyResolved(_Msg):
+    """wait_any 等待结束。
+
+    data = {"settled_ids": list[str], "pending_ids": list[str],
+            "outcome": "terminal"|"timeout"}
+    正文(各句柄 result)不入事件 data——与 peer 事件族一致,只带可归因的形状信息。
+    """
+
+    kind: Literal["peer_wait_any_resolved"] = "peer_wait_any_resolved"
+
+
 class CacheBreakDetected(_Msg):
     kind: Literal["cache_break_detected"] = "cache_break_detected"
     """data = {"unexpected": bool, "reason": str, "token_drop": int}"""
@@ -875,6 +896,8 @@ Msg = Union[
     PeerAgentWoken,
     PeerWaitStarted,
     PeerWaitResolved,
+    PeerWaitAnyStarted,
+    PeerWaitAnyResolved,
 ]
 
 

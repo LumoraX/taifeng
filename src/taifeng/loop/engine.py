@@ -2173,6 +2173,17 @@ class AgentEngine:
         return await self._spawn.wait_spawn_terminal(
             handle_id=handle_id, timeout_seconds=timeout_seconds, cancel=cancel)
 
+    async def wait_spawn_any(
+        self,
+        *,
+        handle_ids: list[str],
+        timeout_seconds: float,
+        cancel: CancellationToken,
+    ) -> dict[str, Any]:
+        """转发到 SpawnDriver.wait_spawn_any —— ``wait_any`` 工具实现体（any-of-N）。"""
+        return await self._spawn.wait_spawn_any(
+            handle_ids=handle_ids, timeout_seconds=timeout_seconds, cancel=cancel)
+
     async def kill_spawn(self, handle_id: str) -> None:
         """转发到 SpawnDriver.kill_spawn —— 公共 API（主动终止单个 spawn 子树）。"""
         await self._spawn.kill_spawn(handle_id)

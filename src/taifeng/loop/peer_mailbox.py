@@ -25,6 +25,8 @@ from taifeng.loop.event import (
     EventMsg,
     PeerAgentWoken,
     PeerMessageSent,
+    PeerWaitAnyResolved,
+    PeerWaitAnyStarted,
     PeerWaitResolved,
     PeerWaitStarted,
 )
@@ -324,3 +326,120 @@ class PeerMailbox:
                     "status": h.status if h else "unknown",
                 }
             await asyncio.sleep(min(0.05, remaining))
+
+    async def wait_spawn_any(
+        self,
+        *,
+        handle_ids: list[str],
+        timeout_seconds: float,
+        cancel: CancellationToken,
+    ) -> dict[str, Any]:
+        """turn 内阻塞等一组 spawn 句柄,**任一**到终态即唤醒(``wait_any`` 实现体)。
+
+        补齐等待原语的中间档:``wait_spawn_terminal`` 等**一个**、join-barrier 等
+        **全部**,本方法等**任一**。缺这一档时,面对错峰完成的 N 个子任务只能盯死
+        一个或等最慢的,想「谁先好先处理谁」只能让 LLM 轮询 join_skill——每轮烧一次
+        采样,正是 IterationBudget 要防的空转。对标 codex ``wait_agent`` 的 any-of-N。
+
+        **唤醒时收全**:返回当时**全部**已终态句柄,不是只返回第一个——同一轮询周期
+        内多个完成时,调用方不必反复调用。
+
+        ``suspended``(HITL 等待中)**不算**唤醒条件,与 wait_peer / barrier 的终态口径
+        一致;挂起期的等待由 ``timeout_seconds`` 兜底。轮询粒度与取消语义同
+        ``wait_spawn_terminal``(50ms;每圈 raise_if_cancelled,R4)。
+
+        Args:
+            handle_ids: 待等待的 spawn 句柄集(非空;每个必须已注册;重复项按发起序去重)。
+            timeout_seconds: 最长等待秒数(必填);到期仍零终态 → outcome=timeout。
+            cancel: 取消令牌,每轮询圈检查(R4)。
+
+        Returns:
+            ``{"outcome": "terminal"|"timeout", "settled": {hid: {status, result}},
+            "pending": [hid, ...]}``。
+
+        Raises:
+            ValueError: handle_ids 为空(``empty_handle_ids``),或含未注册句柄
+                (``unknown_spawn_handle``)。
+            asyncio.CancelledError: 等待期间被取消。
+        """
+        drv = self._driver
+        eng = drv._engine  # noqa: SLF001
+        # 空集永不可能被满足,等下去必然只能超时 —— 调用方明确错误,显式抛不静默
+        if not handle_ids:
+            raise ValueError("empty_handle_ids")
+        # 去重保序(dict 有序):返回值的 pending 顺序对调用方可预期
+        ordered = list(dict.fromkeys(handle_ids))
+        for hid in ordered:
+            if drv._spawn_handles.get(hid) is None:  # noqa: SLF001
+                raise ValueError(f"unknown_spawn_handle: {hid}")
+        # submission_id 取等待方所在 thread:any-of-N 没有单一句柄能代表这次等待,
+        # 用其中任意一个当轨道键会误导订阅方(wait_peer 用 handle_id 是因为只等它一个)。
+        track = eng._thread_id  # noqa: SLF001
+        await eng._emit(EventMsg(  # noqa: SLF001
+            submission_id=track,
+            msg=PeerWaitAnyStarted(data={
+                "handle_ids": ordered,
+                "timeout_seconds": timeout_seconds,
+            }),
+        ))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            cancel.raise_if_cancelled()
+            settled = self._collect_settled(ordered)
+            if settled:
+                return await self._resolve_wait_any(
+                    track, ordered, settled, "terminal")
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return await self._resolve_wait_any(track, ordered, {}, "timeout")
+            await asyncio.sleep(min(0.05, remaining))
+
+    def _collect_settled(self, handle_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """收走句柄集中**当时全部**已终态的 {status, result}(纯读,不改状态)。
+
+        Args:
+            handle_ids: 已去重、已校验存在的句柄集。
+
+        Returns:
+            ``{hid: {"status", "result"}}``;无终态时为空 dict。
+        """
+        drv = self._driver
+        settled: dict[str, dict[str, Any]] = {}
+        for hid in handle_ids:
+            if not drv._spawn_handles.is_terminal(hid):  # noqa: SLF001
+                continue
+            h = drv._spawn_handles.get(hid)  # noqa: SLF001
+            # is_terminal 已保证句柄在册
+            assert h is not None
+            settled[hid] = {"status": h.status, "result": h.result}
+        return settled
+
+    async def _resolve_wait_any(
+        self,
+        track: str,
+        ordered: list[str],
+        settled: dict[str, dict[str, Any]],
+        outcome: str,
+    ) -> dict[str, Any]:
+        """emit wait_any 收尾事件并组装返回值(terminal / timeout 共用一条出口)。
+
+        Args:
+            track: 轨道键(等待方 thread_id)。
+            ordered: 去重保序的完整句柄集。
+            settled: 已终态句柄的 {status, result};timeout 时为空。
+            outcome: ``"terminal"`` 或 ``"timeout"``。
+
+        Returns:
+            工具层直接可序列化的结果 dict。
+        """
+        pending = [h for h in ordered if h not in settled]
+        await self._driver._engine._emit(EventMsg(  # noqa: SLF001
+            submission_id=track,
+            msg=PeerWaitAnyResolved(data={
+                "settled_ids": list(settled),
+                "pending_ids": pending,
+                "outcome": outcome,
+            }),
+        ))
+        return {"outcome": outcome, "settled": settled, "pending": pending}

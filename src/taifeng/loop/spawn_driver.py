@@ -627,6 +627,17 @@ class SpawnDriver:
         return await self._peers.wait_spawn_terminal(
             handle_id=handle_id, timeout_seconds=timeout_seconds, cancel=cancel)
 
+    async def wait_spawn_any(
+        self,
+        *,
+        handle_ids: list[str],
+        timeout_seconds: float,
+        cancel: CancellationToken,
+    ) -> dict[str, Any]:
+        """转发到 ``PeerMailbox.wait_spawn_any``（``wait_any`` 工具实现体）。"""
+        return await self._peers.wait_spawn_any(
+            handle_ids=handle_ids, timeout_seconds=timeout_seconds, cancel=cancel)
+
 
     # -----------------------------------------------------------------
     # join-barrier + 冷恢复 —— 实现体在 loop/spawn_barrier.py（JoinBarrierCoordinator）
