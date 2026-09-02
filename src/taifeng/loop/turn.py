@@ -1751,7 +1751,7 @@ class TurnRunner:
         self.history_buffer.append(fco)
         await self.store.append(fco)
 
-    def _settle_tool_output(self, call_id: str, result: Any) -> ResponseItem:
+    def _settle_tool_output(self, call_id: str, result: ToolResult) -> ResponseItem:
         """把 ToolResult 结算成 function_call_output item（两处结算点共用）。
 
         图片附件在此完成 **durable append 之前**的 admission。违规**不上抛出批**：
