@@ -382,7 +382,9 @@ version: 1.0.0
 type: composite
 entry: true
 model: mock-model
-child_skills: [ttl-expert, ttl-fast]
+# ttl-consult 是 barrier 聚合器:虽不经 call_skill 调用,也须声明进产品包
+# (then_skill 白名单校验,见 detached-spawn 契约)
+child_skills: [ttl-expert, ttl-fast, ttl-consult]
 max_call_depth: 3
 ---
 # 宿主 TTL_HOST_MARK

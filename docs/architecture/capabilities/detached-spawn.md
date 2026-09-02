@@ -45,7 +45,7 @@ running → done | error | cancelled
 | --- | --- | --- |
 | `barrier_id` | `str` | 唯一 id |
 | `handle_ids` | `frozenset[str]` | 需全部到达终态才触发 |
-| `then_skill_id` | `str` | 聚合 skill id（注册时校验存在性，**不校验** entry 资格） |
+| `then_skill_id` | `str` | 聚合 skill id（注册时校验存在性 **+ 落在 entry 产品包内**：`entry.child_skills ∪ {entry.id}`；**不校验** entry 资格） |
 | `then_args_template` | `dict \| None` | `None` → 聚合 args = `{handle_id: {status, result}}` for 全部句柄（含 failed / cancelled，不丢弃）；非 None → 模板 dict **原样透传**为聚合 turn 的种子 args（v1 **不做**任何 `{{handle_id}}` 占位替换） |
 
 ### SpawnHandle 落盘（append-only ResponseItem）
@@ -152,7 +152,10 @@ running → done | error | cancelled
 
 `set_join_barrier(handle_ids, then_skill_id, then_args_template=None)` 登记一道屏障：
 
-- 注册时校验：每个 handle_id 已知 + `then_skill_id` 在 snapshot 中存在（不校验 entry 资格）
+- 注册时校验：每个 handle_id 已知 + `then_skill_id` 在 snapshot 中存在 + `then_skill_id` ∈ `entry.child_skills ∪ {entry.id}`（**不校验** entry 资格——聚合走独立根 turn，无 entry 门）
+- 白名单一条是治理一致性所需：`spawn_skill` / `call_skill` 都要过 entry 的 `child_skills` 门，barrier 的 then 边若可指向 snapshot 内任意 skill，就成了调用图上一条**不受声明背书**的边（ADR 0006「entry skill 及其可达子图 = 一个产品包」）。聚合回 entry 自身是正当模式（「跑完回来找我」），故并入白名单
+- 聚合器不经 `call_skill` 调用，把它写进 `child_skills` 只是**产品包成员声明**；若不希望它同时出现在 LLM 的可调子 skill 列表里，用 `exposure.model_invocable: false`（G4b）隐藏
+- **迁移提示**：本校验收紧了既有行为——此前 `then_skill_id` 只要存在于 snapshot 即可。嵌入方若把聚合器指向了未声明的 skill，需将其补进 entry 的 `child_skills`
 - 返回 `{barrier_id}`，emit `join_barrier_registered`，追加 `join_barrier` ResponseItem 到父 thread
 
 触发条件：`handle_ids` 内**全部**句柄到达终态（done / error / cancelled）。任意一个句柄到达终态后检查；全部终态才触发。
@@ -179,6 +182,18 @@ barrier_id 记入 `_fired_barriers`。检查与置位同处一个事件循环步
 
 **失败语义**：守卫先于 `_fire_barrier` 置位，故其中途抛错（如 `join_barrier_skill_missing`）时该
 barrier 不重试。这是有意的——then_skill 缺失属声明层错误，重试必然重复失败。
+
+#### Scenario: then_skill 越出产品包被拒
+
+- **GIVEN** 某 skill 存在于 snapshot，但既不在 `entry.child_skills` 内也不是 entry 自身
+- **WHEN** 以它为 `then_skill_id` 调用 `set_join_barrier`
+- **THEN** SHALL raise `ValueError("then_skill_not_in_whitelist: <id>")`，且该 barrier SHALL NOT 被登记
+
+#### Scenario: 聚合回 entry 自身被放行
+
+- **GIVEN** `then_skill_id` 就是 entry skill 自身（entry 不在自己的 `child_skills` 里）
+- **WHEN** 调用 `set_join_barrier`
+- **THEN** SHALL 正常登记并在全终态时触发——「跑完回来找我」是正当模式
 
 #### Scenario: 并发检查只触发一次
 

@@ -9,6 +9,7 @@ import pytest
 import taifeng
 from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.spawn_handle import SpawnHandleRegistry
+from tests.conftest import ATOMIC_SKILL
 
 
 async def _wait(cond, tries: int = 200) -> bool:
@@ -1159,6 +1160,38 @@ async def test_spawn_rejections(skills_dir, threads_dir):
     with pytest.raises(KeyError):
         await engine.kill_spawn("nope")
 
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_barrier_then_skill_not_in_whitelist_rejected(skills_dir, threads_dir):
+    """barrier 的 then_skill 越出 entry 产品包 → 显式拒绝,且不留半登记的 barrier。
+
+    治理一致性:spawn_skill / call_skill 都要过 entry 的 child_skills 门,then 边
+    若可指向 snapshot 内任意 skill,就成了调用图上一条不受声明背书的边
+    (ADR 0006「entry skill 及其可达子图 = 一个产品包」)。
+    outsider 存在于 snapshot,但既不在 code-reviewer 的 child_skills 内、也不是
+    entry 自身 → 拒绝。而「then = entry 自身」是正当模式,由
+    test_join_barrier_fires_when_all_done(then_skill_id="code-reviewer")覆盖。
+    """
+    # snapshot 里放一个谁都没声明为 child 的合法 skill(存在但越出产品包)
+    (skills_dir / "outsider").mkdir()
+    (skills_dir / "outsider" / "SKILL.md").write_text(
+        ATOMIC_SKILL.replace("name: style-checker", "name: outsider"),
+        encoding="utf-8")
+    client = RoutingSimClient(routes={"style-checker": [SimTurn(text="x")]})
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=client, compressors=[])
+    engine = await pool.get_or_create(
+        session_id="jb-wl", entry_skill_id="code-reviewer")
+    a = (await engine.spawn_skill(
+        skill_id="style-checker", args={}, reason="x"))["handle_id"]
+
+    with pytest.raises(ValueError, match="then_skill_not_in_whitelist"):
+        await engine.set_join_barrier([a], then_skill_id="outsider")
+    # 拒绝发生在写 barriers 表之前:表必须干净,不能留下半登记的 barrier
+    assert not engine._spawn_handles.barriers  # noqa: SLF001
     await pool.close()
 
 

@@ -53,23 +53,28 @@ class JoinBarrierCoordinator:
         """登记一个 join-barrier:等 handle_ids 全终态后自动起 then_skill_id 聚合 turn。
 
         聚合 turn 走 ``_build_child_runner``(call_stack 空 → 独立根 turn,**不**过
-        DispatchPolicy 的 entry 门控),故 ``then_skill_id`` 可以是 entry 也可以非 entry,
-        校验仅要求其**存在于 snapshot**。失败/取消的专家终态不被丢弃 —— 触发时默认
-        把每个 handle 的 {status, result} 带入聚合输入(见 _check_barriers)。
+        DispatchPolicy 的 entry 门控),故 ``then_skill_id`` 可以是 entry 也可以非 entry;
+        但**必须落在 entry 的产品包内**(``entry.child_skills ∪ {entry.id}``),否则
+        barrier 的 then 边就成了调用图上一条不受声明背书的边(见校验 3)。失败/取消的
+        专家终态不被丢弃 —— 触发时默认把每个 handle 的 {status, result} 带入聚合输入
+        (见 _check_barriers)。
 
         登记后**立即检查一次**:handle 可能在登记前就已全终态(本测试/业务常见),
         此时同步触发,不需要再等新的终态事件。
 
         Args:
             handle_ids: 本 barrier 等待的全部 spawn 句柄 id(必须均已注册)。
-            then_skill_id: 全终态后续接执行的聚合 skill id(须存在于 snapshot)。
+            then_skill_id: 全终态后续接执行的聚合 skill id(须存在于 snapshot,
+                且 ∈ ``entry.child_skills ∪ {entry.id}``)。
             then_args_template: 聚合 skill 的自定义参数模板;None → 用默认(各 handle 终态)。
 
         Returns:
             ``{"barrier_id": ...}``。
 
         Raises:
-            ValueError: 某 handle_id 未注册,或 then_skill_id 不存在于 snapshot。
+            ValueError: 某 handle_id 未注册(``unknown_spawn_handle``)、then_skill_id
+                不存在于 snapshot(``unknown_skill``),或其越出 entry 产品包
+                (``then_skill_not_in_whitelist``)。
         """
         import secrets
 
@@ -82,6 +87,15 @@ class JoinBarrierCoordinator:
         # 2. 校验:聚合 skill 必须存在(不门控 entry——聚合走独立根 turn 无 entry 门)
         if eng._snapshot.get(then_skill_id) is None:  # noqa: SLF001
             raise ValueError(f"unknown_skill: {then_skill_id}")
+        # 3. 校验:聚合 skill 必须落在 entry 的产品包内(child_skills ∪ {entry 自身})。
+        #    治理一致性所需:spawn_skill / call_skill 都要过 entry 的 child_skills 门,
+        #    barrier 的 then 边若可指向 snapshot 内任意 skill,就成了调用图上一条**不受
+        #    声明背书**的边(ADR 0006「entry skill 及其可达子图 = 一个产品包」)。
+        #    entry 自身并入白名单:聚合回 entry 是正当模式(「跑完回来找我」),而 entry
+        #    不会把自己写进自己的 child_skills。
+        entry = eng._entry_skill  # noqa: SLF001
+        if then_skill_id != entry.id and then_skill_id not in entry.child_skills:
+            raise ValueError(f"then_skill_not_in_whitelist: {then_skill_id}")
 
         barrier_id = f"jb_{secrets.token_hex(4)}"
         barrier = JoinBarrier(
@@ -92,7 +106,7 @@ class JoinBarrierCoordinator:
         )
         drv._spawn_handles.barriers[barrier_id] = barrier  # noqa: SLF001
 
-        # 3. parent thread 落登记锚(冷恢复可重建 barrier)+ emit 登记事件
+        # 4. parent thread 落登记锚(冷恢复可重建 barrier)+ emit 登记事件
         from taifeng.conversation.models import join_barrier_item
 
         anchor = join_barrier_item(
@@ -114,7 +128,7 @@ class JoinBarrierCoordinator:
             }),
         ))
 
-        # 4. 立即检查:handle 可能登记前已全终态 → 同步触发(否则永不再有终态事件唤醒)
+        # 5. 立即检查:handle 可能登记前已全终态 → 同步触发(否则永不再有终态事件唤醒)
         # 经 driver 转发器走(而非直调自身):保持 monkeypatch 注入点单一。
         await drv._check_barriers()  # noqa: SLF001
         return {"barrier_id": barrier_id}
