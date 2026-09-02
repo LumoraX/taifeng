@@ -68,6 +68,7 @@ from taifeng.tool.builtins import (  # noqa: E402
     make_request_user_input_tool,
     make_send_message_tool,
     make_spawn_skill_tool,
+    make_wait_any_tool,
 )
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent
@@ -105,6 +106,7 @@ TOOL_FACTORIES = {
     "join_skill": make_join_skill_tool,
     "kill_skill": make_kill_skill_tool,
     "send_message": make_send_message_tool,
+    "wait_any": make_wait_any_tool,
 }
 
 def _post_turn_hook_runner() -> object:
@@ -209,6 +211,13 @@ SCENARIOS: list[Scenario] = [
                      "turn_completed"},
              driver="peer_messaging",
              tools=("spawn_skill", "send_message", "await_skills")),
+    Scenario("wait_any", "real_llm/skills_extra/wait_any", "race-coordinator",
+             "",
+             capability="any-of-N 等待(wait_any:先到先处理,不等最慢的)",
+             expect={"spawn_started", "peer_wait_any_started",
+                     "peer_wait_any_resolved", "turn_completed"},
+             driver="wait_any",
+             tools=("spawn_skill", "wait_any", "join_skill")),
     Scenario("kernel_knobs", "real_llm/skills_extra/kernel_knobs", "budget-analyst",
              "请按口径分析：某部门年度预算 1200 万元，Q3 实际支出 410 万元，是否超支？",
              capability="K2 会话 token 天花板真实触发（resource_limit）",

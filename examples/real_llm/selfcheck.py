@@ -6,10 +6,10 @@ Rewind 提交时序）本身无 bug。**只覆盖可静态剧本化的 driver**�
 - ``suspend_resume``：HITL 挂起 → Resume 续跑；
 - ``turn_rewind``：完成 → Rewind(re_reason) → 二次完成。
 
-``spawn_join`` / ``peer_messaging`` 的脚本需要动态句柄（spawn 返回的 handle_id /
-child_thread_id 进 await_skills / send_message 参数），静态剧本无法表达——其 driver
-与 suspend_resume 同构（事件轮询 + 按 child thread Resume），动态参数路径由真实
-回归（capability_matrix.py 全量）首验。
+``spawn_join`` / ``peer_messaging`` / ``wait_any`` 的脚本需要动态句柄（spawn 返回的
+handle_id / child_thread_id 进 await_skills / send_message / wait_any 参数），静态剧本
+无法表达——其 driver 与 suspend_resume 同构（事件轮询 + 按 child thread Resume），
+动态参数路径由真实回归（capability_matrix.py 全量）首验。
 
 运行：
     PYTHONPATH=src uv run python examples/real_llm/selfcheck.py

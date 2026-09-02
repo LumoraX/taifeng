@@ -173,11 +173,30 @@ async def drive_post_turn_review(engine: Any, res: Any) -> None:
         what="第2轮 post_turn_hook_fired", wait_seconds=240.0)
 
 
+async def drive_wait_any(engine: Any, res: Any) -> None:
+    """并发两路 spawn + wait_any 先到先处理(any-of-N 真实链路)。
+
+    校验点不是「跑完」,而是模型**真的用了 any-of-N**:先到的那路进 settled、
+    未到的进 pending,协调人据此先出阶段性判断,再回收 pending。若模型退化成
+    等全部(await_skills / 两次 wait 单个),peer_wait_any_* 事件就不会出现。
+    """
+    await engine.submit(taifeng.UserMessage(
+        text="议题:远程办公对团队创造力是利大于弊还是弊大于利?"
+             "请并发派两路分析,谁先出结论就先处理谁,不要干等两路都跑完。"))
+    await _wait_for(res, lambda m: m.kind == "peer_wait_any_started",
+                    what="peer_wait_any_started", wait_seconds=240.0)
+    await _wait_for(res, lambda m: m.kind == "peer_wait_any_resolved",
+                    what="peer_wait_any_resolved", wait_seconds=300.0)
+    await _wait_for(res, lambda m: _root_completions(res) >= 1,
+                    what="root turn_completed", wait_seconds=300.0)
+
+
 DRIVERS: dict[str, Any] = {
     "suspend_resume": drive_suspend_resume,
     "turn_rewind": drive_turn_rewind,
     "thread_rewind": drive_thread_rewind,
     "spawn_join": drive_spawn_join,
     "peer_messaging": drive_peer_messaging,
+    "wait_any": drive_wait_any,
     "post_turn_review": drive_post_turn_review,
 }
