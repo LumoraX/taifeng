@@ -230,8 +230,18 @@ async def test_nested_grandchild_suspension_propagates_to_root(tmp_path: Path, t
     events1 = await recorder.wait_terminal(sub_id)
     assert events1[-1].msg.kind == "turn_suspended"
 
-    # 三层各 emit turn_suspended：叶(用户 pending) + 中(CHILD_SKILL) + 根(CHILD_SKILL)
-    susp_tids = await _suspended_thread_ids(events1)
+    # 三层各 emit turn_suspended：叶(用户 pending) + 中(CHILD_SKILL) + 根(CHILD_SKILL)。
+    # wait_terminal 在首个（叶层）turn_suspended 即返回，中 / 根两层的挂起事件随
+    # 挂起向上传播稍后才到——先等齐三层再断言（否则间歇红）。
+    async def _three_suspended() -> list[str]:
+        while True:
+            got = [e for e in recorder._events if e.submission_id == sub_id]  # noqa: SLF001
+            tids = await _suspended_thread_ids(got)
+            if len(tids) >= 3:
+                return tids
+            await asyncio.sleep(0.02)
+
+    susp_tids = await asyncio.wait_for(_three_suspended(), timeout=8.0)
     assert len(susp_tids) == 3, f"祖父三层应各 emit turn_suspended，实得 {susp_tids}"
     leaf_tid, leaf_rec = await _leaf_with_user_pending(pool, susp_tids)
     assert leaf_tid is not None and leaf_tid != root_tid, "叶 thread 必须含用户 pending 且非根"
