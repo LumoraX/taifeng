@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -20,6 +18,7 @@ from taifeng.llm.client import ModelCapabilities
 from taifeng.llm.image_input import ImageAttachmentV1, ImageInputPolicy
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from tests.conftest import run_until_root_done
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -145,37 +144,13 @@ async def _run(tmp_path: Path, threads_dir: Path) -> tuple[list, dict[str, list]
         extra_tools=[_observe_frame_tool()],
     )
     engine = await pool.get_or_create(session_id="s", entry_skill_id="planner")
-    # 必须等**最外层根 turn** 终态。两个坑叠在一起：① call_skill 派生的子 turn
-    # 复用父的 submission_id 且更早 emit turn_completed；② engine.subscribe(sub_id)
-    # 在首个终态事件后即关流，根本收不到之后的根终态。见首个终态就退出会让父 turn
-    # 停在结算前被 close() 取消，fc/fco 永不落盘——父 history 静默残缺。
-    # 故照 test_audit_engine_turn_e2e::_run_op_until_root_done 的形态：先注册
-    # subscribe_all 收集器，再提交，只认 is_root=True 的终态。
-    result: list[str] = []
-    done = asyncio.Event()
-    sub_holder: list[str] = []
-
-    async def collector() -> None:
-        async for ev in engine.subscribe_all():
-            if not sub_holder or ev.submission_id != sub_holder[0]:
-                continue
-            if ev.msg.kind in ("turn_completed", "turn_failed") and ev.msg.data.get(
-                "is_root"
-            ):
-                result.append(ev.msg.kind)
-                done.set()
-                return
-
-    task = asyncio.create_task(collector())
-    await asyncio.sleep(0)  # 让 collector 先注册 subscribe_all 队列
-    sub_holder.append(await engine.submit(taifeng.UserMessage(text="看一下画面")))
-    try:
-        await asyncio.wait_for(done.wait(), timeout=10.0)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-    assert result == ["turn_completed"], f"根 turn 未正常收敛: {result}"
+    # 等根 turn 终态的正确姿势见 conftest.run_until_root_done（两个坑的说明
+    # 也在那里）：子 turn 复用父 submission_id 且更早发终态、subscribe(sub_id)
+    # 首个终态即关流。此处不再自行实现。
+    events = await run_until_root_done(
+        engine, taifeng.UserMessage(text="看一下画面")
+    )
+    assert events[-1].msg.kind == "turn_completed", events[-1].msg.data
 
     parent_thread_id = engine.thread_id
     await pool.close()

@@ -10,9 +10,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
-import contextlib
 import hashlib
 import json
 from typing import TYPE_CHECKING
@@ -31,6 +29,7 @@ from taifeng.llm.image_input import ImageAttachmentV1, ImageInputPolicy
 from taifeng.llm.providers.openai.responses import OpenAIResponsesClient
 from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.loop.audit_config import AuditConfig
+from tests.conftest import run_until_root_done_kind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,12 +87,10 @@ async def _run_until_root_done(
     *,
     deadline_seconds: float = 10.0,
 ) -> str:
-    """提交一轮并等**最外层根 turn** 终态，返回 turn_completed / turn_failed。
+    """提交一轮文本并等**最外层根 turn** 终态，返回 turn_completed / turn_failed。
 
-    call_skill 派生的子 sub-turn 亦发 ``turn_completed``（``is_root=False``），且比父
-    entry 更早 emit——``engine.subscribe(sub_id)`` 会在首个 turn_completed 即早退（见
-    tests/skill/test_composite_e2e.py 注释）。故改用 ``subscribe_all()`` 后台收集，仅在
-    终态事件带 ``is_root=True``（最外层 entry turn）时退出，确保父 turn 完整收敛。
+    等待姿势的两个坑（子 turn 复用 submission_id、subscribe(sub_id) 首个终态即
+    关流）已收敛到 conftest 的 run_until_root_done，此处只做薄包装。
     """
     return await _run_op_until_root_done(
         engine,
@@ -109,32 +106,9 @@ async def _run_op_until_root_done(
     deadline_seconds: float = 10.0,
 ) -> str:
     """在提交任意 UserMessage 前注册 collector，并等待根 turn 终态。"""
-    result: list[str] = []
-    done = asyncio.Event()
-    sub_holder: list[str] = []
-
-    async def collector() -> None:
-        async for ev in engine.subscribe_all():
-            if not sub_holder or ev.submission_id != sub_holder[0]:
-                continue
-            if ev.msg.kind in ("turn_completed", "turn_failed") and ev.msg.data.get(
-                "is_root"
-            ):
-                result.append(ev.msg.kind)
-                done.set()
-                return
-
-    task = asyncio.create_task(collector())
-    await asyncio.sleep(0)  # 让 collector 先注册 subscribe_all 队列
-    sub_holder.append(await engine.submit(op))
-    try:
-        await asyncio.wait_for(done.wait(), timeout=deadline_seconds)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-    assert result, "未收到根 turn 终态事件"
-    return result[0]
+    return await run_until_root_done_kind(
+        engine, op, deadline_seconds=deadline_seconds
+    )
 
 
 @pytest.mark.asyncio

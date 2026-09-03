@@ -12,14 +12,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 from typing import TYPE_CHECKING
 
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
+from tests.conftest import run_until_root_done
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,36 +65,15 @@ async def _run_until_root_done(
     *,
     deadline_seconds: float = 10.0,
 ) -> list:
-    """提交 message，subscribe_all 收集事件直到最外层 turn 完成/失败。"""
-    sub_id_holder: list[str] = []
-    events: list = []
-    done = asyncio.Event()
+    """提交 message 并等最外层 turn 终态，返回该 submission 的全部事件。
 
-    async def collector() -> None:
-        depth = 0
-        async for ev in engine.subscribe_all():
-            if not sub_id_holder or ev.submission_id != sub_id_holder[0]:
-                continue
-            events.append(ev)
-            if ev.msg.kind == "skill_dispatched":
-                depth += 1
-            elif ev.msg.kind == "skill_returned":
-                depth -= 1
-            if ev.msg.kind in ("turn_completed", "turn_failed") and depth == 0:
-                done.set()
-                return
-
-    task = asyncio.create_task(collector())
-    await asyncio.sleep(0)
-    sub_id = await engine.submit(message)
-    sub_id_holder.append(sub_id)
-    try:
-        await asyncio.wait_for(done.wait(), timeout=deadline_seconds)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-    return events
+    原实现用 skill_dispatched/skill_returned 计数深度推断「回到根」；现改用
+    conftest 的共享 helper，判据换成 loop/event.py 明文契约的 is_root——终态
+    事件本就带该字段，不必绕道计数。
+    """
+    return await run_until_root_done(
+        engine, message, deadline_seconds=deadline_seconds
+    )
 
 
 async def test_empty_subskill_completion_is_tolerated(tmp_path: Path, caplog) -> None:

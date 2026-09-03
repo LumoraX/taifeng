@@ -12,6 +12,7 @@ from taifeng.llm.image_input import ImageAttachmentV1, ImageInputPolicy
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import ImagePart
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from tests.conftest import run_until_root_done
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -103,11 +104,10 @@ async def _run(
         extra_tools=[_observe_frame_tool()],
     )
     engine = await pool.get_or_create(session_id="s", entry_skill_id="watcher")
-    submission_id = await engine.submit(taifeng.UserMessage(text="看一下"))
-    async for event in engine.subscribe(submission_id):
-        if event.msg.kind in ("turn_completed", "turn_failed"):
-            assert event.msg.kind == "turn_completed", event.msg.data
-            break
+    # 本场景当前无子 turn（entry 直接调工具），首个终态即根终态；但那是「场景
+    # 碰巧安全」而非写法安全——加一个 call_skill 就会静默退化。统一走共享 helper。
+    events = await run_until_root_done(engine, taifeng.UserMessage(text="看一下"))
+    assert events[-1].msg.kind == "turn_completed", events[-1].msg.data
     history = engine.history_snapshot()
     await pool.close()
     return client, history
