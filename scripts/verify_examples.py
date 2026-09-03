@@ -152,7 +152,11 @@ def run_one(
         raw = exc.stdout or b""
         blob = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
         code = "TIMEOUT"
-    markers = tuple(sorted({pat for pat in HARD_MARKERS if re.search(pat, blob)}))
+    # 记的是**命中的原文**而不是正则本身 —— 排障时要看到 demo 到底打了什么
+    hits: set[str] = set()
+    for pattern in HARD_MARKERS:
+        hits.update(m.group(0) for m in re.finditer(pattern, blob))
+    markers = tuple(sorted(hits))
     if log_dir is not None:
         name = rel.replace("/", "__").removesuffix(".py")
         (log_dir / f"{name}.log").write_text(blob, encoding="utf-8")
