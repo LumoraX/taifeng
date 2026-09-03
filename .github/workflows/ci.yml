@@ -1,0 +1,82 @@
+# 持续门禁 —— 每次 push main / 每个 PR 都跑,不等到发版才发现坏掉。
+# 与 publish.yml 的分工:本文件守「代码是否还对」,publish.yml 守「发行产物是否可发」。
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上新的推送作废旧的排队运行,省 runner 也让红绿只反映 HEAD
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: 全量测试 (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 pyproject classifiers 声明的受支持版本一一对应
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: 校验锁文件与 pyproject 一致
+        run: uv lock --check
+
+      - name: 全量测试
+        # telemetry-otel 必须装:否则 tests/telemetry/test_otel_sink.py 会被
+        # importorskip 静默跳过,那组测试就永远没有地方真正跑过。
+        run: >-
+          uv run --python ${{ matrix.python-version }}
+          --extra dev --extra litellm --extra telemetry-otel
+          pytest tests/ -q
+
+  examples:
+    name: examples 冒烟
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: 跑 sim 档示例
+        # 需真实 LLM key 的示例由脚本自动分档跳过;CI 内禁止调真实 API。
+        # 真实回归走 examples/real_llm/capability_matrix.py + docs/real-llm-ledger。
+        run: >-
+          uv run --frozen --extra dev --extra litellm
+          python scripts/verify_examples.py --log-dir "${RUNNER_TEMP}/example-logs"
+
+      - name: 校验示例未污染工作区
+        # 示例只允许写自己目录下的 .runs/(已 gitignore);
+        # 写进纳管路径 = 生成器产物与提交内容不一致,必须当场发现。
+        run: |
+          dirty="$(git status --porcelain)"
+          if [ -n "$dirty" ]; then
+            echo "::error::示例运行后工作区不干净:"
+            echo "$dirty"
+            exit 1
+          fi
+
+      - name: 失败时上传示例日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: example-logs
+          path: ${{ runner.temp }}/example-logs
+          if-no-files-found: ignore
