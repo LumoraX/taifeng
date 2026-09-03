@@ -584,19 +584,33 @@ class SpawnDriver:
         await self._check_barriers(handle_id)
 
     def has_live_spawns(self) -> bool:
-        """是否存在未终结（running / suspended）的 detached spawn —— 引用计数保活。
+        """是否存在未终结的 detached 后台工作 —— 引用计数保活。
 
-        EnginePool 释放/淘汰 engine 前据此判定：有 live spawn 时**不得**释放
-        engine（否则 detached 子任务 / 挂起待 resume 的 spawn 会随 engine 一起被
-        取消、丢失）。全部 spawn 进入终态后才允许释放。
+        EnginePool 释放/淘汰 engine 前据此判定：有 live 工作时**不得**释放 engine
+        （否则 detached 子任务 / 挂起待 resume 的 spawn / 在跑的聚合 turn 会随
+        engine 一起被取消、丢失）。
+
+        两个来源缺一不可：
+
+        1. **未终态句柄**（running / suspended 的 spawn）；
+        2. **在飞的自有 detached task**（``_owned_tasks``）—— join-barrier 点火起的
+           聚合 turn 经 ``_start_owned_task`` 跑在独立 task 上，**从不登记为 spawn
+           句柄**。只看句柄会漏：最后一个专家进终态与 barrier 点火发生在同一刻,
+           此时句柄集已全终态而聚合 turn 才刚起,保活闸放行释放 engine → pool 释放
+           在 ``stage=engine_task`` 等不到收敛,抛 ``EnginePoolUnresponsiveError``。
+
+        ``_owned_tasks`` 由 ``_start_owned_task`` 登记、done 回调摘除,故「未 done」
+        即「仍在飞」,与 ``converge_owned_tasks``（shutdown 侧收敛）看同一份集合。
 
         Returns:
-            True iff 至少一个句柄状态不在 done/error/cancelled 中。
+            True iff 存在未终态句柄，或存在尚未 done 的自有 detached task。
         """
-        return any(
+        if any(
             not self._spawn_handles.is_terminal(hid)
             for hid in self._spawn_handles.handles
-        )
+        ):
+            return True
+        return any(not task.done() for task in self._owned_tasks)
 
     # -----------------------------------------------------------------
     # peer-mailbox：谱系内点对点投递 —— 实现体在 loop/peer_mailbox.py（PeerMailbox）

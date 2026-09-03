@@ -1445,3 +1445,114 @@ async def test_kill_running_spawn_emits_exactly_one_cancelled(
 
     watch_task.cancel()
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# barrier 聚合 turn 的保活缺口：has_live_spawns 只数 spawn 句柄，而聚合 turn 走
+# _start_owned_task 进 _owned_tasks、从不登记为句柄。最后一个句柄进终态与 barrier
+# 点火同刻发生 → 保活闸判「无 live spawn」放行释放 engine，聚合 turn 才刚起。
+# ---------------------------------------------------------------------------
+
+_KA_HOST = """---
+name: ka-host
+description: 保活测试宿主
+version: 1.0.0
+type: composite
+entry: true
+model: mock-model
+child_skills: [ka-worker, ka-aggregator]
+max_call_depth: 3
+---
+# KA_HOST_MARK 宿主
+"""
+
+_KA_WORKER = """---
+name: ka-worker
+description: 立即完成的专家
+version: 1.0.0
+type: atomic
+---
+# KA_WORKER_MARK 专家
+"""
+
+_KA_AGG = """---
+name: ka-aggregator
+description: 聚合器(钉在门上模拟聚合 turn 在飞)
+version: 1.0.0
+type: composite
+tool_names: [ka_gate]
+max_call_depth: 2
+---
+# KA_AGG_MARK 聚合器
+"""
+
+
+@pytest.fixture
+def keepalive_skills(tmp_path):
+    """ka-host(entry) + ka-worker(秒完成) + ka-aggregator(门控) 三 skill 目录。"""
+    skills = tmp_path / "ka_skills"
+    for name, body in (("ka-host", _KA_HOST), ("ka-worker", _KA_WORKER),
+                       ("ka-aggregator", _KA_AGG)):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text(body, encoding="utf-8")
+    return skills
+
+
+@pytest.mark.asyncio
+async def test_barrier_aggregation_turn_keeps_engine_alive(
+        keepalive_skills, threads_dir) -> None:
+    """聚合 turn 在飞时 has_live_spawns 必须为真，release 必须被保活闸拦下。
+
+    复现路径：句柄全终态 → barrier 点火起聚合 turn（detached，非句柄）→ 此刻
+    只看句柄的保活闸会放行释放 engine，而聚合 turn 还在跑 → pool 释放在
+    stage=engine_task 等不到收敛，抛 EnginePoolUnresponsiveError。
+    """
+    from taifeng.tool.spec import ToolResult, ToolSpec
+
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def _gate_handler(args: dict, ctx: object) -> ToolResult:
+        entered.set()          # 通知测试：聚合 turn 已真正在跑
+        await gate.wait()      # 把聚合 turn 钉住
+        return ToolResult.ok("opened")
+
+    gate_tool = ToolSpec(
+        name="ka_gate", description="门控",
+        input_schema={"type": "object", "properties": {}},
+        handler=_gate_handler, parallel_safe=True)
+
+    client = RoutingSimClient(routes={
+        "KA_WORKER_MARK": [SimTurn(text="专家结论")],
+        "KA_AGG_MARK": [
+            SimTurn(text="聚合中", tool_calls=[
+                {"id": "g1", "name": "ka_gate", "arguments": "{}"}]),
+            SimTurn(text="聚合完成"),
+        ],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=keepalive_skills, threads_dir=threads_dir,
+        model_client=client, compressors=[], extra_tools=[gate_tool])
+    engine = await pool.get_or_create(session_id="ka", entry_skill_id="ka-host")
+
+    h = (await engine.spawn_skill(
+        skill_id="ka-worker", args={}, reason="x"))["handle_id"]
+    assert await _wait(lambda: engine.spawn_status([h])[h]["status"] == "done")
+
+    # 句柄已终态 → 登记 barrier 会**立即**点火，聚合 turn 随即起跑并钉在门上
+    await engine.set_join_barrier([h], then_skill_id="ka-aggregator")
+    assert await _wait(entered.is_set), "聚合 turn 应已开始执行"
+
+    # 此刻：唯一句柄是 done（终态），但聚合 turn 仍在飞 → 必须判定为「有活」
+    assert engine.spawn_status([h])[h]["status"] == "done"
+    assert engine.has_live_spawns(), \
+        "聚合 turn 在飞时 has_live_spawns 必须为真,否则 pool 会提前释放 engine"
+
+    # 保活闸生效 → release 静默跳过，engine 仍在缓存里
+    await pool.release("ka")
+    assert "ka" in pool._engines, "有在飞聚合 turn 时 release 必须被拦下"  # noqa: SLF001
+
+    gate.set()
+    assert await _wait(lambda: not engine.has_live_spawns()), \
+        "聚合 turn 收敛后应恢复可释放"
+    await pool.close()

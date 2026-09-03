@@ -560,7 +560,7 @@ join-barrier（全终态触发）：
 
 ### engine keepalive 生命周期（引用计数）
 
-`has_live_spawns()` True（有 running / suspended 句柄）时：
+`has_live_spawns()` True（有 running / suspended 句柄，**或**有在飞的自有 detached task——barrier 点火起的聚合 turn 即属此类，它不登记为句柄）时：
 - `pool.release(session_id)`（非 force）**空操作**，engine 保持缓存运行
 - 父 turn 结束不触发释放
 

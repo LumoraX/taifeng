@@ -252,9 +252,23 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 
 ### Requirement: engine keepalive 保活
 
-`has_live_spawns()` 为 `True`（即有 status ∈ {running, suspended} 的句柄）时，`pool.release(session_id)`（非 force）是**空操作**——engine 继续缓存运行，不释放。
+`has_live_spawns()` 为 `True` 时，`pool.release(session_id)`（非 force）是**空操作**——engine 继续缓存运行，不释放。
+
+判定为 `True` 的来源有**两个，缺一不可**：
+
+1. 存在 status ∈ {running, suspended} 的句柄；
+2. 存在尚未 done 的 engine 自有 detached task（`SpawnDriver._owned_tasks`）——**join-barrier 点火起的聚合 turn 走这条路，从不登记为 spawn 句柄**。
+
+第 2 条不是补充而是必需：最后一个句柄进终态与 barrier 点火发生在**同一刻**，只看句柄时保活闸恰好在聚合 turn 刚起跑时判定「无 live spawn」放行释放，pool 随后在 `stage=engine_task` 等不到收敛，抛 `EnginePoolUnresponsiveError`。
 
 只有 `pool.close()` 或 `pool.release(force=True)` 才无条件拆除，同时级联取消全部 detached child。
+
+#### Scenario: 聚合 turn 在飞时不得释放
+
+- **GIVEN** barrier 的句柄集已全终态（无 running / suspended 句柄），barrier 已点火且聚合 turn 仍在执行
+- **WHEN** 业务调用 `pool.release(session_id)`（非 force）
+- **THEN** `has_live_spawns()` SHALL 为 `True`，engine SHALL NOT 被释放
+- **AND** 聚合 turn 收敛后 `has_live_spawns()` 转 `False`，下次 `release` 才真正释放
 
 #### Scenario: 父 turn 结束后 engine 保活
 

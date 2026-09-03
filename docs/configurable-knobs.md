@@ -244,7 +244,7 @@ engine.spawn_status(           # 非阻塞读各句柄状态；未知 handle_id 
     handle_ids,                #   返回 {hid: {status, result}}
 )
 engine.kill_spawn(handle_id)   # R4：取消单个 spawn token；terminal → no-op；unknown → KeyError
-engine.has_live_spawns()       # bool：True iff 有 running/suspended 句柄（keepalive 引用计数）
+engine.has_live_spawns()       # bool：True iff 有 running/suspended 句柄，或有在飞的自有 detached task（含 barrier 聚合 turn）
 
 await engine.submit(op)        # 入队 Op
 async for ev in engine.subscribe(sub_id):    # 订阅指定 submission 事件
