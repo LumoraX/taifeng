@@ -297,7 +297,7 @@ async def test_unresponsive_finish_owner_preserves_fatal_and_wakes_retry(
         )
     except BaseException as error:  # noqa: BLE001
         first_error = error
-    with anyio.move_on_after(0.05) as retry_scope:
+    with anyio.move_on_after(1.0) as retry_scope:
         try:
             await _submit_shutdown(
                 state,

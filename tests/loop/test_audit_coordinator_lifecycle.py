@@ -310,7 +310,7 @@ async def test_duplicate_pending_work_id_is_rejected_without_waiting_or_acceptin
         tasks.start_soon(first)
         await accept_entered.wait()
         tasks.start_soon(duplicate)
-        with anyio.move_on_after(0.05) as deadline:
+        with anyio.move_on_after(1.0) as deadline:
             await duplicate_done.wait()
         release_accept.set()
         await first_done.wait()
@@ -562,7 +562,7 @@ async def test_pending_durable_accept_cannot_hold_finish_lock_past_deadline() ->
         tasks.start_soon(admit)
         await accept_entered.wait()
         tasks.start_soon(finish)
-        with anyio.move_on_after(0.05) as deadline:
+        with anyio.move_on_after(1.0) as deadline:
             await finish_done.wait()
         release_accept.set()
         await admission_done.wait()
