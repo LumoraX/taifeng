@@ -118,7 +118,6 @@ async def test_inject_then_cancel_keeps_user_input(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="wave2a task 3 未实现")
 async def test_subscriber_after_shutdown_receives_terminal_event(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
@@ -184,5 +183,64 @@ async def test_two_user_messages_run_serially_in_order(
             ("user_message", "A"), ("assistant_message", "answer-A"),
             ("user_message", "B"), ("assistant_message", "answer-B"),
         ]
+    finally:
+        await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# e) operation 崩溃：终结事件 + 无幽灵 pending
+# ---------------------------------------------------------------------------
+
+
+async def test_crashed_operation_emits_terminal_and_clears_pending(
+    skills_dir: Path, threads_dir: Path,
+) -> None:
+    """operation 抛未捕获异常 → 订阅者收到 turn_failed{kind=<异常类名>}，introspect 无幽灵。"""
+    client = SimClient(turns=[SimTurn(text="x")] * 2)
+    pool = await _pool(skills_dir, threads_dir, client)
+    try:
+        engine = await pool.get_or_create(session_id="s", entry_skill_id=ENTRY)
+
+        async def _boom() -> None:
+            raise RuntimeError("resumed_tool_call_not_found")
+
+        sub_id = "sub-crash"
+        engine._start_operation(_boom(), name="boom", submission_id=sub_id)  # noqa: SLF001
+
+        async def _first() -> tuple[str, dict]:
+            async for ev in engine.subscribe(sub_id):
+                return ev.msg.kind, dict(ev.msg.data)
+            return "iterator-ended", {}
+
+        kind, data = await asyncio.wait_for(_first(), timeout=3.0)
+        assert kind == "turn_failed"
+        assert data["kind"] == "RuntimeError"
+        assert "resumed_tool_call_not_found" in data["error"]
+        assert sub_id not in engine.introspect()["pending_submissions"]
+    finally:
+        await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# f) 晚到的过滤订阅（engine 已收敛）立即得到合成终结
+# ---------------------------------------------------------------------------
+
+
+async def test_late_subscriber_after_engine_closed_gets_terminal(
+    skills_dir: Path, threads_dir: Path,
+) -> None:
+    client = SimClient(turns=[SimTurn(text="x")] * 2)
+    pool = await _pool(skills_dir, threads_dir, client)
+    try:
+        engine = await pool.get_or_create(session_id="s", entry_skill_id=ENTRY)
+        await engine.submit(Shutdown())
+        await asyncio.sleep(0.3)  # 让 run() 收敛完毕
+
+        async def _first() -> str:
+            async for ev in engine.subscribe("never-submitted"):
+                return ev.msg.kind
+            return "iterator-ended"
+
+        assert await asyncio.wait_for(_first(), timeout=3.0) == "turn_failed"
     finally:
         await pool.close()

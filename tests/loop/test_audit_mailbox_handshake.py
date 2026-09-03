@@ -63,6 +63,7 @@ async def test_finalizer_wins_before_late_child_handshake(
         coroutine: Any,
         *,
         name: str,
+        submission_id: str | None = None,
     ) -> asyncio.Task[None]:
         """登记 operation 后让 actor 先进入 mailbox finalizer。"""
         nonlocal child, child_started
@@ -78,7 +79,7 @@ async def test_finalizer_wins_before_late_child_handshake(
                 if not child_started:
                     coroutine.close()
 
-        child = original_start(delayed_child(), name=name)
+        child = original_start(delayed_child(), name=name, submission_id=submission_id)
         actor = asyncio.current_task()
         assert actor is not None
         actor.cancel()

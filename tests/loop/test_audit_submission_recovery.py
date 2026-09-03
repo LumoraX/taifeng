@@ -594,6 +594,7 @@ async def test_actor_termination_after_claim_before_child_start_retires_token(
         coroutine: Any,
         *,
         name: str,
+        submission_id: str | None = None,
     ) -> asyncio.Task[None]:
         """create_task 返回后、child 首步前同步取消当前 actor。"""
         nonlocal child, child_started
@@ -609,7 +610,7 @@ async def test_actor_termination_after_claim_before_child_start_retires_token(
                 if not child_started:
                     coroutine.close()
 
-        child = original_start(hold_child_start(), name=name)
+        child = original_start(hold_child_start(), name=name, submission_id=submission_id)
         actor = asyncio.current_task()
         assert actor is not None
         actor.cancel()

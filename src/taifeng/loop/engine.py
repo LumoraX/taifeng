@@ -28,7 +28,8 @@ from taifeng.instructions.types import (
     InstructionLayer,
     ResolvedInstruction,
 )
-from taifeng.llm.errors import LLMError
+from taifeng.llm.errors import LLMError, classify_failure, suggested_action_for
+from taifeng.llm.recovery import recommend_recovery
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
@@ -411,6 +412,8 @@ class AgentEngine:
         self._event_subs: dict[str, _Subscriber] = {}
         self._all_subs: list[_Subscriber] = []
         self._pending: dict[str, _PendingTurn] = {}
+        # run() 收敛完毕后置 True：此后过滤订阅立即得到合成终结（ADR 0029）
+        self._closed = False
         self._running = False
         self._audited_shutdown_enqueued = False
         # 跨 turn 持久化的 history view（用于复用 + cache）
@@ -799,6 +802,11 @@ class AgentEngine:
         sub = self._new_subscriber()
         self._event_subs[submission_id] = sub
         try:
+            if self._closed:
+                # engine 已收敛完毕、终结事件早已投完：晚到的订阅者直接拿合成终结
+                await self._emit_operation_terminal(
+                    submission_id, None, kind="engine_shutdown",
+                )
             while True:
                 env = await sub.queue.get()
                 if env.event.submission_id != submission_id:
@@ -811,7 +819,6 @@ class AgentEngine:
                     "turn_completed",
                     "turn_failed",
                     "turn_suspended",
-                    "shutdown",
                 ):
                     return
         finally:
@@ -970,15 +977,77 @@ class AgentEngine:
         coroutine: Coroutine[Any, Any, None],
         *,
         name: str,
+        submission_id: str | None = None,
     ) -> asyncio.Task[None]:
-        """创建并登记 Engine-owned operation，终态总会检索异常。"""
+        """创建并登记 Engine-owned operation，终态总会检索异常。
+
+        ``submission_id`` 非 None 时包一层 ``_guarded_operation``：operation 以未捕获
+        异常退出也给该 submission 一个 ``turn_failed`` 终结事件并清理 ``_pending``
+        （ADR 0029 终结信号完整），否则订阅者只能永久等待、introspect 留幽灵 turn。
+        """
+        body = (
+            coroutine if submission_id is None
+            else self._guarded_operation(submission_id, coroutine)
+        )
         task = asyncio.create_task(
-            coroutine,
+            body,
             name=f"engine-operation:{self._session_id}:{name}",
         )
         self._operation_tasks.add(task)
         task.add_done_callback(self._forget_operation)
         return task
+
+    async def _guarded_operation(
+        self, submission_id: str, coroutine: Coroutine[Any, Any, None],
+    ) -> None:
+        """operation 崩溃 → 终结事件 + 清 _pending，再原样上抛（日志由 _forget_operation 记）。
+
+        取消（收敛路径）原样传播：finalize 会对仍在订阅的 submission 统一投
+        engine_shutdown 终结。
+        """
+        try:
+            await coroutine
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            self._pending.pop(submission_id, None)
+            await self._emit_operation_terminal(submission_id, exc)
+            raise
+
+    async def _emit_operation_terminal(
+        self, submission_id: str, exc: BaseException | None, *, kind: str | None = None,
+    ) -> None:
+        """给一个 submission 发 engine 层面的 ``turn_failed`` 终结事件。
+
+        exc 非 None → kind 取异常类名、failure_class 走 classify_failure；
+        exc None + kind（如 ``engine_shutdown`` / ``cancelled``）→ failure_class=cancelled。
+        """
+        if exc is not None:
+            failure_class, suggested_action = classify_failure(exc)
+            error_kind = type(exc).__name__
+            error_msg = str(exc) or error_kind
+        else:
+            failure_class = "cancelled"
+            suggested_action = suggested_action_for("cancelled")
+            error_kind = kind or "cancelled"
+            error_msg = error_kind
+        await self._emit(
+            EventMsg(
+                submission_id=submission_id,
+                msg=TurnFailed(
+                    data={
+                        "error": error_msg,
+                        "kind": error_kind,
+                        "failure_class": failure_class,
+                        "suggested_action": suggested_action,
+                        "recovery": recommend_recovery(failure_class).to_dict(),
+                        "request_id": None,
+                        "iterations": 0,
+                        "is_root": True,
+                    }
+                ),
+            )
+        )
 
     def _forget_operation(self, task: asyncio.Task[None]) -> None:
         """检索 operation 终态并释放 Engine 显式 ownership。"""
@@ -1276,6 +1345,10 @@ class AgentEngine:
         actor_cancellation = actor_cancellation or spawn_cancellation
         if shutdown_requested:
             await self._memory_session_end()
+        # ADR 0029 终结信号完整：过滤订阅（按 submission_id 收事件）收不到全局
+        # shutdown（id 不匹配），必须逐个投 turn_failed{engine_shutdown}；队列里
+        # 尚未出队的 submission 同样终结，否则订阅者永久挂死。
+        await self._terminate_orphan_submissions()
         # 通知所有 subscriber 退出：经统一投递路径，shutdown 也获全局 seq +
         # per-subscriber delivery_seq（保持两个序号在退出事件上同样连续可自检）。
         shutdown_ev = EventMsg(submission_id="*", msg=ShutdownMsg())
@@ -1283,8 +1356,28 @@ class AgentEngine:
         self._seq += 1
         for subscriber in list(self._all_subs):
             self._deliver(subscriber, shutdown_ev)
+        # 此后再来的过滤订阅直接拿到合成终结（见 subscribe_envelopes），不留竞态窗口
+        self._closed = True
         if actor_cancellation is not None:
             raise actor_cancellation
+
+    async def _terminate_orphan_submissions(self) -> None:
+        """Shutdown 收尾：对仍在订阅的与队列残留的 submission 投 engine_shutdown 终结。
+
+        只发事件、**不动队列**：audit 模式的 durable accepted token 必须留在队列里
+        供复活的 actor 继续处理（application cancel 契约）；legacy Submission 随
+        engine 一起消亡，但本进程的订阅者仍需终结信号。
+        """
+        terminated: set[str] = set()
+        for sid in list(self._event_subs):
+            terminated.add(sid)
+            await self._emit_operation_terminal(sid, None, kind="engine_shutdown")
+        for sub in list(self._submissions._queue):  # noqa: SLF001 —— 只读遍历，不出队
+            if sub.id in terminated or isinstance(sub, AcceptedUserMessage):
+                continue
+            terminated.add(sub.id)
+            await self._emit_operation_terminal(sub.id, None, kind="engine_shutdown")
+        self._pending.clear()
 
     # -----------------------------------------------------------------
     # Main loop
@@ -1428,6 +1521,7 @@ class AgentEngine:
                     self._start_operation(
                         self._handle_rewind(sub, cancel),
                         name=f"rewind:{sub.id}",
+                        submission_id=sub.id,
                     )
                     continue
                 if isinstance(sub.op, Resume):
@@ -1440,6 +1534,7 @@ class AgentEngine:
                         self._start_operation(
                             self._resume_spawn(sub, spawn_handle),
                             name=f"resume-spawn:{sub.id}",
+                            submission_id=sub.id,
                         )
                         continue
                     # 与 UserMessage 一致用 create_task 异步派发：让续跑链（可能跨子/根
@@ -1449,6 +1544,7 @@ class AgentEngine:
                     self._start_operation(
                         self._handle_resume(sub, cancel),
                         name=f"resume:{sub.id}",
+                        submission_id=sub.id,
                     )
                     continue
                 if self._is_queued_user_message(sub):
@@ -1477,6 +1573,7 @@ class AgentEngine:
             self._start_operation(
                 self._run_turn_for(sub, root_cancel),
                 name=f"turn:{sub.id}",
+                submission_id=sub.id,
             )
             return
         if not await self._audited_mailbox.claim(sub):
@@ -1489,6 +1586,7 @@ class AgentEngine:
                 application_checkpoint=application_checkpoint,
             ),
             name=f"turn:{sub.id}",
+            submission_id=sub.id,
         )
         await application_checkpoint.wait()
 
@@ -2925,7 +3023,15 @@ class AgentEngine:
             pinned_states=self._pinned_states,
             call_stack=sub_stack,
         )
-        return await runner.run()
+        # 子 thread 续跑登记 _pending（is_root=False）：CancelTurn(sub.id) 才能触达（R4）
+        pending_key = submission_id or sub.id
+        self._pending[pending_key] = _PendingTurn(
+            submission_id=pending_key, cancel=turn_cancel, is_root=False,
+        )
+        try:
+            return await runner.run()
+        finally:
+            self._pending.pop(pending_key, None)
 
     async def _execute_resumed_tool_on_thread(
         self, thread_id: str, entry_skill_id: str, call_id: str
