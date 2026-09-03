@@ -61,8 +61,8 @@ LLM 调用 `run_script(skill_id, script_name, args)` 时，系统 SHALL 按以�
 - **THEN** 系统 SHALL 用替换后的 args 继续后续流程
 
 #### Scenario: 跨 skill 调用被拒
-- **WHEN** skill A 的 LLM 调 `run_script(skill_id='B', script_name='x')`
-- **THEN** SHALL 返回 `ToolResult.error("unknown_script")`（除非 ctx 显式允许跨 skill）
+- **WHEN** skill A 的 LLM 调 `run_script(skill_id='B', script_name='x')`（B 在注册表内）
+- **THEN** SHALL 返回 `ToolResult.error("unknown_script")`（除非 `ctx.extras["allow_cross_skill_script"] is True`）；校验位于 skill 查找之后、script 查找之前，policy / hook / executor MUST NOT 被触达；`current_skill` 缺失 → `config_error`；不存在的 skill_id 仍 `unknown_skill`
 
 ### Requirement: subprocess 隔离与安全
 

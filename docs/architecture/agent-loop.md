@@ -282,6 +282,8 @@ class ToolCallRuntime:
             return await self._execute(call, spec, cancel)
 ```
 
+**取消安全**：写者在 `acquire_write` 等待期间被取消（engine 关停走 `task.cancel()` 即触发）时，`_waiting_writers` 计数必须回退并 `notify_all()`——否则幽灵写者让此后所有 `acquire_read` 永久排队；`ToolCallRuntime` 是 pool 级单例，等于全 pool 的 parallel_safe 工具挂死（wave1 修复，`tests/tool/test_rwlock_cancel.py`）。
+
 **parallel_safe 字段约定**：
 - 只读工具（read_file / grep / list_dir / read_skill）→ `True`
 - 写工具（write_file / bash / mcp_action）→ `False`

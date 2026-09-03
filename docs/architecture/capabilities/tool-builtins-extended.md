@@ -148,7 +148,7 @@ handler SHALL 执行如下顺序：
 1. **入参校验** —— url 缺失 / 格式非法 / method 非法 / timeout 超限 → `ToolResult.error(reason="bad_args")`
 2. **取消检查** —— `ctx.cancel.raise_if_cancelled()` 在发起请求前抛出（R4 红线）
 3. **PermissionPolicy** —— `policy is None` → `ToolResult.error(reason="no_policy")`；否则 `await policy.check(PermissionRequest(scope="network", target=f"{method} {url}", reason="LLM 请求 HTTP 调用", metadata={"thread_id": ctx.thread_id, "call_id": ctx.call_id, "method": method, "url": url}))`；`granted=False` → `ToolResult.error(reason="permission_denied")`
-4. **执行** —— `httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds), follow_redirects=True, max_redirects=max_redirects)`；dict/list body 走 `json=`，string body 走 `content=`
+4. **执行（逐跳审批）** —— `httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds), follow_redirects=False)`；dict/list body 走 `json=`，string body 走 `content=`。响应为 3xx 且 `resp.next_request` 非空时由内核自行跟随：每跳 `hop += 1`，`hop > max_redirects` → `ToolResult.error(reason="redirect_limit")`；`ctx.cancel.raise_if_cancelled()`；对 `next_request` 的 method / URL 重新构造 `PermissionRequest(scope="network", target=f"{method} {url}", metadata={..., "redirect_hop": hop, "redirect_from": <上一跳 URL>})` 过 policy，deny → `permission_denied`（MUST NOT 发出该跳）；放行后 `client.send(next_request)`。复用 httpx 的 `next_request` 保留 303 改 GET 等 RFC 7231 语义。**不做**内核级私网 / loopback 黑名单——那是策略层职责，metadata 里的 hop 信息供业务策略收紧
 5. **响应序列化** —— `ToolResult.ok(output=<JSON 字符串>, status_code=..., bytes_in=..., truncated=..., method=..., url_final=...)`，output 形如：
    ```json
    {
@@ -162,7 +162,7 @@ handler SHALL 执行如下顺序：
 6. **HTTP 4xx / 5xx 不算 ToolResult.error** —— `is_error=False`，让 LLM 自行解读 status code
 7. **异常归类**：
    - `httpx.TimeoutException` → `ToolResult.error(reason="timeout")`
-   - `httpx.TooManyRedirects` → `ToolResult.error(reason="redirect_limit")`
+   - 跳数超过 `max_redirects`（内核自计数，不再依赖 `httpx.TooManyRedirects`）→ `ToolResult.error(reason="redirect_limit")`
    - `httpx.ConnectError` / `httpx.RequestError` → `ToolResult.error(reason="connect_error")`
    - 其他 Exception → `ToolResult.error(reason="unknown")` 且 `logger.exception(...)`
 
