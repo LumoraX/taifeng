@@ -27,17 +27,18 @@ from taifeng.permission import (
 
 
 def test_parse_bash_literal() -> None:
+    """效果模型（ADR 0028）：Bash → scope=shell_exec，payload 即 target_pattern。"""
     rule = PermissionRule.parse("Bash(openspec --help)", mode="allow")
-    assert rule.scope == "tool_use"
-    assert rule.target_pattern == "shell_exec"
+    assert rule.scope == "shell_exec"
+    assert rule.target_pattern == "openspec --help"
     assert rule.mode == "allow"
-    assert rule.args_match == {"cmd": "openspec --help"}
+    assert rule.args_match is None
 
 
 def test_parse_bash_glob_auto_prefix() -> None:
     """payload 含 * → 自动加 glob: 前缀。"""
     rule = PermissionRule.parse("Bash(openspec *)", mode="allow")
-    assert rule.args_match == {"cmd": "glob:openspec *"}
+    assert rule.target_pattern == "glob:openspec *"
 
 
 def test_parse_bash_regex_prefix_kept() -> None:
@@ -45,15 +46,15 @@ def test_parse_bash_regex_prefix_kept() -> None:
     rule = PermissionRule.parse(
         "Bash(re:^rm\\s+-rf\\s+\\./data)", mode="allow",
     )
-    assert rule.args_match == {"cmd": "re:^rm\\s+-rf\\s+\\./data"}
+    assert rule.target_pattern == "re:^rm\\s+-rf\\s+\\./data"
 
 
 def test_parse_bash_wildcard_only() -> None:
     """* / 空 → glob:* 全匹配。"""
     rule = PermissionRule.parse("Bash(*)", mode="ask")
-    assert rule.args_match == {"cmd": "glob:*"}
+    assert rule.target_pattern == "glob:*"
     rule2 = PermissionRule.parse("Bash()", mode="ask")
-    assert rule2.args_match == {"cmd": "glob:*"}
+    assert rule2.target_pattern == "glob:*"
 
 
 def test_parse_skill_with_glob() -> None:
@@ -66,9 +67,9 @@ def test_parse_skill_with_glob() -> None:
 
 def test_parse_file_read() -> None:
     rule = PermissionRule.parse("FileRead(/data/*)", mode="allow")
-    assert rule.scope == "tool_use"
-    assert rule.target_pattern == "file_read"
-    assert rule.args_match == {"path": "glob:/data/*"}
+    assert rule.scope == "file_read"
+    assert rule.target_pattern == "glob:/data/*"
+    assert rule.args_match is None
 
 
 def test_parse_script_alias() -> None:
@@ -186,14 +187,9 @@ async def test_from_dict_e2e_deny_overrides_allow() -> None:
         "deny":  ["Bash(re:^rm\\s+-rf)"],
     })
 
-    req_safe = PermissionRequest.for_tool_call(
-        "shell_exec", {"cmd": "rm /tmp/x"},
-        thread_id="t", submission_id="s", entry_skill_id="e", turn_index=1,
-    )
-    req_dangerous = PermissionRequest.for_tool_call(
-        "shell_exec", {"cmd": "rm -rf /"},
-        thread_id="t", submission_id="s", entry_skill_id="e", turn_index=1,
-    )
+    # 内置 shell_exec 真实发出的效果形状：scope=shell_exec，target=完整命令串
+    req_safe = PermissionRequest(scope="shell_exec", target="rm /tmp/x")
+    req_dangerous = PermissionRequest(scope="shell_exec", target="rm -rf /")
     d_safe = await policy.check(req_safe)
     d_dangerous = await policy.check(req_dangerous)
     assert d_safe.granted is True       # 命中 allow Bash(rm *)
@@ -218,14 +214,8 @@ async def test_from_dict_e2e_default_allow_with_specific_ask() -> None:
         prompter=CallbackPrompter(cb),
     )
 
-    req_safe = PermissionRequest.for_tool_call(
-        "shell_exec", {"cmd": "ls"},
-        thread_id="t", submission_id="s", entry_skill_id="e", turn_index=1,
-    )
-    req_ask = PermissionRequest.for_tool_call(
-        "shell_exec", {"cmd": "rm /tmp/x"},
-        thread_id="t", submission_id="s", entry_skill_id="e", turn_index=1,
-    )
+    req_safe = PermissionRequest(scope="shell_exec", target="ls")
+    req_ask = PermissionRequest(scope="shell_exec", target="rm /tmp/x")
 
     # req_safe (cmd=ls) → 不命中 Bash(rm *) → fallback default_mode=allow
     d_safe = await policy.check(req_safe)
