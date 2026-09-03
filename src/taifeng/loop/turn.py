@@ -457,6 +457,9 @@ class TurnRunner:
     # 业务可配）。同时驱动 system prompt 文本形状 + per-turn search_skills 工具裁剪
     # （二者经 effective_child_recall 同一判定，保证一致）。默认 50。
     recall_threshold: int = 50
+    # 本轮已流式输出的 assistant 文本（取消时落 partial，正常落史后清空；非持久状态）
+    _streamed_text: str = field(default="", init=False, repr=False)
+
     # 是否注入了 SkillRecall 召回后端（pool 据 skill_recall 是否为 None 透传）。
     # 默认 False = 无后端 = inline（LLM 自己找）：不暴露 search_skills、不走 deferred。
     # 与 recall_threshold 同走 pool→engine→TurnRunner 透传路径。
@@ -935,6 +938,7 @@ class TurnRunner:
         except asyncio.CancelledError:
             end_reason = "cancelled"
             error_msg = "cancelled"
+            await self._persist_partial_assistant()
         except Exception as e:
             end_reason = "error"
             error_msg = str(e)
@@ -1193,6 +1197,8 @@ class TurnRunner:
 
         sess = model_session_for_turn(self, iteration)
         assistant_text = ""
+        # 取消时落 partial assistant 用（ADR 0029 / R5）：本轮已流出的文本
+        self._streamed_text = ""
         # 累积本轮 reasoning 全文(thinking 模型;非 thinking 恒为空)
         reasoning_text = ""
         # 累积 tool calls
@@ -1213,6 +1219,7 @@ class TurnRunner:
                     if ev.kind == "text_delta":
                         delta = ev.data.get("text", "")
                         assistant_text += delta
+                        self._streamed_text = assistant_text
                         await self._emit(AssistantText(data={"delta": delta}))
                     elif ev.kind == "reasoning_delta":
                         r_delta = ev.data.get("delta", "")
@@ -1369,6 +1376,8 @@ class TurnRunner:
                     thread_id=self.thread_id,
                     model=self.entry_skill.model or "auto",
                 ))
+        # 本轮文本即将随 response_items 正常落史：取消兜底不再需要
+        self._streamed_text = ""
 
         audit_state = self.audit_state
         if audit_state is not None:
@@ -1846,6 +1855,25 @@ class TurnRunner:
             reasoning_tokens=self.total_usage.reasoning_tokens + u.reasoning_tokens,
             raw=u.raw,
         )
+
+    async def _persist_partial_assistant(self) -> None:
+        """取消时把已流式输出、尚未落史的 assistant 文本以 truncated 标记落史（R5）。
+
+        UI 已经把这段文本展示给了用户，transcript 若不记 → 冷 resume 后"这轮从没
+        说过话"，与用户所见不一致（codex interrupt 落 partial message 同语义）。
+        采样正常结束时 `_streamed_text` 已随 assistant_message 落史并清空，这里为空即返回。
+        """
+        text = self._streamed_text
+        if not text:
+            return
+        self._streamed_text = ""
+        item = assistant_message(
+            text,
+            thread_id=self.thread_id,
+            model=self.entry_skill.model or "auto",
+        ).model_copy(update={"metadata": {"truncated": True}})
+        self.history_buffer.append(item)
+        await self.store.append(item)
 
     async def _drain_pending_input(self, *, residual: bool = False) -> None:
         """B1：把 pending_input 队列并入 history。

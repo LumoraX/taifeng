@@ -1859,6 +1859,15 @@ class AgentEngine:
         if acquire.done() and not acquire.cancelled() and acquire.result():
             self._root_gate.release()
 
+    def _resume_tool_cancel(self, call_id: str) -> CancellationToken:
+        """resume 执行已批准工具的 token 必须派生自 engine 根 token（R4）。
+
+        此前用全新根 token → engine shutdown / pool close 的级联取消无法中止该工具。
+        """
+        if self._root_cancel is None:
+            raise RuntimeError("engine not running: resume requires an active root cancel token")
+        return self._root_cancel.child(f"resume_tool:{call_id}")
+
     def _release_root_gate(self) -> None:
         """释放 root gate（持有者退出真终态之后调用）。"""
         self._root_gate_owner = None
@@ -3286,7 +3295,7 @@ class AgentEngine:
         except json.JSONDecodeError:
             args = {}
         entry = self._snapshot.get(entry_skill_id) or self._entry_skill
-        cancel = CancellationToken().child(f"resume_tool:{call_id}")
+        cancel = self._resume_tool_cancel(call_id)
         ctx = ToolContext(
             call_id=call_id, cancel=cancel, thread_id=thread_id,
             extras={
@@ -3511,7 +3520,7 @@ class AgentEngine:
         # 工具运行所需的最小上下文（snapshot / 可见 skill / 权限策略 / 元数据）。
         # 关键：permission_policy 不再注入 ask prompter 的挂起语义——本次执行是"已批准"
         # 的二次放行，工具内若再次走 check 应按业务策略放行（业务侧据 resolutions 调整）。
-        cancel = CancellationToken().child(f"resume_tool:{call_id}")
+        cancel = self._resume_tool_cancel(call_id)
         ctx = ToolContext(
             call_id=call_id,
             cancel=cancel,
