@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -270,3 +271,104 @@ async def test_connect_error_returns_connect_error_reason() -> None:
     r = await t.handler({"url": "https://x.example/"}, _make_ctx())
     assert r.is_error
     assert r.data["reason"] == "connect_error"
+
+
+# ====================================================================
+# 9. redirect 逐跳审批（wave1 task 3 —— SSRF 绕过审批）
+# ====================================================================
+
+class _RecordingPolicy(PermissionPolicy):
+    """记录每次 check 收到的 request，便于断言逐跳审批的次数与 metadata。"""
+
+    def __init__(self, inner: PermissionPolicy) -> None:
+        super().__init__(rules=list(inner.rules), default_mode=inner.default_mode)
+        self.requests: list[Any] = []
+
+    async def check(self, request: Any) -> Any:
+        self.requests.append(request)
+        return await super().check(request)
+
+
+def _allow_only(prefix: str) -> PermissionPolicy:
+    """只放行以 prefix 开头的 URL（任意 method），其余 deny。"""
+    return PermissionPolicy(
+        rules=[
+            PermissionRule(
+                scope="network",
+                target_pattern=f"glob:* {prefix}*",
+                mode="allow",
+                reason="allowlist",
+            ),
+        ],
+        default_mode="deny",
+    )
+
+
+async def test_redirect_second_hop_denied_is_not_sent() -> None:
+    """首跳放行、302 指向内网元数据地址 → 二跳被 deny，transport 不收到二跳请求。"""
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if request.url.host == "api.example.com":
+            return httpx.Response(
+                302, headers={"location": "http://169.254.169.254/latest/meta-data/"},
+            )
+        return httpx.Response(200, text="SECRET")
+
+    transport = httpx.MockTransport(respond)
+    policy = _RecordingPolicy(_allow_only("https://api.example.com/"))
+    t = make_http_request_tool(policy=policy, transport=transport)
+    r = await t.handler({"url": "https://api.example.com/x"}, _make_ctx())
+    assert r.is_error
+    assert r.data["reason"] == "permission_denied"
+    assert seen == ["https://api.example.com/x"], "second hop MUST NOT be sent"
+    assert len(policy.requests) == 2
+    assert policy.requests[1].metadata["redirect_hop"] == 1
+    assert policy.requests[1].metadata["redirect_from"] == "https://api.example.com/x"
+
+
+async def test_redirect_chain_fully_allowed_returns_final_body() -> None:
+    """A → 302 → B → 200：两跳都过 policy，返回 B 的响应体。"""
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "a.example":
+            return httpx.Response(302, headers={"location": "https://b.example/final"})
+        return httpx.Response(200, text="final-body")
+
+    transport = httpx.MockTransport(respond)
+    policy = _RecordingPolicy(_allow_all_policy())
+    t = make_http_request_tool(policy=policy, transport=transport)
+    r = await t.handler({"url": "https://a.example/start"}, _make_ctx())
+    assert not r.is_error
+    assert r.data["status_code"] == 200
+    assert "final-body" in r.output
+    assert [req.target for req in policy.requests] == [
+        "GET https://a.example/start",
+        "GET https://b.example/final",
+    ]
+
+
+async def test_redirect_exceeding_max_redirects_returns_redirect_limit() -> None:
+    """max_redirects=2，链路 A→B→C→D 全 302 → redirect_limit，D 不发出。"""
+    seen: list[str] = []
+    chain = {
+        "a.example": "https://b.example/",
+        "b.example": "https://c.example/",
+        "c.example": "https://d.example/",
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        nxt = chain.get(request.url.host)
+        if nxt:
+            return httpx.Response(302, headers={"location": nxt})
+        return httpx.Response(200, text="never")
+
+    transport = httpx.MockTransport(respond)
+    t = make_http_request_tool(
+        policy=_allow_all_policy(), transport=transport, max_redirects=2,
+    )
+    r = await t.handler({"url": "https://a.example/"}, _make_ctx())
+    assert r.is_error
+    assert r.data["reason"] == "redirect_limit"
+    assert "d.example" not in seen

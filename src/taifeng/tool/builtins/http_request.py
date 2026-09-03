@@ -7,6 +7,9 @@
     - 4xx / 5xx 不算 ToolResult.error，让 LLM 自行解读 status code
     - ``parallel_safe=False``（单一 ToolSpec 同时承载读写方法，保守序列化）
     - R4 取消：handler 入口 ``ctx.cancel.raise_if_cancelled()`` + ``httpx.Timeout``
+    - **redirect 逐跳审批**：``follow_redirects=False``，内核自行跟随 3xx，每一跳的
+      目标 URL 重新过 policy（scope=network，metadata 带 redirect_hop / redirect_from）；
+      否则 302 可把已审批的请求带到内网 / 云元数据地址（SSRF 绕过审批）
 
 参照：hermes-gap-roadmap.md P0；对标 hermes httpx-based / codex reqwest-based。
 """
@@ -77,6 +80,46 @@ def _validate_url(url: Any) -> str | None:
     if not parsed.netloc:
         return "url missing host"
     return None
+
+
+async def _check_network_permission(
+    policy: PermissionPolicy,
+    *,
+    method: str,
+    url: str,
+    ctx: ToolContext,
+    redirect_hop: int = 0,
+    redirect_from: str | None = None,
+) -> ToolResult | None:
+    """对单个 (method, url) 过 PermissionPolicy；被拒返回 ToolResult.error，放行返回 None。
+
+    效果模型：scope=``network``，target=``"<METHOD> <URL>"``。redirect 的每一跳都必须
+    重新走这里（否则 302 可把已审批的请求带到内网 / 元数据地址），metadata 带
+    ``redirect_hop``（从 1 起）与 ``redirect_from`` 供策略层收紧。
+    """
+    metadata: dict[str, Any] = {
+        "thread_id": ctx.thread_id,
+        "call_id": ctx.call_id,
+        "method": method,
+        "url": url,
+    }
+    if redirect_hop:
+        metadata["redirect_hop"] = redirect_hop
+        metadata["redirect_from"] = redirect_from
+    req = PermissionRequest(
+        scope="network",
+        target=f"{method} {url}",
+        reason="LLM 请求 HTTP 调用" if not redirect_hop else "HTTP redirect 跳转",
+        metadata=metadata,
+    )
+    decision = await policy.check(req)
+    if decision.granted:
+        return None
+    hop_note = f" (redirect hop {redirect_hop} -> {url})" if redirect_hop else ""
+    return ToolResult.error(
+        f"permission_denied: {decision.reason}{hop_note}",
+        reason="permission_denied",
+    )
 
 
 def make_http_request_tool(
@@ -160,25 +203,13 @@ def make_http_request_tool(
                 reason="no_policy",
             )
 
-        req = PermissionRequest(
-            scope="network",
-            target=f"{method} {url}",
-            reason="LLM 请求 HTTP 调用",
-            metadata={
-                "thread_id": ctx.thread_id,
-                "call_id": ctx.call_id,
-                "method": method,
-                "url": url,
-            },
+        denied = await _check_network_permission(
+            policy, method=method, url=url, ctx=ctx,
         )
-        decision = await policy.check(req)
-        if not decision.granted:
-            return ToolResult.error(
-                f"permission_denied: {decision.reason}",
-                reason="permission_denied",
-            )
+        if denied is not None:
+            return denied
 
-        # ---- step 4: 执行 ----
+        # ---- step 4: 执行（自行跟随 redirect，每跳重新审批）----
         # body 序列化策略：dict/list 走 json=（自动 content-type）；
         # string 走 content=（按需用户自填 content-type）；None 不传 body
         request_kwargs: dict[str, Any] = {
@@ -197,10 +228,11 @@ def make_http_request_tool(
                     reason="bad_args",
                 )
 
+        # follow_redirects=False：httpx 只为 3xx 填好 next_request（含 303 改 GET 等
+        # RFC 7231 语义），跟随与否由我们决定——每一跳都先过 policy 再发。
         client_kwargs: dict[str, Any] = {
             "timeout": httpx.Timeout(effective_timeout),
-            "follow_redirects": True,
-            "max_redirects": max_redirects,
+            "follow_redirects": False,
         }
         if transport is not None:
             client_kwargs["transport"] = transport
@@ -208,10 +240,27 @@ def make_http_request_tool(
         try:
             async with httpx.AsyncClient(**client_kwargs) as client:
                 resp = await client.request(**request_kwargs)
-        except httpx.TooManyRedirects as e:
-            return ToolResult.error(
-                f"redirect_limit: {e}", reason="redirect_limit"
-            )
+                hop = 0
+                while resp.is_redirect and resp.next_request is not None:
+                    hop += 1
+                    if hop > max_redirects:
+                        return ToolResult.error(
+                            f"redirect_limit: exceeded {max_redirects} redirects",
+                            reason="redirect_limit",
+                        )
+                    ctx.cancel.raise_if_cancelled()
+                    next_req = resp.next_request
+                    denied = await _check_network_permission(
+                        policy,
+                        method=next_req.method,
+                        url=str(next_req.url),
+                        ctx=ctx,
+                        redirect_hop=hop,
+                        redirect_from=str(resp.url),
+                    )
+                    if denied is not None:
+                        return denied
+                    resp = await client.send(next_req)
         except httpx.TimeoutException as e:
             return ToolResult.error(
                 f"timeout after {effective_timeout}s: {e}", reason="timeout"
