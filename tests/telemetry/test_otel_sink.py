@@ -14,12 +14,23 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+# telemetry-otel 是**可选 extra**（pyproject 明写「业务侧按需装,不放默认依赖」）。
+# 不加这道闸时,本文件顶层 import opentelemetry 会让缺该 extra 的环境在 collection
+# 阶段整轮中断——可选依赖不该拖垮全量测试,故缺失时跳过本文件而非报错。
+pytest.importorskip(
+    "opentelemetry.sdk",
+    reason="需要可选 extra: uv pip install -e '.[telemetry-otel]'",
+)
+
+from opentelemetry.sdk.metrics import MeterProvider  # noqa: E402
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader  # noqa: E402
+from opentelemetry.sdk.resources import Resource  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,  # noqa: E402
+)
 
 import taifeng
 from taifeng.loop.event import EventMsg
