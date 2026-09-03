@@ -16,6 +16,8 @@ ToolContext.extras 可选：
 
 9 阶段流程（spec ``script-execution``）：
     1. skill 查找 → ``unknown_skill``
+    1.5 跨 skill 隔离：target ≠ ``current_skill`` 且 ctx 未置
+        ``allow_cross_skill_script`` → ``unknown_script``（不泄露他方脚本存在）
     2. script_name 查找 → ``unknown_script``
     3. args_schema 校验 → ``invalid_args``
     4. executor 查找 → ``no_executor_for_language``
@@ -151,11 +153,29 @@ async def _run_script_handler(args: dict[str, Any], ctx: ToolContext) -> ToolRes
             "run_script misconfigured: missing skill_snapshot / script_executors",
             reason="config_error",
         )
+    caller = ctx.extras.get("current_skill")
+    if caller is None:
+        return ToolResult.error(
+            "run_script misconfigured: missing current_skill",
+            reason="config_error",
+        )
 
     # ---- 阶段 1：skill 查找 ----
     skill = snapshot.get(skill_id)
     if skill is None:
         return ToolResult.error(f"unknown_skill: {skill_id}", reason="unknown_skill")
+
+    # ---- 阶段 1.5：跨 skill 隔离（契约 script-execution.md）----
+    # 默认只能跑调用方自身的脚本；错误码用 unknown_script 而非 permission_denied，
+    # 不向 LLM 泄露「别的 skill 有这个脚本」。业务可经 allow_cross_skill_script 显式放开。
+    if (
+        skill.id != caller.id
+        and ctx.extras.get("allow_cross_skill_script") is not True
+    ):
+        return ToolResult.error(
+            f"unknown_script: {skill_id}/{script_name}",
+            reason="unknown_script",
+        )
 
     # ---- 阶段 2：script_name 查找 ----
     descriptor = _find_descriptor(skill.scripts, script_name)

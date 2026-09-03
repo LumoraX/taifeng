@@ -347,3 +347,89 @@ async def test_run_script_post_hook_audit_only(tmp_path: Path) -> None:
     assert saw_post is True
     assert result.is_error is False
     assert "fine" in result.output
+
+
+# ---------------------------------------------------------------------------
+# 跨 skill 隔离（契约 script-execution.md「跨 skill 调用被拒」；wave1 task 2）
+# ---------------------------------------------------------------------------
+
+
+class _SpyPolicy:
+    """记录是否被调用的 PermissionPolicy 替身——跨 skill 拒绝须在权限阶段之前。"""
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    async def check(self, req: Any) -> Any:
+        self.calls.append(req)
+        raise AssertionError("policy SHALL NOT be reached for cross-skill run_script")
+
+
+def _two_skills(tmp_path: Path) -> tuple[SkillDefinition, SkillDefinition, list[Any]]:
+    """skill-a 无脚本；skill-b 有 purge 脚本（用 SpyExecutor 记录是否被执行）。"""
+    script = tmp_path / "scripts" / "purge.sh"
+    _write_script(script, "#!/bin/sh\necho purged\n")
+    descriptor = ScriptDescriptor(
+        skill_id="skill-b", name="purge", path=script,
+        language="shell", timeout_seconds=5.0,
+    )
+    return _build_skill("skill-a", ()), _build_skill("skill-b", (descriptor,)), []
+
+
+async def test_run_script_cross_skill_rejected_as_unknown_script(tmp_path: Path) -> None:
+    """skill-a 调 skill-b 的脚本 → unknown_script，policy / executor 均不触达。"""
+    skill_a, skill_b, calls = _two_skills(tmp_path)
+
+    class SpyExecutor:
+        async def execute(self, inv: ScriptInvocation) -> ScriptResult:
+            calls.append(inv)
+            return ScriptResult(exit_code=0, stdout="", stderr="", duration_ms=0)
+
+    policy = _SpyPolicy()
+    tool = make_run_script_tool()
+    ctx = _make_ctx(
+        snapshot=SkillSnapshot(version=1, skills=(skill_a, skill_b)),
+        executors={"shell": SpyExecutor()},
+        permission_policy=policy,  # type: ignore[arg-type]
+        current_skill=skill_a,
+    )
+    result = await tool.handler(
+        {"skill_id": "skill-b", "script_name": "purge", "args": {}}, ctx
+    )
+    assert result.is_error is True
+    assert result.data["reason"] == "unknown_script"
+    assert calls == [], "executor SHALL NOT run a foreign skill's script"
+    assert policy.calls == []
+
+
+async def test_run_script_cross_skill_allowed_when_ctx_opts_in(tmp_path: Path) -> None:
+    """ctx.extras['allow_cross_skill_script'] is True → 按既有流程放行。"""
+    skill_a, skill_b, _ = _two_skills(tmp_path)
+    tool = make_run_script_tool()
+    ctx = _make_ctx(
+        snapshot=SkillSnapshot(version=1, skills=(skill_a, skill_b)),
+        executors={"shell": ShellScriptExecutor()},
+        current_skill=skill_a,
+    )
+    ctx.extras["allow_cross_skill_script"] = True
+    result = await tool.handler(
+        {"skill_id": "skill-b", "script_name": "purge", "args": {}}, ctx
+    )
+    assert result.is_error is False
+    assert "purged" in result.output
+
+
+async def test_run_script_missing_current_skill_is_config_error(tmp_path: Path) -> None:
+    """current_skill 缺失是接线错误，须 config_error 而非静默放行。"""
+    skill_a, skill_b, _ = _two_skills(tmp_path)
+    tool = make_run_script_tool()
+    ctx = _make_ctx(
+        snapshot=SkillSnapshot(version=1, skills=(skill_a, skill_b)),
+        executors={"shell": ShellScriptExecutor()},
+        current_skill=None,
+    )
+    result = await tool.handler(
+        {"skill_id": "skill-b", "script_name": "purge", "args": {}}, ctx
+    )
+    assert result.is_error is True
+    assert result.data["reason"] == "config_error"
