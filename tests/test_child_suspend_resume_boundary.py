@@ -21,6 +21,7 @@ import pytest
 
 from taifeng.suspend.reason import SuspendReason
 from taifeng.suspend.record import SuspensionRecord
+from tests.conftest import last_turn_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -228,7 +229,8 @@ async def test_nested_grandchild_suspension_propagates_to_root(tmp_path: Path, t
     # 第一阶段：三层下钻，叶内 danger 挂起 → 逐层上抛至根挂起
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events1 = await recorder.wait_terminal(sub_id)
-    assert events1[-1].msg.kind == "turn_suspended"
+    assert last_turn_terminal(events1) == "turn_suspended", \
+        f"应以挂起收尾，实得 {[e.msg.kind for e in events1]}"
 
     # 三层各 emit turn_suspended：叶(用户 pending) + 中(CHILD_SKILL) + 根(CHILD_SKILL)。
     # wait_terminal 在首个（叶层）turn_suspended 即返回，中 / 根两层的挂起事件随
@@ -315,7 +317,8 @@ async def test_child_multi_pending_partial_then_complete(tmp_path: Path, threads
 
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events1 = await recorder.wait_terminal(sub_id)
-    assert events1[-1].msg.kind == "turn_suspended"
+    assert last_turn_terminal(events1) == "turn_suspended", \
+        f"应以挂起收尾，实得 {[e.msg.kind for e in events1]}"
 
     susp_tids = await _suspended_thread_ids(events1)
     leaf_tid, leaf_rec = await _leaf_with_user_pending(pool, susp_tids)

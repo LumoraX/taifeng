@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from taifeng.suspend.record import SuspensionRecord
+from tests.conftest import last_turn_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -222,7 +223,7 @@ async def test_resume_child_thread_suspension_continues_parent(tmp_path: Path, t
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events1 = await recorder.wait_terminal(sub_id)
     kinds1 = [ev.msg.kind for ev in events1]
-    assert events1[-1].msg.kind == "turn_suspended", f"应以挂起收尾，实得 {kinds1}"
+    assert last_turn_terminal(events1) == "turn_suspended", f"应以挂起收尾，实得 {kinds1}"
 
     # 挂起事件携带的是【子 thread_id】，且 ≠ 根 thread_id
     suspend_ev = next(ev for ev in events1 if ev.msg.kind == "turn_suspended")

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from taifeng.suspend.record import SuspensionRecord
+from tests.conftest import last_turn_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -137,7 +138,7 @@ async def test_tool_only_composite_child_suspend_resume(tmp_path: Path, threads_
     # === 第一阶段：父派子，子内 request_user_input 挂起 ===
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
     events1 = await recorder.wait_terminal(sub_id)
-    assert events1[-1].msg.kind == "turn_suspended", \
+    assert last_turn_terminal(events1) == "turn_suspended", \
         f"应以挂起收尾，实得 {[e.msg.kind for e in events1]}"
 
     suspend_ev = next(ev for ev in events1 if ev.msg.kind == "turn_suspended")

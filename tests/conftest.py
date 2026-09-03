@@ -155,3 +155,25 @@ async def run_until_root_done_kind(
     """``run_until_root_done`` 的便捷包装：只要根终态的 kind。"""
     events = await run_until_root_done(engine, op, deadline_seconds=deadline_seconds)
     return str(events[-1].msg.kind)
+
+TURN_TERMINAL_KINDS = ("turn_suspended", "turn_completed", "turn_failed")
+
+
+def last_turn_terminal(events: list[Any]) -> str | None:
+    """取一批事件里**最后一条 turn 终态**的 kind（挂起 / 完成 / 失败）。
+
+    为什么不能直接看 ``events[-1].msg.kind``：turn 终态之后还会跟
+    ``rewind_checkpoint_recorded`` 这类**记账事件**，它到没到全看调度时序 ——
+    按 ``[-1]`` 断言会间歇误判（2026-09-03 实测：挂起族 10 轮红 5 轮，
+    失败原文即 ``assert 'rewind_checkpoint_recorded' == 'turn_suspended'``）。
+
+    与 :func:`run_until_root_done` 同源的一条纪律：**断言要挑事件，不要挑位置**。
+
+    Args:
+        events: 保序的事件列表（通常来自 ``subscribe_all`` 收集器）。
+
+    Returns:
+        最后一条 turn 终态事件的 kind；一条都没有则返回 ``None``。
+    """
+    terminals = [ev.msg.kind for ev in events if ev.msg.kind in TURN_TERMINAL_KINDS]
+    return str(terminals[-1]) if terminals else None
