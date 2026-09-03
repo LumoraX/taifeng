@@ -85,6 +85,7 @@ from taifeng.loop.event import (
     UserInputInjected,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
+from taifeng.loop.injection import injection_event
 from taifeng.loop.rewind import RewindCheckpoint, count_turns, derive_rewind_log
 from taifeng.loop.spawn_driver import SpawnDriver
 from taifeng.loop.submission import (
@@ -174,6 +175,9 @@ class _PendingTurn:
     # B1 midturn-input-steering：注入队列。engine 处理 InjectUserInput Op 时 append，
     # 与对应活跃 TurnRunner.pending_input 共享同一 list 引用，runner 迭代边界 drain。
     pending_input: list[ResponseItem] = field(default_factory=list)
+    # 是否根 thread 的 turn：InjectSystemMessage 只投给根 turn；子 thread 续跑登记
+    # `_pending`（供 CancelTurn 触达）时置 False。
+    is_root: bool = True
 
 
 class AgentEngine:
@@ -1339,8 +1343,15 @@ class AgentEngine:
                     item = system_injection(
                         sub.op.text, thread_id=self._thread_id, source=sub.op.source
                     )
-                    self._history.append(item)
-                    await self._store.append(item)
+                    active = self._active_root_pending()
+                    if active is not None:
+                        # 在飞期间 root history 只有 runner 一个写者（ADR 0029）：
+                        # 走与 InjectUserInput 同一 pending 队列，runner 迭代边界落
+                        # buffer + store；否则 engine 直写会被 turn 结束的回写覆盖。
+                        active.pending_input.append(item)
+                    else:
+                        self._history.append(item)
+                        await self._store.append(item)
                     continue
                 if isinstance(sub.op, SendToPeer):
                     # peer-mailbox：与 send_message 工具收敛到同一投递路径。
@@ -1896,6 +1907,39 @@ class AgentEngine:
             spawn_coordinator=self,
         )
 
+    def _active_root_pending(self) -> _PendingTurn | None:
+        """返回当前根 thread 在飞 turn 的 pending 记录（无则 None）。
+
+        `_pending` 也会登记子 thread 续跑 turn，这里只认 is_root 的那一个。
+        """
+        for pending in self._pending.values():
+            if pending.is_root:
+                return pending
+        return None
+
+    async def _drain_residual_injections(
+        self, runner: TurnRunner, submission_id: str,
+    ) -> None:
+        """turn 退出后把 runner 未消费的 pending 注入并入 buffer + store（R5）。
+
+        正常路径 runner 已在迭代边界 drain 完毕，这里见空列表直接返回；取消 / 异常
+        路径才有残留。事件与 runner 侧同形，但 delivered=False + reason=turn_ended，
+        让宿主知道这段文本没有进入本 turn 的 prompt。
+        """
+        residual = list(runner.pending_input)
+        runner.pending_input.clear()
+        for item in residual:
+            runner.history_buffer.append(item)
+            await self._store.append(item)
+            await self._emit(
+                EventMsg(
+                    submission_id=submission_id,
+                    msg=injection_event(
+                        item, submission_id, delivered=False, reason="turn_ended",
+                    ),
+                )
+            )
+
     async def _writeback_turn_runner(self, runner: TurnRunner) -> None:
         """完整验证 audited history 后原子回写 runner 派生状态。"""
         async with self._lock:
@@ -1953,6 +1997,9 @@ class AgentEngine:
                     outcome.end_reason,
                 )
         finally:
+            # runner 因取消 / 异常退出时 pending 队列可能仍有未消费注入：
+            # 在回写之前并入 runner buffer + store，不丢（R5），事件报 delivered:false。
+            await self._drain_residual_injections(runner, submission_id)
             self._pending.pop(submission_id, None)
             self._turn_index += 1
 

@@ -97,6 +97,8 @@ class _ConflictingRunner:
         self.total_usage = TokenUsage(total_tokens=999)
         self.turn_index = 0
         self._seed_pending_call_id: str | None = None
+        # engine 收尾会 drain 残留注入队列（ADR 0029）；真 runner 一直有该字段
+        self.pending_input: list[ResponseItem] = []
 
     async def run(self) -> TurnOutcome:
         """返回成功 outcome，使测试只命中 history writeback 边界。"""

@@ -102,7 +102,6 @@ from taifeng.loop.event import (
     TurnFailed,
     TurnStarted,
     TurnSuspended,
-    UserInputInjected,
 )
 from taifeng.loop.failure_policy import (
     DEFAULT_FAILURE_POLICY,
@@ -110,6 +109,7 @@ from taifeng.loop.failure_policy import (
     FailureDisposition,
     FailureDispositionPolicy,
 )
+from taifeng.loop.injection import injection_event
 from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.rewind import RewindLog, count_turns
@@ -970,6 +970,11 @@ class TurnRunner:
                     }
                 )
             )
+
+        # ADR 0029：取消 / 异常 / 挂起路径上 pending 队列可能仍有未消费注入——在终态
+        # 事件之前落 buffer + store（R5 不丢），事件 delivered:false + reason=turn_ended，
+        # 让停在终态的订阅者也能看到。正常路径上方已 drain 完、这里见空即返回。
+        await self._drain_pending_input(residual=True)
 
         # K3 writeback（dirty-page）：把本 turn 新增 items 异步写回长期存储。
         await self._writeback_memory(self.history_buffer[writeback_baseline:])
@@ -1842,16 +1847,22 @@ class TurnRunner:
             raw=u.raw,
         )
 
-    async def _drain_pending_input(self) -> None:
-        """B1：把 pending_input 队列并入 history（迭代边界调用）。
+    async def _drain_pending_input(self, *, residual: bool = False) -> None:
+        """B1：把 pending_input 队列并入 history。
 
-        取出全部 pending（保留提交顺序），逐条追加 history_buffer + store.append +
-        emit ``UserInputInjected{delivered:true}``，并清空队列。turn 已取消则不并入
-        （留给 engine 收尾落历史，不丢用户输入，R5）。
+        迭代边界调用（``residual=False``）：取出全部 pending（保留提交顺序），逐条追加
+        history_buffer + store.append + emit 对应注入事件（user_message →
+        ``user_input_injected``、system_injection → ``system_message_injected``，
+        delivered:true）；turn 已取消则不并入。
+
+        turn 退出路径调用（``residual=True``，ADR 0029）：不看取消位，把残留全部落史，
+        事件 delivered:false + reason="turn_ended"——文本未进入本 turn 的 prompt 但没丢。
 
         副作用：history_buffer / store 追加；pending_input 清空；emit 事件。
         """
-        if not self.pending_input or self.cancel.is_cancelled:
+        if not self.pending_input:
+            return
+        if not residual and self.cancel.is_cancelled:
             return
         # 同 event loop 协作式调度：取出 + 清空在无 await 的同步段完成，避免与
         # engine 主循环 append 竞态（无需锁）。
@@ -1860,14 +1871,11 @@ class TurnRunner:
         for item in drained:
             self.history_buffer.append(item)
             await self.store.append(item)
-            preview = str(item.payload.get("text", ""))[:80]
             await self._emit(
-                UserInputInjected(
-                    data={
-                        "submission_id": self.submission_id,
-                        "delivered": True,
-                        "text_preview": preview,
-                    }
+                injection_event(
+                    item, self.submission_id,
+                    delivered=not residual,
+                    reason="turn_ended" if residual else None,
                 )
             )
 

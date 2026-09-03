@@ -93,6 +93,7 @@ _KIND_TAG = {
     "resource_limit_exceeded": ("knob", _Colors.RED, "⛔"),
     # midturn-input-steering：运行中注入用户输入（R3 审计补：此前落 `evt` 兜底）
     "user_input_injected": ("inje", _Colors.CYAN, "↘"),
+    "system_message_injected": ("inje", _Colors.CYAN, "↘"),
     # post-turn-hook：root turn 真终态收尾审计点（R3 审计补：此前落 `evt` 兜底）
     "post_turn_hook_fired": ("hook", _Colors.GRAY, "⊛"),
     "engine_log": ("eng ", _Colors.GRAY, "·"),
@@ -273,9 +274,11 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         parts.append(f"condition missing: {data.get('condition')} (skill={data.get('skill_id')})")
     elif ev.msg.kind == "thread_resumed":
         parts.append(f"thread={data.get('thread_id')} items={data.get('item_count', data.get('items', '?'))}")
-    elif ev.msg.kind == "user_input_injected":
-        # delivered=True 投进活跃 turn pending；False 无活跃 turn（落史未起新 turn）
+    elif ev.msg.kind in ("user_input_injected", "system_message_injected"):
+        # delivered=True 已并入 turn / 落史；False + reason=turn_ended 为 engine 收尾落史
         parts.append(f"delivered={data.get('delivered')}")
+        if reason := data.get("reason"):
+            parts.append(f"reason={reason}")
         if preview := data.get("text_preview"):
             parts.append(_short(preview, 60))
     elif ev.msg.kind == "post_turn_hook_fired":

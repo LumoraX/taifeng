@@ -38,6 +38,7 @@ MsgKind = Literal[
     "provider_retry",
     "llm_request_recorded",
     "user_input_injected",
+    "system_message_injected",
     "permission_prompt_timeout",
     "skill_dispatch_hook_denied",
     "skill_dispatch_permission_denied",
@@ -393,7 +394,24 @@ class UserInputInjected(_Msg):
     """
 
     kind: Literal["user_input_injected"] = "user_input_injected"
-    """data = {"submission_id": str, "delivered": bool, "text_preview": str}"""
+    """data = {"submission_id": str, "delivered": bool, "text_preview": str,
+    "reason": str | None}
+
+    ``reason="turn_ended"``（delivered=false）：注入投进了活跃 turn 的 pending 队列，但
+    turn 在消费前结束（取消 / 异常），文本由 engine 收尾落史、未进入该 turn 的 prompt。
+    """
+
+
+class SystemMessageInjected(_Msg):
+    """InjectSystemMessage 投递结果（ADR 0029：在飞期间走 runner pending 队列）。
+
+    delivered=true → 已并入活跃 turn 的 history（下一迭代可见）或无活跃 turn 时直接
+    落史；false + reason="turn_ended" → 投进 pending 后 turn 结束，engine 收尾落史。
+    """
+
+    kind: Literal["system_message_injected"] = "system_message_injected"
+    """data = {"submission_id": str, "delivered": bool, "text_preview": str,
+    "reason": str | None}"""
 
 
 class CompactionDegradationWarning(_Msg):
@@ -851,6 +869,7 @@ Msg = Union[
     ProviderRetry,
     LlmRequestRecorded,
     UserInputInjected,
+    SystemMessageInjected,
     PermissionPromptTimeout,
     SkillDispatchHookDenied,
     SkillDispatchPermissionDenied,
