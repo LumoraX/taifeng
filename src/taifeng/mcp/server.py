@@ -124,6 +124,10 @@ class McpStdioServer:
         # 在 run() 中 bind 到实际 stdout，供 server_initiated_request 写出
         self._stdout: asyncio.StreamWriter | None = None
 
+        # tools/call 以 owned task 派发（读循环不被 turn 阻塞，turn 内的
+        # elicitation 才能读到 client 应答）；run() 退出时统一收敛
+        self._owned_tasks: set[asyncio.Task[None]] = set()
+
     # ------------------------------------------------------------------
     # Public: run loop
     # ------------------------------------------------------------------
@@ -155,7 +159,39 @@ class McpStdioServer:
         except asyncio.CancelledError:
             raise
         finally:
+            await self._converge_owned_tasks()
             self._stdout = None
+
+    async def _converge_owned_tasks(self) -> None:
+        """取消并等待所有在飞 tools/call task（EOF / 取消退出时不留悬空任务）。"""
+        tasks = list(self._owned_tasks)
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._owned_tasks.clear()
+
+    def _spawn_tools_call(self, req_id: Any, params: dict[str, Any]) -> None:
+        """把一次 tools/call 派成 owned task，完成后自行写回响应。"""
+        task = asyncio.create_task(self._run_tools_call(req_id, params))
+        self._owned_tasks.add(task)
+        task.add_done_callback(self._owned_tasks.discard)
+
+    async def _run_tools_call(self, req_id: Any, params: dict[str, Any]) -> None:
+        """owned task 主体：跑 tools/call，异常兜底为 JSON-RPC internal error 响应。
+
+        取消（run() 收敛）原样上抛、不写响应——stdout 此时可能已失效。
+        """
+        try:
+            response = await self._handle_tools_call(req_id, params)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 —— 不让单次 turn 的异常打穿读循环
+            logger.exception("tools/call failed: id=%s", req_id)
+            response = _jsonrpc_error(
+                req_id, JSONRPC_INTERNAL_ERROR, f"Internal error: {e}",
+            )
+        await self._write_message(response)
 
     # ------------------------------------------------------------------
     # Internal: line / request dispatch
@@ -368,7 +404,10 @@ class McpStdioServer:
         elif method == "tools/list":
             result = self._handle_tools_list(params)
         elif method == "tools/call":
-            return await self._handle_tools_call(req_id, params)
+            # 不在读循环内 await 整个 turn：turn 内 McpPrompter 的 elicitation 要靠
+            # 读循环继续读 stdin 才能拿到 client 应答
+            self._spawn_tools_call(req_id, params)
+            return None
         elif method == "resources/list":
             result = self._handle_resources_list(params)
         elif method == "resources/read":

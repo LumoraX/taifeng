@@ -68,6 +68,16 @@ McpStdioServer(
 4. 异步消费 `engine.subscribe(sub_id)`，累积 `assistant_text` deltas；遇 `turn_completed` 或 `turn_failed` 退出
 5. 返回 `{"content": [{"type": "text", "text": final_text}], "isError": <bool>}`，`isError=True` 当且仅当 `turn_failed`
 
+**并发模型**：`tools/call` SHALL 以 server 持有的 owned task 派发，读循环在 turn 期间**持续读取 stdin**——turn 内 `McpPrompter` 发起的 `elicitation/create` 才能收到 client 应答（否则必超时 → deny）。task 完成后经 `_write_message` 写回响应；task 内未捕获异常 SHALL 以 `-32603 Internal error` 响应写回，MUST NOT 使读循环退出。`run()` 退出（EOF / 取消）时 SHALL 取消并等待所有在飞 task。其他 method（`initialize` / `tools/list` / `resources/*`）仍在读循环内同步处理，响应顺序与请求顺序一致。
+
+#### Scenario: HITL 在真实 tools/call 路径上获批
+- **WHEN** client 发 `tools/call run_skill_turn`，turn 内工具触发 `McpPrompter.prompt`，server 写出 `elicitation/create`，client 随后在 stdin 写入对应 `{"id": "srv_1", "result": {"action": "accept", ...}}`
+- **THEN** prompter 在超时前拿到 accept，`tools/call` 最终响应 `isError=False`
+
+#### Scenario: 读循环退出收敛在飞任务
+- **WHEN** 一个 `tools/call` 仍在执行时 stdin 到达 EOF
+- **THEN** `run()` 返回前该 task 被取消并 await 完成
+
 #### Scenario: 成功 turn 返回 final text
 - **WHEN** mock LLM 在一个 turn 内返回 `"foo"` 然后 `completed`
 - **AND** 客户端 `tools/call(name="run_skill_turn", arguments={"skill_id": "<entry>", "message": "hi"})`

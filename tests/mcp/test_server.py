@@ -2,13 +2,17 @@
 
 策略：不真启动 stdio subprocess，直接构造 `McpStdioServer` 实例
 + 调 `_handle_line(json_bytes)` / `_dispatch(...)` 验证 response dict 结构。
-覆盖 spec ``mcp-server`` 全部 ADDED Requirement。
+``tools/call`` 例外：它以 owned task 派发、经 stdout 写回，须走 ``_roundtrip``
+（伪 stdin/stdout 跑真实 ``run()`` 读循环）。覆盖 spec ``mcp-server`` 全部 ADDED
+Requirement。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,7 +24,6 @@ from taifeng.mcp.server import (
     SKILL_URI_PREFIX,
     McpStdioServer,
 )
-
 
 # --------------------------------------------------------------------
 # Fixtures
@@ -43,6 +46,53 @@ def _req(rid: int, method: str, params: dict | None = None) -> bytes:
     if params is not None:
         payload["params"] = params
     return (json.dumps(payload) + "\n").encode("utf-8")
+
+
+def _make_pipe() -> tuple[asyncio.StreamReader, asyncio.StreamWriter, list[bytes]]:
+    """伪 stdin/stdout：StreamWriter.write 的字节全部收进 written 列表。"""
+    reader = asyncio.StreamReader()
+    written: list[bytes] = []
+
+    class _T:
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def is_closing(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    class _P:
+        async def _drain_helper(self) -> None:
+            return None
+
+        def connection_lost(self, exc: Any) -> None:
+            pass
+
+    writer = asyncio.StreamWriter(_T(), _P(), reader, asyncio.get_event_loop())
+    return reader, writer, written
+
+
+async def _roundtrip(server: McpStdioServer, line: bytes, rid: int) -> dict[str, Any]:
+    """跑真实 run() 读循环：喂一行请求，等到 id 匹配的响应后 EOF 收尾。"""
+    reader, writer, written = _make_pipe()
+    task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
+    try:
+        reader.feed_data(line)
+        for _ in range(500):
+            await asyncio.sleep(0.01)
+            for raw in written:
+                text = raw.decode("utf-8").strip()
+                if not text:
+                    continue
+                msg = json.loads(text)
+                if msg.get("id") == rid:
+                    return msg
+        raise AssertionError(f"no response for id={rid} within 5s")
+    finally:
+        reader.feed_eof()
+        await asyncio.wait_for(task, timeout=2.0)
 
 
 # --------------------------------------------------------------------
@@ -112,14 +162,14 @@ async def test_tools_call_run_skill_turn_returns_final_text(
         )],
     )
     server = McpStdioServer(pool)
-    resp = await server._handle_line(_req(3, "tools/call", {  # noqa: SLF001
+    resp = await _roundtrip(server, _req(3, "tools/call", {
         "name": "run_skill_turn",
         "arguments": {
             "skill_id": "code-reviewer",
             "message": "hi",
             "session_id": "test-1",
         },
-    }))
+    }), 3)
 
     result = resp["result"]
     assert result["isError"] is False
@@ -135,10 +185,10 @@ async def test_tools_call_unknown_skill_returns_is_error(
 ) -> None:
     pool = await _build_pool(skills_dir, threads_dir)
     server = McpStdioServer(pool)
-    resp = await server._handle_line(_req(4, "tools/call", {  # noqa: SLF001
+    resp = await _roundtrip(server, _req(4, "tools/call", {
         "name": "run_skill_turn",
         "arguments": {"skill_id": "ghost-skill", "message": "hi"},
-    }))
+    }), 4)
 
     # 业务错误走 isError，而非 JSON-RPC 顶层错误
     assert "error" not in resp
@@ -155,10 +205,10 @@ async def test_tools_call_missing_message_returns_invalid_params(
 ) -> None:
     pool = await _build_pool(skills_dir, threads_dir)
     server = McpStdioServer(pool)
-    resp = await server._handle_line(_req(5, "tools/call", {  # noqa: SLF001
+    resp = await _roundtrip(server, _req(5, "tools/call", {
         "name": "run_skill_turn",
         "arguments": {"skill_id": "code-reviewer"},  # 缺 message
-    }))
+    }), 5)
 
     # 参数缺失走 JSON-RPC -32602
     assert "result" not in resp
@@ -174,10 +224,10 @@ async def test_tools_call_unknown_tool_name_returns_method_not_found(
 ) -> None:
     pool = await _build_pool(skills_dir, threads_dir)
     server = McpStdioServer(pool)
-    resp = await server._handle_line(_req(6, "tools/call", {  # noqa: SLF001
+    resp = await _roundtrip(server, _req(6, "tools/call", {
         "name": "explode_universe",
         "arguments": {},
-    }))
+    }), 6)
 
     assert resp["error"]["code"] == -32601
     await pool.close()
