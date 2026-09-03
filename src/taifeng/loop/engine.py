@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ from taifeng.loop.audit_mailbox import (
 )
 from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shutdown
 from taifeng.loop.audit_support import AuditHealth
+from taifeng.loop.audit_support import _await_owned as audit_await_owned
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import (
     EngineLog,
@@ -76,6 +78,7 @@ from taifeng.loop.event import (
     ResourceLimitExceeded,
     RewindRejected,
     RewindTableRebuilt,
+    SubmissionQueued,
     SuspensionExpired,
     SuspensionPartiallyResolved,
     SuspensionResolved,
@@ -414,6 +417,9 @@ class AgentEngine:
         self._pending: dict[str, _PendingTurn] = {}
         # run() 收敛完毕后置 True：此后过滤订阅立即得到合成终结（ADR 0029）
         self._closed = False
+        # ADR 0029 root gate：同一 engine 同时只跑一个根 turn；gated Op 按提交序排队
+        self._root_gate = asyncio.Lock()
+        self._root_gate_owner: str | None = None
         self._running = False
         self._audited_shutdown_enqueued = False
         # 跨 turn 持久化的 history view（用于复用 + cache）
@@ -1500,11 +1506,32 @@ class AgentEngine:
                     )
                     continue
                 if isinstance(sub.op, CompactNow):
-                    # 走 manual 路径 —— 启动一个不带 user message 的特殊 turn
-                    await self._run_compact_now(sub.id, sub.op, cancel)
+                    # manual 压缩 = 一次 LLM 调用：不能内联在 actor 循环里（会饿死
+                    # CancelTurn / Shutdown），且改写 root history 须持 root gate
+                    op_compact = sub.op
+                    self._start_operation(
+                        self._run_gated_op(
+                            sub.id, cancel,
+                            lambda tok, sid=sub.id, op=op_compact: self._run_compact_now(
+                                sid, op, tok,
+                            ),
+                        ),
+                        name=f"compact:{sub.id}",
+                        submission_id=sub.id,
+                    )
                     continue
                 if isinstance(sub.op, ThreadRollback):
-                    await self._handle_rollback(sub.id, sub.op.num_turns)
+                    num_turns = sub.op.num_turns
+                    self._start_operation(
+                        self._run_gated_op(
+                            sub.id, cancel,
+                            lambda _tok, sid=sub.id, n=num_turns: self._handle_rollback(
+                                sid, n,
+                            ),
+                        ),
+                        name=f"rollback:{sub.id}",
+                        submission_id=sub.id,
+                    )
                     continue
                 if isinstance(sub.op, UpdateBudget):
                     self._handle_update_budget(sub.id, sub.op)
@@ -1518,10 +1545,22 @@ class AgentEngine:
                 if isinstance(sub.op, Rewind):
                     # 与 Resume 同理用 create_task：重推会跑完整 turn(采样 + 派发),
                     # 不阻塞主 run 循环,且给 subscribe(submission_id) 留注册窗口。
+                    # 根 thread 的 rewind 改写 root history → 持 root gate；子 thread
+                    # rewind 作用于 child thread，不排队（其一致性归 wave2b）。
+                    is_root_rewind = (
+                        sub.op.thread_id is None or sub.op.thread_id == self._thread_id
+                    )
+                    rewind_sub = sub
+                    body = (
+                        self._run_gated_op(
+                            sub.id, cancel,
+                            lambda tok, s_=rewind_sub: self._handle_rewind(s_, tok),
+                        )
+                        if is_root_rewind
+                        else self._handle_rewind(sub, cancel)
+                    )
                     self._start_operation(
-                        self._handle_rewind(sub, cancel),
-                        name=f"rewind:{sub.id}",
-                        submission_id=sub.id,
+                        body, name=f"rewind:{sub.id}", submission_id=sub.id,
                     )
                     continue
                 if isinstance(sub.op, Resume):
@@ -1541,8 +1580,13 @@ class AgentEngine:
                     # 多个 turn）不阻塞主 run 循环，且给 subscribe(submission_id) 留出在
                     # 事件流出前注册队列的窗口（子 thread resume 续跑链 emit 多个事件，
                     # 内联执行会与"submit 后再 subscribe"的消费者抢跑导致丢首批事件→挂死）。
+                    # 根 / call_skill 子链续跑最终都回写 root history → 持 root gate
+                    resume_sub = sub
                     self._start_operation(
-                        self._handle_resume(sub, cancel),
+                        self._run_gated_op(
+                            sub.id, cancel,
+                            lambda tok, s_=resume_sub: self._handle_resume(s_, tok),
+                        ),
                         name=f"resume:{sub.id}",
                         submission_id=sub.id,
                     )
@@ -1638,6 +1682,77 @@ class AgentEngine:
             item, conversation_envelopes = token.validated_application()
         except BaseException as error:
             raise self._audit_state.coordinator.freeze(error) from None
+        # ADR 0029：accepted item 的 application（进 history + 投影）推迟到本 token 拿到
+        # root gate——transcript 顺序 = 执行顺序，在飞 turn 的 prompt 确定不含排队消息。
+        # accept 本身（durable 准入记录）已在 submit 时落盘，不受影响。
+        # 排队前登记 _pending（gate token），CancelTurn 可取消排队；engine 收敛（raw
+        # cancel）时对仍排队的 token「只应用不跑 turn」，满足 release 等 application 收敛。
+        gate_cancel = root_cancel.child(f"sub:{token.submission_id}:gate")
+        self._pending[token.submission_id] = _PendingTurn(
+            token.submission_id, gate_cancel, token.accepted_turn_index,
+        )
+        # actor 握手语义 = 「交接完成」：gate 空闲时等 application 收敛（原语义）；
+        # gate 被占时登记排队即交接完成，actor 可出队下一个 token——否则 actor 会
+        # 永远等在排队 token 的 application 上（它要等 gate）。排队 token 之后的
+        # application 失败走 operation 自己的 freeze / 终结路径。
+        if self._root_gate.locked() and application_checkpoint is not None:
+            application_checkpoint.succeed()
+        raw_cancel: asyncio.CancelledError | None = None
+        try:
+            acquired = await self._acquire_root_gate(token.submission_id, gate_cancel)
+        except asyncio.CancelledError as error:
+            acquired = False
+            raw_cancel = error
+        if not acquired:
+            # 取消（CancelTurn 或 engine 收敛）：accepted 是 durable 承诺，仍要应用
+            self._pending.pop(token.submission_id, None)
+            await self._apply_accepted_item_owned(
+                token, item, conversation_envelopes, application_checkpoint,
+            )
+            await self._emit_operation_terminal(
+                token.submission_id, None,
+                kind="engine_shutdown" if raw_cancel is not None else "cancelled",
+            )
+            if raw_cancel is not None:
+                raise raw_cancel
+            return
+        try:
+            await self._apply_accepted_item(
+                token, item, conversation_envelopes, application_checkpoint,
+            )
+            target_cancel = self._audit_state.coordinator.register_target(
+                token.submission_id
+            )
+            await self._run_audited_target(token, item, target_cancel)
+        finally:
+            self._release_root_gate()
+
+    async def _apply_accepted_item_owned(
+        self,
+        token: AcceptedUserMessage,
+        item: ResponseItem,
+        conversation_envelopes: Any,
+        application_checkpoint: AuditedApplicationCheckpoint | None,
+    ) -> None:
+        """application 作为 coordinator-owned 步骤执行：caller 的 raw cancel 只能延迟重抛。"""
+        _, cancellation = await audit_await_owned(
+            self._apply_accepted_item(
+                token, item, conversation_envelopes, application_checkpoint,
+            ),
+            name=f"apply-accepted:{token.submission_id}",
+        )
+        if cancellation is not None:
+            raise cancellation
+
+    async def _apply_accepted_item(
+        self,
+        token: AcceptedUserMessage,
+        item: ResponseItem,
+        conversation_envelopes: Any,
+        application_checkpoint: AuditedApplicationCheckpoint | None,
+    ) -> None:
+        """accepted user item 进 hot history + 投影（ADR 0025 application）。"""
+        assert self._audit_state is not None
         async with self._lock:
             self._history.append(item)
         try:
@@ -1651,9 +1766,15 @@ class AgentEngine:
         self._audit_state.coordinator.update_projection(result)
         if application_checkpoint is not None:
             application_checkpoint.succeed()
-        target_cancel = self._audit_state.coordinator.register_target(
-            token.submission_id
-        )
+
+    async def _run_audited_target(
+        self,
+        token: AcceptedUserMessage,
+        item: ResponseItem,
+        target_cancel: CancellationToken,
+    ) -> None:
+        """已持 root gate：跑 audited 根 turn 并收敛 target 终态。"""
+        assert self._audit_state is not None
         try:
             await self._run_turn_for(
                 AuditedTurnInput(
@@ -1662,6 +1783,7 @@ class AgentEngine:
                     accepted_turn_index=token.accepted_turn_index,
                 ),
                 target_cancel,
+                gate_held=True,
             )
             end_reason = self._audit_state.coordinator.target_outcome(
                 token.submission_id,
@@ -1686,11 +1808,119 @@ class AgentEngine:
                 target_cancel,
             )
 
+    async def _acquire_root_gate(
+        self, submission_id: str, cancel: CancellationToken,
+    ) -> bool:
+        """排队获取 root gate；gate 被占时 emit submission_queued，排队中被取消返回 False。
+
+        `asyncio.Lock` 是 FIFO：提交序即执行序。与 cancel token 竞速——CancelTurn 命中
+        排队中的 submission（_pending 已登记）→ 放弃排队，调用方发 cancelled 终结。
+        """
+        if cancel.is_cancelled:
+            return False
+        if self._root_gate.locked():
+            await self._emit(EventMsg(
+                submission_id=submission_id,
+                msg=SubmissionQueued(data={
+                    "submission_id": submission_id,
+                    "waiting_on": self._root_gate_owner,
+                }),
+            ))
+        acquire = asyncio.ensure_future(self._root_gate.acquire())
+        waiter = asyncio.ensure_future(cancel.wait_cancelled())
+        try:
+            await asyncio.wait({acquire, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            # 任务级 raw cancel（engine 收敛）：撤回 acquire，恰好拿到的锁立刻归还
+            await self._abandon_acquire(acquire)
+            raise
+        finally:
+            waiter.cancel()
+        current = asyncio.current_task()
+        if current is not None and current.cancelling() > 0:
+            # 锁与 raw cancel 同一轮到达：cancel 会在下一个 await 抛出，此时若已持锁
+            # 会在 release 期间跑起 turn——一律视为未获取，把锁归还后按取消传播
+            await self._abandon_acquire(acquire)
+            raise asyncio.CancelledError("engine converging")
+        if acquire.done() and not acquire.cancelled():
+            acquire.result()
+            self._root_gate_owner = submission_id
+            return True
+        # 取消 token 先到：撤回 acquire
+        await self._abandon_acquire(acquire)
+        return False
+
+    async def _abandon_acquire(self, acquire: asyncio.Future[bool]) -> None:
+        """撤回一次 gate acquire；若它已经（或在撤回瞬间）拿到锁，立刻归还。"""
+        if not acquire.done():
+            acquire.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await acquire
+        if acquire.done() and not acquire.cancelled() and acquire.result():
+            self._root_gate.release()
+
+    def _release_root_gate(self) -> None:
+        """释放 root gate（持有者退出真终态之后调用）。"""
+        self._root_gate_owner = None
+        self._root_gate.release()
+
+    async def _run_gated_op(
+        self,
+        submission_id: str,
+        root_cancel: CancellationToken,
+        run: Callable[[CancellationToken], Coroutine[Any, Any, None]],
+    ) -> None:
+        """非 UserMessage 的 gated Op（CompactNow / Rollback / 根 Rewind / 根 Resume）。
+
+        登记 _pending（排队中可被 CancelTurn 取消）→ 排队取 gate → 以派生 token 跑
+        op → 释放。op 内部若再登记 _pending 会覆盖这里的记录（其 token 派生自同一
+        gate_cancel，取消任一都能传达）。
+        """
+        gate_cancel = root_cancel.child(f"sub:{submission_id}:gate")
+        self._pending[submission_id] = _PendingTurn(submission_id, gate_cancel)
+        if not await self._acquire_root_gate(submission_id, gate_cancel):
+            self._pending.pop(submission_id, None)
+            await self._emit_operation_terminal(submission_id, None, kind="cancelled")
+            return
+        try:
+            await run(gate_cancel)
+        finally:
+            self._pending.pop(submission_id, None)
+            self._release_root_gate()
+
     async def _run_turn_for(
         self,
         sub: Submission | AuditedTurnInput,
         root_cancel: CancellationToken,
+        *,
+        gate_held: bool = False,
     ) -> None:
+        """根 turn 入口：登记 _pending → 排队取 root gate → 跑 turn → 释放。
+
+        _pending 在排队前登记，CancelTurn 才能取消排队中的 submission
+        （→ turn_failed{kind=cancelled}）。``gate_held=True``（audited 路径）表示
+        调用方已在 application 之前持有 gate，这里不再取 / 放。
+        """
+        turn_cancel = root_cancel.child(f"sub:{sub.id}")
+        self._pending[sub.id] = _PendingTurn(sub.id, turn_cancel, audited_turn_index(sub))
+        if gate_held:
+            await self._run_turn_for_gated(sub, turn_cancel)
+            return
+        if not await self._acquire_root_gate(sub.id, turn_cancel):
+            self._pending.pop(sub.id, None)
+            await self._emit_operation_terminal(sub.id, None, kind="cancelled")
+            return
+        try:
+            await self._run_turn_for_gated(sub, turn_cancel)
+        finally:
+            self._release_root_gate()
+
+    async def _run_turn_for_gated(
+        self,
+        sub: Submission | AuditedTurnInput,
+        turn_cancel: CancellationToken,
+    ) -> None:
+        """持有 root gate 后的根 turn 主体（挂起守卫 → 落 user → 指令 → hook → runner）。"""
         if isinstance(sub, Submission):
             assert isinstance(sub.op, UserMessage)
             user_text = sub.op.text
@@ -1715,11 +1945,9 @@ class AgentEngine:
                 "iterations": 0,
                 "is_root": True,
             })))
+            self._pending.pop(sub.id, None)
             self._turn_index += 1
             return
-
-        turn_cancel = root_cancel.child(f"sub:{sub.id}")
-        self._pending[sub.id] = _PendingTurn(sub.id, turn_cancel, audited_turn_index(sub))
 
         # 把 user 消息落 buffer + 持久化
         if attachments is not None:

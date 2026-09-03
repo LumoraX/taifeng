@@ -177,19 +177,19 @@ async def _wait_until(predicate: object) -> None:
 
 
 @pytest.mark.anyio
-async def test_reverse_completion_keeps_each_conversation_item_exactly_once(
+async def test_sequential_root_turns_keep_each_conversation_item_exactly_once(
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
-    """后启动 runner 先完成时，两轮 user/assistant 仍各保留一次。"""
+    """两条 UserMessage 连发：按提交序串行完成，每轮 user/assistant 各保留一次且有序。
+
+    历史版本构造「后启动先完成」验证并发回写按 id 合并；ADR 0029 后根 turn 串行，
+    第二轮在第一轮真终态后才开跑，合并退化为无冲突追加——不变量改为顺序 + 唯一。
+    """
     client = RoutingSimClient(
         routes={
-            "SECOND_HISTORY_MARK": [
-                SimTurn(text="second reply", emit_signal="second-finished")
-            ],
-            "FIRST_HISTORY_MARK": [
-                SimTurn(text="first reply", await_signal="second-finished")
-            ],
+            "SECOND_HISTORY_MARK": [SimTurn(text="second reply")],
+            "FIRST_HISTORY_MARK": [SimTurn(text="first reply")],
         }
     )
     engine, coordinator, _ = await _engine_with_audit(
@@ -197,11 +197,10 @@ async def test_reverse_completion_keeps_each_conversation_item_exactly_once(
         skills_dir,
         model_client=client,
     )
-    root_cancel = CancellationToken(name="reverse-completion-root")
+    root_cancel = CancellationToken(name="sequential-root")
     actor = asyncio.create_task(engine.run(root_cancel))
     try:
         await engine.submit(UserMessage(text="FIRST_HISTORY_MARK"))
-        await _wait_until(lambda: len(client.ledger.requests()) == 1)
         await engine.submit(UserMessage(text="SECOND_HISTORY_MARK"))
         await _wait_until(
             lambda: (
@@ -216,7 +215,6 @@ async def test_reverse_completion_keeps_each_conversation_item_exactly_once(
     history = engine.history_snapshot()
     assert len({item.id for item in history}) == len(history)
     texts = [str(item.payload.get("text", "")) for item in history]
-    assert texts.count("FIRST_HISTORY_MARK") == 1
-    assert texts.count("SECOND_HISTORY_MARK") == 1
-    assert texts.count("first reply") == 1
-    assert texts.count("second reply") == 1
+    assert texts == [
+        "FIRST_HISTORY_MARK", "first reply", "SECOND_HISTORY_MARK", "second reply",
+    ]

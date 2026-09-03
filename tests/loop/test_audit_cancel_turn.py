@@ -260,7 +260,11 @@ async def test_engine_cancel_turn_is_durable_targeted_and_peer_can_continue(
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
-    """accepted→turn_cancelled→applied，且 peer 仍可完成后续 effect。"""
+    """accepted→turn_cancelled→applied，且排队中的 peer 在 target 取消后照常完成。
+
+    ADR 0029 根 turn 串行：peer 在 target 在飞期间只排队（不发 LLM 请求、_pending
+    登记的是 gate token），target 被取消并退出后 peer 才拿到 gate 开跑。
+    """
     client = _controlled_sim_client()
     engine, coordinator, core = await _engine_with_audit(
         tmp_path,
@@ -272,7 +276,11 @@ async def test_engine_cancel_turn_is_durable_targeted_and_peer_can_continue(
     try:
         target_id = await engine.submit(UserMessage(text="cancel-me"))
         peer_id = await engine.submit(UserMessage(text="keep-going"))
-        await _wait_for_requests(client, 2)
+        await _wait_for_requests(client, 1)
+        with anyio.fail_after(2):
+            while peer_id not in engine._pending:  # noqa: SLF001 —— peer 排队登记
+                await anyio.lowlevel.checkpoint()
+        assert len(client.ledger.requests()) == 1, "peer 排队中不得发请求（串行）"
         target_token = engine._pending[target_id].cancel  # noqa: SLF001
         peer_token = engine._pending[peer_id].cancel  # noqa: SLF001
         target_child = target_token.child("child-effect")
@@ -298,6 +306,8 @@ async def test_engine_cancel_turn_is_durable_targeted_and_peer_can_continue(
         assert coordinator.health is AuditHealth.HEALTHY
         await coordinator.ensure_effect_allowed()
 
+        # target 退出释放 gate → peer 开跑（第 2 个请求）→ 放行 → 完成
+        await _wait_for_requests(client, 2)
         with anyio.fail_after(2):
             client.coordinator.signal("release-peer")
             await client.coordinator.wait("peer-completed")

@@ -39,6 +39,7 @@ MsgKind = Literal[
     "llm_request_recorded",
     "user_input_injected",
     "system_message_injected",
+    "submission_queued",
     "permission_prompt_timeout",
     "skill_dispatch_hook_denied",
     "skill_dispatch_permission_denied",
@@ -400,6 +401,17 @@ class UserInputInjected(_Msg):
     ``reason="turn_ended"``（delivered=false）：注入投进了活跃 turn 的 pending 队列，但
     turn 在消费前结束（取消 / 异常），文本由 engine 收尾落史、未进入该 turn 的 prompt。
     """
+
+
+class SubmissionQueued(_Msg):
+    """根 turn 串行（ADR 0029）：submission 因 root gate 被占用而排队。
+
+    ``waiting_on`` 是当前持有 gate 的 submission id；排队按提交序 FIFO，前者真终态
+    （含 post_turn hook）后本 submission 才开始。排队中可被 CancelTurn 取消。
+    """
+
+    kind: Literal["submission_queued"] = "submission_queued"
+    """data = {"submission_id": str, "waiting_on": str | None}"""
 
 
 class SystemMessageInjected(_Msg):
@@ -870,6 +882,7 @@ Msg = Union[
     LlmRequestRecorded,
     UserInputInjected,
     SystemMessageInjected,
+    SubmissionQueued,
     PermissionPromptTimeout,
     SkillDispatchHookDenied,
     SkillDispatchPermissionDenied,

@@ -59,9 +59,9 @@ async def test_release_cancels_and_awaits_real_engine_dispatch(
     finished = asyncio.Event()
     operation_tasks: list[asyncio.Task[Any]] = []
 
-    async def _blocked_handler(*args: object) -> None:
+    async def _blocked_handler(*args: object, **kwargs: object) -> None:
         """记录真实 actor 派发出的 operation task 生命周期。"""
-        del args
+        del args, kwargs
         task = asyncio.current_task()
         assert task is not None
         operation_tasks.append(task)
@@ -132,9 +132,9 @@ async def test_unresponsive_real_operation_preserves_pool_ownership(
     escape = asyncio.Event()
     operation_tasks: list[asyncio.Task[Any]] = []
 
-    async def _resistant_turn(*args: object) -> None:
+    async def _resistant_turn(*args: object, **kwargs: object) -> None:
         """吞取消直到测试放行，模拟违反 cooperative cancellation 的 turn。"""
-        del args
+        del args, kwargs
         task = asyncio.current_task()
         assert task is not None
         operation_tasks.append(task)

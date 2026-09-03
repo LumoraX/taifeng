@@ -177,7 +177,8 @@ async def _begin_release_and_assert_application_convergence(
 ) -> asyncio.Task[None]:
     """验证 release 等待 application 收敛且 FINISHING 拒绝新输入。"""
     release = asyncio.create_task(pool.release(session_id))
-    await anyio.sleep(0.05)
+    with anyio.fail_after(2):
+        await gate.entered.wait()  # 排队 token 在 release 收敛时被应用（第二次投影）
     assert not release.done()
     assert not core.terminal_entered.is_set()
 
@@ -273,7 +274,13 @@ async def test_real_pool_release_waits_for_accepted_application_and_orders_journ
     first_id = await engine.submit(UserMessage(text="first accepted"))
     await _wait_until(lambda: gate.calls == 1)
     second_id = await engine.submit(UserMessage(text="second accepted"))
-    await gate.entered.wait()
+    # ADR 0029：second 的 application 推迟到它拿到 root gate；first 的 turn 永远阻塞，
+    # 所以 second 只会在 release 取消 first 之后「只应用不跑」——gate.entered 在
+    # release 开始后才会点亮（helper 内等待）。release 前先确认 first 已进入 sim
+    # 阻塞点（attempt 已 durable 提交），否则 release 会把 first 的 attempt 提交
+    # 打断成 commit_outcome_unknown（那是另一个场景）。
+    sim = pool._model_client._inner  # noqa: SLF001
+    await _wait_until(lambda: len(sim.ledger.requests()) == 1)
     release = await _begin_release_and_assert_application_convergence(
         pool=pool,
         session_id=session_id,

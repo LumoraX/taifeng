@@ -559,19 +559,19 @@ async def test_final_response_commits_ordered_conversation_items(
 
 
 @pytest.mark.anyio
-async def test_overlapping_audited_turns_keep_accepted_turn_indexes(
+async def test_sequential_audited_turns_keep_accepted_turn_indexes(
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
-    """反向完成的 accepted turns 必须沿用 admission 分配的 0/1 lineage。"""
+    """按提交序串行完成的 accepted turns 沿用 admission 分配的 0/1 lineage。
+
+    历史版本构造「反向完成」验证并发下 lineage 不串；ADR 0029 后根 turn 串行，
+    第二轮在第一轮真终态后开跑，lineage 由 admission 顺序点决定、与执行时序无关。
+    """
     inner = RoutingSimClient(
         routes={
-            "SECOND_ATTEMPT": [
-                SimTurn(text="second", emit_signal="second-finished")
-            ],
-            "FIRST_ATTEMPT": [
-                SimTurn(text="first", await_signal="second-finished")
-            ],
+            "SECOND_ATTEMPT": [SimTurn(text="second")],
+            "FIRST_ATTEMPT": [SimTurn(text="first")],
         }
     )
     client = AttemptObservableClientAdapter(
@@ -584,13 +584,10 @@ async def test_overlapping_audited_turns_keep_accepted_turn_indexes(
         skills_dir,
         model_client=client,
     )
-    root_cancel = CancellationToken(name="overlap-root")
+    root_cancel = CancellationToken(name="sequential-root")
     actor = asyncio.create_task(engine.run(root_cancel))
     try:
         first_id = await engine.submit(UserMessage(text="FIRST_ATTEMPT"))
-        with anyio.fail_after(2):
-            while len(inner.ledger.requests()) < 1:
-                await anyio.lowlevel.checkpoint()
         second_id = await engine.submit(UserMessage(text="SECOND_ATTEMPT"))
         with anyio.fail_after(2):
             while (

@@ -145,7 +145,6 @@ async def test_subscriber_after_shutdown_receives_terminal_event(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="wave2a task 4 未实现")
 async def test_two_user_messages_run_serially_in_order(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
