@@ -45,10 +45,23 @@ class _RwLock:
                 self._cond.notify_all()
 
     async def acquire_write(self) -> None:
+        """获取写锁（独占）。
+
+        等待期间若被取消（CancelledError 或任何 BaseException），必须回退
+        ``_waiting_writers`` 并唤醒等待者再上抛：否则幽灵写者会让此后所有
+        ``acquire_read`` 永久排队（runtime 是 pool 级单例，等于全 pool 挂死）。
+        ``asyncio.Condition.wait`` 在取消时会先重新拿回底层锁再抛，所以
+        except 块内持锁，直接改计数是安全的。
+        """
         async with self._cond:
             self._waiting_writers += 1
-            while self._writer_active or self._readers > 0:
-                await self._cond.wait()
+            try:
+                while self._writer_active or self._readers > 0:
+                    await self._cond.wait()
+            except BaseException:
+                self._waiting_writers -= 1
+                self._cond.notify_all()
+                raise
             self._waiting_writers -= 1
             self._writer_active = True
 
