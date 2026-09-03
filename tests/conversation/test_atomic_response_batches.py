@@ -147,3 +147,80 @@ async def test_atomic_batch_conflict_is_serialized_across_writer_instances(
 
     assert sum(isinstance(value, BatchAppendAck) for value in results) == 1
     assert sum(isinstance(value, BatchConflictError) for value in results) == 1
+
+
+# ---------------------------------------------------------------------------
+# torn tail（wave1 task 6）：crash 遗留半行不得吞掉后续 durable ack 过的整批
+# ---------------------------------------------------------------------------
+
+from taifeng.conversation.jsonl_atomic import (  # noqa: E402
+    OrphanCommittedItemError,
+    read_state,
+)
+from taifeng.conversation.transcript import JsonlMessageWriter  # noqa: E402
+
+
+class _RecordingSink:
+    """收集 EventMsg 的测试 sink。"""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def handle(self, ev) -> None:  # noqa: ANN001
+        self.events.append(ev)
+
+
+def _append_torn_tail(path: Path) -> None:
+    """同步 helper：在文件末尾追加一条没有换行的半截 JSON（模拟 crash）。"""
+    with path.open("a", encoding="utf-8") as f:
+        f.write('{"kind":"assistant_message","id":"torn","pay')
+
+
+@pytest.mark.asyncio
+async def test_atomic_batch_after_torn_tail_is_still_visible(tmp_path: Path) -> None:
+    """半行之后 append_atomic_batch → items 可见、batch 已提交、半行独立成一条 corrupt。"""
+    store = JsonlMessageStore(tmp_path)
+    thread_id = await store.create_thread()
+    from taifeng.conversation import user_message
+    await store.append(user_message("hello", thread_id=thread_id))
+    path = tmp_path / f"{thread_id}.jsonl"
+    _append_torn_tail(path)
+
+    items = [
+        assistant_message("after-crash", thread_id=thread_id, model="gpt-5.6"),
+        reasoning("", summary="r", thread_id=thread_id),
+    ]
+    ack = await JsonlMessageStore(tmp_path).append_atomic_batch(items, batch_id="b1")
+    assert ack.already_committed is False
+
+    state = read_state(path)
+    assert [it.kind for it in state.items] == [
+        "user_message", "assistant_message", "reasoning",
+    ]
+    assert "b1" in state.committed
+    assert len(state.corrupt) == 1  # 只有那条半行
+
+
+@pytest.mark.asyncio
+async def test_orphan_committed_item_is_reported_as_corrupt(tmp_path: Path) -> None:
+    """batch 外携带 commit_batch_id 的 item 记为 corrupt 并发事件，不再静默跳过。"""
+    sink = _RecordingSink()
+    writer = JsonlMessageWriter(tmp_path, sink=sink)
+    thread_id = await writer.create_thread(entry_skill_id="entry")
+    path = tmp_path / f"{thread_id}.jsonl"
+    orphan = assistant_message("orphan", thread_id=thread_id, model="gpt-5.6")
+    orphan = orphan.model_copy(
+        update={"metadata": {**orphan.metadata, "commit_batch_id": "b9"}},
+    )
+    with path.open("a", encoding="utf-8") as f:
+        f.write(orphan.model_dump_json() + "\n")
+
+    state = read_state(path)
+    assert state.items == ()
+    assert len(state.corrupt) == 1
+    assert isinstance(state.corrupt[0][1], OrphanCommittedItemError)
+
+    loaded = await writer.load_history(thread_id)
+    assert loaded == []
+    kinds = [e.msg.kind for e in sink.events]
+    assert kinds.count("transcript_skipped_corrupt_line") == 1

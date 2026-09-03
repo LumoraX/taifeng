@@ -41,6 +41,20 @@ TBD - created by archiving change store-protocol-decoupling. Update Purpose afte
 - **WHEN** 先 `append(tid, [item_A])`，再 `append(tid, [item_B])`，然后 `load_history(tid)`
 - **THEN** 返回结果 SHALL 包含 item_A 与 item_B 且 item_A 内容与首次 append 时完全相同
 
+### Requirement: 追加保证行边界（torn-tail 防护）
+
+任何追加（`append` / `append_atomic_batch`，durable 与 buffered 路径）写入前 SHALL 检查主存末字节；文件非空且末字节不是 `\n` 时 SHALL 先补 `\n` 再写内容，使 crash 遗留的半行成为独立的一行，MUST NOT 与新内容（尤其是 `item_batch_begin` frame）合并成同一物理行。
+
+重放时携带 `commit_batch_id` 但不在任何 `item_batch_begin` 范围内的 item SHALL 记为损坏行（异常类型 `OrphanCommittedItemError`）并发 `transcript_skipped_corrupt_line`，MUST NOT 静默跳过。
+
+#### Scenario: 半行后追加原子批次仍可读回
+- **WHEN** 主存末尾是一条未以 `\n` 结尾的半截 JSON；随后 `append_atomic_batch([a, b], batch_id="b1")` 返回 ack
+- **THEN** 重放结果含 a、b，`b1` 计入已提交，损坏行恰为那条半行
+
+#### Scenario: 孤儿 committed item 发事件
+- **WHEN** 主存中一条带 `commit_batch_id` 的 item 前面没有对应 `item_batch_begin`
+- **THEN** `load_history` 不返回该 item，事件流含一条 `transcript_skipped_corrupt_line`
+
 ### Requirement: load_history 完整回放跳过 metadata
 
 `writer.load_history(thread_id)` SHALL 返回该 thread 全部 ResponseItem 按写入顺序，SHALL 跳过首条 metadata 行，SHALL 跳过损坏的单行 + 发 EventMsg `transcript_skipped_corrupt_line`（不抛异常）。

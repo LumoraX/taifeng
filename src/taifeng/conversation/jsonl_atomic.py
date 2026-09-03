@@ -19,18 +19,38 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _needs_line_boundary(path: Path) -> bool:
+    """文件非空且末字节不是换行 → crash 遗留了半行，追加前必须先补 ``\\n``。
+
+    否则半行会与下一条 frame（如 ``item_batch_begin``）合并成同一物理行：
+    begin frame 被吞后，整批 durable ack 过的 items 在重放时因「batch 外携带
+    commit_batch_id」全部不可见。
+    """
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                return False
+            stream.seek(-1, os.SEEK_END)
+            return stream.read(1) != b"\n"
+    except FileNotFoundError:
+        return False
+
+
 def append_durable(path: Path, content: str) -> None:
     """单个 worker 内追加完整 frame，并在返回前 flush/fsync。"""
+    pad = "\n" if _needs_line_boundary(path) else ""
     with path.open("a", encoding="utf-8") as stream:
-        stream.write(content)
+        stream.write(pad + content)
         stream.flush()
         os.fsync(stream.fileno())
 
 
 def append_buffered(path: Path, content: str) -> None:
     """保持 legacy append 的无 fsync 行为与延迟边界。"""
+    pad = "\n" if _needs_line_boundary(path) else ""
     with path.open("a", encoding="utf-8") as stream:
-        stream.write(content)
+        stream.write(pad + content)
 
 
 def _open_lock_file(path: Path) -> Any:
@@ -155,6 +175,14 @@ class _ActiveBatch:
     item_lines: list[str]
 
 
+class OrphanCommittedItemError(ValueError):
+    """item 携带 ``commit_batch_id`` 却不在任何 ``item_batch_begin`` 范围内。
+
+    正常写入路径下不会出现（begin frame 与 items 在同一 append 内顺序落盘）；
+    出现即意味着 begin frame 丢失 / 损坏，该行按 corrupt 上报而非静默跳过。
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ReadState:
     """一次 JSONL 同步读取的可见状态与待异步上报损坏行。"""
@@ -242,6 +270,14 @@ def read_state(path: Path) -> ReadState:
                 active = None
                 continue
             if active is None and "commit_batch_id" in item.metadata:
+                # begin frame 丢失 / 损坏：不静默跳过，按 corrupt 上报（发事件）
+                corrupt.append((
+                    line_no,
+                    OrphanCommittedItemError(
+                        f"orphan committed item outside batch: "
+                        f"batch_id={item.metadata['commit_batch_id']!r}"
+                    ),
+                ))
                 continue
             if active is None:
                 result.append(item)
