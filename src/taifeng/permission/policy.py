@@ -202,9 +202,11 @@ class PermissionPolicy:
             {
                 "default_mode": "allow",
                 "rules": [
-                    {"scope": "tool_use", "target_pattern": "shell_exec",
-                     "args_match": {"cmd": "re:^openspec\\\\s"},
+                    {"scope": "shell_exec", "target_pattern": "re:^openspec\\\\s",
                      "mode": "allow", "reason": "ops_safe"},
+                    {"scope": "tool_use", "target_pattern": "db_query",
+                     "args_match": {"sql": "re:^SELECT\\\\b"},
+                     "mode": "allow", "reason": "business_tool_readonly"},
                 ],
             }
 

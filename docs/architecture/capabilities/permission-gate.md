@@ -1,28 +1,46 @@
 # permission-gate Specification
 
 ## Purpose
-TBD - created by archiving change permission-gate-completeness. Update Purpose after archive.
+HITL 权限门：`PermissionRequest` / `PermissionRule` / `PermissionPolicy` / `PermissionPrompter` 的稳定契约。权限模型是**效果模型**（ADR 0028）——scope 表达效果类型、target 是规范化后的作用对象，`tool_use` 只是兜底。
 ## Requirements
-### Requirement: PermissionRequest typed 字段 + 向后兼容
+### Requirement: PermissionRequest 按效果分类（效果模型，ADR 0028）
 
-`PermissionRequest` SHALL 是 frozen pydantic BaseModel，含以下字段：
+`PermissionRequest` SHALL 是 frozen pydantic BaseModel。**scope 表达效果类型，target 表达规范化后的作用对象**：
 
-- `scope: Literal["tool_use", "script_exec", "skill_dispatch"]` —— required
-- `target: str` —— required（工具名 / 脚本名 / skill_id）
+| scope | 谁发 | target 形状 |
+| --- | --- | --- |
+| `shell_exec` | `shell_exec` / `run_in_background` | 完整命令串 |
+| `file_read` / `file_write` | `file_read` / `file_write` | 解析后的**绝对路径**（沙箱 root 拼接 + resolve） |
+| `network` | `http_request`（含每一跳 redirect） | `"<METHOD> <URL>"` |
+| `script_exec` | `run_script` | `"<skill_id>/<script_name>"` |
+| `skill_dispatch` | `call_skill` / `spawn_skill` | 目标 skill id |
+| `compaction` | 压缩触发 | 策略名 |
+| `tool_use` | **兜底**：无更细效果的工具（业务 `for_tool_call`、过渡期的 `apply_patch`） | 工具名；`metadata["args"]` 为原始参数 |
+
+内置效果类工具 MUST NOT 以 `tool_use` 形状发请求；`tool_use` + `metadata["args"]` + `PermissionRule.args_match` 是给业务自注册工具（Style B 规则）用的机制。
+
+字段：
+- `scope: PermissionScope` —— required，见上表
+- `target: str` —— required，规范化后的作用对象
 - `reason: str = ""` —— 可选，LLM 自陈意图
-- `metadata: dict[str, Any] | None = None` —— **若 scope ∈ ("tool_use", "script_exec")，SHALL 含 `metadata["args"]` = 该工具/脚本被调用的实际 args 字典**（供 PermissionRule.args_match 使用）；skill_dispatch scope 不强制
-- `thread_id` / `submission_id` / `entry_skill_id` / `turn_index`：上下文必填
+- `metadata: dict[str, Any] | None = None` —— `tool_use` / `script_exec` 由工厂塞 `metadata["args"]`；效果类 scope 放上下文（`thread_id` / `call_id` / `redirect_hop` 等）
+- `thread_id` / `submission_id` / `entry_skill_id` / `turn_index`：上下文
 - `call_chain: tuple[str, ...]` —— 调用栈
 
-业务侧领域上下文（租户 / 用户 / audience 等）SHALL 走开放的 `metadata` dict 透传——
-引擎不引入任何业务命名字段（R1 业务零侵入）；taifeng 不解析 `metadata` 的 keys。
+业务侧领域上下文（租户 / 用户 / audience 等）SHALL 走开放的 `metadata` dict 透传——引擎不引入任何业务命名字段（R1 业务零侵入）；taifeng 不解析 `metadata` 的 keys。
 
-向后兼容承诺：本 change 不改 PermissionRequest 字段；仅说明 `metadata["args"]` 已经存在（工厂 `for_tool_call` / `for_script_exec` 一直在塞），现在被 args_match 真正用上。
+#### Scenario: 内置 shell 工具发效果请求
+- **WHEN** LLM 调用 `shell_exec(command="ls /etc")` 且 policy 已注入
+- **THEN** policy 收到 `PermissionRequest(scope="shell_exec", target="ls /etc")`
 
-#### Scenario: tool_use scope 必含 args metadata
-- **WHEN** `PermissionRequest.for_tool_call("shell_exec", {"cmd": "ls"}, ...)`
-- **THEN** `req.metadata["args"] == {"cmd": "ls"}`
-- **AND** `PermissionRule(args_match={"cmd": "ls"})` 可以命中该 request
+#### Scenario: 内置文件工具以绝对路径为 target
+- **WHEN** LLM 调用 `file_read(path="secret.txt")`，沙箱 root 为 `/ws`
+- **THEN** policy 收到 `scope="file_read", target="/ws/secret.txt"`（resolve 后），MUST NOT 是原始相对串
+
+#### Scenario: tool_use 兜底必含 args metadata
+- **WHEN** `PermissionRequest.for_tool_call("db_export", {"table": "users"}, ...)`
+- **THEN** `req.metadata["args"] == {"table": "users"}`
+- **AND** `PermissionRule(scope="tool_use", target_pattern="db_export", args_match={"table": "users"})` 可以命中该 request
 
 #### Scenario: skill_dispatch scope 不强制 args
 - **WHEN** `PermissionRequest.for_skill_dispatch("backend-reviewer", ...)`
@@ -171,6 +189,9 @@ McpPrompter(
 
 ### Requirement: PermissionRule 支持 args 级匹配
 
+> `args_match` 是 **`tool_use` 兜底 scope** 的机制：面向业务经 `for_tool_call` 自注册的工具（`metadata["args"]` 为原始参数）。内置效果类工具不发 `tool_use`，对它们用效果 scope 的 `target_pattern`（见上文效果模型）。以下示例用业务工具 `db_query(sql=...)` 说明。
+
+
 `PermissionRule` SHALL 新增 optional 字段 `args_match: dict[str, str] | None`（默认 `None`）。
 当 `args_match` 非 None 时，`matches(request)` SHALL 在 scope + target 命中之外，额外检查 `request.metadata["args"]` 字典：
 - 对 `args_match` 的每个 `(key, pattern)`：取 `args.get(key)`，按 pattern 语义匹配
@@ -179,65 +200,78 @@ McpPrompter(
 - request.metadata 缺 `"args"` 字段（如 skill_dispatch scope）→ args_match 非空时整条 rule 不命中
 
 pattern 三态语义：
-- **字面**：`"openspec --help"` → 严格等于（`str(args[key]) == pattern`）
+- **字面**：`"SELECT 1"` → 严格等于（`str(args[key]) == pattern`）
 - **正则**：`"re:^rm\\s+-rf.*"` → `re.search` 匹配
-- **glob**：`"glob:openspec *"` → `fnmatch.fnmatch` 匹配（`*` / `?` / `[seq]` 三种通配符）
+- **glob**：`"glob:SELECT *"` → `fnmatch.fnmatch` 匹配（`*` / `?` / `[seq]` 三种通配符）
 
 #### Scenario: args_match 命中
-- **WHEN** rule = `PermissionRule(scope="tool_use", target_pattern="shell_exec", args_match={"cmd": "openspec --help"}, mode="allow")`
-- **AND** request = `for_tool_call("shell_exec", {"cmd": "openspec --help"}, ...)`
+- **WHEN** rule = `PermissionRule(scope="tool_use", target_pattern="db_query", args_match={"sql": "SELECT 1"}, mode="allow")`
+- **AND** request = `for_tool_call("db_query", {"sql": "SELECT 1"}, ...)`
 - **THEN** `rule.matches(request) == True`
 
 #### Scenario: glob 通配符
-- **WHEN** rule = `PermissionRule(scope="tool_use", target_pattern="shell_exec", args_match={"cmd": "glob:openspec *"}, mode="allow")`
-- **AND** request 的 `args.cmd == "openspec instructions proposal --change x"`
+- **WHEN** rule = `PermissionRule(scope="tool_use", target_pattern="db_query", args_match={"sql": "glob:SELECT *"}, mode="allow")`
+- **AND** request 的 `args.sql == "SELECT id FROM t"`
 - **THEN** `rule.matches(request) == True`
-- **AND** 同 rule 对 `args.cmd == "rm -rf /"` 不命中
+- **AND** 同 rule 对 `args.sql == "DROP TABLE t"` 不命中
 
 #### Scenario: 正则前缀
-- **WHEN** rule = `PermissionRule(scope="tool_use", target_pattern="shell_exec", args_match={"cmd": "re:^(ls|pwd|whoami)\\b"}, mode="allow")`
-- **AND** request 的 `args.cmd == "ls -la"`
-- **THEN** 命中（允许只读命令）
-- **AND** 同 rule 对 `args.cmd == "ls; rm -rf /"` 不命中（`;` 后续段不在表达式范围）
+- **WHEN** rule = `PermissionRule(scope="tool_use", target_pattern="db_query", args_match={"sql": "re:^(SELECT|EXPLAIN)\\b"}, mode="allow")`
+- **AND** request 的 `args.sql == "SELECT * FROM t"`
+- **THEN** 命中（允许只读语句）
+- **AND** 同 rule 对 `args.sql == "SELECT 1; DROP TABLE t"` 不命中（`;` 后续段不在表达式范围）
 
 #### Scenario: args 缺 key → 不命中
-- **WHEN** rule args_match 含 `{"cmd": "..."}` 但 request.metadata.args 不含 `"cmd"` 键
+- **WHEN** rule args_match 含 `{"sql": "..."}` 但 request.metadata.args 不含 `"sql"` 键
 - **THEN** rule.matches(request) == False（保守拒绝匹配，让下一条规则或 default_mode 决定）
 
 #### Scenario: 没有 args_match 的规则 — 行为不变
 - **WHEN** rule = `PermissionRule(scope=..., target_pattern=..., mode=...)` 不传 args_match
 - **THEN** matches 行为完全等价于本 change 之前的版本（向后兼容）
 
-### Requirement: `PermissionRule.parse` —— Claude Code 风格语法糖
+### Requirement: `PermissionRule.parse` —— Style A 语法糖映射到效果 scope
 
-`PermissionRule` SHALL 暴露 `@classmethod parse(rule_str: str, *, mode: PermissionMode) -> PermissionRule`，把字符串语法 `<Alias>(<args>)` 解析成 PermissionRule 对象。
+`PermissionRule` SHALL 暴露 `@classmethod parse(rule_str: str, *, mode: PermissionMode) -> PermissionRule`，把 `<Alias>(<payload>)` 解析成 PermissionRule。**每个别名对应一个效果 scope，payload 即 `target_pattern`**（经归一：空 / `*` → `glob:*`；含 `*` `?` `[` → 自动加 `glob:`；`re:` / `glob:` 前缀原样）。Style A MUST NOT 产出 `args_match`。
 
-内置 alias 映射表（最小可用集）：
+| 别名 | scope | target_pattern |
+| --- | --- | --- |
+| `Bash(p)` / `ShellExec(p)` | `shell_exec` | p（匹配完整命令串） |
+| `FileRead(p)` | `file_read` | p（匹配绝对路径） |
+| `FileWrite(p)` | `file_write` | p（匹配绝对路径） |
+| `Network(p)` | `network` | p 匹配 `"<METHOD> <URL>"`；p 不以 `re:` 开头且首 token 不是 HTTP method 时前缀 `"* "` 后归一（任意 method 命中） |
+| `Skill(p)` | `skill_dispatch` | p（匹配 skill id） |
+| `Script(p)` | `script_exec` | p（匹配 `"<skill_id>/<script_name>"`） |
+| `ApplyPatch(p)` | `tool_use` | p —— 过渡形态，`apply_patch` 尚未按路径发 `file_write`（backlog） |
 
-| 前缀 | scope | target | args_match key |
-| --- | --- | --- | --- |
-| `Bash` / `ShellExec` | `tool_use` | `shell_exec` | `cmd` |
-| `Skill` | `skill_dispatch` | （括号内为 target_pattern） | — |
-| `Script` | `script_exec` | （括号内为 target_pattern） | — |
-| `FileRead` | `tool_use` | `file_read` | `path` |
-| `FileWrite` | `tool_use` | `file_write` | `path` |
-| `ApplyPatch` | `tool_use` | `apply_patch` | （括号内为 target_pattern） |
-
-括号内为空字符串、`*`、`glob:*` → target / args_match 取 `"glob:*"`（全匹配）。
-
-未识别 alias 前缀 → 抛 `ValueError("unknown_permission_syntax: ...")`。
+未识别别名 → 抛 `ValueError("unknown_permission_syntax: ...")`。
 
 #### Scenario: parse Bash 字面
 - **WHEN** `PermissionRule.parse("Bash(openspec --help)", mode="allow")`
-- **THEN** 返回 `PermissionRule(scope="tool_use", target_pattern="shell_exec", args_match={"cmd": "openspec --help"}, mode="allow")`
+- **THEN** 返回 `PermissionRule(scope="shell_exec", target_pattern="openspec --help", mode="allow", args_match=None)`
 
 #### Scenario: parse Bash + glob 通配
 - **WHEN** `PermissionRule.parse("Bash(openspec *)", mode="allow")`
-- **THEN** 返回 rule 的 `args_match["cmd"] == "glob:openspec *"`
+- **THEN** 返回 rule 的 `target_pattern == "glob:openspec *"`
 
 #### Scenario: parse Bash + 正则前缀透传
 - **WHEN** `PermissionRule.parse("Bash(re:^rm\\s+-rf\\s+\\./data)", mode="allow")`
-- **THEN** 返回 rule 的 `args_match["cmd"] == "re:^rm\\s+-rf\\s+\\./data"`
+- **THEN** 返回 rule 的 `target_pattern == "re:^rm\\s+-rf\\s+\\./data"`
+
+#### Scenario: Bash deny 对内置 shell_exec 真正生效
+- **WHEN** policy 由 `{"default_mode": "allow", "deny": ["Bash(echo *)"]}` 构造，`shell_exec(command="echo hi")` 被调用
+- **THEN** 工具返回 `reason="permission_denied"`，命令不执行
+
+#### Scenario: FileRead glob 匹配绝对路径
+- **WHEN** 规则 `FileRead(/etc/*)`，`file_read` 解析出 target `/etc/hosts`
+- **THEN** 规则命中
+
+#### Scenario: Network 省略 method
+- **WHEN** `PermissionRule.parse("Network(https://api.example.com/*)", mode="allow")`
+- **THEN** 返回 `target_pattern="glob:* https://api.example.com/*"`，对 `"GET https://api.example.com/v1"` 与 `"POST ..."` 均命中
+
+#### Scenario: Network 指定 method
+- **WHEN** `PermissionRule.parse("Network(GET https://api.example.com/*)", mode="allow")`
+- **THEN** `target_pattern="glob:GET https://api.example.com/*"`，对 `"POST https://api.example.com/v1"` 不命中
 
 #### Scenario: parse Skill 通配
 - **WHEN** `PermissionRule.parse("Skill(read_*)", mode="allow")`
@@ -269,9 +303,11 @@ pattern 三态语义：
 {
     "default_mode": "allow",
     "rules": [
-        {"scope": "tool_use", "target": "shell_exec",
-         "args_match": {"cmd": "re:^openspec\\s"}, "mode": "allow",
-         "reason": "ops_safe_subcommands"},
+        {"scope": "shell_exec", "target_pattern": "re:^openspec\\s",
+         "mode": "allow", "reason": "ops_safe_subcommands"},
+        {"scope": "tool_use", "target_pattern": "db_query",
+         "args_match": {"sql": "re:^SELECT\\b"}, "mode": "allow",
+         "reason": "business_tool_readonly"},
         ...
     ],
 }
@@ -284,7 +320,7 @@ pattern 三态语义：
 - **AND** `policy.default_mode == "ask"`（缺省）
 
 #### Scenario: Style B 加载
-- **WHEN** `PermissionPolicy.from_dict({"rules": [{"scope": "tool_use", "target": "shell_exec", "mode": "allow"}], "default_mode": "allow"})`
+- **WHEN** `PermissionPolicy.from_dict({"rules": [{"scope": "shell_exec", "target_pattern": "glob:ls *", "mode": "allow"}], "default_mode": "allow"})`
 - **THEN** 返回的 policy 含 1 条规则且 default_mode="allow"
 
 #### Scenario: 混用 → 报错
@@ -293,7 +329,7 @@ pattern 三态语义：
 
 #### Scenario: deny 规则优先于 allow（同 dict 内）
 - **WHEN** `from_dict({"allow": ["Bash(rm *)"], "deny": ["Bash(rm -rf *)"], "default_mode": "ask"})`
-- **AND** request 的 `args.cmd == "rm -rf /tmp"`
+- **AND** request 为 `PermissionRequest(scope="shell_exec", target="rm -rf /tmp")`
 - **THEN** 命中 deny → `policy.check` 返回 `deny`（不被 allow 覆盖，因为 deny 在 rules 列表前面）
 
 ### Requirement: PermissionPolicy 内核不持久化 remember_until 判断
