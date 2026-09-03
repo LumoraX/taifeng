@@ -310,6 +310,8 @@ async def test_duplicate_pending_work_id_is_rejected_without_waiting_or_acceptin
         tasks.start_soon(first)
         await accept_entered.wait()
         tasks.start_soon(duplicate)
+        # 1s 是「有没有卡死」的判据上限,不是延迟 SLA:真卡住会一直阻塞到 release
+        # 之后,1s 照样判失败;而 50ms 会被负载下的调度抖动误伤(曾在完整套件里红过)。
         with anyio.move_on_after(1.0) as deadline:
             await duplicate_done.wait()
         release_accept.set()
@@ -562,6 +564,8 @@ async def test_pending_durable_accept_cannot_hold_finish_lock_past_deadline() ->
         tasks.start_soon(admit)
         await accept_entered.wait()
         tasks.start_soon(finish)
+        # 1s 是「有没有卡死」的判据上限,不是延迟 SLA:真卡住会一直阻塞到 release
+        # 之后,1s 照样判失败;而 50ms 会被负载下的调度抖动误伤(曾在完整套件里红过)。
         with anyio.move_on_after(1.0) as deadline:
             await finish_done.wait()
         release_accept.set()

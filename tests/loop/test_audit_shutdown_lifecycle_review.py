@@ -297,6 +297,8 @@ async def test_unresponsive_finish_owner_preserves_fatal_and_wakes_retry(
         )
     except BaseException as error:  # noqa: BLE001
         first_error = error
+    # 1s 是「有没有卡死」的判据上限,不是延迟 SLA:真卡住会一直阻塞到 release
+    # 之后,1s 照样判失败;而 50ms 会被负载下的调度抖动误伤(曾在完整套件里红过)。
     with anyio.move_on_after(1.0) as retry_scope:
         try:
             await _submit_shutdown(
