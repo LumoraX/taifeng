@@ -24,7 +24,7 @@ scripts:
           enum: [low, medium, high]
         has_silent_fallback:
           type: boolean
-          description: 是否含 silent fallback（如 `except: pass`、`dict.get(k, '默认')`）
+          description: "是否含 silent fallback（如 `except: pass`、`dict.get(k, '默认')`）"
         has_magic_number:
           type: boolean
           description: 是否含魔法数（应改 enum / const）

@@ -18,7 +18,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 安装（uv 是必须，不用 pip）
-uv venv && uv pip install -e ".[dev,litellm]"
+# telemetry-otel 必须装:tests/telemetry/test_otel_sink.py 在模块顶层 import
+# opentelemetry 且无 importorskip 保护,缺它 `pytest tests/` 会在 collection 阶段
+# 整轮中断（不是跳过该文件）。
+uv venv && uv pip install -e ".[dev,litellm,telemetry-otel]"
 
 # 跑全部测试（必须带 PYTHONPATH=src，因为是 src-layout）
 PYTHONPATH=src uv run pytest tests/ -v
