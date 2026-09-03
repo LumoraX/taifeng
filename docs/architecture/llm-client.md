@@ -169,7 +169,7 @@ Codex SSE 以 `response.output_item.done.item` 为输出事实源，以唯一 `r
 唯一 `normalized_output → completed`。它只接受 exact `codex/responses/reasoning` state，OpenAI 与 Codex
 state 双向隔离，不能按模型名、域名或返回形状隐式换 dialect。
 
-两套官方客户端均 `store=false`。Responses 还固定请求 `include=["reasoning.encrypted_content"]`，不传 `previous_response_id`。其 function tool 不强制发送 `strict=true`，terminal accumulator 先拒绝空 `call_id`/`name`，再只在 `response.completed` 校验成功后发布唯一 `normalized_output`；TurnRunner 原子提交完整 sample 后才执行工具。history 若含 provider state 而目标客户端未声明接受能力，prompt 构建在网络前 fail closed。
+两套官方客户端均 `store=false`。Responses 还固定请求 `include=["reasoning.encrypted_content"]`，不传 `previous_response_id`；`system_prompt` 逐条作 `input` message 下发，角色用 **`developer`**（Responses 下 system 的后继角色）——**注意与上文 Codex 的差异**：Codex 把 system 折叠进顶层 `instructions`，OpenAI Responses 保留逐条 item 以维持多段 system 的独立性与顺序。实测部分代理会直接拒 `input` 中的 `role="system"` item（HTTP 400 `System messages are not allowed`），改用 `developer` 后同端点放行。其 function tool 不强制发送 `strict=true`，terminal accumulator 先拒绝空 `call_id`/`name`，再只在 `response.completed` 校验成功后发布唯一 `normalized_output`；TurnRunner 原子提交完整 sample 后才执行工具。history 若含 provider state 而目标客户端未声明接受能力，prompt 构建在网络前 fail closed。
 
 图片正文以 `ImageAttachmentV1` canonical base64 落 conversation；`ApiRequest.input_items` 是有序事实源，provider 只在网络边界临时构造 Data URL。支持 MIME 为 PNG、JPEG、WebP 和单帧 GIF；GIF 按 block 计帧，WebP 支持 VP8/VP8L/VP8X 并拒绝 VP8X 动画标志。业务必须显式注入 `ImageInputPolicy(enabled=True, ...)`，否则 durable append 前返回 `unsupported_modality`。
 

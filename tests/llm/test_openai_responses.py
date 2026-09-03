@@ -134,7 +134,9 @@ def test_responses_maps_ordered_items_images_tools_and_format() -> None:
     assert payload["stream"] is True
     assert payload["include"] == ["reasoning.encrypted_content"]
     assert "previous_response_id" not in payload
-    assert payload["input"][0]["role"] == "system"
+    # system_prompt 走 developer 角色（Responses 下 system 的后继；部分端点
+    # 直接拒 system → HTTP 400 "System messages are not allowed"）
+    assert payload["input"][0]["role"] == "developer"
     assert payload["input"][1]["content"] == [
         {"type": "input_text", "text": "看图"},
         {

@@ -327,11 +327,20 @@ class OpenAIResponsesSession:
         """httpx client 在 stream scope 内关闭，无额外资源。"""
 
     def _build_payload(self, request: ApiRequest) -> dict[str, Any]:
-        """从 canonical input_items 构造 Responses payload。"""
+        """从 canonical input_items 构造 Responses payload。
+
+        system_prompt 以 ``role="developer"`` 下发（**不是** ``system``）：Responses
+        协议下 developer 是 system 的后继角色,而部分端点会直接拒 system
+        （实测 ``{"message": "System messages are not allowed"}`` HTTP 400,同端点
+        developer 与顶层 instructions 均 200）。仍逐条作 input item 而非合并进顶层
+        ``instructions``:多条 system_prompt 的独立性与顺序得以保留,也与 chat 协议
+        侧的逐条 message 结构对称（Codex client 走 instructions 是其协议要求,见
+        ``codex/wire.py``,两者刻意不同构）。
+        """
         input_items = [
             {
                 "type": "message",
-                "role": "system",
+                "role": "developer",
                 "content": [{"type": "input_text", "text": prompt}],
             }
             for prompt in request.system_prompt
