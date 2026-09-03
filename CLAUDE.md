@@ -32,7 +32,12 @@ PYTHONPATH=src uv run pytest tests/test_engine_e2e.py -v
 # 跑单个测试
 PYTHONPATH=src uv run pytest tests/test_dispatch.py::test_circular_reference_detection -v
 
-# 端到端示例 —— 分两类，**不是所有 demo 都免 key**（判据：脚本内是否调 build_model_client）
+# 端到端示例 —— **不是所有 demo 都免 key**。分档判据是「是否引用 examples/_provider_bootstrap」
+# （不是「是否调 build_model_client」—— mcp_basic / mcp_hitl 把 key 经环境变量传给
+#   spawn 出的 `taifeng mcp serve` 子进程，并不直接构造 client）。
+# 权威分档由脚本给出，别照抄下面的手工清单：
+#   python scripts/verify_examples.py --list   # 看分档
+#   python scripts/verify_examples.py          # 跑全部 sim 档并核验输出
 # ① 纯 SimClient，无需 API key
 PYTHONPATH=src uv run python examples/basic/minimal_chat.py
 PYTHONPATH=src uv run python examples/basic/composite_skill.py
@@ -42,13 +47,13 @@ PYTHONPATH=src uv run python examples/orchestration/demo.py         # 声明式�
 PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py  # detached spawn + join-barrier
 PYTHONPATH=src uv run python examples/turn_rewind/demo.py           # 节点回访 re_reason / retry_tool
 #   其余同类：audit_observability / compression_showcase / concurrent_fanout / doom_loop /
-#   hooks_showcase / kernel_knobs / mcp_basic / mcp_hitl / mcp_showcase / memory /
-#   peer_messaging / permission_grants / post_turn_review / read_skill_lazy /
-#   skill_outcome_fleet / step_pipeline / subagent_isolation / suspend_resume
+#   hooks_showcase / kernel_knobs / mcp_showcase / memory / peer_messaging /
+#   permission_grants / post_turn_review / read_skill_lazy / skill_outcome_fleet /
+#   step_pipeline / subagent_isolation / suspend_resume
 #
 # ② 需要真实 LLM key（脚本自读 .env 的 LLM_BOOTSTRAP_*）
-#   code_review / dual_track / numeric_loop / product_review / research_assistant /
-#   selective_approval / travel_planner —— 见 examples/<name>/demo.py
+#   code_review / dual_track / mcp_basic / mcp_hitl / numeric_loop / product_review /
+#   research_assistant / selective_approval / travel_planner —— 见 examples/<name>/demo.py
 #   web_ui/server.py 与 step_pipeline/server.py 同样需 key（常驻 HTTP 服务，不自行退出）
 PYTHONPATH=src uv run python examples/real_llm/e2e.py               # real_llm/ 下均需 key
 #   ⚠️ 端点若拒 role=system（报 System messages are not allowed），用
@@ -80,6 +85,11 @@ uv run mypy src/
 1. **跑通验证命令**：相关 `pytest tests/test_<x>.py` 全绿，或对应 example 端到端无异常。
 2. **复述实际命令 + 关键输出**：不是"应该 OK"，而是贴命令与输出。
 3. 红测试**禁止**以 "pre-existing" 为借口跳过。先排查是否与本次改动相关。
+
+CI 门禁（`.github/workflows/ci.yml`，push main / 每个 PR 自动跑）会做同样两件事：
+Python 3.12+3.13 全量 `pytest tests/`，以及 `scripts/verify_examples.py` 的 examples
+冒烟。本地先跑一遍这两条就等于预跑了门禁。**门禁不跑真实 LLM**——真实回归仍是
+人工跑 `examples/real_llm/capability_matrix.py` 并提交台账（见「测试约束」）。
 
 ## 多 Session 并发协作
 

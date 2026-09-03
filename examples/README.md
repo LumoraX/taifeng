@@ -2,6 +2,19 @@
 
 所有示例都 self-contained，可独立运行。从下面挑一个对应你正在调研的场景。
 
+## 一次跑完 / 看分档
+
+```bash
+python scripts/verify_examples.py            # 跑全部 sim 档示例并核验输出
+python scripts/verify_examples.py --list     # 只看分档：谁跑、谁跳过、为什么
+```
+
+CI 每个 PR 都会跑上面第一条（`.github/workflows/ci.yml`）。它**按输出内容判定**而不是
+看退出码 —— 绝大多数 demo 末尾无条件 `return 0`，turn 失败照样退 0。
+
+「需要 key」的判据是**是否引用 [_provider_bootstrap.py](_provider_bootstrap.py)**，下表
+的「需要 key」列与之一致；改示例时以脚本的分档为准。
+
 ## 共享辅助
 
 | 文件 | 用途 |
@@ -114,8 +127,8 @@ OpenAI 的 provider 与 protocol 是两级统一配置：`provider=openai` 选�
 | [hooks_showcase/](hooks_showcase/) | 业务钩子 pre/post_skill_dispatch 按*运行时 args* 动态拦截（钩子 vs 声明式权限规则） | 否（Mock） |
 | [post_turn_review/](post_turn_review/) | **post_turn 钩子**:turn 收尾自我审计 / 记忆固化 —— 每轮真终态后**确定性**固化结论（收尾的同步一步;跨 turn 顺序须等 `post_turn_hook_fired` 再提交下一轮） | 否（Mock） |
 | [mcp_showcase/](mcp_showcase/) | taifeng 作为 MCP client：spawn 自带的最小 MCP server 子进程 + 注册其工具远程调用（已注册进 web_ui） | 否（Mock） |
-| [mcp_basic/](mcp_basic/) | MCP stdio client 连外部 server，自动注册工具 | 否（Mock） |
-| [mcp_hitl/](mcp_hitl/) | MCP 工具调用走 permission gate | 否（Mock） |
+| [mcp_basic/](mcp_basic/) | taifeng 作为 MCP **server**：spawn `taifeng mcp serve` 走 5 步 JSON-RPC，最后一步真跑一轮 turn | **是**（key 经环境变量传给 serve 子进程） |
+| [mcp_hitl/](mcp_hitl/) | MCP server 模式下工具调用走 permission gate（turn 挂起等审批） | **是**（同上，经 serve 子进程） |
 | [suspend_resume/](suspend_resume/) | 表单采集型 HITL 挂起 → 释放实例 → 跨实例重建 → Resume 续跑（R5 头条故事） | 否（Mock） |
 | [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）；**含两个 detached 交互 demo**：`multi_expert_consult`（并发多专家 + 错峰 HITL + 联合会诊）和 `turn_rewind`（节点回访 + re_reason / retry_tool 重跑）。无 key 自动化 smoke：`PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py` | **是** |
 

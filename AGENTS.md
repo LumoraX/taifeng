@@ -58,6 +58,7 @@
 
 - 新模块必须有 `tests/test_<module>.py`
 - LLM 调用走 `SimClient`（conformance 模拟器）—— 不能在 CI 里调真实 API
+- **CI 门禁**（`.github/workflows/ci.yml`，push main / 每个 PR 自动触发）：Python 3.12+3.13 全量 `pytest tests/` + `scripts/verify_examples.py` 的 examples 冒烟。本地先跑这两条 = 预跑门禁。门禁只跑 sim，真实回归仍走下面的台账红线
 - **真实回归红线**：凡变更基础层（`src/taifeng/{llm,loop,context,conversation}/`），合入前必须全量跑 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 并提交更新后的 `docs/real-llm-ledger.{json,md}`；台账 commit 落后于基础层变更 → 不得标 task 完成 / openspec archive。烧 key 前可先 `examples/real_llm/selfcheck.py`（sim 干跑，零消耗）
 - **能力登记红线**：新增 / 修改 LLM 策略类能力必须同步登记 `docs/capability-matrix.md`（含「真实 LLM 验证」列），与「architecture 未同步 → PR 不合并」同级
 - 文件 IO 走 `tmp_path` fixture
@@ -72,13 +73,14 @@ uv venv && uv pip install -e ".[dev,litellm]"
 # 测试（全套）
 PYTHONPATH=src uv run pytest tests/ -v
 
-# 示例（basic/ 与各 pattern demo 走 SimClient，无需 API key；real_llm/ 需真实 key）
+# examples 冒烟（跑全部 sim 档并按输出内容核验——退出码 0 不等于跑通）
+python scripts/verify_examples.py
+python scripts/verify_examples.py --list      # 只看分档：谁跑、谁跳过、为什么
+
+# 单个示例（分档判据 = 是否引用 examples/_provider_bootstrap；引用即需真实 key）
 PYTHONPATH=src uv run python examples/basic/minimal_chat.py
-PYTHONPATH=src uv run python examples/basic/composite_skill.py
 PYTHONPATH=src uv run python examples/orchestration/demo.py   # 声明式编排
-PYTHONPATH=src uv run python examples/mcp_basic/demo.py       # taifeng 作为 MCP server
-# 完整清单见 examples/ 各子目录（instructions_basic / skill_with_script / research_assistant /
-#   travel_planner / code_review / mcp_hitl / permission / persistence / web_ui ...）
+PYTHONPATH=src uv run python examples/mcp_basic/demo.py       # taifeng 作为 MCP server（需 key）
 
 # CLI
 PYTHONPATH=src uv run python -m taifeng skill list /path/to/skills

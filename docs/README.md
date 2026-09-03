@@ -77,3 +77,4 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - Keep architecture docs synchronized with implementation changes.
 - Capability changes must update the relevant contract and [capability matrix](capability-matrix.md).
 - Generated ledgers such as [real-llm-ledger.md](real-llm-ledger.md) should be updated by their generation scripts, not by hand.
+- The example tier lists (which demo needs a real LLM key) are owned by `scripts/verify_examples.py`; docs must follow the script, not a hand-maintained list. `.github/workflows/ci.yml` runs the full test suite and the example smoke on every push to main and every PR; real-LLM regression stays manual (see the ledger red line in `AGENTS.md`).
