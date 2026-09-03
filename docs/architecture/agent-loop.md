@@ -372,7 +372,7 @@ class CancellationToken:
 | Rust `tokio::mpsc` unbounded | Python `asyncio.Queue`（默认 bounded=1024，可配） |
 | `Submission` 含 `id: SubmissionId` | 同 |
 | `Event` 含 `id: EventId` + `submission_id` | 简化为 `EventMsg(submission_id, msg)` |
-| `Op::*` 枚举 ~20 种 | 实现 11 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Rewind / Shutdown），见 `loop/submission.py` |
+| `Op::*` 枚举 ~20 种 | 实现 13 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / InjectUserInput / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Rewind / SendToPeer / Shutdown），见 `loop/submission.py` |
 
 ## 测试用例（M3 验收）
 
@@ -443,11 +443,24 @@ TurnCompleted event（runner 内 emit）
 [ engine 状态回写：history / cache_anchor / rewind 节点表 / 指纹 / token ]
   ↓
 post_turn hook ───────────────── 仅审计（root turn 真终态触发；suspended/cancelled 跳过；
-                                  本 turn 收尾的同步一步=回写之后触发；自我 review / 记忆固化落脚点。
-                                  注:引擎不串行化相邻 turn——跨 turn 顺序须宿主等 post_turn_hook_fired
-                                  再提交下一轮,而非等 turn_completed）
+                                  本 turn 收尾的同步一步=回写之后触发；自我 review / 记忆固化落脚点）
   ↓ (emit post_turn_hook_fired)
+  ↓
+[ 释放 root gate ] ─────────────── 下一个排队的根 turn / gated Op 此刻才开始
 ```
+
+### root gate：根 turn 排队串行（ADR 0029）
+
+同一 engine **同时只跑一个根 turn**。`UserMessage` / `CompactNow` / `ThreadRollback` / 根 thread 的 `Rewind` / 根 thread 的 `Resume` 进入 `asyncio.Lock`（FIFO）排队，前一个持有者到达真终态（含 post_turn hook）后按提交序执行：
+
+- **排队可观测**：gate 被占时 emit `submission_queued{submission_id, waiting_on}`。
+- **排队中可取消**：`_pending` 在排队前登记，`CancelTurn` 命中 → `turn_failed{kind: cancelled}`，不起 turn。
+- **不排队的 Op**：`CancelTurn` / `InjectUserInput` / `InjectSystemMessage` / `SendToPeer` / `UpdateBudget` / `RefreshSnapshot` / `UpdateInstructions` / `Shutdown`；命中 spawn 句柄的 `Resume` 与 child thread 的 `Rewind` 作用于子 thread，不排队。
+- **`CompactNow` / `ThreadRollback` 是 operation**：以 `_run_gated_op` 派成 task 排队，不再内联在 actor 循环里（否则饿死 CancelTurn / Shutdown）。
+- **在飞期间 root history 单写者**：turn 在飞时只有 runner 写 root history；`InjectSystemMessage` 与 `InjectUserInput` 同走 runner 的 pending 队列，热 == 冷由构造保证（见下节）。
+- **audit 模式**：accepted token 的 application（进 history + 投影）推迟到它拿到 gate；actor 握手 = 「交接完成」（gate 被占时登记排队即放行 actor 出队下一个）；engine 收敛时对仍排队的 token「只应用不跑 turn」。gate 获取对「锁与任务级 raw cancel 同轮到达」做了防护（cancelling 状态一律视为未获取并归还锁）。
+
+**终结信号完整**：每个 submission 在任何退出路径都有终结事件——operation 抛未捕获异常 → `turn_failed{kind: <异常类名>}` + 清 `_pending`；Shutdown → 对每个过滤订阅投 `turn_failed{kind: engine_shutdown}`（不动队列：audit durable token 留给复活 actor）；engine 收敛后晚到的过滤订阅立即得到合成终结。子 thread 续跑 turn 登记 `_pending(is_root=False)`，`CancelTurn` 可触达。
 
 **关键约束（ADR 0010）**：
 
@@ -614,13 +627,14 @@ K1（广度）/ K2（token）之外，turn 级还有两条 opt-in 护栏（默�
 
 ## mid-turn steering：运行中 turn 注入用户输入（midturn-input-steering 契约）
 
-`UserMessage` 经 `asyncio.create_task(self._run_turn_for(...))` 派发 —— turn 跑在独立 task，**不阻塞 Op 主循环**。据此支持「运行中 turn 不打断地插话」：
+`UserMessage` 经 `_start_operation(self._run_turn_for(...))` 派发 —— turn 跑在独立 task，**不阻塞 Op 主循环**（根 turn 之间经 root gate 串行）。据此支持「运行中 turn 不打断地插话」：
 
-- **Op**：`InjectUserInput{submission_id, text}`（区别于 `InjectSystemMessage` 注 system 注记）。
-- **共享队列**：`_PendingTurn.pending_input` 与对应 `TurnRunner.pending_input` 是同一 list 引用（`_run_turn` 构造时从 `self._pending[submission_id]` 取）。engine 主循环 append、runner drain，同 event loop 协作式调度无需锁。
-- **drain seam**：`TurnRunner._drain_pending_input` 在迭代循环顶部（`_maybe_compress(pre_turn)` 前、成对 fc/output 已闭合的安全点）把 pending 转 user_message 并入 history + emit `UserInputInjected{delivered:true}`。
+- **Op**：`InjectUserInput{submission_id, text}`；`InjectSystemMessage{text}` 在有活跃根 turn 时走**同一队列**（ADR 0029 单写者），无活跃 turn 时由 engine 直接落史。
+- **共享队列**：`_PendingTurn.pending_input` 与对应 `TurnRunner.pending_input` 是同一 list 引用。engine 主循环 append、runner drain，同 event loop 协作式调度无需锁。
+- **drain seam**：`TurnRunner._drain_pending_input` 在迭代循环顶部（`_maybe_compress(pre_turn)` 前、成对 fc/output 已闭合的安全点）与 turn 收尾把 pending 并入 history + store，按 item kind emit `user_input_injected` / `system_message_injected`（`delivered:true`）。注入位置 = 消费时刻（单迭代 turn 即末尾）。
 - **无活跃 turn 退化**：主循环找不到 `_pending[submission_id]` → 文本落历史不起新 turn（codex `inject_no_new_turn`），emit `delivered:false`。
-- **R4**：drain 前 `cancel.is_cancelled` 守卫，已取消 turn 不并入（文本由 engine 收尾落历史，不丢，R5）。
+- **退出路径残留**（R5）：turn 因取消 / 异常 / 挂起退出时，runner 在终态事件之前把残留 pending 全部落史（`_drain_pending_input(residual=True)`），事件 `delivered:false, reason:"turn_ended"`；engine `_drain_residual_injections` 再兜底一次。注入永不丢。
+- **取消时 partial assistant**：已流式输出的 assistant 文本以 `assistant_message(metadata.truncated=true)` 落史，transcript 与用户所见一致。
 
 完整契约见 [`capabilities/midturn-input-steering.md`](capabilities/midturn-input-steering.md)。
 

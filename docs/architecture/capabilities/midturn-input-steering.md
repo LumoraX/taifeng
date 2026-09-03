@@ -26,12 +26,17 @@
 ### 共享 `pending_input` 队列
 `_PendingTurn.pending_input: list[ResponseItem]` 与对应 `TurnRunner.pending_input` 是**同一 list 引用**（`_run_turn` 构造 TurnRunner 时从 `self._pending[submission_id]` 取）。engine 主循环 append、runner 迭代边界 drain。同一 event loop 协作式调度，append/drain 都在无 await 的同步段完成 → 无需锁。
 
+**ADR 0029 单写者**：有活跃根 turn 时 `InjectSystemMessage` 也走这条队列（item kind=`system_injection`），engine MUST NOT 直接写 root history；无活跃 turn 时才由 engine 直接落史。事件构造集中在 `loop/injection.py::injection_event`。
+
 ### `UserInputInjected` 事件（`loop/event.py`，`kind="user_input_injected"`）
 | 字段 | 含义 |
 | --- | --- |
 | `data.submission_id` | 目标 turn |
-| `data.delivered` | `true`=投进活跃 turn pending；`false`=无活跃 turn、落历史未起新 turn |
+| `data.delivered` | `true`=已并入活跃 turn 的 history（drain 时发）；`false`=无活跃 turn 落历史未起新 turn，或 `reason="turn_ended"`（turn 退出时残留落史，未进入本 turn prompt） |
 | `data.text_preview` | 文本前 80 字 |
+| `data.reason` | `null` 或 `"turn_ended"` |
+
+`SystemMessageInjected`（`kind="system_message_injected"`）字段同形，对应 `InjectSystemMessage`。
 
 ## 行为契约
 
@@ -48,7 +53,11 @@
 - **THEN** 注入推迟到该批闭合后的迭代边界并入（drain 点在迭代循环顶部、`_maybe_compress(pre_turn)` 前），history 不出现配对孤儿
 
 ### Requirement: Cache 友好 + 尊重取消 + 可 resume
-- 注入作为 tail 追加，不动 cache anchor 之前的 head；目标 turn 已取消 → drain 不并入（`cancel.is_cancelled` 守卫），文本由 engine 收尾落历史不丢（R5）；并入的 user_message 经 store.append 持久化。
+- 注入作为 tail 追加，不动 cache anchor 之前的 head；目标 turn 已取消 → 迭代边界 drain 不并入（`cancel.is_cancelled` 守卫）；turn 以任何方式退出（取消 / 异常 / 挂起）时 runner SHALL 在终态事件之前把残留 pending 全部落史（`_drain_pending_input(residual=True)`，事件 `delivered:false, reason:"turn_ended"`），engine `_drain_residual_injections` 再兜底一次；注入 MUST NOT 丢（R5）。
+
+#### Scenario: 已取消 turn 的注入由 engine 收尾落史
+- **WHEN** `InjectUserInput` 后 turn 被 `CancelTurn`
+- **THEN** 注入文本以 user_message 出现在热与冷 history 中；事件 `user_input_injected{delivered:false, reason:"turn_ended"}` 在 `turn_completed` 之前发出
 
 ### Requirement: 晚到注入收尾不丢（R5）
 注入在 turn **最后一轮采样期间**到达（`delivered=true`，但该轮无后续 tool call、无下一迭代 drain）时，turn 正常退出前 SHALL 补一次 drain 把它落历史——否则 pending 随 turn 结束被丢弃，违反 R5。
@@ -64,7 +73,7 @@
 
 - **R1**：✅ 注入中性 `ResponseItem`，无业务概念。
 - **R2**：✅ pending 只追加 tail，不动 head。
-- **R3**：✅ `user_input_injected`（delivered 真假）。
+- **R3**：✅ `user_input_injected` / `system_message_injected`（delivered 真假 + reason）。
 - **R4**：✅ drain 前 `cancel.is_cancelled` 守卫；不绕过 CancellationToken。
 - **R5**：✅ 并入 / 落历史均经 store.append 持久化。
 
