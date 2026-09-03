@@ -3618,6 +3618,7 @@ class AgentEngine:
             enable_request_capture=self._enable_request_capture,
             history_buffer=list(self._history),
             cache_anchor_index=self._cache_anchor_index,
+            compaction_count=self._compaction_count,
             pinned_states=self._pinned_states,
             # T6: 一致性透传（CompactNow runner 不采样，阈值无实效但保字段齐整）
             recall_threshold=self._recall_threshold,
@@ -3627,6 +3628,8 @@ class AgentEngine:
         async with self._lock:
             self._history = list(runner.history_buffer)
             self._cache_anchor_index = runner.cache_anchor_index
+            # 与 _writeback_turn_runner 同步回写压缩计数，否则 G1c 降级告警跨 turn 少计
+            self._compaction_count = runner.compaction_count
             # turn-rewind：对当前全量逻辑 history 重算节点表(derive 为唯一产出方)。
             # CompactNow 路径：在压缩后 history 上重算，折叠语义与冷加载推导一致。
             self._rewind_checkpoints = derive_rewind_log(self._history)
