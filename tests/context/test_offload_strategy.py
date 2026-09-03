@@ -233,3 +233,59 @@ def test_should_skip_results_carrying_image_attachments() -> None:
     strat = _strategy(Path("/tmp"))  # noqa: S108 — should_trigger 不落盘
 
     assert strat.should_trigger(_ctx(history)) is None
+
+
+# ---- 路径校验（wave1 task 7）----
+
+def _history_with_thread(output: str, *, call_id: str, thread_id: str) -> list[ResponseItem]:
+    return [
+        user_message("请分析", thread_id=thread_id),
+        function_call(call_id, "search", "{}", thread_id=thread_id),
+        function_call_output(call_id=call_id, output=output, thread_id=thread_id),
+        assistant_message("ok", thread_id=thread_id, model="m"),
+    ]
+
+
+def _files_outside(root: Path) -> list[Path]:
+    """同步 helper：列出 root 之外（父目录下）新出现的文件，用于断言穿越未发生。"""
+    parent = root.parent
+    return [p for p in parent.rglob("*") if p.is_file() and root not in p.parents]
+
+
+async def test_traversal_call_id_is_rejected_and_original_kept(tmp_path: Path) -> None:
+    """call_id='../../../evil' 不得写到 file_root 外，且该条目保留原文。"""
+    root = tmp_path / "sandbox"
+    root.mkdir()
+    before = set(_files_outside(root))
+    strat = _strategy(root)
+    hist = _history_with_thread(BIG, call_id="../../../evil", thread_id=TID)
+    result = await strat.compress(_ctx(hist), InitialContextInjection.DO_NOT_INJECT)
+    assert set(_files_outside(root)) == before
+    assert not (tmp_path / "evil").exists()
+    out = next(
+        it.payload["output"]
+        for it in (result.new_history or hist)
+        if it.kind == "function_call_output"
+    )
+    assert out == BIG
+
+
+async def test_traversal_thread_id_is_rejected(tmp_path: Path) -> None:
+    """thread_id 含路径分隔符同样被拒。"""
+    root = tmp_path / "sandbox"
+    root.mkdir()
+    strat = _strategy(root)
+    hist = _history_with_thread(BIG, call_id="c1", thread_id="../escape")
+    result = await strat.compress(_ctx(hist), InitialContextInjection.DO_NOT_INJECT)
+    assert not (tmp_path / "escape").exists()
+    assert not (tmp_path / "_offload").exists()
+    assert not result.success
+
+
+async def test_regular_call_id_still_offloads(tmp_path: Path) -> None:
+    """合法 call_id 行为不变。"""
+    strat = _strategy(tmp_path)
+    hist = _history_with_thread(BIG, call_id="call_abc123", thread_id=TID)
+    result = await strat.compress(_ctx(hist), InitialContextInjection.DO_NOT_INJECT)
+    assert result.success
+    assert (tmp_path / "_offload" / TID / "call_abc123").is_file()

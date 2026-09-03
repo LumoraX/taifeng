@@ -26,6 +26,7 @@ R1-R5(见 design):
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,6 +46,25 @@ if TYPE_CHECKING:
 
 # offload 文件根下的固定子目录名 —— 与业务文件区隔离
 _OFFLOAD_SUBDIR = "_offload"
+
+logger = logging.getLogger(__name__)
+
+
+def _is_safe_segment(name: str) -> bool:
+    """单个路径段是否安全：非空、不为 . / ..、不含分隔符 / NUL、非绝对路径。
+
+    ``call_id`` 来自 provider 返回、``thread_id`` 来自 history —— 二者都是外部输入，
+    直接拼进落盘路径会被 ``../../..`` 带出 file_root（路径穿越）。
+    """
+    return (
+        isinstance(name, str)
+        and bool(name)
+        and name not in {".", ".."}
+        and "\x00" not in name
+        and "/" not in name
+        and "\\" not in name
+        and not Path(name).is_absolute()
+    )
 
 
 def _build_name_index(history: list[ResponseItem]) -> dict[str, str]:
@@ -228,8 +248,22 @@ class OffloadStrategy:
     ) -> str | None:
         """落盘单条 output,返回 stub 文本;落盘失败返回 None(调用方保留原文)。"""
         thread_id = self._thread_id_for(ctx, call_id)
+        if not (_is_safe_segment(thread_id) and _is_safe_segment(call_id)):
+            # 路径穿越型 id：不落盘、保留原文，与 OSError 分支同语义
+            # （非 silent fallback：数据不被改写，且有 warning）
+            logger.warning(
+                "offload rejected unsafe path segment: thread_id=%r call_id=%r",
+                thread_id, call_id,
+            )
+            return None
         rel_path = f"{_OFFLOAD_SUBDIR}/{thread_id}/{call_id}"
-        target = anyio.Path(self._root) / _OFFLOAD_SUBDIR / thread_id / call_id
+        thread_dir = Path(self._root) / _OFFLOAD_SUBDIR / thread_id
+        target_path = thread_dir / call_id
+        # 二次证明：resolve 后的父目录必须仍是 thread 目录（防 symlink 等绕过）
+        if target_path.resolve().parent != thread_dir.resolve():
+            logger.warning("offload target escaped thread dir: %s", target_path)
+            return None
+        target = anyio.Path(target_path)
         try:
             await target.parent.mkdir(parents=True, exist_ok=True)
             await target.write_text(output, encoding="utf-8")

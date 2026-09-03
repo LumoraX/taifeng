@@ -23,6 +23,8 @@
 
 `{file_root}/_offload/{thread_id}/{call_id}` —— 可从 stub 的 `call_id` 纯函数推导,无独立索引。offload 文件独立于 history(JSONL)持久化。
 
+**路径段校验**：`thread_id` 与 `call_id` 都是外部输入（history / provider），拼接前各自 SHALL 通过：非空、不为 `.` / `..`、不含 `/` `\` `\x00`、非绝对路径；且落盘 target 的 resolved 父目录 SHALL 等于 `{file_root}/_offload/{thread_id}` 的 resolved 结果。不通过 → 不落盘、返回 None（该条目保留原文）并记 warning，MUST NOT 写到 `file_root` 之外。
+
 ### stub 结构
 
 以 `OFFLOAD_PREFIX`(`[offloaded:`)起头(→ `is_placeholder` 幂等识别):
@@ -61,6 +63,8 @@
 - **THEN** 返回对应行区间,不触发整文件截断
 
 ### Requirement: 幂等 / 失败回退
+- **WHEN** provider 返回 `call_id="../../../evil"` 且该条 output 超阈值
+- **THEN** 不产生任何 `file_root` 外的文件；该条目保留原文不被替换为 stub
 - **WHEN** 再次扫描到已带 `OFFLOAD_PREFIX` 的 stub → 跳过,不二次落盘
 - **WHEN** 单条落盘抛 OSError → 保留原始 output,不产半截 stub,继续处理其余候选
 
