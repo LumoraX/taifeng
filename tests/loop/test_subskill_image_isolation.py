@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -143,11 +145,38 @@ async def _run(tmp_path: Path, threads_dir: Path) -> tuple[list, dict[str, list]
         extra_tools=[_observe_frame_tool()],
     )
     engine = await pool.get_or_create(session_id="s", entry_skill_id="planner")
-    submission_id = await engine.submit(taifeng.UserMessage(text="看一下画面"))
-    async for event in engine.subscribe(submission_id):
-        if event.msg.kind in ("turn_completed", "turn_failed"):
-            assert event.msg.kind == "turn_completed", event.msg.data
-            break
+    # 必须等**最外层根 turn** 终态。两个坑叠在一起：① call_skill 派生的子 turn
+    # 复用父的 submission_id 且更早 emit turn_completed；② engine.subscribe(sub_id)
+    # 在首个终态事件后即关流，根本收不到之后的根终态。见首个终态就退出会让父 turn
+    # 停在结算前被 close() 取消，fc/fco 永不落盘——父 history 静默残缺。
+    # 故照 test_audit_engine_turn_e2e::_run_op_until_root_done 的形态：先注册
+    # subscribe_all 收集器，再提交，只认 is_root=True 的终态。
+    result: list[str] = []
+    done = asyncio.Event()
+    sub_holder: list[str] = []
+
+    async def collector() -> None:
+        async for ev in engine.subscribe_all():
+            if not sub_holder or ev.submission_id != sub_holder[0]:
+                continue
+            if ev.msg.kind in ("turn_completed", "turn_failed") and ev.msg.data.get(
+                "is_root"
+            ):
+                result.append(ev.msg.kind)
+                done.set()
+                return
+
+    task = asyncio.create_task(collector())
+    await asyncio.sleep(0)  # 让 collector 先注册 subscribe_all 队列
+    sub_holder.append(await engine.submit(taifeng.UserMessage(text="看一下画面")))
+    try:
+        await asyncio.wait_for(done.wait(), timeout=10.0)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+    assert result == ["turn_completed"], f"根 turn 未正常收敛: {result}"
+
     parent_thread_id = engine.thread_id
     await pool.close()
 
@@ -214,3 +243,28 @@ async def test_child_conclusion_is_plain_text(
     finals = [it for it in child_history if it.kind == "assistant_message"]
     assert "两帧均正常" in finals[-1].payload["text"]
     assert not (finals[-1].payload.get("attachments") or [])
+
+
+@pytest.mark.asyncio
+async def test_parent_records_the_dispatch_it_made(
+    tmp_path: Path, threads_dir: Path
+) -> None:
+    """父 thread 必须完整记录它发起的那次 call_skill（fc + 配对 fco）。
+
+    这条锁的是**等待姿势**而非图片：子 turn 复用父的 submission_id 且更早
+    emit turn_completed，若在首个终态就退出，父 turn 会停在结算前被 close()
+    取消，fc/fco 永不落盘——父 history 静默残缺，而只看「父侧无图」的断言
+    照样通过。此处直接断言父侧派发已成对落盘，让早退无处藏身。
+    """
+    parent_history, _ = await _run(tmp_path, threads_dir)
+
+    kinds = [it.kind for it in parent_history]
+    fcs = [it for it in parent_history if it.kind == "function_call"]
+    fcos = [it for it in parent_history if it.kind == "function_call_output"]
+
+    assert fcs, f"父侧应记录 call_skill 的 function_call，实际只有 {kinds}"
+    assert [it.payload["call_id"] for it in fcs] == [
+        it.payload["call_id"] for it in fcos
+    ], "fc 与 fco 必须成对且 call_id 对齐"
+    assert fcs[0].payload["name"] == "call_skill"
+    assert "两帧均正常" in fcos[0].payload["output"], "子的结论应回填进父的 fco"
