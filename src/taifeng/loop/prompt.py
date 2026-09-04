@@ -598,6 +598,7 @@ def build_api_request(
         resolved_capabilities.protocol == "responses" or contains_provider_state
     )
     input_items: list[ApiInputItem] | None = None
+    messages: list[ApiMessage]
     if use_ordered_items:
         input_items, source_indexes = _history_to_api_input_items(
             history,
@@ -633,13 +634,26 @@ def build_api_request(
         else:
             messages.append(ApiMessage(role="system", content=memory_content))
 
-    common = {
-        "model": model,
-        "system_prompt": [system_prompt],
-        "tools": tools,
-        "parallel_tool_calls": True,
-        "cache_breakpoints": breakpoints,
-    }
+    # 这里**刻意不抽公共 dict 再 ** 展开**,两个原因缺一不可:
+    #   1. 混合值类型的 dict 会被推导成 dict[str, object],`**` 进 ApiRequest 后
+    #      mypy 对每个字段都判不兼容 —— 等于这条关键路径完全脱离类型检查;
+    #   2. ApiRequest 的 after-validator 按 **model_fields_set**(有没有显式传)
+    #      分支:messages 与 input_items 同时传会直接 raise「两者不一致」。
+    #      故每个分支必须**只传其中一个**,不能靠传空 list 合并写法。
     if input_items is not None:
-        return ApiRequest(input_items=input_items, **common)
-    return ApiRequest(messages=messages, **common)
+        return ApiRequest(
+            model=model,
+            system_prompt=[system_prompt],
+            input_items=input_items,
+            tools=tools,
+            parallel_tool_calls=True,
+            cache_breakpoints=breakpoints,
+        )
+    return ApiRequest(
+        model=model,
+        system_prompt=[system_prompt],
+        messages=messages,
+        tools=tools,
+        parallel_tool_calls=True,
+        cache_breakpoints=breakpoints,
+    )
