@@ -12,7 +12,6 @@ import asyncio
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
 
 # 把 examples/ 目录加入 sys.path，让 _provider_bootstrap 可以 import
 # 当前文件位于 examples/real_llm/ 子目录，parent.parent = examples/

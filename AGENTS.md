@@ -58,7 +58,7 @@
 
 - 新模块必须有 `tests/test_<module>.py`
 - LLM 调用走 `SimClient`（conformance 模拟器）—— 不能在 CI 里调真实 API
-- **CI 门禁**（`.github/workflows/ci.yml`，push main / 每个 PR 自动触发）：Python 3.12+3.13 全量 `pytest tests/` + `scripts/verify_examples.py` 的 examples 冒烟。本地先跑这两条 = 预跑门禁。门禁只跑 sim，真实回归仍走下面的台账红线
+- **CI 门禁**（`.github/workflows/ci.yml`，push main / 每个 PR 自动触发）：三个 job —— Python 3.12+3.13 全量 `pytest tests/`、`scripts/verify_examples.py` 的 examples 冒烟、`ruff check --select F` 静态检查。本地跑这三条 = 预跑门禁。**只卡 ruff F 类**（未用导入 / 重名覆盖 / 未用变量 / 未定义名，零风格意见）；E501/TC/I 共 300+ 条既有欠账不入闸，要清得单独开切片。门禁只跑 sim，真实回归仍走下面的台账红线
 - **真实回归红线**：凡变更基础层（`src/taifeng/{llm,loop,context,conversation}/`），合入前必须全量跑 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 并提交更新后的 `docs/real-llm-ledger.{json,md}`；台账 commit 落后于基础层变更 → 不得标 task 完成 / openspec archive。烧 key 前可先 `examples/real_llm/selfcheck.py`（sim 干跑，零消耗）
 - **能力登记红线**：新增 / 修改 LLM 策略类能力必须同步登记 `docs/capability-matrix.md`（含「真实 LLM 验证」列），与「architecture 未同步 → PR 不合并」同级
 - 文件 IO 走 `tmp_path` fixture

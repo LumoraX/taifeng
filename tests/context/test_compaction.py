@@ -41,7 +41,7 @@ def test_sliding_window_when_handoff_skipped() -> None:
     budget = ContextBudget(context_window=1000, soft_limit_ratio=0.85, hard_limit_ratio=0.95, preserve_tail_messages=2)
     sliding = SlidingWindowStrategy(keep_tail=2)
     items = [user_message(f"msg-{i} " * 30, thread_id="t") for i in range(10)]
-    tokens = estimate_history_tokens(items)
+    # token_estimate 直接写死超过 hard limit,比用真实估算更确定,不受 tokenizer 变动影响
     ctx = CompressionContext(
         history=items,
         token_estimate=int(budget.hard_limit) + 1,

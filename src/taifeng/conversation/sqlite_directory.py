@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from taifeng.conversation.errors import DirectoryError, ThreadNotFoundError
+from taifeng.conversation.errors import ThreadNotFoundError
 from taifeng.conversation.models import (
     ThreadFilter,
     ThreadMetadata,

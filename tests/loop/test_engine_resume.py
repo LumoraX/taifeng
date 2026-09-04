@@ -8,7 +8,6 @@ history 恢复 + ThreadResumed 事件 + thread_id 一致 + cache_anchor 重置�
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest

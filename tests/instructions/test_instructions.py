@@ -356,7 +356,6 @@ async def test_resolver_text_too_large_raises() -> None:
 
 from pathlib import Path  # noqa: E402
 
-import taifeng  # noqa: E402
 from taifeng.llm.providers.sim import SimClient, SimTurn  # noqa: E402
 from taifeng.llm.types import ApiRequest, TokenUsage  # noqa: E402
 

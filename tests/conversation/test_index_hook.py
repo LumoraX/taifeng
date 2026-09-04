@@ -18,7 +18,6 @@ import pytest
 
 import taifeng
 from taifeng.conversation import (
-    IndexHook,
     NoopIndexHook,
     ResponseItem,
     ThreadMetadata,

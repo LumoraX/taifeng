@@ -8,7 +8,6 @@ import pytest
 
 from taifeng.skill import (
     CircularSkillReference,
-    DispatchPolicy,
     FilesystemSkillRegistry,
     SkillDefinition,
     SkillValidationError,

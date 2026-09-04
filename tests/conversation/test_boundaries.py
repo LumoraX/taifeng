@@ -24,8 +24,6 @@ from taifeng.conversation import (
     user_message,
 )
 from taifeng.conversation.hook_runner import HookRunner
-from taifeng.conversation.protocols import IndexHook
-from taifeng.loop.event import EventMsg
 
 
 # -----------------------------------------------------------------

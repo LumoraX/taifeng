@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from taifeng.conversation.models import RebuildReport, ThreadMetadata
 from taifeng.conversation.protocols import ThreadDirectory

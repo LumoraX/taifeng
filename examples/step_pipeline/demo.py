@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,9 +23,8 @@ from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
 
-    from taifeng.llm.types import ApiRequest
+    pass
 
 SKILLS = Path(__file__).resolve().parent / "skills"
 

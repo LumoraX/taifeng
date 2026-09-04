@@ -92,7 +92,6 @@ def test_public_api_exports_outcome_types() -> None:
     """OutcomeJudge / SkillExecutionRecord / StructuralOutcomeJudge 必须从 taifeng 顶层可导入。"""
     from taifeng import (  # noqa: PLC0415
         OutcomeJudge,
-        OutcomeVerdict,
         SkillExecutionContext,
         SkillExecutionRecord,
         StructuralOutcomeJudge,

@@ -23,7 +23,6 @@ from taifeng.llm.types import TokenUsage
 from taifeng.permission.types import PermissionPolicy
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import (
-    CallStack,
     DispatchPolicy,
     _SubagentAutoDecisionPolicy,
 )
@@ -53,13 +52,12 @@ def captured_sub_policies(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     """Monkey-patch TurnRunner.run 捕获子 TurnRunner 的 permission_policy 字段。"""
     captured: list[Any] = []
 
-    original_run = TurnRunner.run
-
     async def _capturing_run(self: TurnRunner) -> TurnOutcome:
         # 仅在 sub TurnRunner（thread_id 以 subskill 开头）记录
         if "sub" in self.thread_id or self.entry_skill.id == "sub":
             captured.append(self.permission_policy)
-        # 走原 run 但快速结束（不靠 LLM）
+        # 不走原 run：本 fixture 只关心子 runner 拿到的 permission_policy，
+        # 直接返回定型 outcome 以免真跑 LLM。
         return TurnOutcome(
             success=True,
             iterations=1,

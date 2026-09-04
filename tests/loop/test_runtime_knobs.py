@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 import taifeng
-from taifeng.context.budget import ContextBudget
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import (

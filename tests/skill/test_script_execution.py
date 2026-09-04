@@ -145,10 +145,8 @@ def test_script_execution_error_carries_descriptor() -> None:
 import asyncio  # noqa: E402
 
 from taifeng.hooks.types import HookDecision, HookRegistry, HookRunner  # noqa: E402
-from taifeng.loop import CancellationToken  # noqa: E402
 from taifeng.permission.types import (  # noqa: E402
     PermissionPolicy,
-    PermissionRule,
 )
 from taifeng.skill.definition import SkillDefinition  # noqa: E402
 from taifeng.skill.registry import SkillSnapshot  # noqa: E402

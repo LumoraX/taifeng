@@ -24,7 +24,6 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation import (
-    ThreadDirectory,
     ThreadFilter,
     ThreadMetadata,
     ThreadNotFoundError,

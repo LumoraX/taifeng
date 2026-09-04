@@ -20,7 +20,6 @@ from pathlib import Path
 from taifeng.conversation import (
     JsonlMessageWriter,
     MessageWriter,
-    ResponseItem,
     iter_thread_files,
     user_message,
 )
