@@ -25,6 +25,7 @@ from taifeng.loop.audit_descriptor import (
 )
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import Submission, UserMessage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_submission_admission import _engine_with_audit
 
 if TYPE_CHECKING:
@@ -277,9 +278,13 @@ def _descriptor_cases() -> tuple[tuple[str, UserMessage, str], ...]:
 
 
 async def _wait_until(predicate: object) -> None:
-    """在测试 deadline 内等待同步谓词为真。"""
+    """在守卫期限内等待同步谓词为真。
+
+    期限用 ``GUARD_TIMEOUT_SECONDS``（防挂死，非性能断言）——原来写死 1 秒，
+    全量跑负载下会把「慢」误判成「没发生」。
+    """
     assert callable(predicate)
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         while not predicate():
             await anyio.lowlevel.checkpoint()
 
@@ -508,7 +513,7 @@ async def test_actor_termination_wakes_full_queue_handoff_and_retires_all_tokens
     actor.cancel()
     with pytest.raises(asyncio.CancelledError):
         await actor
-    done, pending = await asyncio.wait({blocked}, timeout=1)
+    done, pending = await asyncio.wait({blocked}, timeout=GUARD_TIMEOUT_SECONDS)
     if pending:
         blocked.cancel()
         await asyncio.gather(blocked, return_exceptions=True)
@@ -670,7 +675,7 @@ async def test_shutdown_serializes_with_admission_and_finish_converges_queue(
     actor = asyncio.create_task(engine.run(root))
     done, pending = await asyncio.wait(
         {second, shutdown, late, actor},
-        timeout=1,
+        timeout=GUARD_TIMEOUT_SECONDS,
     )
     converged = not pending
     if pending:

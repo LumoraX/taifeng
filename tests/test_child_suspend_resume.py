@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from taifeng.suspend.record import SuspensionRecord
-from tests.conftest import last_turn_terminal
+from tests.conftest import GUARD_TIMEOUT_SECONDS, last_turn_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -164,7 +164,17 @@ class _AllEventsRecorder:
             if ev.msg.kind == "shutdown":
                 break
 
-    async def wait_terminal(self, sub_id: str, *, timeout_s: float = 8.0) -> list:
+    def seen(self, predicate) -> bool:
+        """是否已收到满足 predicate 的事件（供条件等待用，取代裸 sleep 同步）。"""
+        return any(predicate(e) for e in self._events)
+
+    def registered(self, engine) -> bool:
+        """firehose 订阅是否真的登记进 engine —— create_task 只排期，不保证已订上。"""
+        return bool(engine._all_subs)  # noqa: SLF001
+
+    async def wait_terminal(
+        self, sub_id: str, *, timeout_s: float = GUARD_TIMEOUT_SECONDS
+    ) -> list:
         """轮询直到 sub_id 的根终结事件出现，返回该 submission 的全部已收事件。"""
         async def _poll() -> list:
             while True:

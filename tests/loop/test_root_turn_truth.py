@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.submission import (
@@ -18,6 +17,7 @@ from taifeng.loop.submission import (
     InjectUserInput,
     Shutdown,
 )
+from tests.conftest import wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -154,20 +154,43 @@ async def test_two_user_messages_run_serially_in_order(
     pool = await _pool(skills_dir, threads_dir, client)
     try:
         engine = await pool.get_or_create(session_id="s", entry_skill_id=ENTRY)
-        sub_a = await engine.submit(taifeng.UserMessage(text="A"))
-        await asyncio.sleep(0.05)
-        sub_b = await engine.submit(taifeng.UserMessage(text="B"))
 
+        # 全程用 firehose 收，且在**任何 submit 之前**就建立订阅：
+        # 原写法是 submit 完再 subscribe(sub_id)，过滤订阅是 live-only，turn 一快
+        # 就整段错过（ADR 0031 的终态补投只补终结，补不回 turn_started）；
+        # 而 sleep(0.05) 又被当成「B 落进 A 在飞窗口」的同步手段。两个赌注叠在一起，
+        # 负载下就是本用例历史上间歇报 TimeoutError 的根因。
         events: list[tuple[str, str]] = []
 
-        async def _collect(sid: str) -> None:
-            async for ev in engine.subscribe(sid):
-                events.append((sid, ev.msg.kind))
-                if ev.msg.kind in ("turn_completed", "turn_failed"):
+        async def _firehose() -> None:
+            async for ev in engine.subscribe_all():
+                events.append((ev.submission_id, ev.msg.kind))
+                if ev.msg.kind == "shutdown":
                     return
 
-        await asyncio.wait_for(asyncio.gather(_collect(sub_a), _collect(sub_b)), timeout=5.0)
-        await asyncio.sleep(0.1)
+        collector = asyncio.create_task(_firehose())
+        await wait_for_condition(
+            lambda: bool(engine._all_subs),  # noqa: SLF001 —— 订阅真的登记上了才发提交
+            message="firehose 订阅未能登记",
+        )
+
+        sub_a = await engine.submit(taifeng.UserMessage(text="A"))
+        # 前提是「B 提交时 A 正在飞」——等 A 真的起飞，而不是睡一个估计值
+        await wait_for_condition(
+            lambda: (sub_a, "turn_started") in events,
+            message="A 的 turn_started 未出现",
+        )
+        sub_b = await engine.submit(taifeng.UserMessage(text="B"))
+
+        await wait_for_condition(
+            lambda: any(
+                (sid, kind) in events
+                for sid in (sub_b,)
+                for kind in ("turn_completed", "turn_failed")
+            ),
+            message="B 未走到终态",
+        )
+        collector.cancel()
 
         # B 的 turn_started 必须晚于 A 的 turn_completed
         order = [(sid, k) for sid, k in events if k in ("turn_started", "turn_completed")]

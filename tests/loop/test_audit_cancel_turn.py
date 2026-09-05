@@ -23,6 +23,7 @@ from taifeng.loop.audit import (
 )
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import CancelTurn, Submission, UserMessage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_coordinator import _coordinator, _RecordingCore
 from tests.loop.test_audit_submission_admission import _engine_with_audit
 
@@ -171,7 +172,7 @@ def _controlled_sim_client() -> RoutingSimClient:
 
 async def _wait_for_requests(client: SimClient | RoutingSimClient, count: int) -> None:
     """等待 reviewed Sim ledger 记录指定数量的真实请求。"""
-    with anyio.fail_after(2):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         while len(client.ledger.requests()) < count:
             await anyio.lowlevel.checkpoint()
 
@@ -234,7 +235,7 @@ async def _wait_for_record(
     submission_id: str,
 ) -> list[Any]:
     """等待指定 submission 的 durable record 后返回完整 Journal。"""
-    with anyio.fail_after(2):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         while True:
             envelopes = await _load_journal(core)
             if any(
@@ -277,7 +278,7 @@ async def test_engine_cancel_turn_is_durable_targeted_and_peer_can_continue(
         target_id = await engine.submit(UserMessage(text="cancel-me"))
         peer_id = await engine.submit(UserMessage(text="keep-going"))
         await _wait_for_requests(client, 1)
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while peer_id not in engine._pending:  # noqa: SLF001 —— peer 排队登记
                 await anyio.lowlevel.checkpoint()
         assert len(client.ledger.requests()) == 1, "peer 排队中不得发请求（串行）"
@@ -288,7 +289,7 @@ async def test_engine_cancel_turn_is_durable_targeted_and_peer_can_continue(
         cancel_task = asyncio.create_task(
             engine.submit(CancelTurn(submission_id=target_id))
         )
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await target_token.wait_cancelled()
         client.coordinator.signal("release-target")
         cancel_id = await cancel_task
@@ -308,7 +309,7 @@ async def test_engine_cancel_turn_is_durable_targeted_and_peer_can_continue(
 
         # target 退出释放 gate → peer 开跑（第 2 个请求）→ 放行 → 完成
         await _wait_for_requests(client, 2)
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             client.coordinator.signal("release-peer")
             await client.coordinator.wait("peer-completed")
 
@@ -390,7 +391,7 @@ async def _submit_and_replay_cancel(
     first_task = asyncio.create_task(
         engine.submit(CancelTurn(submission_id=target_id))
     )
-    with anyio.fail_after(2):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await target_token.wait_cancelled()
     client.coordinator.signal("release-target")
     first_id = await first_task
@@ -548,10 +549,10 @@ async def test_cancel_caller_raw_cancellation_waits_for_applied_then_reraises(
         cancel_task = asyncio.create_task(
             engine.submit(CancelTurn(submission_id=target_id))
         )
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await target_token.wait_cancelled()
         client.coordinator.signal("release-target")
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await pausing_core.applied_entered.wait()
         cancel_task.cancel("caller raw cancellation")
         pausing_core.release_applied.set()
@@ -616,7 +617,7 @@ async def test_late_cancel_after_natural_outcome_does_not_fabricate_cancelled(
     )
     try:
         target_id = await engine.submit(UserMessage(text="complete-first"))
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await writeback_entered.wait()
         target_token = coordinator._target_cancellations._active[  # noqa: SLF001
             target_id
@@ -625,7 +626,7 @@ async def test_late_cancel_after_natural_outcome_does_not_fabricate_cancelled(
         cancel_task = asyncio.create_task(
             engine.submit(CancelTurn(submission_id=target_id))
         )
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await target_token.wait_cancelled()
         release_writeback.set()
         cancel_id = await cancel_task

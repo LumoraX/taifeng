@@ -65,3 +65,29 @@ SHALL NOT 拆分单文件。
 - **WHEN** 迁移前后分别跑 `pytest --collect-only -q tests/ | tail -1`
 - **THEN** 两次输出的 "N tests collected" 中 N SHALL 相等
 
+
+### Requirement: 墙钟期限区分「守卫」与「被测行为」
+
+测试里的墙钟期限 SHALL 明确属于以下两类之一，且不得混用。
+
+**守卫期限**（等待「本就该发生的事」，只为防止无限挂死）：
+
+- SHALL 使用 `tests/conftest.py` 的 `GUARD_TIMEOUT_SECONDS`（默认 30s，可用环境变量
+  `TAIFENG_TEST_GUARD_TIMEOUT` 整体放大），SHALL NOT 按「正常应该多快」估一个 1~5 秒的值。
+  条件一满足就立即返回，给足期限不会拖慢通过路径，只在真挂死时才被用到。
+- 等待某个状态成立 SHALL 用 `wait_for_condition(predicate)`，SHALL NOT 用
+  `await asyncio.sleep(<估计值>)` 充当同步——后者把用例前提押在机器速度上，负载下前提凭空消失，
+  症状却表现为下游超时，极难归因。
+- 后台 `subscribe_all` 收集器 SHALL 在提交前确认订阅**已登记**（`engine._all_subs` 非空）再发提交；
+  `asyncio.create_task` 只是排期，不保证已进入订阅。
+
+**被测行为期限**（期限本身就是断言对象，如「commit 超期必须冻结 writer」）：
+
+- SHALL 显式写值并注明理由，SHALL NOT 复用 `GUARD_TIMEOUT_SECONDS`。
+- SHALL NOT 让该期限同时圈住**真实 IO**（fsync / 真 journal 写）：期限要小到能被人为构造的慢路径
+  确定性触发，就必然小到会被慢盘偶发撞上。做法是**分段**——真实 IO 阶段给足期限，进入被测阶段前
+  再收紧。
+
+依据（2026-09 实测）：8 个不同用例曾轮流因守卫期限过紧而间歇变红，每次红的用例都不一样，其中一次
+把 main 的 CI 跑红；孤立跑全绿、只在全量跑（2300+ 用例单进程累积负载）复现。典型误用是
+`commit_timeout=0.01` 同时圈住了建会话的两次真 fsync。

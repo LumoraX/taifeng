@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.submission import CancelTurn, CompactNow, ThreadRollback
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,14 +39,22 @@ class _Recorder:
     def kinds(self, sub_id: str) -> list[str]:
         return [e.msg.kind for e in self.events if e.submission_id == sub_id]
 
-    async def wait_kind(self, sub_id: str, kind: str, timeout: float = 5.0) -> Any:
-        async def _poll() -> Any:
-            while True:
-                for e in self.events:
-                    if e.submission_id == sub_id and e.msg.kind == kind:
-                        return e
-                await asyncio.sleep(0.02)
-        return await asyncio.wait_for(_poll(), timeout=timeout)
+    def seen(self, sub_id: str, kind: str) -> bool:
+        """该 submission 是否已出现过某 kind（供条件等待用）。"""
+        return any(e.submission_id == sub_id and e.msg.kind == kind for e in self.events)
+
+    async def wait_kind(
+        self, sub_id: str, kind: str, deadline_seconds: float = GUARD_TIMEOUT_SECONDS
+    ) -> Any:
+        """等某事件出现。期限是**防挂死守卫**，不是性能断言——故默认给足。"""
+        await wait_for_condition(
+            lambda: self.seen(sub_id, kind),
+            deadline_seconds=deadline_seconds,
+            message=f"{sub_id} 的 {kind} 事件未在守卫期限内出现",
+        )
+        return next(
+            e for e in self.events if e.submission_id == sub_id and e.msg.kind == kind
+        )
 
 
 async def test_queued_submission_emits_submission_queued(
@@ -61,7 +70,10 @@ async def test_queued_submission_emits_submission_queued(
         rec = _Recorder(engine)
         await asyncio.sleep(0)
         sub_a = await engine.submit(taifeng.UserMessage(text="A"))
-        await asyncio.sleep(0.05)
+        # 用例前提是「B 提交时 A 正在飞」。原来靠 sleep(0.05) 赌这一点：机器一慢
+        # 睡醒时 A 可能已经跑完，前提凭空消失，症状却是下游 wait_kind 超时。
+        # 改成等 A 真的 turn_started 再提交 B。
+        await rec.wait_kind(sub_a, "turn_started")
         sub_b = await engine.submit(taifeng.UserMessage(text="B"))
 
         queued = await rec.wait_kind(sub_b, "submission_queued")
@@ -127,12 +139,13 @@ async def test_compact_now_does_not_starve_cancel_turn(
         await engine.submit(CancelTurn(submission_id=sub_a))
         # 饿死判据：actor 是否及时处理了 CancelTurn（token 置位），而非 turn 何时退出
         # （SimClient 的 delay 睡眠本身不响应 token，睡完才检查）
-        for _ in range(30):
-            if token_a.is_cancelled:
-                break
-            await asyncio.sleep(0.01)
-        assert token_a.is_cancelled, "CancelTurn 被 CompactNow 饿死（actor 未及时处理）"
-        done_a = await rec.wait_kind(sub_a, "turn_completed", timeout=4.0)
+        # 饿死 = **永远**处理不到，不是「没在 0.3 秒内处理到」。故用守卫期限等状态，
+        # 而不是数一个固定圈数 —— 后者在负载下会把「慢」误判成「饿死」。
+        await wait_for_condition(
+            lambda: token_a.is_cancelled,
+            message="CancelTurn 被 CompactNow 饿死（actor 始终未处理）",
+        )
+        done_a = await rec.wait_kind(sub_a, "turn_completed")
         assert done_a.msg.data["end_reason"] == "cancelled"
     finally:
         await pool.close()

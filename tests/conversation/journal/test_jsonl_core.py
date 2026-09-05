@@ -415,13 +415,18 @@ async def test_commit_deadline_freezes_writer_as_recovery_required(
     tmp_path: Path,
 ) -> None:
     """同步 commit 超过期限时必须有界返回并关闭普通追加。"""
+    # 分两段设期限：建会话走的是 ``create_exclusive``（真 mkdir + 文件 fsync +
+    # 目录 fsync，_SlowAppendAdapter 并不覆盖它），拿 10ms 去套它等于用测试期限
+    # 赌磁盘——2026-09-04 的 CI 就是这么红的（Python 3.13 job 红、3.12 同码绿）。
+    # 建会话给足期限，进入被测阶段前再收紧到「只有人为拖慢的 append 会撞上」。
     adapter = _SlowAppendAdapter(0.08)
     journal = JsonlSessionJournalCore(
         tmp_path,
         sync_file_adapter=adapter,
-        commit_timeout=0.01,
+        commit_timeout=5.0,
     )
     created = await journal.create_session(_descriptor())
+    journal._commit_timeout = 0.01  # noqa: SLF001 —— 被测阶段才收紧
 
     with pytest.raises(JournalRecoveryRequiredError):
         await journal.append(_record(), lease=created.lease, expected_seq=3)

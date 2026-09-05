@@ -2,10 +2,65 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+import asyncio
+import os
+import time
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# 墙钟守卫期限（防挂死用，**不是**被测行为）
+# ---------------------------------------------------------------------------
+
+GUARD_TIMEOUT_SECONDS = float(os.environ.get("TAIFENG_TEST_GUARD_TIMEOUT", "30"))
+"""等待「本就该发生的事」时的兜底期限（秒）。
+
+**条件一满足就立即返回**，这个值只在真挂死时才被用到——所以必须**给足**。
+
+历史教训：这里过去按「正常应该多快」估成 1~5 秒，结果全量跑（2300+ 用例、单进程
+累积线程 / 事件循环 / GC 压力，整轮 50~80s）时机器一慢就集体误报。2026-09 期间已
+观测到 **8 个不同用例**轮流因此变红，其中一次直接把 main 的 CI 跑红，且每次红的
+用例都不一样——典型的「守卫期限当成了性能断言」。
+
+判据：**守卫期限只负责「别无限挂」，不负责「多快算对」。** 要断言时序快慢的用例
+必须自己写显式期限并注明理由，不得复用本常量。慢环境可用环境变量
+``TAIFENG_TEST_GUARD_TIMEOUT`` 整体放大。
+"""
+
+
+async def wait_for_condition(
+    predicate: Callable[[], bool],
+    *,
+    deadline_seconds: float | None = None,
+    poll_seconds: float = 0.005,
+    message: str = "条件未在守卫期限内满足",
+) -> None:
+    """轮询等待条件成立——取代「sleep 一个估计值，然后假设它已经发生」。
+
+    ``await asyncio.sleep(0.05)`` 这种写法把「前置条件是否成立」押在机器速度上：
+    负载一高睡醒时状态早已越过，用例的前提凭空消失，症状却表现为下游 `wait_for`
+    超时，极难归因。改成等真实状态。
+
+    Args:
+        predicate: 同步谓词，返回 True 即结束等待。
+        deadline_seconds: 守卫期限；None → ``GUARD_TIMEOUT_SECONDS``。
+        poll_seconds: 轮询间隔。
+        message: 超时断言信息。
+
+    Raises:
+        AssertionError: 期限内条件始终不成立。
+    """
+    budget = GUARD_TIMEOUT_SECONDS if deadline_seconds is None else deadline_seconds
+    deadline = time.monotonic() + budget
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(message)
+        await asyncio.sleep(poll_seconds)
 
 ATOMIC_SKILL = """---
 name: style-checker

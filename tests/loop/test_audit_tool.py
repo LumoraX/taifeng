@@ -377,7 +377,12 @@ async def test_finalization_timeout_freezes_and_does_not_fail_open(
             registry=registry,
             run_dispatch=run_dispatch,
             cancel=CancellationToken(name="turn"),
-            finalization_timeout=0.05,
+            # 这个期限圈住的是 commit_intents()（真 journal 写 + fsync）+ dispatch。
+            # 原值 0.05s 会让慢盘上的 intent 落账先超时，于是下面
+            # 「tool_intent_committed 必须已 durable」的断言凭空落空——症状看着像
+            # 冻结逻辑坏了，其实是期限太紧。给足到远大于 fsync；dispatch 里是
+            # sleep_forever，到期照样确定性触发，用例不会因此变慢多少。
+            finalization_timeout=1.0,
         )
 
     committed = [envelope async for envelope in core.load("session_1")]

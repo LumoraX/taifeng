@@ -8,7 +8,6 @@ Resume(子 thread) → 子续跑（SimTurn 放慢 1s）→ 立刻 CancelTurn(res
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 import taifeng
@@ -21,6 +20,7 @@ from taifeng.permission.types import (
     SuspendingPrompter,
 )
 from taifeng.suspend.record import SuspensionRecord
+from tests.conftest import wait_for_condition
 from tests.test_child_suspend_resume import (
     _AllEventsRecorder,
     _build_skills,
@@ -65,7 +65,10 @@ async def test_cancel_turn_reaches_child_thread_resume(tmp_path: Path, threads_d
     try:
         engine = await pool.get_or_create(session_id="s", entry_skill_id="parent-orch")
         recorder = _AllEventsRecorder(engine)
-        await asyncio.sleep(0)
+        # create_task 只是排期：确认订阅真登记上再提交，否则首批事件整段丢失
+        await wait_for_condition(
+            lambda: recorder.registered(engine), message="firehose 订阅未能登记"
+        )
 
         sub_id = await engine.submit(taifeng.UserMessage(text="go"))
         events1 = await recorder.wait_terminal(sub_id)
@@ -78,10 +81,20 @@ async def test_cancel_turn_reaches_child_thread_resume(tmp_path: Path, threads_d
         resume_sub = await engine.submit(Resume(
             thread_id=child_tid, resolutions={req_id: {"granted": True}},
         ))
-        await asyncio.sleep(0.3)  # 子续跑已进入放慢的采样
+        # 前提是「CancelTurn 到达时子续跑正在采样」。原来 sleep(0.3) 赌这一点：
+        # 机器一慢睡醒时子 turn 可能还没起飞（或已跑完），前提消失、症状却是下游
+        # wait_terminal 超时。改成等子续跑真的 turn_started。
+        await wait_for_condition(
+            lambda: recorder.seen(
+                lambda e: e.submission_id == resume_sub
+                and e.msg.kind == "turn_started"
+                and not e.msg.data.get("is_root")
+            ),
+            message="子续跑 turn 未起飞",
+        )
         await engine.submit(CancelTurn(submission_id=resume_sub))
 
-        events2 = await recorder.wait_terminal(resume_sub, timeout_s=3.0)
+        events2 = await recorder.wait_terminal(resume_sub)
         # 内核语义：token 取消的 turn 以 turn_completed{end_reason=cancelled} 收尾。
         # 子续跑 turn 是 resume 后第一个 turn_completed（is_root=False）。
         child_done = next(

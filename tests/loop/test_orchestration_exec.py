@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -97,12 +98,20 @@ async def _run(
                 break
 
     task = asyncio.create_task(consume())
+    # 先确认 firehose 订阅真的登记上再提交：create_task 只是排期，不保证已进
+    # subscribe_all —— 抢不到就整段事件收不到，症状是下面等 root_done 超时。
+    await wait_for_condition(
+        lambda: bool(engine._all_subs),  # noqa: SLF001
+        message="firehose 订阅未能登记",
+    )
     start = time.monotonic()
     await engine.submit(taifeng.UserMessage(text="规划行程"))
-    await asyncio.wait_for(root_done.wait(), timeout=5.0)
+    # 守卫期限：只防挂死，不是「编排该多快」的断言（真要断言时长的用例在下方
+    # 自己写显式阈值）。原值 5s 在全量跑负载下会误报。
+    await asyncio.wait_for(root_done.wait(), timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
     try:
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     except TimeoutError:
         task.cancel()
     return holder["t"], events, returned
