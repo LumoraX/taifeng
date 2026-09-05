@@ -14,7 +14,10 @@ from taifeng.llm.events import (
     tool_call_delta,
     tool_call_done,
 )
-from taifeng.llm.providers._shared import extract_usage_openai_family
+from taifeng.llm.providers._shared import (
+    classify_responses_stream_failure,
+    extract_usage_openai_family,
+)
 from taifeng.llm.responses_types import (
     NormalizedFunctionCallItem,
     NormalizedMessageItem,
@@ -276,7 +279,10 @@ class CodexResponsesAccumulator:
             self._accept_completed(event)
             return []
         if kind in {"response.failed", "response.incomplete", "error"}:
-            raise InvalidResponseError(f"Codex terminal failure: {kind}")
+            # 归一而非吞掉（ADR 0033）：按官方字段（code / message / param /
+            # incomplete_details.reason）归类到既有 LLMError taxonomy，让上层拿到
+            # 正确的 failure_class / retryable / recovery 配方，并保留 provider 原文。
+            raise classify_responses_stream_failure(event)
         # _KNOWN_EVENTS 已穷举，剩余必为 _VALUE_EVENTS
         return self._accept_value_event(event, kind)
 

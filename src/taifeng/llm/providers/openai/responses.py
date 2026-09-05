@@ -30,6 +30,7 @@ from taifeng.llm.events import (
 )
 from taifeng.llm.providers._shared import (
     classify_http_error,
+    classify_responses_stream_failure,
     extract_rate_limit_snapshot,
     extract_request_id,
     extract_usage_openai_family,
@@ -433,8 +434,13 @@ class OpenAIResponsesSession:
                                 yield emitted
                             terminal_seen = True
                         elif kind in {"response.failed", "response.incomplete", "error"}:
-                            err = InvalidResponseError(f"Responses terminal failure: {kind}")
-                            yield error(message=str(err), kind=err.kind, retryable=False)
+                            # 与 codex provider 同源归一（ADR 0033）：官方字段 → typed
+                            # LLMError，retryable / failure_class 反映真实原因。
+                            err = classify_responses_stream_failure(event)
+                            err.request_id = request_id
+                            yield error(
+                                message=str(err), kind=err.kind, retryable=err.retryable
+                            )
                             raise err
                         else:
                             for emitted in accumulator.preview(event):

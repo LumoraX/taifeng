@@ -169,6 +169,13 @@ Codex SSE 以 `response.output_item.done.item` 为输出事实源，以唯一 `r
 唯一 `normalized_output → completed`。它只接受 exact `codex/responses/reasoning` state，OpenAI 与 Codex
 state 双向隔离，不能按模型名、域名或返回形状隐式换 dialect。
 
+**流内失败归一**（ADR 0033）：`error` / `response.failed` / `response.incomplete` 三种流内失败终态，
+按 openai-openapi 官方字段（`code`/`message`/`param`、`response.error`、`incomplete_details.reason`）
+经共享的 `classify_responses_stream_failure` 归一为 typed `LLMError`，**codex 与 OpenAI Responses 两条
+provider 共用同一归一器**。旧行为一律塌缩成 `InvalidResponseError`（不可重试 / `invalid_request`），
+把限流、5xx、超时这类瞬时故障伪装成确定性客户端错误，上层 policy 既不重试也不挂起。现在
+`failure_class` / `retryable` / recovery 配方反映真实原因，异常文本带 provider 原文。
+
 **非协议帧容忍**（ADR 0030）：顶层 `type` 未登记 / 缺失 / 非字符串的帧，以及空 `data:`、非 JSON、
 非 object 的 data 行，一律由 `NoiseLedger` 记账后跳过——中转网关注入的心跳、计费标记不属于 Codex
 协议，据此终止整条流会把链路噪声升格成不可恢复故障。该判定排在 completed 闸门之前。跳过不静默：

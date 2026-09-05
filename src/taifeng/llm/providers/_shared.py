@@ -28,6 +28,7 @@ from taifeng.llm.errors import (
     ContextOverflowError,
     InvalidHistoryError,
     InvalidRequestError,
+    InvalidResponseError,
     LLMError,
     RateLimitError,
     ServerError,
@@ -161,6 +162,123 @@ _CONTENT_FILTER_KEYWORDS = (
     "blocked",
     "violat",
 )
+
+
+# ---------------------------------------------------------------------------
+# Responses 流内失败事件归一（ADR 0033）
+# ---------------------------------------------------------------------------
+
+# 官方 error code → 归类桶。按**子串**匹配（小写）：``ResponseErrorCode`` 是持续
+# 演进的开放集合，中转网关还会自造码，硬编码闭集必然漏。元组顺序即优先级。
+_STREAM_ERROR_CODE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("rate_limit", "too_many_requests"), "rate_limit"),
+    (("timeout", "timed_out", "deadline_exceeded"), "transient"),
+    (("invalid_api_key", "authentication", "unauthorized", "permission_denied"), "auth"),
+    (("content_filter", "content_policy", "moderation"), "content_filter"),
+    (("context_length", "context_window", "max_tokens"), "context_overflow"),
+    (("server_error", "internal_error", "internal_server", "service_unavailable"), "server"),
+)
+
+# ``incomplete_details.reason`` 在 openai-openapi 里是**闭集**，只有这两个值。
+# 二者都不是「响应畸形」，各有确定语义，必须分开归类而不是一律 invalid_response。
+_INCOMPLETE_REASONS = ("content_filter", "max_output_tokens")
+
+
+def _stream_failure_detail(
+    kind: str, code: object, message: object, param: object
+) -> str:
+    """把官方字段拼成一条不丢信息的可读描述（code / param / message 全带出）。"""
+    parts = [kind]
+    if isinstance(code, str) and code:
+        parts.append(f"code={code}")
+    if isinstance(param, str) and param:
+        parts.append(f"param={param}")
+    text = message if isinstance(message, str) and message else "<no message>"
+    parts.append(text)
+    return " | ".join(parts)
+
+
+def _stream_error_from_bucket(bucket: str, detail: str, message: str) -> LLMError:
+    """按归类桶构造对应 ``LLMError``（rate_limit 顺带解析服务端 hint）。"""
+    if bucket == "rate_limit":
+        return RateLimitError(detail, retry_after_seconds=_parse_retry_after(message))
+    if bucket == "transient":
+        return TransientNetworkError(detail)
+    if bucket == "auth":
+        return AuthenticationError(detail)
+    if bucket == "content_filter":
+        return ContentFilterError(detail)
+    if bucket == "context_overflow":
+        return ContextOverflowError(detail)
+    return ServerError(detail)
+
+
+def classify_responses_stream_failure(event: dict[str, Any]) -> LLMError:
+    """把 Responses **流内**失败事件归一为 typed ``LLMError``（ADR 0033）。
+
+    覆盖 openai-openapi 定义的三种流内失败终态：
+
+    - ``error``（``ResponseErrorEvent``）：``code: str|null`` / ``message: str`` /
+      ``param: str|null`` / ``sequence_number``；
+    - ``response.failed``：``response.error`` = ``{code, message}``（非 null 时两者必填）；
+    - ``response.incomplete``：``response.incomplete_details.reason``，闭集
+      ``content_filter`` | ``max_output_tokens``。
+
+    为什么归一而不是吞掉：这些事件带着 provider 的**真实失败语义**。旧实现一律塌缩成
+    ``InvalidResponseError``（``retryable=False`` / ``failure_class=invalid_request``），
+    把限流、5xx、超时这类**瞬时**故障伪装成确定性客户端错误——上层 policy 于是既不
+    重试也不挂起，直接判死一个本可恢复的 turn。
+
+    默认取值的依据：官方对流内 error 事件的描述是「This can happen due to an internal
+    server error or a timeout」，即**默认属 provider 侧瞬时故障**，故无法识别 code 的
+    ``error`` / ``response.failed`` 归 :class:`ServerError`（可重试）。``response.incomplete``
+    的 reason 是闭集，出现集合外的值属协议违规，仍归 :class:`InvalidResponseError`。
+
+    Args:
+        event: 已解析的 SSE data object（``type`` 必须是上述三者之一）。
+
+    Returns:
+        带正确 ``failure_class`` / ``retryable`` 的 ``LLMError``；其 message 携带
+        官方 code / param / message 原文，不丢诊断信息。
+    """
+    kind = str(event.get("type", "unknown"))
+
+    if kind == "response.incomplete":
+        response = event.get("response")
+        details = response.get("incomplete_details") if isinstance(response, dict) else None
+        reason = details.get("reason") if isinstance(details, dict) else None
+        detail = _stream_failure_detail(kind, reason, "response incomplete", None)
+        if reason == "content_filter":
+            return ContentFilterError(detail)
+        if reason == "max_output_tokens":
+            # 输出被上限截断：非畸形、非瞬时。归 context_window 桶 —— 其恢复配方
+            # （压缩后重试一次）正是这里有意义的动作，且 turn 侧有界自愈只跑一次。
+            return ContextOverflowError(detail)
+        return InvalidResponseError(detail)
+
+    if kind == "response.failed":
+        response = event.get("response")
+        raw_error = response.get("error") if isinstance(response, dict) else None
+        code = raw_error.get("code") if isinstance(raw_error, dict) else None
+        message = raw_error.get("message") if isinstance(raw_error, dict) else None
+        param: object = None
+    else:
+        code, message, param = event.get("code"), event.get("message"), event.get("param")
+
+    detail = _stream_failure_detail(kind, code, message, param)
+    # code + message 一起参与匹配：中转网关常把真实原因只写在 message 里
+    code_text = code if isinstance(code, str) else ""
+    message_text = message if isinstance(message, str) else ""
+    text = f"{code_text} {message_text}".lower()
+    for needles, bucket in _STREAM_ERROR_CODE_RULES:
+        if any(needle in text for needle in needles):
+            return _stream_error_from_bucket(bucket, detail, message_text)
+    # code 无法识别时再看正文关键字（与 HTTP 分类共用同一张表）
+    if any(kw in text for kw in _CONTEXT_OVERFLOW_KEYWORDS):
+        return ContextOverflowError(detail)
+    if any(kw in text for kw in _CONTENT_FILTER_KEYWORDS):
+        return ContentFilterError(detail)
+    return ServerError(detail)
 
 
 def classify_http_error(status: int, body: str, *, provider: str = "openai") -> LLMError:
@@ -405,6 +523,7 @@ def extract_usage_gemini(raw: dict[str, Any]) -> TokenUsage:
 
 __all__ = [
     "classify_http_error",
+    "classify_responses_stream_failure",
     "extract_usage_anthropic",
     "extract_usage_gemini",
     "extract_usage_openai_family",

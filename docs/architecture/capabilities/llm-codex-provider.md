@@ -166,8 +166,15 @@ payload 规则：
   是非空 list，则数组 position 就是隐式 `output_index`，显式 `output_index` 若存在必须等于 position；该
   数组必须与 done items 在索引、顺序、类型、身份和所有白名单正文/状态字段上 canonical 等价，否则 fail
   closed。非 list 的 output 一律拒绝。
-- `response.failed`、`response.incomplete` 与 `error` 是失败终态。提前 EOF、重复 completed、completed 前
-  缺少 done、或 completed 后 EOF 前出现任何新的**协议**事件均须失败；非协议帧按 §5.3 跳过，不构成失败。
+- `response.failed`、`response.incomplete` 与 `error` 是失败终态，且 SHALL 按官方字段**归一为 typed
+  `LLMError`**，不得一律塌缩成 `InvalidResponseError`（ADR 0033）：`error` 事件读 `code`/`message`/`param`；
+  `response.failed` 读 `response.error.{code,message}`；`response.incomplete` 读
+  `incomplete_details.reason`（闭集 `content_filter` | `max_output_tokens`，前者归内容拦截、后者归
+  context_window 桶，集合外的值才算协议违规）。无法识别 code 的 `error` / `response.failed` SHALL 归
+  `ServerError`（可重试）——官方对流内 error 的描述即「internal server error or a timeout」。异常文本
+  SHALL 携带 provider 原始 code / param / message。
+- 提前 EOF、重复 completed、completed 前缺少 done、或 completed 后 EOF 前出现任何新的**协议**事件均须
+  失败；非协议帧按 §5.3 跳过，不构成失败。
 - 客户端只在 completed 校验成功且确认其后无新协议 event 时，按顺序发布唯一 `normalized_output`，随后
   发布唯一 `completed`。失败、取消或未知终态不得发布 partial `normalized_output`/`completed`。
 

@@ -11,7 +11,7 @@ import logging
 
 import pytest
 
-from taifeng.llm.errors import InvalidResponseError
+from taifeng.llm.errors import InvalidResponseError, LLMError
 from taifeng.llm.providers.codex.accumulator import (
     CodexResponsesAccumulator,
     NoiseLedger,
@@ -135,20 +135,26 @@ def test_heartbeat_flood_warns_once_per_label(caplog: pytest.LogCaptureFixture) 
 
 
 @pytest.mark.parametrize(
-    ("terminal_event", "match"),
+    "terminal_event",
     [
-        ({"type": "response.failed", "response": {}}, "terminal failure"),
-        ({"type": "response.incomplete", "response": {}}, "terminal failure"),
-        ({"type": "error", "message": "boom"}, "terminal failure"),
+        {"type": "response.failed", "response": {}},
+        {"type": "response.incomplete", "response": {}},
+        {"type": "error", "message": "boom"},
     ],
 )
 def test_explicit_failure_events_still_fail_closed(
-    terminal_event: dict[str, object], match: str
+    terminal_event: dict[str, object],
 ) -> None:
-    """显式失败终态是协议内事件，绝不能被当成噪声吞掉。"""
+    """显式失败终态是协议内事件，绝不能被当成噪声吞掉。
+
+    注：ADR 0033 起，抛出的是**归一后的** LLMError 子类（按官方 code /
+    incomplete_details.reason 分类），不再一律是 InvalidResponseError；本用例只钉
+    「不得被当噪声跳过」这一条，具体分类由 test_responses_stream_failure.py 覆盖。
+    """
     accumulator = CodexResponsesAccumulator()
-    with pytest.raises(InvalidResponseError, match=match):
+    with pytest.raises(LLMError):
         accumulator.accept(terminal_event)
+    assert accumulator.noise.total == 0  # 没被记成噪声
 
 
 def test_registered_event_after_completed_still_fails() -> None:
