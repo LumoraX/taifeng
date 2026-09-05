@@ -32,6 +32,17 @@ logger = logging.getLogger(__name__)
 _OUTPUT_TYPES = frozenset({"reasoning", "message", "function_call"})
 _PART_TYPES = frozenset({"output_text", "refusal"})
 
+# usage 明细里**实际会被读取**的键，与 ``extract_usage_openai_family`` 的查找集合
+# 一一对应（chat 风格的 prompt_/completion_ 别名容器也在内——提取器优先查它们）。
+# 只有这些键参与 fail-closed 校验；其余字段一律忽略。改提取器时必须同步本表，
+# 否则会出现「读了却没校验」的坏值直落 int() 的深处崩溃。
+_USAGE_DETAIL_READ_KEYS: dict[str, tuple[str, ...]] = {
+    "input_tokens_details": ("cached_tokens",),
+    "prompt_tokens_details": ("cached_tokens",),
+    "output_tokens_details": ("reasoning_tokens",),
+    "completion_tokens_details": ("reasoning_tokens",),
+}
+
 # 带正文的 delta/done 事件（统一走 _accept_value_event）
 _VALUE_EVENTS = frozenset(
     {
@@ -207,29 +218,50 @@ def _canonical_item(raw: dict[str, Any]) -> dict[str, Any]:
     return {key: raw[key] for key in keys if key in raw}
 
 
+def _non_negative_count(value: object) -> bool:
+    """非 bool 的非负整数（bool 是 int 子类，必须显式排除，防 coercion 蒙混）。"""
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
 def _strict_usage(raw: object) -> TokenUsage:
-    """验证 completed usage，不允许 bool/int coercion。"""
+    """验证 completed usage，不允许 bool/int coercion。
+
+    严格性分界（ADR 0032）：
+
+    - **顶层三个计数**严格 fail closed —— 它们喂 K2 会话 token 天花板等资源决策，
+      错值会导致错误的调度判断；
+    - **明细里实际会被读取的键**（见 ``_USAGE_DETAIL_READ_KEYS``）同样严格 ——
+      提取器对它们做 ``int()``，坏值会在更深处炸出非 LLMError；
+    - **明细里其余字段、以及整体不是 object 的明细，一律忽略** —— usage 是纯记账
+      元数据，不影响输出正确性，而上游最爱往 ``*_tokens_details`` 里加新字段
+      （``cached_tokens`` / ``audio_tokens`` / ``reasoning_tokens`` 都是这么来的）。
+      因为一个我们根本不读的字段，把一个已经成功产出内容、已经 ``response.completed``
+      的 turn 判死，是不可辩护的。忽略非 object 明细也与
+      ``extract_usage_openai_family`` 的行为一致（它本就 ``isinstance(..., dict)``
+      不成立即跳过）。
+    """
     if not isinstance(raw, dict):
         raise InvalidResponseError("Codex completed usage must be an object")
     counts: dict[str, int] = {}
     for key in ("input_tokens", "output_tokens", "total_tokens"):
         value = raw.get(key)
+        # 顶层计数就地 isinstance 判定（而非走 _non_negative_count）：让类型收窄生效，
+        # 免掉一处 type: ignore；判据与 _non_negative_count 完全一致。
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise InvalidResponseError(f"Codex usage {key} must be a non-negative integer")
         counts[key] = value
     if counts["total_tokens"] != counts["input_tokens"] + counts["output_tokens"]:
         raise InvalidResponseError("Codex usage total_tokens is inconsistent")
-    for key in ("input_tokens_details", "output_tokens_details"):
-        details = raw.get(key)
-        if details is None:
-            continue
+    for container, read_keys in _USAGE_DETAIL_READ_KEYS.items():
+        details = raw.get(container)
         if not isinstance(details, dict):
-            raise InvalidResponseError(f"Codex usage {key} must be an object")
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) or value < 0
-            for value in details.values()
-        ):
-            raise InvalidResponseError(f"Codex usage {key} contains invalid counts")
+            # 缺失或非 object：提取器读不到任何值、按 0 处理 —— 不构成失败
+            continue
+        for read_key in read_keys:
+            if read_key in details and not _non_negative_count(details[read_key]):
+                raise InvalidResponseError(
+                    f"Codex usage {container}.{read_key} must be a non-negative integer"
+                )
     return extract_usage_openai_family(raw)
 
 

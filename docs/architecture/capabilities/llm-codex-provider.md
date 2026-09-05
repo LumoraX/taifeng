@@ -160,8 +160,14 @@ payload 规则：
 - `response.completed` 是唯一成功完成门，必须恰好出现一次；其 `response` 必须是 object，`id` 必须为
   非空字符串，`status` 必须精确为 `completed`。
 - `usage` 必须是 object，`input_tokens`、`output_tokens`、`total_tokens` 必须是非 bool 的非负整数，且
-  `total_tokens == input_tokens + output_tokens`；存在的 token detail 字段必须是 object，所含计数也必须为
-  非 bool 的非负整数。
+  `total_tokens == input_tokens + output_tokens`（这三个计数喂 K2 会话 token 天花板等资源决策，错值会
+  导致错误调度，故严格 fail closed）。
+- token detail 容器（`input_tokens_details` / `prompt_tokens_details` / `output_tokens_details` /
+  `completion_tokens_details`）中，**只有实际会被读取的键**（前两者的 `cached_tokens`、后两者的
+  `reasoning_tokens`）必须是非 bool 的非负整数；**明细里其余字段、以及整体不是 object 的明细，一律忽略，
+  不得据此失败**（ADR 0032）。usage 是纯记账元数据，不影响输出正确性，而上游会持续往明细里加新字段——
+  因为一个不被读取的字段把已成功产出内容、已 `response.completed` 的 attempt 判死是不可辩护的。忽略非
+  object 明细与提取器行为一致（其本就在非 dict 时跳过）。校验键集必须与提取器的查找集合保持一一对应。
 - done items 是 Codex 输出事实源。若 `completed.response.output` 是空 list，则仅使用已验证 done items；若
   是非空 list，则数组 position 就是隐式 `output_index`，显式 `output_index` 若存在必须等于 position；该
   数组必须与 done items 在索引、顺序、类型、身份和所有白名单正文/状态字段上 canonical 等价，否则 fail
