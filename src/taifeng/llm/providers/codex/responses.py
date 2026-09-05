@@ -32,6 +32,7 @@ from taifeng.llm.providers._shared import (
 from taifeng.llm.providers.codex.accumulator import (
     CodexResponsesAccumulator,
     CodexTerminal,
+    NoiseLedger,
 )
 from taifeng.llm.providers.codex.wire import build_codex_payload
 from taifeng.llm.providers.openai._shared import build_openai_headers
@@ -47,8 +48,21 @@ if TYPE_CHECKING:
     from taifeng.loop.cancellation import CancellationToken
 
 
-def _parse_codex_sse_line(line: str) -> dict[str, Any] | None:
-    """严格解析 Codex data 行；注释/event 标签/[DONE] 可跳过。"""
+def _parse_codex_sse_line(line: str, noise: NoiseLedger) -> dict[str, Any] | None:
+    """解析 Codex data 行；注释 / event 标签 / [DONE] / 非协议噪声均跳过。
+
+    空 data 行、非 JSON、非 object 曾经硬失败——但这三种恰好是中转网关注入心跳最
+    常见的形状（``data:`` 空帧、``data: ping``、``data: []``），据此终止整条流会把
+    链路噪声升格成不可恢复故障（ADR 0030）。改为记账后跳过；真正的终态保证由
+    ``CodexResponsesAccumulator.finalize()`` 守，噪声吞不掉输出事实。
+
+    Args:
+        line: 一行原始 SSE 文本（已去行尾换行）。
+        noise: 与 accumulator 共用的噪声账；跳过的非协议帧记在这里（warn 一次）。
+
+    Returns:
+        协议 data object；``None`` 表示该行应跳过。
+    """
     if not line or line.startswith(":") or line.startswith("event:"):
         return None
     if not line.startswith("data:"):
@@ -57,13 +71,16 @@ def _parse_codex_sse_line(line: str) -> dict[str, Any] | None:
     if payload == "[DONE]":
         return None
     if not payload:
-        raise InvalidResponseError("Codex SSE data payload is empty")
+        noise.record("empty-data")
+        return None
     try:
         parsed = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise InvalidResponseError("Codex SSE data is not valid JSON") from exc
+    except json.JSONDecodeError:
+        noise.record("non-json-data")
+        return None
     if not isinstance(parsed, dict):
-        raise InvalidResponseError("Codex SSE data must be an object")
+        noise.record("non-object-data")
+        return None
     return parsed
 
 
@@ -128,7 +145,7 @@ class CodexResponsesSession:
                     if snapshot is not None:
                         yield rate_limits(snapshot)
                     async for line in iter_lines_with_cancel(response, self._cancel):
-                        event = _parse_codex_sse_line(line)
+                        event = _parse_codex_sse_line(line, accumulator.noise)
                         if event is None:
                             continue
                         try:

@@ -167,9 +167,25 @@ payload 规则：
   数组必须与 done items 在索引、顺序、类型、身份和所有白名单正文/状态字段上 canonical 等价，否则 fail
   closed。非 list 的 output 一律拒绝。
 - `response.failed`、`response.incomplete` 与 `error` 是失败终态。提前 EOF、重复 completed、completed 前
-  缺少 done、或 completed 后 EOF 前出现任何新的非空 SSE data event 均须失败。
-- 客户端只在 completed 校验成功且确认其后无新 event 时，按顺序发布唯一 `normalized_output`，随后发布
-  唯一 `completed`。失败、取消或未知终态不得发布 partial `normalized_output`/`completed`。
+  缺少 done、或 completed 后 EOF 前出现任何新的**协议**事件均须失败；非协议帧按 §5.3 跳过，不构成失败。
+- 客户端只在 completed 校验成功且确认其后无新协议 event 时，按顺序发布唯一 `normalized_output`，随后
+  发布唯一 `completed`。失败、取消或未知终态不得发布 partial `normalized_output`/`completed`。
+
+### 5.3 非协议帧容忍
+
+中转网关会往 SSE 流里注入不属于 Codex Responses 协议的帧（心跳、计费标记、路由探针）。这类帧
+**必须跳过，不得终止 attempt**（ADR 0030）：
+
+- 顶层 `type` 不在已登记事件全集内、缺 `type`、或 `type` 非字符串 → 跳过。该判定排在 completed
+  闸门**之前**——非协议帧同样会落在 `response.completed` 与 EOF 之间。
+- 行解析层：SSE 注释行（`:` 开头）、`event:` 标签行、`data: [DONE]` 属正常传输语法，跳过且不记账；
+  空 `data:` 帧、非 JSON data、非 object data 是噪声，跳过并记账。
+- 跳过**不得静默**：按 label 计数，同一 label 每个 attempt 至少 warn 一次，计数对调用方可读。
+
+容忍范围**仅限**未登记 / 畸形的顶层帧。协议内违规——显式失败终态、身份漂移、配对缺失、索引不连续、
+delta 与 done 不一致、completed 后的协议事件、以及 §5.2 全部终态校验——一律维持 fail closed。终态
+保证由 completed 完成门与 done items 事实源承担，不由逐行严格性承担：噪声若吞掉了输出，终态校验
+必然失败。
 
 ## 6. Durable、脱敏与授权 sink
 

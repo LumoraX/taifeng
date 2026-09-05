@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,8 +24,80 @@ from taifeng.llm.responses_types import (
 )
 from taifeng.llm.types import ProviderStateEnvelope, TokenUsage
 
+logger = logging.getLogger(__name__)
+
 _OUTPUT_TYPES = frozenset({"reasoning", "message", "function_call"})
 _PART_TYPES = frozenset({"output_text", "refusal"})
+
+# 带正文的 delta/done 事件（统一走 _accept_value_event）
+_VALUE_EVENTS = frozenset(
+    {
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.refusal.delta",
+        "response.refusal.done",
+    }
+)
+
+# Codex Responses 协议已登记的顶层 SSE ``type`` 全集。**不在此集合内的一律不是
+# 协议事件**——见 NoiseLedger 与 accept() 的容忍规则（ADR 0030）。
+_KNOWN_EVENTS = (
+    frozenset(
+        {
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+            "error",
+        }
+    )
+    | _VALUE_EVENTS
+)
+
+
+@dataclass(slots=True)
+class NoiseLedger:
+    """一次 attempt 内被跳过的**非协议帧**记账（ADR 0030）。
+
+    中转网关会往 SSE 流里注入自己的帧——心跳 / 计费标记 / 路由探针——它们不属于
+    Codex Responses 协议。跳过而非硬失败，但**不静默**：同一 label 每个 attempt
+    warn 一次（心跳可能上百帧，不能刷屏），计数留给调用方与测试读。
+
+    Attributes:
+        counts: label → 出现次数。label 形如 ``event:keepalive``（未登记 type）
+            或 ``empty-data`` / ``non-json-data`` / ``non-object-data``（行解析层）。
+    """
+
+    counts: dict[str, int] = field(default_factory=dict)
+
+    def record(self, label: str) -> None:
+        """记一笔非协议帧；该 label 首次出现时 warn 一次。"""
+        first = label not in self.counts
+        self.counts[label] = self.counts.get(label, 0) + 1
+        if first:
+            logger.warning(
+                "Codex SSE 跳过非协议帧（疑似中转网关注入）：%s；"
+                "终态保证不受影响——输出事实仍由 done items + completed 完成门把关",
+                label,
+            )
+
+    @property
+    def total(self) -> int:
+        """本次 attempt 跳过的非协议帧总数。"""
+        return sum(self.counts.values())
+
+    def summary(self) -> str:
+        """稳定排序的 ``label×次数`` 摘要（日志 / 断言用）。"""
+        return ", ".join(f"{label}x{count}" for label, count in sorted(self.counts.items()))
 
 
 @dataclass(slots=True)
@@ -160,15 +233,32 @@ def _strict_usage(raw: object) -> TokenUsage:
 class CodexResponsesAccumulator:
     """单次 Codex attempt 的 SSE 配对与 terminal 一致性状态机。"""
 
-    def __init__(self) -> None:
+    def __init__(self, noise: NoiseLedger | None = None) -> None:
         self._slots: list[_OutputSlot] = []
         self._completed: dict[str, Any] | None = None
+        # 行解析层与本状态机共用一本噪声账（调用方可注入以跨两层聚合）
+        self.noise = noise if noise is not None else NoiseLedger()
 
     def accept(self, event: dict[str, Any]) -> list[ResponseEvent]:
-        """吸收一个解析成功的非空 SSE data object。"""
+        """吸收一个解析成功的非空 SSE data object。
+
+        **未登记的顶层 type 一律跳过，不再硬失败**（ADR 0030）：中转网关会往流里
+        注入自己的帧（心跳 / 计费 / 路由标记），据此终止整条流等于把第三方链路噪声
+        升格成不可恢复故障——2026-09-05 中转站开始发 ``{"type":"keepalive"}`` 后
+        根 turn 每轮必崩即是此故障。跳过不削弱终态保证：输出事实仍由 done items
+        与 completed 完成门把关，噪声若真吞掉了内容，``finalize()`` 必然失败。
+
+        仍然硬失败的是**协议内**的违规：显式失败终态、身份漂移、配对缺失、
+        delta 与 done 不一致、completed 后又来协议事件。
+        """
+        kind = event.get("type")
+        # 非协议帧（未登记 type / 缺 type）：记账后跳过。该判定必须在 completed
+        # 闸门之前——心跳同样会落在 completed 与 EOF 之间的空窗里。
+        if not isinstance(kind, str) or kind not in _KNOWN_EVENTS:
+            self.noise.record(f"event:{kind}")
+            return []
         if self._completed is not None:
             raise InvalidResponseError("Codex emitted event after response.completed")
-        kind = event.get("type")
         if kind in {"response.created", "response.in_progress"}:
             return []
         if kind == "response.output_item.added":
@@ -187,18 +277,8 @@ class CodexResponsesAccumulator:
             return []
         if kind in {"response.failed", "response.incomplete", "error"}:
             raise InvalidResponseError(f"Codex terminal failure: {kind}")
-        if kind in {
-            "response.output_text.delta",
-            "response.output_text.done",
-            "response.reasoning_summary_text.delta",
-            "response.reasoning_summary_text.done",
-            "response.function_call_arguments.delta",
-            "response.function_call_arguments.done",
-            "response.refusal.delta",
-            "response.refusal.done",
-        }:
-            return self._accept_value_event(event, str(kind))
-        raise InvalidResponseError(f"unsupported Codex SSE event: {kind}")
+        # _KNOWN_EVENTS 已穷举，剩余必为 _VALUE_EVENTS
+        return self._accept_value_event(event, kind)
 
     def _accept_output_added(self, event: dict[str, Any]) -> None:
         """登记连续 output index 与稳定 item identity。"""
@@ -558,4 +638,4 @@ class CodexResponsesAccumulator:
                 raise InvalidResponseError("Codex completed output conflicts with done items")
 
 
-__all__ = ["CodexResponsesAccumulator", "CodexTerminal"]
+__all__ = ["CodexResponsesAccumulator", "CodexTerminal", "NoiseLedger"]
