@@ -234,6 +234,7 @@ async def create_started_pool_engine(
             event_low_water_ratio=pool._event_low_water_ratio,  # noqa: SLF001
             event_warn_cooldown_sec=pool._event_warn_cooldown_sec,  # noqa: SLF001
             submission_queue_size=pool._submission_queue_size,  # noqa: SLF001
+            terminal_replay_size=pool._terminal_replay_size,  # noqa: SLF001
             initial_history=(
                 list(prepared.initial_history) if resume_thread_id else None
             ),

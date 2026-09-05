@@ -320,6 +320,7 @@ class EnginePool:
         event_low_water_ratio: float = 0.5,
         event_warn_cooldown_sec: int = 5,
         submission_queue_size: int = 256,
+        terminal_replay_size: int = 256,
         permission_policy: Any = None,
         request_metadata: dict[str, Any] | None = None,
         max_concurrent_spawns: int = 16,
@@ -402,6 +403,8 @@ class EnginePool:
         self._event_low_water_ratio = event_low_water_ratio
         self._event_warn_cooldown_sec = event_warn_cooldown_sec
         self._submission_queue_size = submission_queue_size
+        # 晚到订阅者终态补投上限（ADR 0031），透传到每个 AgentEngine；<=0 关闭。
+        self._terminal_replay_size = terminal_replay_size
         # PermissionPolicy / request_metadata 注入路径：pool 透传到 AgentEngine
         # 再透传到 TurnRunner。request_metadata 是业务侧不透明上下文（无业务命名
         # 字段，R1），合并进 PermissionRequest.metadata；taifeng 不解析其 keys。
@@ -546,6 +549,7 @@ class EnginePool:
         event_low_water_ratio: float = 0.5,
         event_warn_cooldown_sec: int = 5,
         submission_queue_size: int = 256,
+        terminal_replay_size: int = 256,
         # G1 mcp-server-hitl-elicitation T1: HITL 注入参数
         permission_policy: Any = None,
         request_metadata: dict[str, Any] | None = None,
@@ -664,6 +668,7 @@ class EnginePool:
                 event_low_water_ratio=event_low_water_ratio,
                 event_warn_cooldown_sec=event_warn_cooldown_sec,
                 submission_queue_size=submission_queue_size,
+                terminal_replay_size=terminal_replay_size,
                 permission_policy=permission_policy,
                 request_metadata=request_metadata,
                 max_concurrent_spawns=max_concurrent_spawns,

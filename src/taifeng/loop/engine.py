@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -146,6 +147,11 @@ class DeliveredEvent:
     delivery_seq: int
 
 
+# submission 级终结 kind 单一真相：过滤订阅据此收尾，终态记账据此登记。
+# 二者必须同集合，否则会出现「订阅认为没结束 / 记账认为已结束」的语义分叉。
+_TERMINAL_KINDS = frozenset({"turn_completed", "turn_failed", "turn_suspended"})
+
+
 class _Subscriber:
     """单个订阅的队列 + 投递簿记（审计可观测 层1）。
 
@@ -226,6 +232,7 @@ class AgentEngine:
         event_low_water_ratio: float = 0.5,
         event_warn_cooldown_sec: int = 5,
         submission_queue_size: int = 256,
+        terminal_replay_size: int = 256,
         instruction_layers: list[InstructionLayer] | None = None,
         script_executors: dict[str, Any] | None = None,
         initial_history: list[ResponseItem] | None = None,
@@ -414,6 +421,12 @@ class AgentEngine:
         # 投递序号 + 水位告警迟滞）。每 submission 至多一个过滤订阅；firehose 可多个。
         self._event_subs: dict[str, _Subscriber] = {}
         self._all_subs: list[_Subscriber] = []
+        # 晚到订阅者终态补投（ADR 0031）：记住每个 submission 最后一条终结事件，
+        # 使「submission 已终态之后才 subscribe」立刻拿到终结而不是永久挂死。
+        # 有界 FIFO：超出 terminal_replay_size 淘汰最老的（退化回等待，不吃内存）。
+        # <=0 = 关闭补投（历史行为逃生口）。
+        self._terminal_replay_size = terminal_replay_size
+        self._terminal_replay: OrderedDict[str, EventMsg] = OrderedDict()
         self._pending: dict[str, _PendingTurn] = {}
         # run() 收敛完毕后置 True：此后过滤订阅立即得到合成终结（ADR 0029）
         self._closed = False
@@ -805,6 +818,12 @@ class AgentEngine:
         ⚠️ 过滤订阅只收一个 submission 的事件，全局 ``event.seq`` 天然跳号（=过滤，
         非丢弃）；要自检自己的丢弃**必须**看 ``delivery_seq`` 跳号。
         """
+        # 已终态 → 立即补投真实终结事件并收尾（ADR 0031）。必须早于订阅登记：
+        # 补投路径不占用 per-submission 订阅位，也就不会挤掉在线订阅者。
+        recorded = self._terminal_replay.get(submission_id)
+        if recorded is not None:
+            yield DeliveredEvent(event=recorded, delivery_seq=0)
+            return
         sub = self._new_subscriber()
         self._event_subs[submission_id] = sub
         try:
@@ -821,11 +840,7 @@ class AgentEngine:
                 # turn_suspended 是独立终结态(turn 已结束，等待 Resume)——必须纳入自动
                 # 终止集合，否则 turn 挂起时消费者的 async for 永远拿不到终结信号、卡死，
                 # 业务也无法释放实例并提交 Resume(Task 16 回归根因)。
-                if env.event.msg.kind in (
-                    "turn_completed",
-                    "turn_failed",
-                    "turn_suspended",
-                ):
+                if env.event.msg.kind in _TERMINAL_KINDS:
                     return
         finally:
             self._event_subs.pop(submission_id, None)
@@ -923,6 +938,23 @@ class AgentEngine:
         per = self._event_subs.get(ev.submission_id)
         if per is not None:
             self._deliver(per, ev)
+        # 终态记账（ADR 0031）：放在投递之后——先保证在线订阅者拿到，再留档给晚到者。
+        if kind in _TERMINAL_KINDS:
+            self._record_terminal(ev)
+
+    def _record_terminal(self, ev: EventMsg) -> None:
+        """登记一个 submission 的终结事件，供晚到订阅者补投（有界 FIFO）。
+
+        同一 submission 重复终结（如 turn_suspended 后又被 Resume 跑出 turn_completed）
+        以**最后一条**为准：晚到者关心的是「现在是什么状态」。重复登记会把该条目挪到
+        队尾（视为最新），淘汰仍从队首取。
+        """
+        if self._terminal_replay_size <= 0:
+            return
+        self._terminal_replay.pop(ev.submission_id, None)
+        self._terminal_replay[ev.submission_id] = ev
+        while len(self._terminal_replay) > self._terminal_replay_size:
+            self._terminal_replay.popitem(last=False)
 
     def _deliver(self, sub: _Subscriber, ev: EventMsg) -> None:
         """把事件投递给单个订阅者：分配 per-subscriber delivery_seq（含丢弃烧号）→

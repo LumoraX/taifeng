@@ -135,6 +135,13 @@ class AgentEngine:
 - **全局序号 `seq`**：每条 `EventMsg` 带单调 `seq`，在 `engine._emit` 入口同步分配（无 await 让出点 → 原子不重不漏）。作用域单 engine（= 单 session）；落库主键用 `(session_id, seq)`，`session_id` 由订阅方在 sink 边界提供、**不**盖在事件上（`engine.session_id` 只读属性）。全局 seq 连续性自检**仅** firehose（`subscribe_all`）成立。
 - **per-subscriber 投递序号 `delivery_seq`**：`subscribe_all_envelopes` / `subscribe_envelopes` 产出 `DeliveredEvent {event, delivery_seq}`；每订阅各自从 0 连续，队列满丢弃也烧号 → 收方跳号 = 它自己漏了（过滤订阅亦可精确自检）。`subscribe_all` / `subscribe` 仍向后兼容产出裸 `EventMsg`。
 - **队列有界大容量 + 高/低水位告警**：`event_queue_size` 默认 `65536`（有界 ⇒ 内存可预测、绝不 OOM；`<=0` 为无界 opt-in 自负 OOM）。`qsize` 上穿高水位（75%）打 `logger.warning`，回落低水位（50%）才重新武装（迟滞）+ `event_warn_cooldown_sec` 限频；告警走 logger 不走事件（防自放大）。
+- **晚到订阅者终态补投**（ADR 0031）：engine 记住每个 submission 的**最后一条**终结事件
+  （`turn_completed` / `turn_failed` / `turn_suspended`）；`subscribe_envelopes(submission_id)` 在注册订阅
+  **之前**先查一次，命中即补投**那条真实事件**并收尾。补投保持原 `seq`（事件身份），`delivery_seq` 按新
+  订阅从 0 起，且不占用 per-submission 订阅位（不会挤掉在线订阅者）。有界 FIFO `terminal_replay_size`
+  默认 `256`，超出淘汰最老的、退化回等待；`<=0` 关闭补投。**未记账的 submission 维持等待**——
+  `subscribe` 早于 `submit` 是推荐用法，不得被合成终结打断。解决「submit 后才 subscribe、turn 已跑完 →
+  消费者永久挂死」。
 - **LLM request 留痕**：`enable_request_capture`（默认关）开启后，`turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（retry/重建各一条）；文字正文仍敏感，图片 base64/Data URL 则在事件生成前结构化替换为 `content_redacted` 描述。`OtelTelemetrySink` 按 kind 整条跳过不外发。
 
 > 「可靠 fail-stop 审计真相源」是独立的层2 课题（留 ADR 0019），不改造 EventMsg emit 路径。
@@ -680,7 +687,7 @@ Resume(thread_id, resolutions)
 
 **子 skill 战绩沉淀**：`_spawn_sub_runner` 在子 skill 到达**终态**（`end_reason != "suspended"`）后，通过注入的 `OutcomeJudge`（默认 `StructuralOutcomeJudge`）裁决出 `success / failure / abandoned`，构造 `SkillExecutionRecord`，调 `store.append([skill_outcome_item(...)])` 旁路追加到子 thread JSONL，并 emit `SkillOutcomeRecorded` 事件。`suspended` 提前返回路径**不记录**（挂起不是终态）。`skill_outcome` item 不进 LLM 消息视图（`build_api_request` 跳过）。完整契约见 [skill-outcome-record.md](capabilities/skill-outcome-record.md)。
 
-**子 thread 嵌套挂起 + 续跑回传父 call_skill**：`call_skill` 派发的子 skill 在独立子 thread 运行（`_spawn_sub_runner`，history 隔离）。子 turn 挂起时挂起记录落**子 thread**，子 emit `turn_suspended`（子 thread_id）。`_spawn_sub_runner` 在子 `end_reason=="suspended"` 时抛 `SuspendSignal(reason=CHILD_SKILL, detail={sub_thread_id, skill_id})` → 父 `call_skill` 随之挂起 → 逐层上抛至根 → 根也 emit `turn_suspended`。`Resume(thread_id=<子 thread>)` 经 `_handle_resume` 分流到 `_handle_child_resume` 续跑链：自根沿 `CHILD_SKILL` pending 串链至 leaf（不依赖 `get_metadata`，谱系由父挂起 record 的 pending detail 携带）→ 核销 leaf 用户挂起 + 续跑子 turn → 把子结果逐层回填父 `call_skill` 的 `function_call_output` + 续跑父 turn → 根以 `_build_and_run_runner` 收尾。子层续跑 turn `is_root=False`（engine 注入非空 `call_stack`），根续跑 `is_root=True`。**`Resume` 经 `asyncio.create_task` 异步派发**（与 `UserMessage` 一致），使续跑链多 turn 不阻塞 run 循环、且给 `subscribe(submission_id)` 留出注册窗口。详见 [suspend-resume 契约](capabilities/suspend-resume.md) §子 thread resume 续跑链。
+**子 thread 嵌套挂起 + 续跑回传父 call_skill**：`call_skill` 派发的子 skill 在独立子 thread 运行（`_spawn_sub_runner`，history 隔离）。子 turn 挂起时挂起记录落**子 thread**，子 emit `turn_suspended`（子 thread_id）。`_spawn_sub_runner` 在子 `end_reason=="suspended"` 时抛 `SuspendSignal(reason=CHILD_SKILL, detail={sub_thread_id, skill_id})` → 父 `call_skill` 随之挂起 → 逐层上抛至根 → 根也 emit `turn_suspended`。`Resume(thread_id=<子 thread>)` 经 `_handle_resume` 分流到 `_handle_child_resume` 续跑链：自根沿 `CHILD_SKILL` pending 串链至 leaf（不依赖 `get_metadata`，谱系由父挂起 record 的 pending detail 携带）→ 核销 leaf 用户挂起 + 续跑子 turn → 把子结果逐层回填父 `call_skill` 的 `function_call_output` + 续跑父 turn → 根以 `_build_and_run_runner` 收尾。子层续跑 turn `is_root=False`（engine 注入非空 `call_stack`），根续跑 `is_root=True`。**`Resume` 经 `asyncio.create_task` 异步派发**（与 `UserMessage` 一致），使续跑链多 turn 不阻塞 run 循环、且给 `subscribe(submission_id)` 留出注册窗口（**该窗口只是缓解、非保证**；错过窗口的订阅者由 ADR 0031 的终态补投兜底）。详见 [suspend-resume 契约](capabilities/suspend-resume.md) §子 thread resume 续跑链。
 
 - [x] `cancel.child()` 派生层级正确，父取消级联 —— `tests/loop/test_cancellation.py::test_child_cancel_propagates_from_parent`
 

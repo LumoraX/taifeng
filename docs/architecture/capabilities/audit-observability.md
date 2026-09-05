@@ -27,6 +27,20 @@
 - **WHEN** 未显式传 `session_id`
 - **THEN** `engine.session_id` SHALL 退回 `thread_id`
 
+### Requirement: 晚到订阅者终态补投
+
+系统 SHALL 记住每个 submission 的最后一条终结事件，并在过滤订阅命中时立即补投。
+
+- 终结 kind SHALL 为 `turn_completed` / `turn_failed` / `turn_suspended` 三者之一，与过滤订阅的收尾判定
+  **同集合**（单一真相，不得各写一份字面量）。
+- `subscribe_envelopes(submission_id)` SHALL 在登记订阅**之前**查询终态记账；命中 SHALL 补投**原事件**
+  （保持其全局 `seq`）后收尾，且 SHALL NOT 占用 per-submission 订阅位。
+- 补投事件的 `delivery_seq` SHALL 从 0 起（新订阅的独立簿记）。
+- 记账 SHALL 有界（`terminal_replay_size`，默认 256，FIFO 淘汰最老）；`<=0` SHALL 关闭补投。
+  被淘汰后 SHALL 退化为等待，SHALL NOT 无界缓存。
+- **未命中记账的 submission SHALL 维持等待**（`subscribe` 早于 `submit` 是合法且推荐的用法）。
+- 同一 submission 多次终结 SHALL 以最后一条为准。
+
 ### Requirement: per-subscriber 投递序号 delivery_seq
 
 系统 SHALL 通过 `DeliveredEvent { event: EventMsg, delivery_seq: int }` 信封向订阅者暴露 per-subscriber 投递序号。
