@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,16 +18,47 @@ import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _slow_tool(delay: float) -> ToolSpec:
-    """构造一个 sleep `delay` 秒后返回 ok 的 parallel_safe 工具。"""
+@dataclass
+class _OverlapProbe:
+    """记录工具执行的**峰值并发度**——比墙钟更直接、且不受机器快慢影响。
+
+    并发与串行的**结构性**判据是「同时有几个 handler 在执行」，墙钟只是它的
+    间接投影。原来用 `elapsed < 0.5` / `< 0.75` 这类上界断言，等于把「并发」和
+    「快」划等号：IO / CPU 一争抢，调度延迟就把上界撑破，用例红得跟并发语义无关
+    （实测 IO 风暴下 main 必现）。改成直接数峰值。
+    """
+
+    active: int = 0
+    peak: int = 0
+
+    def enter(self) -> None:
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+
+    def exit(self) -> None:
+        self.active -= 1
+
+
+def _slow_tool(delay: float, probe: _OverlapProbe | None = None) -> ToolSpec:
+    """构造一个 sleep `delay` 秒后返回 ok 的 parallel_safe 工具。
+
+    传入 ``probe`` 时顺带记录峰值并发度（供结构性断言用）。
+    """
 
     async def handler(args: dict, ctx: ToolContext) -> ToolResult:
-        await asyncio.sleep(delay)
+        if probe is not None:
+            probe.enter()
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            if probe is not None:
+                probe.exit()
         return ToolResult.ok("slow-done")
 
     return ToolSpec(
@@ -75,12 +107,13 @@ async def _run_once(
     (skills_dir / "batch-reader" / "SKILL.md").write_text(
         _BATCH_READER, encoding="utf-8"
     )
+    probe = _OverlapProbe()
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
         threads_dir=threads_dir,
         model_client=_client(n),
         compressors=[],
-        extra_tools=[_slow_tool(delay)],
+        extra_tools=[_slow_tool(delay, probe)],
         max_parallel_tool_calls=cap,
     )
     engine = await pool.get_or_create(session_id="s1", entry_skill_id="batch-reader")
@@ -92,28 +125,28 @@ async def _run_once(
             break
     elapsed = time.monotonic() - start
     await pool.close()
-    return elapsed
+    return elapsed, probe.peak
 
 
 @pytest.mark.asyncio
 async def test_concurrent_when_cap_gt_one(skills_dir: Path, threads_dir: Path) -> None:
-    """3 个 sleep 0.3s、cap=4：wall-clock 应明显 < 0.6s（并发）。"""
-    elapsed = await _run_once(skills_dir, threads_dir, n=3, delay=0.3, cap=4)
-    assert elapsed < 0.5, f"期望并发(<0.5s)，实测 {elapsed:.2f}s"
+    """3 个调用、cap=4：三者必须真的同时在跑（峰值并发=3）。"""
+    _elapsed, peak = await _run_once(skills_dir, threads_dir, n=3, delay=0.3, cap=4)
+    assert peak == 3, f"期望三者并发（峰值=3），实测峰值 {peak}"
 
 
 @pytest.mark.asyncio
 async def test_serial_when_cap_one(skills_dir: Path, threads_dir: Path) -> None:
-    """3 个 sleep 0.2s、cap=1：wall-clock 应 >= 0.55s（串行）。"""
-    elapsed = await _run_once(skills_dir, threads_dir, n=3, delay=0.2, cap=1)
-    assert elapsed >= 0.55, f"期望串行(>=0.55s)，实测 {elapsed:.2f}s"
+    """3 个调用、cap=1：任何时刻至多一个在跑（峰值并发=1）。"""
+    _elapsed, peak = await _run_once(skills_dir, threads_dir, n=3, delay=0.2, cap=1)
+    assert peak == 1, f"期望串行（峰值=1），实测峰值 {peak}"
 
 
 @pytest.mark.asyncio
 async def test_semaphore_caps_concurrency(skills_dir: Path, threads_dir: Path) -> None:
-    """4 个 sleep 0.2s、cap=2：约两批 → >=0.4s 且 < 0.75s。"""
-    elapsed = await _run_once(skills_dir, threads_dir, n=4, delay=0.2, cap=2)
-    assert 0.4 <= elapsed < 0.75, f"期望两批({elapsed:.2f}s)"
+    """4 个调用、cap=2：信号量必须把峰值并发恰好压在 2。"""
+    _elapsed, peak = await _run_once(skills_dir, threads_dir, n=4, delay=0.2, cap=2)
+    assert peak == 2, f"期望信号量封顶 2（峰值=2），实测峰值 {peak}"
 
 
 # ----------------------------------------------------------------------
@@ -191,7 +224,9 @@ def _planner_routing_client() -> RoutingSimClient:
     })
 
 
-async def _run_planner(skills: Path, threads_dir: Path, *, cap: int) -> tuple[float, set[str]]:
+async def _run_planner(
+    skills: Path, threads_dir: Path, *, cap: int
+) -> tuple[float, set[str], int]:
     """跑 planner 编排，返回 (根 turn wall-clock 秒, 实际 returned 的子 skill 集合)。
 
     用 subscribe_all 监听到【根 turn 完成（is_root=True）】才计时收尾——不能用
@@ -210,10 +245,16 @@ async def _run_planner(skills: Path, threads_dir: Path, *, cap: int) -> tuple[fl
     returned: set[str] = set()
     root_done = asyncio.Event()
     elapsed_holder: dict[str, float] = {}
+    # 峰值并发：已 dispatch 未 return 的子 skill 数的最大值。这是「两条线路是否
+    # 真的同时在跑」的**结构性**判据；墙钟只是它的间接投影，机器一慢就失真。
+    probe = _OverlapProbe()
 
     async def consume() -> None:
         async for ev in engine.subscribe_all():
+            if ev.msg.kind == "skill_dispatched":
+                probe.enter()
             if ev.msg.kind == "skill_returned":
+                probe.exit()
                 returned.add(ev.msg.data.get("skill_id", ""))
             if ev.msg.kind == "turn_completed" and ev.msg.data.get("is_root"):
                 elapsed_holder["t"] = time.monotonic() - start
@@ -222,35 +263,39 @@ async def _run_planner(skills: Path, threads_dir: Path, *, cap: int) -> tuple[fl
                 break
 
     task = asyncio.create_task(consume())
+    # create_task 只排期；确认订阅登记上再提交，否则首批 dispatch 事件会漏
+    await wait_for_condition(
+        lambda: bool(engine._all_subs),  # noqa: SLF001
+        message="firehose 订阅未能登记",
+    )
     start = time.monotonic()
     await engine.submit(taifeng.UserMessage(text="规划两条线路"))
-    await asyncio.wait_for(root_done.wait(), timeout=3.0)
+    await asyncio.wait_for(root_done.wait(), timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
     try:
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     except TimeoutError:
         task.cancel()
-    return elapsed_holder["t"], returned
+    return elapsed_holder["t"], returned, probe.peak
 
 
 @pytest.mark.asyncio
 async def test_two_call_skills_dispatch_concurrently(
     tmp_path: Path, threads_dir: Path
 ) -> None:
-    """两个 call_skill 同批、cap=2：两条子线路并发 → 根 turn wall-clock < 0.5s（各 0.3s）。"""
+    """两个 call_skill 同批、cap=2：两条子线路必须真的同时在跑（峰值并发=2）。"""
     skills = _build_two_route_skills(tmp_path)
-    elapsed, returned = await _run_planner(skills, threads_dir, cap=2)
+    _elapsed, returned, peak = await _run_planner(skills, threads_dir, cap=2)
     assert returned == {"route-a", "route-b"}, f"实际 returned={returned}"
-    # 并发：两条各 0.3s，若串行需 >=0.6s；并发应 < 0.5s
-    assert elapsed < 0.5, f"期望两条线路并发(<0.5s)，实测 {elapsed:.2f}s"
+    assert peak == 2, f"期望两条线路并发（峰值=2），实测峰值 {peak}"
 
 
 @pytest.mark.asyncio
 async def test_two_call_skills_serial_when_cap_one(
     tmp_path: Path, threads_dir: Path
 ) -> None:
-    """同场景 cap=1：两条子线路串行 → 根 turn wall-clock >= 0.55s（回归对照）。"""
+    """同场景 cap=1：两条子线路串行 → 任何时刻至多一条在跑（峰值并发=1，回归对照）。"""
     skills = _build_two_route_skills(tmp_path)
-    elapsed, returned = await _run_planner(skills, threads_dir, cap=1)
+    _elapsed, returned, peak = await _run_planner(skills, threads_dir, cap=1)
     assert returned == {"route-a", "route-b"}, f"实际 returned={returned}"
-    assert elapsed >= 0.55, f"期望串行(>=0.55s)，实测 {elapsed:.2f}s"
+    assert peak == 1, f"期望串行（峰值=1），实测峰值 {peak}"
