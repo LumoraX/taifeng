@@ -24,7 +24,6 @@ import logging
 from typing import TYPE_CHECKING
 
 from taifeng.conversation.models import function_call, system_injection
-from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.loop.event import EventMsg, RewindRejected, TurnRewound
 from taifeng.loop.rewind import derive_rewind_log
 from taifeng.loop.submission import Rewind, Submission
@@ -115,9 +114,8 @@ class SpawnRewindChain:
         eng = drv._engine  # noqa: SLF001
         child_tid = handle.child_thread_id
 
-        # 3. 重建逻辑 history(raw → reconstruct,禁直接 derive raw,design D3)
-        raw = await eng._load_thread_items(child_tid)  # noqa: SLF001
-        logical = reconstruct_logical_history(raw)
+        # 3. 逻辑 history(_load_thread_items 已 reconstruct;禁直接 derive raw,design D3)
+        logical = await eng._load_thread_items(child_tid)  # noqa: SLF001
         # 活跃挂起守卫:挂起态 rewind 与 Resume 职责重叠,显式拒绝(对称根路径)
         if eng._find_active_suspension_in(logical) is not None:  # noqa: SLF001
             await self._reject(sub.id, op.node_id, "turn_suspended")

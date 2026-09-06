@@ -567,10 +567,10 @@ class AgentEngine:
         """按 thread_id 查询 rewind 节点表(thread-addressable rewind 的只读入口)。
 
         - 根 thread:直接返回内存表(等价 ``rewind_nodes()``,零 IO);
-        - 其他 thread(典型为 detached spawn 子 thread):load raw store 项 →
-          ``reconstruct_logical_history`` 折叠压缩区间/重放 rewind marker 的
-          cut_index → ``derive_rewind_log`` 派生节点表。**禁止对 raw 直接
-          derive**——raw 含被折叠/被截断的废弃项,坐标会错位(design D3)。
+        - 其他 thread(典型为 detached spawn 子 thread):经 ``_load_thread_items``
+          取逻辑 history(已折叠压缩区间 / 重放 rewind cut_index)→
+          ``derive_rewind_log`` 派生节点表。**禁止对 raw 直接 derive**——raw 含
+          被折叠/被截断的废弃项,坐标会错位(design D3)。
 
         Args:
             thread_id: 目标 thread;不存在的 thread 自然得到空表(load 空)。
@@ -580,8 +580,7 @@ class AgentEngine:
         """
         if thread_id == self._thread_id:
             return list(self._rewind_checkpoints)
-        raw = await self._load_thread_items(thread_id)
-        return derive_rewind_log(reconstruct_logical_history(raw))
+        return derive_rewind_log(await self._load_thread_items(thread_id))
 
     def estimate_tokens(self) -> int:
         """估算当前 history 的 token 占用 —— 业务侧可据此决定是否 CompactNow。"""
@@ -1312,12 +1311,13 @@ class AgentEngine:
         return False
 
     async def _rearm_ttl_timers_cold(self) -> None:
-        """冷启动重武装(R5):扫根 history + 挂起态 spawn 子 thread 的活跃挂起。
+        """冷启动重武装(R5,根段):根 history 的活跃挂起。
 
         已过期 → delay=0 立即裁决;未过期 → 按剩余壁钟时长重武装。旧 JSONL 无
-        ttl 字段 → expires_at 为 None,不武装(永不过期,前向兼容)。深层
-        call_skill leaf 的 ttl 由其自身 turn_suspended 热路径覆盖;冷恢复场景
-        覆盖根 + spawn 两类 engine 可枚举的 thread(v1 边界,见能力契约)。
+        ttl 字段 → expires_at 为 None,不武装(永不过期,前向兼容)。挂起态 spawn
+        子 thread 由 ``_rearm_spawn_ttl_timers_cold`` 在句柄表重建完成后武装
+        (run() 起跑时句柄表尚空,此处枚举不到);深层 call_skill leaf 的 ttl 由其
+        自身 turn_suspended 热路径覆盖(v1 边界,见能力契约)。
         """
         record = self._find_active_suspension()
         if record is not None and record.expires_at is not None:
@@ -1326,10 +1326,16 @@ class AgentEngine:
                 "thread_id": self._thread_id,
                 "expires_at": record.expires_at,
             })
-        # 挂起态 spawn 句柄:子 thread 的活跃挂起带 ttl 的一并重武装
+
+    async def _rearm_spawn_ttl_timers_cold(self) -> None:
+        """冷启动重武装(R5,spawn 段):挂起态 spawn 句柄子 thread 的活跃挂起。
+
+        必须在 ``rebuild_from_history`` 填好句柄表之后调用——否则
+        ``suspended_handles`` 为空,spawn 子 thread 的 TTL 永不武装(wave2b 复现 b:
+        过期的挂起也永不裁决)。``_arm_ttl_timer`` 按 record_id 去重,与热路径 /
+        根段重复调用无副作用。
+        """
         for h in self._spawn.suspended_handles():
-            if h.status != "suspended":
-                continue
             try:
                 items = await self._load_thread_items(h.child_thread_id)
             except Exception:
@@ -1426,9 +1432,10 @@ class AgentEngine:
         shutdown_requested = False
         # detached-spawn：记下根取消 token，供 spawn 的分离 task 派生子 token（R4 可取消）。
         self._root_cancel = cancel
-        # suspension-ttl 冷重武装(R5):装载的历史里有带 ttl 的活跃挂起 →
-        # 已过期立即裁决、未过期按剩余时长武装。pool 冷恢复在 run 启动前已
-        # rebuild spawn 句柄,此处可一并枚举挂起态 spawn 子 thread。
+        # suspension-ttl 冷重武装(R5,根段):装载的历史里有带 ttl 的活跃挂起 →
+        # 已过期立即裁决、未过期按剩余时长武装。此刻 spawn 句柄表尚未重建
+        # (rebuild 要等本方法赋值 _root_cancel 后才跑),挂起态 spawn 子 thread
+        # 的重武装由 _rebuild_spawn_state_from_history 收尾时完成。
         try:
             await self._rearm_ttl_timers_cold()
             while self._running:
@@ -2623,6 +2630,8 @@ class AgentEngine:
         调用点：pool 重载 engine 时（engine 持有 prior history 的 resume 场景）。
         """
         await self._spawn.rebuild_from_history()
+        # suspension-ttl 冷重武装(spawn 段):句柄表就绪后才枚举得到挂起态 spawn
+        await self._rearm_spawn_ttl_timers_cold()
 
 
     # -----------------------------------------------------------------
@@ -3176,8 +3185,16 @@ class AgentEngine:
         return "settled"
 
     async def _load_thread_items(self, thread_id: str) -> list[ResponseItem]:
-        """load_thread → list（子 thread resume 需要按当前持久态重建历史）。"""
-        return [it async for it in await self._store.load_thread(thread_id)]
+        """非根 thread 的**逻辑 history 单一入口**:load_thread → reconstruct。
+
+        store 是 append-only 转录(压缩占位追加在尾、rewind 只落 marker),直接拿
+        raw 当 history 会把被替换原文 / 被截断旧圈重新塞回 prompt,冷推断也会据
+        废弃项误判(wave2b 复现 a / f)。所有子 thread 的重载 / 推断 / 路由 / TTL
+        活跃性验证都经此取逻辑 history;``reconstruct_logical_history`` 对逻辑
+        history 是恒等映射,调用方不必也不应再次 reconstruct。
+        """
+        raw = [it async for it in await self._store.load_thread(thread_id)]
+        return reconstruct_logical_history(raw)
 
     async def _apply_plan_on_thread(
         self, thread_id: str, entry_skill_id: str,
