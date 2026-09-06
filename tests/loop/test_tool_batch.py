@@ -6,18 +6,32 @@ import asyncio
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch
 from taifeng.tool.spec import ToolContext, ToolResult
+from tests.conftest import OverlapProbe
 
 
 class _FakeRuntime:
-    """记录 dispatch 调用顺序,按 name 返回 ToolResult。可选 delay 模拟耗时。"""
+    """记录 dispatch 调用顺序,按 name 返回 ToolResult。可选 delay 模拟耗时。
 
-    def __init__(self, delay: float = 0.0) -> None:
+    传入 ``probe`` 时顺带记录峰值并发度,供并发/串行的结构性断言使用
+    (见 :class:`tests.conftest.OverlapProbe`)。
+    """
+
+    def __init__(
+        self, delay: float = 0.0, probe: OverlapProbe | None = None
+    ) -> None:
         self.calls: list[str] = []
         self._delay = delay
+        self._probe = probe
 
     async def dispatch(self, *, name: str, arguments: dict, ctx: ToolContext) -> ToolResult:
-        if self._delay:
-            await asyncio.sleep(self._delay)
+        if self._probe is not None:
+            self._probe.enter()
+        try:
+            if self._delay:
+                await asyncio.sleep(self._delay)
+        finally:
+            if self._probe is not None:
+                self._probe.exit()
         self.calls.append(name)
         return ToolResult.ok(f"out:{name}")
 
@@ -114,22 +128,20 @@ async def test_dispatch_batch_preserves_index_order() -> None:
 
 
 async def test_dispatch_batch_runs_concurrently() -> None:
-    """cap=4、每条 sleep 0.2s 的 3 条:wall-clock 应明显 < 0.6s(串行和)。"""
-    runtime = _FakeRuntime(delay=0.2)
-    start = asyncio.get_event_loop().time()
+    """cap=4 的 3 条:三者必须真的同时在跑(峰值并发=3)。"""
+    probe = OverlapProbe()
+    runtime = _FakeRuntime(delay=0.05, probe=probe)
     outcomes, _ = await _run(_reqs(3), runtime, cap=4)
-    elapsed = asyncio.get_event_loop().time() - start
     assert len(outcomes) == 3
-    assert elapsed < 0.5, f"期望并发(<0.5s),实测 {elapsed:.2f}s"
+    assert probe.peak == 3, f"期望三者并发(峰值=3),实测峰值 {probe.peak}"
 
 
 async def test_dispatch_batch_serial_when_cap_one() -> None:
-    """cap=1、每条 sleep 0.2s 的 3 条:wall-clock 应 >= 0.6s(串行)。"""
-    runtime = _FakeRuntime(delay=0.2)
-    start = asyncio.get_event_loop().time()
+    """cap=1 的 3 条:任意时刻只能有一条在跑(峰值并发=1)。"""
+    probe = OverlapProbe()
+    runtime = _FakeRuntime(delay=0.05, probe=probe)
     await _run(_reqs(3), runtime, cap=1)
-    elapsed = asyncio.get_event_loop().time() - start
-    assert elapsed >= 0.55, f"期望串行(>=0.55s),实测 {elapsed:.2f}s"
+    assert probe.peak == 1, f"期望串行(峰值=1),实测峰值 {probe.peak}"
 
 
 class _CancelAwareRuntime:

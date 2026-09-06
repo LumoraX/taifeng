@@ -1,7 +1,7 @@
 """声明式编排端到端（走 EnginePool + RoutingSimClient）：
 
-- parallel 段：cap≥2 真并发（wall-clock < 串行和）；cap=1 退化串行（回归对照）
-- serial 段：即便 cap 高也强制 Semaphore(1) 串行
+- parallel 段：cap≥2 真并发（断言**峰值并发度**，不看 wall-clock）；cap=1 退化串行
+- serial 段：即便 cap 高也强制 Semaphore(1) 串行（峰值=1）
 - 同种子 + 前序输出注入：summarizer 的子线程种子含上一步 child 输出
 - when：condition flag 选 then/else；flag 缺失 → 硬失败 turn + condition_missing 事件
 - orchestration_plan_resolved 事件 emit
@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import TYPE_CHECKING
 
 import pytest
 
 import taifeng
 from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
-from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
+from tests.conftest import GUARD_TIMEOUT_SECONDS, OverlapProbe, wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -67,10 +66,14 @@ def _write(skills: Path, name: str, body: str) -> None:
 
 async def _run(
     skills: Path, threads_dir: Path, client: RoutingSimClient, *, cap: int
-) -> tuple[float, list, set[str]]:
-    """跑 trip 编排，返回 (根 turn wall-clock, 全事件列表, returned 子 skill 集合)。
+) -> tuple[int, list, set[str]]:
+    """跑 trip 编排，返回 (子 skill 峰值并发度, 全事件列表, returned 子 skill 集合)。
 
     用 subscribe_all + is_root=True 收根 turn（子 turn 也 emit turn_completed）。
+
+    峰值并发度由 ``skill_dispatched`` / ``skill_returned`` 事件配对计出——这是
+    「并发/串行」的**结构性**证据。原来返回根 turn 墙钟、由调用方断言
+    ``elapsed < 0.5``，等于把「并发」和「机器快」划等号，负载一高就误报。
     """
     pool = await taifeng.EnginePool.create(
         skills_dir=skills, threads_dir=threads_dir,
@@ -81,18 +84,19 @@ async def _run(
     events: list = []
     returned: set[str] = set()
     root_done = asyncio.Event()
-    holder: dict[str, float] = {}
+    probe = OverlapProbe()
 
     async def consume() -> None:
         async for ev in engine.subscribe_all():
             events.append(ev)
+            if ev.msg.kind == "skill_dispatched":
+                probe.enter()
             if ev.msg.kind == "skill_returned":
+                probe.exit()
                 returned.add(ev.msg.data.get("skill_id", ""))
-            if ev.msg.kind == "turn_completed" and ev.msg.data.get("is_root"):
-                holder["t"] = time.monotonic() - start
-                root_done.set()
-            if ev.msg.kind == "turn_failed" and ev.msg.data.get("is_root"):
-                holder["t"] = time.monotonic() - start
+            if ev.msg.kind in ("turn_completed", "turn_failed") and ev.msg.data.get(
+                "is_root"
+            ):
                 root_done.set()
             if ev.msg.kind == "shutdown":
                 break
@@ -104,7 +108,6 @@ async def _run(
         lambda: bool(engine._all_subs),  # noqa: SLF001
         message="firehose 订阅未能登记",
     )
-    start = time.monotonic()
     await engine.submit(taifeng.UserMessage(text="规划行程"))
     # 守卫期限：只防挂死，不是「编排该多快」的断言（真要断言时长的用例在下方
     # 自己写显式阈值）。原值 5s 在全量跑负载下会误报。
@@ -114,12 +117,12 @@ async def _run(
         await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     except TimeoutError:
         task.cancel()
-    return holder["t"], events, returned
+    return probe.peak, events, returned
 
 
 @pytest.mark.asyncio
 async def test_parallel_step_concurrent(tmp_path: Path, threads_dir: Path) -> None:
-    """parallel: [route-a, route-b]，各 sleep 0.3s，cap=2 → 根 turn < 0.5s（并发）。"""
+    """parallel: [route-a, route-b]，cap=2 → 两条子线路真的同时在跑（峰值=2）。"""
     skills = tmp_path / "s"
     _write(skills, "trip", _entry(
         "orchestration:\n  steps:\n    - parallel: [route-a, route-b]\n",
@@ -131,14 +134,14 @@ async def test_parallel_step_concurrent(tmp_path: Path, threads_dir: Path) -> No
         "A_MARK": [SimTurn(text="线路甲完成", delay_seconds=0.3)],
         "B_MARK": [SimTurn(text="线路乙完成", delay_seconds=0.3)],
     })
-    elapsed, _events, returned = await _run(skills, threads_dir, client, cap=2)
+    peak, _events, returned = await _run(skills, threads_dir, client, cap=2)
     assert returned == {"route-a", "route-b"}
-    assert elapsed < 0.5, f"期望并发(<0.5s)，实测 {elapsed:.2f}s"
+    assert peak == 2, f"期望两条线路并发(峰值=2)，实测峰值 {peak}"
 
 
 @pytest.mark.asyncio
 async def test_parallel_step_serial_when_cap_one(tmp_path: Path, threads_dir: Path) -> None:
-    """同上 cap=1 → 退化串行 → 根 turn >= 0.35s（回归对照）。"""
+    """同上 cap=1 → 退化串行 → 任意时刻只有一条在跑（峰值=1，回归对照）。"""
     skills = tmp_path / "s"
     _write(skills, "trip", _entry(
         "orchestration:\n  steps:\n    - parallel: [route-a, route-b]\n",
@@ -150,14 +153,14 @@ async def test_parallel_step_serial_when_cap_one(tmp_path: Path, threads_dir: Pa
         "A_MARK": [SimTurn(text="线路甲完成", delay_seconds=0.2)],
         "B_MARK": [SimTurn(text="线路乙完成", delay_seconds=0.2)],
     })
-    elapsed, _events, returned = await _run(skills, threads_dir, client, cap=1)
+    peak, _events, returned = await _run(skills, threads_dir, client, cap=1)
     assert returned == {"route-a", "route-b"}
-    assert elapsed >= 0.35, f"期望串行(>=0.35s)，实测 {elapsed:.2f}s"
+    assert peak == 1, f"期望串行(峰值=1)，实测峰值 {peak}"
 
 
 @pytest.mark.asyncio
 async def test_serial_step_forces_sequential(tmp_path: Path, threads_dir: Path) -> None:
-    """serial: [route-a, route-b]，各 0.2s，即便 cap=4 也强制串行 → >= 0.35s。"""
+    """serial: [route-a, route-b]，即便 cap=4 也强制串行 → 峰值并发=1。"""
     skills = tmp_path / "s"
     _write(skills, "trip", _entry(
         "orchestration:\n  steps:\n    - serial: [route-a, route-b]\n",
@@ -169,9 +172,9 @@ async def test_serial_step_forces_sequential(tmp_path: Path, threads_dir: Path) 
         "A_MARK": [SimTurn(text="甲", delay_seconds=0.2)],
         "B_MARK": [SimTurn(text="乙", delay_seconds=0.2)],
     })
-    elapsed, _events, returned = await _run(skills, threads_dir, client, cap=4)
+    peak, _events, returned = await _run(skills, threads_dir, client, cap=4)
     assert returned == {"route-a", "route-b"}
-    assert elapsed >= 0.35, f"serial 段应串行(>=0.35s)，实测 {elapsed:.2f}s"
+    assert peak == 1, f"serial 段应串行(峰值=1)，实测峰值 {peak}"
 
 
 @pytest.mark.asyncio
@@ -192,7 +195,7 @@ async def test_upstream_injected_into_serial_step(tmp_path: Path, threads_dir: P
         "B_MARK": [SimTurn(text="线路乙完成")],
         "SUM_MARK": [SimTurn(text="汇总完毕")],
     })
-    _elapsed, _events, returned = await _run(skills, threads_dir, client, cap=2)
+    _peak, _events, returned = await _run(skills, threads_dir, client, cap=2)
     assert returned == {"route-a", "route-b", "summarizer"}
 
     seeds = _collect_user_message_seeds(threads_dir)
@@ -219,7 +222,7 @@ async def test_when_true_branch(tmp_path: Path, threads_dir: Path) -> None:
         "PROBE_MARK": [SimTurn(text='{"needs_weather": true}')],
         "WEATHER_MARK": [SimTurn(text="天气已查")],
     })
-    _elapsed, _events, returned = await _run(skills, threads_dir, client, cap=2)
+    _peak, _events, returned = await _run(skills, threads_dir, client, cap=2)
     assert "weather" in returned, f"needs_weather=true 应执行 weather；returned={returned}"
 
 
@@ -241,7 +244,7 @@ async def test_when_false_skips_when_no_else(tmp_path: Path, threads_dir: Path) 
         "PROBE_MARK": [SimTurn(text='{"needs_weather": false}')],
         "WEATHER_MARK": [SimTurn(text="天气已查")],
     })
-    _elapsed, _events, returned = await _run(skills, threads_dir, client, cap=2)
+    _peak, _events, returned = await _run(skills, threads_dir, client, cap=2)
     assert "weather" not in returned, f"needs_weather=false 应跳过 weather；returned={returned}"
 
 
@@ -263,7 +266,7 @@ async def test_when_missing_flag_hard_fails(tmp_path: Path, threads_dir: Path) -
         "PROBE_MARK": [SimTurn(text='{"other": 1}')],
         "WEATHER_MARK": [SimTurn(text="天气已查")],
     })
-    _elapsed, events, _returned = await _run(skills, threads_dir, client, cap=2)
+    _peak, events, _returned = await _run(skills, threads_dir, client, cap=2)
     kinds = [e.msg.kind for e in events]
     assert "orchestration_condition_missing" in kinds
     root_failed = [
@@ -297,7 +300,7 @@ async def test_when_then_parallel_injects_upstream(tmp_path: Path, threads_dir: 
         "WEATHER_MARK": [SimTurn(text="天气已查")],
         "TRAFFIC_MARK": [SimTurn(text="路况已查")],
     })
-    _elapsed, _events, returned = await _run(skills, threads_dir, client, cap=4)
+    _peak, _events, returned = await _run(skills, threads_dir, client, cap=4)
     assert {"weather", "traffic"} <= returned
     # weather / traffic 的子线程种子应含上一步 probe 的输出（upstream 注入）。
     # probe 输出 `{"needs_weather": true}` 嵌进 upstream 列表后会被 json.dumps 二次转义，
@@ -358,7 +361,7 @@ async def test_plan_resolved_emitted(tmp_path: Path, threads_dir: Path) -> None:
     ))
     _write(skills, "route-a", _child("route-a", "A_MARK"))
     client = RoutingSimClient(routes={"A_MARK": [SimTurn(text="甲")]})
-    _elapsed, events, _returned = await _run(skills, threads_dir, client, cap=2)
+    _peak, events, _returned = await _run(skills, threads_dir, client, cap=2)
     resolved = [e for e in events if e.msg.kind == "orchestration_plan_resolved"]
     assert len(resolved) == 1
     assert resolved[0].msg.data["skill_id"] == "trip"

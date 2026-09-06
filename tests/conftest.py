@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -61,6 +62,45 @@ async def wait_for_condition(
         if time.monotonic() >= deadline:
             raise AssertionError(message)
         await asyncio.sleep(poll_seconds)
+
+
+@dataclass
+class OverlapProbe:
+    """记录并发执行的**峰值并发度**——并发/串行的结构性判据，不受机器快慢影响。
+
+    「并发发生了」的直接证据是「同时有几个 handler 在执行」，墙钟耗时只是它的
+    间接投影。用 ``elapsed < 0.5`` 这类上界断言等于把「并发」和「快」划等号：
+    单进程测试套里 IO / CPU 一争抢，调度延迟就把上界撑破，用例红得跟并发语义
+    毫无关系（实测 IO 风暴下 main 必现）。
+
+    而且墙钟断言**比结构断言弱**：信号量若从 cap=2 悄悄退化成 cap=4，只要机器
+    够快 ``elapsed`` 照样落在区间内——真回归漏抓；``peak == 2`` 必抓。
+
+    用法::
+
+        probe = OverlapProbe()
+        async def handler(...):
+            probe.enter()
+            try:
+                await asyncio.sleep(delay)
+            finally:
+                probe.exit()
+        ...
+        assert probe.peak == 2   # 而不是 assert elapsed < 0.5
+    """
+
+    active: int = 0
+    peak: int = 0
+
+    def enter(self) -> None:
+        """进入临界区，刷新峰值。"""
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+
+    def exit(self) -> None:
+        """离开临界区。"""
+        self.active -= 1
+
 
 ATOMIC_SKILL = """---
 name: style-checker
