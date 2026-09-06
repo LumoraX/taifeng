@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from taifeng.mcp.server import McpStdioServer
+from tests.conftest import wait_for_condition
 
 
 def _make_pipe() -> tuple[asyncio.StreamReader, asyncio.StreamWriter, list[bytes]]:
@@ -53,16 +54,15 @@ async def test_success_emits_started_then_completed() -> None:
     server = McpStdioServer(pool, emit=emit)
     reader, writer, written = _make_pipe()
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if server._stdout is not None:
-            break
+    await wait_for_condition(
+        lambda: server._stdout is not None,
+        message="server.run 未在守卫期限内 bind _stdout",
+    )
 
     async def respond() -> None:
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if written:
-                break
+        await wait_for_condition(
+            lambda: bool(written), message="server 未在守卫期限内写出 outgoing 请求"
+        )
         line = (
             json.dumps({
                 "jsonrpc": "2.0", "id": "srv_1",
@@ -105,10 +105,10 @@ async def test_timeout_emits_started_then_timed_out_then_completed_timeout() -> 
     server = McpStdioServer(pool, emit=emit)
     reader, writer, _written = _make_pipe()
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if server._stdout is not None:
-            break
+    await wait_for_condition(
+        lambda: server._stdout is not None,
+        message="server.run 未在守卫期限内 bind _stdout",
+    )
 
     with pytest.raises(TimeoutError):
         await server.server_initiated_request(
@@ -138,10 +138,10 @@ async def test_none_emit_does_not_raise() -> None:
     server = McpStdioServer(pool, emit=None)
     reader, writer, _written = _make_pipe()
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if server._stdout is not None:
-            break
+    await wait_for_condition(
+        lambda: server._stdout is not None,
+        message="server.run 未在守卫期限内 bind _stdout",
+    )
     with pytest.raises(TimeoutError):
         await server.server_initiated_request("ping", {}, timeout=0.1)
     reader.feed_eof()

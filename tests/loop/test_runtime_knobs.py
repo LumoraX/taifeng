@@ -15,6 +15,7 @@ from taifeng.loop.submission import (
     ThreadRollback,
     UpdateBudget,
 )
+from tests.conftest import wait_for_condition
 
 
 @pytest.mark.asyncio
@@ -70,11 +71,10 @@ async def test_update_budget_at_runtime(skills_dir: Path, threads_dir: Path) -> 
 
     await engine.submit(UpdateBudget(context_window=50_000, soft_limit_ratio=0.7))
     # actor loop 处理 op 需要时间 —— 拉一条心跳让它走过
-    import asyncio
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if engine.budget.context_window == 50_000:
-            break
+    await wait_for_condition(
+        lambda: engine.budget.context_window == 50_000,
+        message="UpdateBudget 未在守卫期限内被 actor loop 处理",
+    )
     assert engine.budget.context_window == 50_000
     assert engine.budget.soft_limit_ratio == pytest.approx(0.7)
     # 未传字段保持原值
@@ -111,14 +111,12 @@ async def test_thread_rollback_drops_recent_turns(
 
     # 回滚 1 轮
     await engine.submit(ThreadRollback(num_turns=1))
-    import asyncio
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if (
-            sum(1 for it in engine.history_snapshot() if it.kind == "user_message")
-            < initial_users
-        ):
-            break
+    await wait_for_condition(
+        lambda: sum(
+            1 for it in engine.history_snapshot() if it.kind == "user_message"
+        ) < initial_users,
+        message="ThreadRollback 未在守卫期限内生效",
+    )
 
     snap = engine.history_snapshot()
     users_after = sum(1 for it in snap if it.kind == "user_message")
@@ -160,12 +158,10 @@ async def test_compact_now_with_params(skills_dir: Path, threads_dir: Path) -> N
     sub_id = await engine.submit(CompactNow(force=True, preserve_tail=2))
 
     # 等 actor 处理 + compaction 完成
-    import asyncio
-    for _ in range(200):
-        await asyncio.sleep(0.01)
-        snap = engine.history_snapshot()
-        if any(it.kind == "compacted" for it in snap):
-            break
+    await wait_for_condition(
+        lambda: any(it.kind == "compacted" for it in engine.history_snapshot()),
+        message="CompactNow 未在守卫期限内产出 compacted item",
+    )
 
     snap = engine.history_snapshot()
     compacted_count = sum(1 for it in snap if it.kind == "compacted")
@@ -188,8 +184,8 @@ async def test_event_queue_size_kwarg_takes_effect(
     queue maxsize 必须等于 42，subscribe 与 subscribe_all 都生效。
 
     实现注：subscribe() 的 finally 在协程被取消时会 pop _event_subs，所以
-    必须在 cancel 之前抓到 queue 引用并断言。这里 spawn task + sleep 让
-    generator 推进到 q.get() 阻塞点，期间 queue 已注册。
+    必须在 cancel 之前抓到 queue 引用并断言。这里 spawn task 后**等注册这个
+    状态**（不是睡估计值），让 generator 推进到 q.get() 阻塞点。
     """
     import asyncio
 
@@ -212,10 +208,10 @@ async def test_event_queue_size_kwarg_takes_effect(
 
     sub_task = asyncio.create_task(_sub_runner())
     # 让 subscribe 协程跑到 q.get() 阻塞点（已注册到 _event_subs）
-    for _ in range(20):
-        await asyncio.sleep(0.005)
-        if "queue-size-probe" in engine._event_subs:  # noqa: SLF001
-            break
+    await wait_for_condition(
+        lambda: "queue-size-probe" in engine._event_subs,  # noqa: SLF001
+        message="subscribe 未在守卫期限内注册到 _event_subs",
+    )
 
     assert "queue-size-probe" in engine._event_subs, (  # noqa: SLF001
         "subscribe 应注册到 _event_subs"
@@ -237,10 +233,10 @@ async def test_event_queue_size_kwarg_takes_effect(
             pass
 
     all_task = asyncio.create_task(_all_runner())
-    for _ in range(20):
-        await asyncio.sleep(0.005)
-        if engine._all_subs:  # noqa: SLF001
-            break
+    await wait_for_condition(
+        lambda: bool(engine._all_subs),  # noqa: SLF001
+        message="subscribe_all 未在守卫期限内注册 broadcast queue",
+    )
 
     assert engine._all_subs, (  # noqa: SLF001
         "subscribe_all 应注册一个 broadcast queue"
@@ -293,11 +289,10 @@ async def test_refresh_snapshot_op(skills_dir: Path, threads_dir: Path) -> None:
     await pool.skill_registry.discover()
 
     await engine.submit(RefreshSnapshot())
-    import asyncio
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if engine.snapshot.version > v0:
-            break
+    await wait_for_condition(
+        lambda: engine.snapshot.version > v0,
+        message="RefreshSnapshot 未在守卫期限内提升 snapshot 版本",
+    )
     assert engine.snapshot.version > v0
     assert engine.snapshot.get("extra-skill") is not None
     await pool.close()

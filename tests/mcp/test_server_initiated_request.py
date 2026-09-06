@@ -20,6 +20,7 @@ from taifeng.mcp.server import (
     McpServerInitiatedRequestError,
     McpStdioServer,
 )
+from tests.conftest import guard_ticks, wait_for_condition
 
 
 # --------------------------------------------------------------------
@@ -72,12 +73,12 @@ async def _start_server() -> tuple[
     server = McpStdioServer(pool)
     reader, writer, written = _make_pipe()
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
-    # 等 server.run 把 _stdout bind 上
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if server._stdout is not None:
-            break
-    assert server._stdout is not None
+    # 等 server.run 把 _stdout bind 上（守卫期限走 GUARD_TIMEOUT_SECONDS，
+    # 不用固定圈数——圈数等于把期限硬编码成 0.5s，负载一高就误判成「没绑上」）
+    await wait_for_condition(
+        lambda: server._stdout is not None,
+        message="server.run 未在守卫期限内 bind _stdout",
+    )
     return server, reader, written, task
 
 
@@ -98,11 +99,9 @@ async def test_request_returns_client_response_result() -> None:
         # 模拟 client 收到 srv_1 后回 result
         async def _respond() -> None:
             # 等 server 写出 outgoing 请求
-            for _ in range(100):
-                await asyncio.sleep(0.01)
-                if written:
-                    break
-            assert written, "server did not write outgoing request"
+            await wait_for_condition(
+                lambda: bool(written), message="server did not write outgoing request"
+            )
             sent = json.loads(written[-1].decode("utf-8").strip())
             assert sent["id"] == "srv_1"
             assert sent["method"] == "elicitation/create"
@@ -168,10 +167,9 @@ async def test_request_error_response_raises() -> None:
     server, reader, written, task = await _start_server()
     try:
         async def _respond() -> None:
-            for _ in range(100):
-                await asyncio.sleep(0.01)
-                if written:
-                    break
+            await wait_for_condition(
+                lambda: bool(written), message="server did not write outgoing request"
+            )
             err_line = (
                 json.dumps({
                     "jsonrpc": "2.0",
@@ -205,8 +203,7 @@ async def test_concurrent_requests_use_incrementing_ids() -> None:
         # 准备两个 client 回包（按 id 匹配）
         async def _respond_both() -> None:
             seen_ids: set[str] = set()
-            for _ in range(500):
-                await asyncio.sleep(0.005)
+            async for _ in guard_ticks(0.005):
                 # 取当前所有写出
                 for raw in written:
                     text = raw.decode("utf-8").strip()

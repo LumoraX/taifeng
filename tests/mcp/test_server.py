@@ -24,6 +24,7 @@ from taifeng.mcp.server import (
     SKILL_URI_PREFIX,
     McpStdioServer,
 )
+from tests.conftest import guard_ticks
 
 # --------------------------------------------------------------------
 # Fixtures
@@ -80,8 +81,7 @@ async def _roundtrip(server: McpStdioServer, line: bytes, rid: int) -> dict[str,
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
     try:
         reader.feed_data(line)
-        for _ in range(500):
-            await asyncio.sleep(0.01)
+        async for _ in guard_ticks():
             for raw in written:
                 text = raw.decode("utf-8").strip()
                 if not text:
@@ -89,7 +89,7 @@ async def _roundtrip(server: McpStdioServer, line: bytes, rid: int) -> dict[str,
                 msg = json.loads(text)
                 if msg.get("id") == rid:
                     return msg
-        raise AssertionError(f"no response for id={rid} within 5s")
+        raise AssertionError(f"守卫期限内未等到 id={rid} 的响应")
     finally:
         reader.feed_eof()
         await asyncio.wait_for(task, timeout=2.0)

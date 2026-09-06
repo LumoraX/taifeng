@@ -27,6 +27,7 @@ import pytest
 from taifeng.mcp.prompter import McpPrompter
 from taifeng.mcp.server import McpStdioServer
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
+from tests.conftest import guard_ticks, wait_for_condition
 
 
 def _make_pipe() -> tuple[asyncio.StreamReader, asyncio.StreamWriter, list[bytes]]:
@@ -62,16 +63,16 @@ async def _start_server() -> tuple[
     server = McpStdioServer(pool)
     reader, writer, written = _make_pipe()
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if server._stdout is not None:
-            break
+    await wait_for_condition(
+        lambda: server._stdout is not None,
+        message="server.run 未在守卫期限内 bind _stdout",
+    )
     return server, reader, written, task
 
 
 async def _wait_outgoing(written: list[bytes]) -> dict[str, Any]:
-    for _ in range(300):
-        await asyncio.sleep(0.01)
+    """等 server 写出 elicitation/create；期限走守卫常量而非固定圈数。"""
+    async for _ in guard_ticks():
         for raw in written:
             text = raw.decode("utf-8").strip()
             if not text:
@@ -82,7 +83,7 @@ async def _wait_outgoing(written: list[bytes]) -> dict[str, Any]:
                 continue
             if msg.get("method") == "elicitation/create":
                 return msg
-    raise AssertionError("server did not write elicitation/create within 3s")
+    raise AssertionError("server 未在守卫期限内写出 elicitation/create")
 
 
 @pytest.mark.asyncio
@@ -232,14 +233,21 @@ class _FakeEngine:
 
 
 class _HangingEngine:
-    """turn 永不结束——用于验证 EOF 时在飞 tools/call 被收敛。"""
+    """turn 永不结束——用于验证 EOF 时在飞 tools/call 被收敛。
+
+    ``started`` 让测试能等「真的在飞了」这个**状态**，而不是 sleep 一个估计值：
+    睡固定时长等于把前置条件押在机器速度上，负载一高就先 EOF 后进入，用例的前提
+    凭空消失。
+    """
 
     cancelled = False
+    started = False
 
     async def submit(self, _sub: Any) -> str:
         return "sub-2"
 
     async def subscribe(self, _sub_id: str) -> Any:
+        type(self).started = True
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -259,8 +267,8 @@ def _pool_with(engine: Any) -> MagicMock:
 
 
 async def _wait_response(written: list[bytes], req_id: Any) -> dict[str, Any]:
-    for _ in range(300):
-        await asyncio.sleep(0.01)
+    """等指定 id 的 result 回包；期限走守卫常量而非固定圈数。"""
+    async for _ in guard_ticks():
         for raw in written:
             text = raw.decode("utf-8").strip()
             if not text:
@@ -271,7 +279,7 @@ async def _wait_response(written: list[bytes], req_id: Any) -> dict[str, Any]:
                 continue
             if msg.get("id") == req_id and "result" in msg:
                 return msg
-    raise AssertionError(f"no response for id={req_id} within 3s")
+    raise AssertionError(f"守卫期限内未等到 id={req_id} 的 result 回包")
 
 
 @pytest.mark.asyncio
@@ -291,10 +299,10 @@ async def test_tools_call_path_hitl_gets_client_answer_before_timeout() -> None:
 
     reader, writer, written = _make_pipe()
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if server._stdout is not None:
-            break
+    await wait_for_condition(
+        lambda: server._stdout is not None,
+        message="server.run 未在守卫期限内 bind _stdout",
+    )
     try:
         call = json.dumps({
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -322,20 +330,24 @@ async def test_tools_call_path_hitl_gets_client_answer_before_timeout() -> None:
 @pytest.mark.asyncio
 async def test_run_exit_converges_in_flight_tools_call() -> None:
     """tools/call 仍在飞时 stdin EOF → run() 返回前在飞任务被取消。"""
+    _HangingEngine.started = False
     server = McpStdioServer(_pool_with(_HangingEngine()))
     reader, writer, written = _make_pipe()
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if server._stdout is not None:
-            break
+    await wait_for_condition(
+        lambda: server._stdout is not None,
+        message="server.run 未在守卫期限内 bind _stdout",
+    )
     call = json.dumps({
         "jsonrpc": "2.0", "id": 9, "method": "tools/call",
         "params": {"name": "run_skill_turn",
                    "arguments": {"skill_id": "entry", "message": "hi"}},
     }) + "\n"
     reader.feed_data(call.encode("utf-8"))
-    await asyncio.sleep(0.05)
+    # 等 tools/call 真的进入在飞状态再 EOF —— 不睡估计值
+    await wait_for_condition(
+        lambda: _HangingEngine.started, message="tools/call 未进入在飞状态"
+    )
     reader.feed_eof()
     await asyncio.wait_for(task, timeout=2.0)
     assert _HangingEngine.cancelled is True

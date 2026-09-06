@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -62,6 +62,34 @@ async def wait_for_condition(
         if time.monotonic() >= deadline:
             raise AssertionError(message)
         await asyncio.sleep(poll_seconds)
+
+
+async def guard_ticks(
+    poll_seconds: float = 0.01,
+    *,
+    deadline_seconds: float | None = None,
+) -> AsyncIterator[None]:
+    """按**守卫期限**驱动的轮询节拍器,取代 ``for _ in range(N)`` 的固定圈数。
+
+    ``for _ in range(300): await asyncio.sleep(0.01)`` 把守卫期限硬编码成 3 秒,
+    而且写成了「圈数」——读代码的人看不出这是个期限,调参的人也不知道该调什么。
+    机器一慢圈数就用尽,症状是「条件没发生」,归因极难。
+
+    适用于**边轮询边处理**的循环（每圈要扫一遍缓冲区、按需回包），单纯等一个
+    条件成立请直接用 :func:`wait_for_condition`。
+
+    Args:
+        poll_seconds: 每圈间隔。
+        deadline_seconds: 守卫期限；None → ``GUARD_TIMEOUT_SECONDS``。
+
+    Yields:
+        每个节拍 yield 一次；期限到达后正常结束迭代（由调用方的断言暴露失败）。
+    """
+    budget = GUARD_TIMEOUT_SECONDS if deadline_seconds is None else deadline_seconds
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        await asyncio.sleep(poll_seconds)
+        yield
 
 
 @dataclass
