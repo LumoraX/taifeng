@@ -17,6 +17,7 @@ from taifeng.loop.pool_lifecycle import (
     EnginePoolUnresponsiveError,
 )
 from taifeng.loop.submission import Shutdown, Submission
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_shutdown_lifecycle import (
     _inject_shutdown_acceptance_failure,
     _start_fixed_shutdown,
@@ -96,7 +97,7 @@ async def _assert_spawn_blocks_terminal(
     cancel_seen: anyio.Event,
 ) -> None:
     """证明 root cancel 后真实 spawn 未收敛时 terminal/close 均不得推进。"""
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await cancel_seen.wait()
     await anyio.sleep(0.05)
     assert not shutdown.done()
@@ -119,7 +120,7 @@ async def _release_spawn_to_terminal(
 ) -> None:
     """放行 spawn 后证明句柄/slot/task 先于 Session terminal 收敛。"""
     allow_terminal.set()
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await core.terminal_entered.wait()
     assert engine.spawn_status([handle_id])[handle_id]["status"] == "cancelled"
     assert engine._spawn._owned_tasks == set()  # noqa: SLF001
@@ -172,7 +173,7 @@ async def test_shutdown_acceptance_fatal_precedes_completed_release_wrapper(
             counted_owner,
         )
 
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         with pytest.raises(AuditSessionReleaseError) as retry_caught:
             await _submit_shutdown(
                 state,
@@ -235,7 +236,7 @@ async def test_unpublished_finish_wrapper_wakes_same_id_retry(
             engine._audited_admission_lock,  # noqa: SLF001
             unpublished_owner,
         )
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         with pytest.raises(SessionAuditFrozenError):
             await _submit_shutdown(
                 state,
@@ -343,7 +344,7 @@ async def test_explicit_audited_shutdown_forces_live_spawn_convergence(
         session_id=session_id,
         entry_skill_id="entry",
     )
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await engine._spawn._await_root_cancel_ready()  # noqa: SLF001
     runner_started = anyio.Event()
     cancel_seen = anyio.Event()
@@ -360,7 +361,7 @@ async def test_explicit_audited_shutdown_forces_live_spawn_convergence(
         reason="shutdown-order",
     )
     handle_id = spawned["handle_id"]
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await runner_started.wait()
     await pool.release(session_id)
     assert session_id in pool._engines  # noqa: SLF001

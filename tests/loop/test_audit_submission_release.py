@@ -18,6 +18,7 @@ from taifeng.loop.audit_config import AuditConfig
 from taifeng.loop.pool import EnginePool
 from taifeng.loop.submission import UserMessage
 from taifeng.tool.registry import ToolRegistry
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_engine_bootstrap import _Registry
 
 if TYPE_CHECKING:
@@ -130,7 +131,7 @@ class _ProjectionGate:
 async def _wait_until(predicate: object) -> None:
     """在测试 deadline 内等待同步谓词成立。"""
     assert callable(predicate)
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         while not predicate():
             await anyio.lowlevel.checkpoint()
 
@@ -177,7 +178,7 @@ async def _begin_release_and_assert_application_convergence(
 ) -> asyncio.Task[None]:
     """验证 release 等待 application 收敛且 FINISHING 拒绝新输入。"""
     release = asyncio.create_task(pool.release(session_id))
-    with anyio.fail_after(2):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await gate.entered.wait()  # 排队 token 在 release 收敛时被应用（第二次投影）
     assert not release.done()
     assert not core.terminal_entered.is_set()

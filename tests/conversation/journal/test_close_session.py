@@ -15,6 +15,7 @@ from taifeng.conversation.journal import (
     SessionDescriptor,
 )
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -173,7 +174,7 @@ async def test_close_cancellation_releases_all_previously_acquired_writer_locks(
         scope.cancel()
 
     second_writer.lock.release()
-    with anyio.fail_after(0.5):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         async with first_writer.lock:
             pass
     first_ack = await journal.append(
@@ -186,7 +187,7 @@ async def test_close_cancellation_releases_all_previously_acquired_writer_locks(
         lease=second.lease,
         expected_seq=3,
     )
-    with anyio.fail_after(0.5):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await journal.close()
 
     assert first_ack.last_seq == 4

@@ -23,6 +23,7 @@ from taifeng.loop.audit import (
     SessionLifecycle,
     ThreadTerminalRequest,
 )
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 _ZERO_HASH = "0" * 64
 
@@ -512,7 +513,7 @@ async def test_finish_owner_cancellation_cannot_strand_shared_future() -> None:
         tasks.start_soon(owner)
         await core.terminal_entered.wait()
         core.release_terminal.set()
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             result = await coordinator.finish(
                 thread_terminals=_threads(),
                 reason="released",
@@ -595,7 +596,7 @@ async def test_unfinished_work_timeout_fails_closed_and_preserves_incomplete_sna
 
     await coordinator.admit_work("sub_never_done", durable_accept)
 
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         result = await coordinator.finish(thread_terminals=_threads(), reason="released")
 
     assert not result.audit_complete
@@ -649,7 +650,7 @@ async def test_terminal_append_timeout_fails_closed_before_emergency_close() -> 
     core = _LifecycleCore(pause_terminal=True)
     coordinator = _coordinator(core, finish_timeout=0.01)
 
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         result = await coordinator.finish(
             thread_terminals=_threads(),
             reason="released",

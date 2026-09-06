@@ -58,6 +58,7 @@ from taifeng.loop.submission import (
 from taifeng.skill.registry import FilesystemSkillRegistry
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -474,7 +475,7 @@ async def test_audited_enabled_image_preserves_detail_in_journal(
 
 async def _wait_for_applied_history(engine: AgentEngine) -> None:
     """等待 actor 把 durable user conversation item 应用到 hot history。"""
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         while not engine._history:  # noqa: SLF001
             await anyio.lowlevel.checkpoint()
 
@@ -517,7 +518,7 @@ async def test_audited_submit_waits_for_durable_ack_before_enqueue(
 
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(submit)
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await pausing_core.append_entered.wait()
 
         assert pausing_core.append_entered.is_set()
@@ -568,7 +569,7 @@ async def test_actor_applies_only_acknowledged_user_envelope_then_completes_work
     actor = asyncio.create_task(engine.run(cancel))
     try:
         await _wait_for_applied_history(engine)
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while (
                 engine._audit_state.projector.state(engine.thread_id).projected_seq  # type: ignore[attr-defined]  # noqa: SLF001
                 < user_envelope.seq
@@ -814,7 +815,7 @@ async def test_completed_actor_submission_replay_is_a_noop(
     actor = asyncio.create_task(engine.run(cancel))
     try:
         first_id = await engine._submit_audited_user_message(submission)  # noqa: SLF001
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while (
                 coordinator.snapshot().accepted_work_ids
                 or engine._turn_index == 0  # noqa: SLF001
@@ -966,7 +967,7 @@ async def test_actor_revalidates_full_token_before_hot_history_mutation(
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
     try:
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while not token.accepted_work.is_completed:
                 await anyio.lowlevel.checkpoint()
     finally:

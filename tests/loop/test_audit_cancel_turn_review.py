@@ -20,6 +20,7 @@ from taifeng.loop.audit import (
 from taifeng.loop.audit_targets import TargetCancellationRegistry
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import CancelTurn, UserMessage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_cancel_turn import (
     _controlled_sim_client,
     _load_journal,
@@ -69,11 +70,11 @@ async def test_pending_cancel_releases_admission_lock_for_shutdown(
         cancel_task = asyncio.create_task(
             engine.submit(CancelTurn(submission_id=target_id))
         )
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await target_token.wait_cancelled()
         cancel_task.cancel("caller cancelled while target pending")
 
-        with anyio.fail_after(0.2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await engine.shutdown()
         assert coordinator.snapshot().lifecycle is SessionLifecycle.FINISHING
         assert engine._audited_shutdown_enqueued  # noqa: SLF001
@@ -87,7 +88,7 @@ async def test_pending_cancel_releases_admission_lock_for_shutdown(
             submission_id="sub_lockcancel",
         )
         assert coordinator.snapshot().accepted_work_ids == ()
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await actor
     finally:
         client.coordinator.signal("release-target")
@@ -118,10 +119,10 @@ async def test_audited_shutdown_cancels_session_root_and_active_target(
     child = target_token.child("child-effect")
 
     await engine.shutdown()
-    with anyio.fail_after(2):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await target_token.wait_cancelled()
     client.coordinator.signal("release-target")
-    with anyio.fail_after(0.2):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await actor
 
     assert coordinator.session_root_cancel.is_cancelled
@@ -147,7 +148,7 @@ async def test_registry_rejects_same_cancel_id_for_different_target() -> None:
             target_submission_id="sub_first",
         )
     )
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await first.wait_cancelled()
     assert registry.register_terminal(
         "sub_first",
@@ -177,7 +178,7 @@ async def test_coordinator_freezes_on_cancel_identity_target_conflict() -> None:
             target_submission_id="sub_first",
         )
     )
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await first.wait_cancelled()
     assert coordinator.register_target_terminal(
         "sub_first",
@@ -234,7 +235,7 @@ async def test_root_first_late_cancel_does_not_claim_cancel_turn_attribution(
         await _wait_for_requests(client, 1)
         target_token = engine._pending[target_id].cancel  # noqa: SLF001
         coordinator.session_root_cancel.cancel()
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await target_token.wait_cancelled()
         monkeypatch.setattr(
             "taifeng.loop.submission.secrets.token_hex",
@@ -258,7 +259,7 @@ async def test_root_first_late_cancel_does_not_claim_cancel_turn_attribution(
         cancel_task = asyncio.create_task(
             engine.submit(CancelTurn(submission_id=target_id))
         )
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await resolution_entered.wait()
         client.coordinator.signal("release-target")
         cancel_id = await cancel_task

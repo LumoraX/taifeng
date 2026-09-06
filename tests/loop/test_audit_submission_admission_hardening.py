@@ -20,6 +20,7 @@ from taifeng.loop.audit import (
 from taifeng.loop.audit_admission import AcceptedUserMessage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import Shutdown, UserMessage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_submission_admission import (
     _blocking_sim_client,
     _engine_with_audit,
@@ -218,7 +219,7 @@ async def test_actor_rejects_coordinated_payload_tamper_with_stale_hashes(
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
     try:
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while not token.accepted_work.is_completed and not engine._history:  # noqa: SLF001
                 await anyio.lowlevel.checkpoint()
     finally:
@@ -301,7 +302,7 @@ async def test_cancelled_projection_checkpoint_stops_before_next_token(
     try:
         await store.entered.wait()
         _audited_turn_operation(engine, first_id).cancel("raw projector child cancel")
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while not actor.done() and engine._submissions.qsize() == 1:  # noqa: SLF001
                 await anyio.lowlevel.checkpoint()
         assert actor.done()
@@ -337,7 +338,7 @@ async def test_cancelled_projection_checkpoint_stops_before_shutdown(
         await store.entered.wait()
         _audited_turn_operation(engine, first_id).cancel("raw projector child cancel")
         with pytest.raises(asyncio.CancelledError) as cancelled:
-            with anyio.fail_after(1):
+            with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
                 await actor
         assert cancelled.value is store.cancelled
         queued = tuple(engine._submissions._queue)  # type: ignore[attr-defined]  # noqa: SLF001
@@ -376,7 +377,7 @@ async def test_projection_failure_marks_stale_without_freezing_or_losing_hot_his
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
     try:
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while True:
                 projection = coordinator.projection_snapshot(engine.thread_id)
                 if projection is not None:
@@ -414,7 +415,7 @@ async def test_projection_identity_invariant_freezes_before_effect_dispatch(
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
     try:
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while not token.accepted_work.is_completed:
                 await anyio.lowlevel.checkpoint()
     finally:
@@ -452,7 +453,7 @@ async def test_unclassified_projector_invariant_freezes_coordinator(
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
     try:
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while not token.accepted_work.is_completed:
                 await anyio.lowlevel.checkpoint()
     finally:

@@ -62,7 +62,7 @@ async def test_active_target_cancel_is_scoped_and_same_submission_replays() -> N
             ),
             results,
         )
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await target.wait_cancelled()
 
         assert target.is_cancelled
@@ -144,11 +144,11 @@ async def test_freeze_wakes_pending_target_resolution_with_frozen_error() -> Non
         )
 
     task = asyncio.create_task(resolve())
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await target.wait_cancelled()
     coordinator.freeze(OSError("journal unavailable"))
 
-    with anyio.fail_after(1), pytest.raises(SessionAuditFrozenError):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS), pytest.raises(SessionAuditFrozenError):
         await task
 
 

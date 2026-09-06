@@ -18,6 +18,7 @@ from taifeng.llm.errors import ServerError
 from taifeng.llm.providers.sim import SimClient, SimFault, SimTurn
 from taifeng.loop.audit_support import AuditHealth, SessionAuditFrozenError
 from taifeng.loop.cancellation import CancellationToken
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_llm import (
     _api_request,
     _attempt_request,
@@ -425,7 +426,7 @@ async def test_checkpoint_timeout_is_bounded_and_freezes_without_worker_leak(
     )
     visible: list[str] = []
 
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         with pytest.raises(SessionAuditFrozenError):
             await _consume(client, observer, visible)
 

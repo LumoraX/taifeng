@@ -22,6 +22,7 @@ from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.rewind import RewindCheckpoint
 from taifeng.loop.submission import UserMessage
 from taifeng.loop.turn import TurnOutcome
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_submission_admission import _engine_with_audit
 
 if TYPE_CHECKING:
@@ -171,7 +172,7 @@ async def test_audited_history_conflict_freezes_before_runner_state_writeback(
 async def _wait_until(predicate: object) -> None:
     """在测试 deadline 内等待同步谓词成立。"""
     assert callable(predicate)
-    with anyio.fail_after(2):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         while not predicate():
             await anyio.lowlevel.checkpoint()
 

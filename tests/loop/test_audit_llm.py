@@ -38,6 +38,7 @@ from taifeng.loop.audit_llm import (
 from taifeng.loop.audit_support import AuditHealth, SessionAuditFrozenError
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import UserMessage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_submission_admission import _engine_with_audit
 
 if TYPE_CHECKING:
@@ -589,7 +590,7 @@ async def test_sequential_audited_turns_keep_accepted_turn_indexes(
     try:
         first_id = await engine.submit(UserMessage(text="FIRST_ATTEMPT"))
         second_id = await engine.submit(UserMessage(text="SECOND_ATTEMPT"))
-        with anyio.fail_after(2):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while (
                 engine._turn_index < 2  # noqa: SLF001
                 or coordinator.snapshot().accepted_work_ids

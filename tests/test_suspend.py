@@ -12,6 +12,7 @@ from taifeng.permission.types import PermissionRequest, SuspendingPrompter
 from taifeng.suspend.reason import PendingRequest, SuspendReason
 from taifeng.suspend.record import SuspensionRecord
 from taifeng.suspend.signal import SuspendSignal
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 
 def test_suspend_reason_values():
@@ -1393,8 +1394,9 @@ async def test_subscribe_terminates_on_suspension(skills_dir, threads_dir):
 
     本测试用真实 SuspendingPrompter：submit 一个会挂起的 UserMessage，
     然后用 **无手动 break** 的 ``async for ev in engine.subscribe(sub_id)`` 收事件，
-    并用 ``anyio.fail_after(5)`` 包裹——若 subscribe 不在挂起时返回，5 秒后超时即测试失败，
-    把"挂死"显式暴露为失败而非无限挂起。最后断言 events[-1] == "turn_suspended"。
+    并用 ``anyio.fail_after(GUARD_TIMEOUT_SECONDS)`` 包裹——若 subscribe 不在挂起时返回，
+    守卫期限到点即测试失败，把"挂死"显式暴露为失败而非无限挂起。
+    最后断言最后一条 turn 终态是 ``turn_suspended``。
     """
     import anyio
 
@@ -1446,9 +1448,10 @@ max_call_depth: 2
     sub_id = await engine.submit(taifeng.UserMessage(text="go"))
 
     # 关键：NO manual break —— 完全依赖 subscribe 自身在 turn_suspended 时 return。
-    # fail_after(5) 把"消费者挂死"转成可观测的超时失败。
+    # fail_after 守卫把"消费者挂死"转成可观测的超时失败（期限走守卫常量，
+    # 不按"正常应该多快"估——条件一满足就返回，给足期限不拖慢通过路径）。
     events: list[str] = []
-    with anyio.fail_after(5):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         async for ev in engine.subscribe(sub_id):
             events.append(ev.msg.kind)
 

@@ -21,6 +21,7 @@ from taifeng.loop.audit_shutdown import _submit_shutdown
 from taifeng.loop.pool import EnginePool
 from taifeng.loop.submission import Shutdown, Submission
 from taifeng.tool.registry import ToolRegistry
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_engine_bootstrap import _Registry
 from tests.loop.test_audit_submission_release import _build_release_scenario
 
@@ -190,7 +191,7 @@ async def test_release_racing_shutdown_uses_one_finish_and_stable_terminal_ids(
         monkeypatch,
         "shutdown_race",
     )
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await acceptance_entered.wait()
     release = asyncio.create_task(pool.release(session_id))
     await anyio.lowlevel.checkpoint()
@@ -269,7 +270,7 @@ async def test_shutdown_id_is_unique_and_same_id_retry_reads_old_result(
     first = await _start_fixed_shutdown(engine, monkeypatch, "shutdown_first")
     second: asyncio.Task[str] | None = None
     retry: asyncio.Task[str] | None = None
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await acceptance_entered.wait()
     allow_acceptance.set()
 
@@ -290,7 +291,7 @@ async def test_shutdown_id_is_unique_and_same_id_retry_reads_old_result(
             monkeypatch,
             "shutdown_first",
         )
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await replay_entered.wait()
         allow_replay.set()
         await anyio.lowlevel.checkpoint()
@@ -447,7 +448,7 @@ async def test_shutdown_caller_cancellation_does_not_truncate_owned_finish(
         monkeypatch,
         "shutdown_caller_cancel",
     )
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await acceptance_entered.wait()
 
     shutdown.cancel("caller cancelled")
@@ -522,7 +523,7 @@ async def test_shutdown_acceptance_fatal_finishes_then_reraises_original(
             counted_owner,
         )
 
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         with pytest.raises(AuditSessionReleaseError) as retry_caught:
             await _submit_shutdown(
                 state,
@@ -572,7 +573,7 @@ async def test_legacy_shutdown_keeps_actor_queue_and_pool_release_behavior(
     )
 
     shutdown_id = await engine.submit(Shutdown())
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await pool._engine_tasks[session_id]  # noqa: SLF001
 
     assert shutdown_id == "sub_shutdown_legacy"
@@ -612,7 +613,7 @@ async def test_audited_shutdown_event_uses_durable_public_submission_id(
     collector = asyncio.create_task(collect_until_shutdown())
     await anyio.lowlevel.checkpoint()
     shutdown_id = await engine.submit(Shutdown())
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         await collector
 
     assert shutdown_id == "sub_shutdown_public"

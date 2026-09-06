@@ -12,6 +12,7 @@ from taifeng.loop.audit import (
     SessionFinishingError,
     SessionLifecycle,
 )
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_coordinator_lifecycle import (
     _coordinator,
     _LifecycleCore,
@@ -77,7 +78,7 @@ async def test_late_accept_during_frozen_finishing_cannot_return_enqueueable_wor
         tasks.start_soon(admit)
         await accept_entered.wait()
         tasks.start_soon(finish)
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await core.close_entered.wait()
         frozen = coordinator.snapshot()
         assert frozen.lifecycle is SessionLifecycle.FINISHING

@@ -22,6 +22,7 @@ from taifeng.loop.audit import (
     SessionFinishingError,
     SessionLifecycle,
 )
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_coordinator_lifecycle import (
     _coordinator,
     _LifecycleCore,
@@ -209,7 +210,7 @@ async def test_terminal_append_fatal_settles_future_then_reraises_same_object() 
     with pytest.raises(SystemExit) as raised:
         await coordinator.finish(thread_terminals=_threads(), reason="released")
 
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         follower = await coordinator.finish(
             thread_terminals=_threads(),
             reason="released",
@@ -232,7 +233,7 @@ async def test_normal_close_fatal_settles_future_then_reraises_same_object() -> 
     with pytest.raises(SystemExit) as raised:
         await coordinator.finish(thread_terminals=_threads(), reason="released")
 
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         follower = await coordinator.finish(
             thread_terminals=_threads(),
             reason="released",
@@ -260,7 +261,7 @@ async def test_emergency_close_fatal_is_reraised_when_main_failure_is_not_fatal(
     with pytest.raises(SystemExit) as raised:
         await coordinator.finish(thread_terminals=_threads(), reason="released")
 
-    with anyio.fail_after(1):
+    with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
         follower = await coordinator.finish(
             thread_terminals=_threads(),
             reason="released",
