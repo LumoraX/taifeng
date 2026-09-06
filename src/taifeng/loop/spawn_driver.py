@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import (
     ResponseItem,
+    spawn_settled_item,
     user_message,
 )
 from taifeng.loop.event import (
@@ -473,6 +474,7 @@ class SpawnDriver:
             self._spawn_handles.set_result(
                 handle_id, status="done", result=outcome.final_text
             )
+            await self._persist_settled(child_thread_id, "done", outcome.final_text)
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnCompleted(data={
@@ -510,6 +512,7 @@ class SpawnDriver:
             self._spawn_handles.set_result(
                 handle_id, status="cancelled", result=outcome.error
             )
+            await self._persist_settled(child_thread_id, "cancelled", outcome.error)
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnCancelled(data={"handle_id": handle_id}),
@@ -520,6 +523,7 @@ class SpawnDriver:
             self._spawn_handles.set_result(
                 handle_id, status="error", result=err
             )
+            await self._persist_settled(child_thread_id, "error", err)
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnFailed(data={"handle_id": handle_id, "error": err}),
@@ -559,7 +563,10 @@ class SpawnDriver:
         # 终态幂等:已收敛句柄不二次处理(终态事件恰好一次)。
         if self._spawn_handles.is_terminal(handle_id):
             return
+        handle = self._spawn_handles.get(handle_id)
+        assert handle is not None  # is_terminal 已判存在
         self._spawn_handles.set_result(handle_id, status="error", result=error)
+        await self._persist_settled(handle.child_thread_id, "error", error)
         await eng._emit(EventMsg(  # noqa: SLF001
             submission_id=handle_id,
             msg=SpawnFailed(data={"handle_id": handle_id, "error": error}),
@@ -575,6 +582,52 @@ class SpawnDriver:
             logger.exception(
                 "join-barrier recheck failed after spawn settled error: %s",
                 handle_id)
+
+    async def _persist_settled(
+        self, child_thread_id: str, status: str, result: str | None,
+    ) -> None:
+        """终态持久锚:向子 thread append ``spawn_settled``(三个收敛点共用)。
+
+        冷恢复 ``_infer_spawn_status_from_child`` 据此得到与热状态一致的终态,不再
+        凭「有无 assistant 文本」猜 done(wave2b 复现 f)。durable 先于 emit。
+        """
+        handle_id = next(
+            h.handle_id for h in self._spawn_handles.handles.values()
+            if h.child_thread_id == child_thread_id
+        )
+        await self._engine._store.append(spawn_settled_item(  # noqa: SLF001
+            handle_id=handle_id, status=status, result=result,
+            thread_id=child_thread_id,
+        ))
+
+    async def _settle_cancelled_suspended(self, handle: SpawnHandle) -> None:
+        """挂起句柄的 cancelled 收敛(kill / 续跑链取消共用):落盘 + 撤销 TTL + emit + barrier。
+
+        前置:调用方已在**同步步**把句柄置 cancelled(与 token.cancel 同步,使并发
+        resume 的 CAS 据此放弃)。无 live runner 驱动 _finalize_spawn,故在此内联。
+        落盘两条(append-only,子 thread):
+          - ``suspend_resolved:<record_id>`` marker:活跃挂起随取消一并核销——否则
+            冷恢复推断回 suspended(僵尸复活)、TTL 重武装后对已 kill 句柄提交裁决、
+            match_suspended_spawn 允许再次 Resume(wave2b 复现 e);
+          - ``spawn_settled(cancelled)`` 终态锚。
+        同时撤销该 record 的到期定时器(R4:被 kill 的句柄不再收到裁决)。
+        """
+        eng = self._engine
+        child_tid = handle.child_thread_id
+        record = eng._find_active_suspension_in(  # noqa: SLF001
+            await eng._load_thread_items(child_tid))  # noqa: SLF001
+        if record is not None:
+            timer = eng._ttl_timers.pop(record.record_id, None)  # noqa: SLF001
+            if timer is not None:
+                timer.cancel()
+            await eng._append_resolved_marker(child_tid, record.record_id)  # noqa: SLF001
+        await self._persist_settled(child_tid, "cancelled", None)
+        await eng._emit(EventMsg(  # noqa: SLF001
+            submission_id=handle.handle_id,
+            msg=SpawnCancelled(data={"handle_id": handle.handle_id}),
+        ))
+        # join-barrier:本句柄进入 cancelled 终态,可能凑齐某 barrier → 检查。
+        await self._check_barriers(handle.handle_id)
 
     def suspended_handles(self) -> list[SpawnHandle]:
         """当前 suspended 状态句柄的只读快照(suspension-ttl 冷重武装枚举用)。"""
@@ -652,8 +705,9 @@ class SpawnDriver:
             退栈后由 _drive_spawn 调 _finalize_spawn 唯一一次 emit SpawnCancelled
             （_drive_spawn 的 finally 同时释放 K1 槽位）。如此 running-kill 恰好一次。
           - **挂起句柄**（status=suspended，无 live 子树驱动 finalize）→ 取消 token
-            （空操作，首发 _drive_spawn 已退栈），并在此内联落 cancelled + emit +
-            _check_barriers 收敛，确保挂起句柄状态确定对外可见。
+            （空操作，首发 _drive_spawn 已退栈），同步步置 cancelled（并发 resume 的
+            CAS 据此放弃），再经 ``_settle_cancelled_suspended`` 落 resolved marker +
+            ``spawn_settled`` 锚、撤销 TTL、emit、_check_barriers，确保热冷一致。
 
         为何按 status 分流而非统一内联：running-kill 若也内联 emit，则 live runner
         退栈后 _finalize_spawn 会对同一句柄再 emit 第二条 spawn_cancelled（消费方
@@ -666,7 +720,6 @@ class SpawnDriver:
         Raises:
             KeyError: handle_id 未注册（调用方传错）。
         """
-        eng = self._engine
         h = self._spawn_handles.get(handle_id)
         if h is None:
             raise KeyError(handle_id)
@@ -681,15 +734,11 @@ class SpawnDriver:
         #   （已做终态幂等），此处**不**内联 emit，避免双发 spawn_cancelled。
         if h.status == "running":
             return
-        # suspended：无 live 子树驱动 finalize（首发 _drive_spawn 已退栈、K1 已释放），
-        #   故在此内联落 cancelled 终态 + emit + barrier 检查，保证确定收敛。
+        # suspended：无 live 子树驱动 finalize（首发 _drive_spawn 已退栈、K1 已释放）。
+        #   先在同步步落 cancelled(与 token.cancel 同一步,resume 的 CAS 据此放弃),
+        #   再落盘 / 撤销 TTL / emit / barrier 收敛(wave2b:kill 不再只改内存)。
         self._spawn_handles.set_result(handle_id, status="cancelled", result=None)
-        await eng._emit(EventMsg(  # noqa: SLF001
-            submission_id=handle_id,
-            msg=SpawnCancelled(data={"handle_id": handle_id}),
-        ))
-        # join-barrier:kill 使本句柄进入 cancelled 终态,可能凑齐某 barrier → 检查。
-        await self._check_barriers(handle_id)
+        await self._settle_cancelled_suspended(h)
 
     def has_live_spawns(self) -> bool:
         """是否存在未终结的 detached 后台工作 —— 引用计数保活。

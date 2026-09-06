@@ -25,6 +25,7 @@ ItemKind = Literal[
     "join_barrier",      # 新增:join-barrier 登记锚(记录等待的 handle_ids + 续接 skill)
     "join_barrier_fired",  # 新增:barrier 已触发的幂等标记(重载时不重复触发)
     "skill_outcome",     # 新增:单次 skill 执行的战绩记账(认知回路 ⑦ 地基);旁路,不进 LLM 视图
+    "spawn_settled",     # 新增(wave2b):spawn 句柄终态锚,落子 thread(冷推断真相);不进 LLM 视图
 ]
 
 
@@ -302,6 +303,33 @@ def join_barrier_fired_item(
             "barrier_id": barrier_id,
             "then_thread_id": then_thread_id,
         },
+    )
+
+
+def spawn_settled_item(
+    *,
+    handle_id: str,
+    status: str,
+    result: str | None,
+    thread_id: str,
+) -> ResponseItem:
+    """子 thread 落:spawn 句柄终态锚(done / error / cancelled;冷恢复推断的真相)。
+
+    为何落子 thread 而非父 thread:父 thread 在飞 turn 期间只有 runner 一个写者
+    (ADR 0029),而 detached 收敛时刻不可控;子 thread 此时无热 buffer,store 即真相。
+    suspended 非终态不落锚(活跃 suspension 记录即真相)。不进 LLM 视图;随逻辑
+    history 的 rewind 截断一并折叠(重推后由新终态再落一条,最后一条生效)。
+
+    Args:
+        handle_id: spawn 句柄 id(与父 thread 的 spawn 锚对应)。
+        status: 终态三值之一。
+        result: 终态结果(done → 最终文本;error → 错误串;cancelled → None)。
+        thread_id: 本条 item 归属的**子** thread_id。
+    """
+    return ResponseItem(
+        kind="spawn_settled",
+        thread_id=thread_id,
+        payload={"handle_id": handle_id, "status": status, "result": result},
     )
 
 

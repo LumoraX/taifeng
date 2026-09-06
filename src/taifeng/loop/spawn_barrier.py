@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from taifeng.conversation.models import user_message
 from taifeng.loop.event import (
@@ -27,6 +27,7 @@ from taifeng.loop.spawn_handle import JoinBarrier
 
 if TYPE_CHECKING:
     from taifeng.loop.spawn_driver import SpawnDriver
+    from taifeng.loop.spawn_handle import SpawnStatus
 
 
 class JoinBarrierCoordinator:
@@ -309,13 +310,17 @@ class JoinBarrierCoordinator:
     async def _infer_spawn_status_from_child(
         self, handle_id: str, child_thread_id: str
     ) -> None:
-        """据子 thread 的持久态推断单个 spawn 句柄的终态,best-effort 回写句柄。
+        """据子 thread 的逻辑 history 推断单个 spawn 句柄的状态,回写句柄。
 
-        分类(与 _drive_spawn/_finalize_spawn 的终态语义对齐):
-          - 活跃挂起记录 → suspended(可后续 resume)
-          - 无挂起 + 有 assistant_message → done(result = 最后一条 assistant 文本)
-          - 既无挂起也无 assistant_message → 跑到一半被中断 → 保持 register 的 running
-            (v1 best-effort:不臆断为 error,留 running 表"需重跑";绝不崩)
+        判定(与 _finalize_spawn / _settle_failed / kill_spawn 的终态语义对齐):
+          1. 「最后一条活跃挂起记录」与「最后一条 ``spawn_settled`` 终态锚」按位置
+             靠后者胜:挂起在后 → suspended(可后续 resume);锚在后 → 锚的终态
+             (done / error / cancelled,result 随锚)。suspended-kill 已核销挂起并落
+             cancelled 锚;resume 后再挂起则挂起落在旧锚之后。
+          2. 两者皆无 → 旧启发(本 change 之前的转录前向兼容):有 assistant_message
+             → done(result = 最后一条 assistant 文本);否则跑到一半被中断 → 保持
+             register 的 running(v1 best-effort:不臆断为 error,留 running 表
+             "需重跑";绝不崩)。
 
         Args:
             handle_id: 已 register 的句柄 id。
@@ -324,13 +329,33 @@ class JoinBarrierCoordinator:
         drv = self._driver
         eng = drv._engine  # noqa: SLF001
         items = await eng._load_thread_items(child_thread_id)  # noqa: SLF001
-        # 优先判挂起:活跃(未被 resolved-marker 核销)的挂起记录 → suspended
-        if eng._find_active_suspension_in(items) is not None:  # noqa: SLF001
+        settled_pos, settled = -1, None
+        for i, it in enumerate(items):
+            if it.kind == "spawn_settled" and it.payload.get("handle_id") == handle_id:
+                settled_pos, settled = i, it
+        record = eng._find_active_suspension_in(items)  # noqa: SLF001
+        record_pos = -1
+        if record is not None:
+            record_pos = max(
+                i for i, it in enumerate(items)
+                if it.kind == "suspension"
+                and it.payload.get("record_id") == record.record_id)
+        # 1. 活跃挂起晚于终态锚 → suspended
+        if record is not None and record_pos > settled_pos:
             drv._spawn_handles.set_result(  # noqa: SLF001
                 handle_id, status="suspended", result=None
             )
             return
-        # 无挂起:找最后一条 assistant_message 作为完成结果
+        # 1'. 终态锚是最新真相 → 直接回写(不再凭 assistant 文本猜)
+        if settled is not None:
+            status = str(settled.payload["status"])
+            assert status in ("done", "error", "cancelled"), status  # 自家写入,坏值即 bug
+            drv._spawn_handles.set_result(  # noqa: SLF001
+                handle_id, status=cast("SpawnStatus", status),
+                result=settled.payload.get("result"),
+            )
+            return
+        # 2. 无锚(旧转录):找最后一条 assistant_message 作为完成结果
         last_text: str | None = None
         for it in items:
             if it.kind == "assistant_message":

@@ -267,13 +267,16 @@ async def test_kill_during_resume_window_is_final(
     rec = await _active_record(pool, ctid)
     req_id = rec.pending[0].request_id
 
-    # 把 resume 钉在「marker 未落、runner 未起」的窗口(实例属性遮蔽注入点)
+    # 把 resume 钉在「marker 未落、runner 未起」的窗口(实例属性遮蔽注入点)。
+    # 只钉**首次**调用(resume 链):kill 的 suspended 收敛同样经此落 marker,
+    # 若也被钉住会与测试主线互等。
     hold, entered = asyncio.Event(), asyncio.Event()
     orig = engine._append_resolved_marker  # noqa: SLF001
 
     async def gated(thread_id: str, record_id: str) -> None:
-        entered.set()
-        await hold.wait()
+        if not entered.is_set():
+            entered.set()
+            await hold.wait()
         await orig(thread_id, record_id)
 
     engine._append_resolved_marker = gated  # noqa: SLF001
