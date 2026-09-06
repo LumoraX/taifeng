@@ -37,12 +37,16 @@ from taifeng.loop.event import (
 )
 from taifeng.loop.peer_mailbox import PeerMailbox
 from taifeng.loop.spawn_barrier import JoinBarrierCoordinator
-from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
+from taifeng.loop.spawn_handle import (
+    SpawnDrivePlan,
+    SpawnHandle,
+    SpawnHandleRegistry,
+)
 from taifeng.loop.spawn_resume import SpawnResumeChain
 from taifeng.loop.spawn_rewind import SpawnRewindChain
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
@@ -89,6 +93,10 @@ class SpawnDriver:
         # thread-addressable rewind:rewind 在飞的 child_thread_id 集合。
         # 并发双 Rewind 拒后到者(占位期间二次 rewind 报 thread_running)。
         self._rewinding_threads: set[str] = set()
+        # wave2b:child_thread_id → 重载互斥锁(惰性建)。二次驱动「重载逻辑
+        # history → 登记 live runner」段与 peer 投递的「非 live 判定 → 落史 / 唤醒」
+        # 段互斥,杜绝消息落在「已重载、未登记」窗口只存 store 不进 buffer(热冷分叉)。
+        self._thread_locks: dict[str, asyncio.Lock] = {}
         # 子协调器（spawn-module-structure 契约:无自有状态,经本 driver 访问
         # 上述运行态表;公共入口由本类同名转发器暴露,外部契约不变）。
         self._peers = PeerMailbox(self)
@@ -210,6 +218,11 @@ class SpawnDriver:
             self._spawn_handles.register(
                 handle_id=handle_id, skill_id=skill_id, child_thread_id=child_thread_id
             )
+            # 取消 token 与句柄登记同一同步步派生:首发 runner 起跑前的 kill_spawn
+            # 也能命中(此前 token 在后台 task 内才派生,窗口内 kill 是静默 no-op)。
+            assert eng._root_cancel is not None  # _await_root_cancel_ready 已保证  # noqa: SLF001
+            cancel = eng._root_cancel.child(f"spawn:{handle_id}")  # noqa: SLF001
+            self._spawn_cancels[handle_id] = cancel
             from taifeng.conversation.models import spawn_item
 
             anchor = spawn_item(
@@ -233,7 +246,7 @@ class SpawnDriver:
             # 6. 分离 task：后台独立跑子 skill turn（非阻塞），跑完回写句柄 + emit 终态。
             #    seed 传入 _drive_spawn，确保 history_buffer[0] 与 store 里的同一对象。
             self._start_owned_task(
-                self._drive_spawn(handle_id, target, child_thread_id, seed),
+                self._drive_spawn(handle_id, target, child_thread_id, seed, cancel),
                 name=f"spawn:{handle_id}",
             )
         except Exception:
@@ -297,45 +310,140 @@ class SpawnDriver:
         target: Any,
         child_thread_id: str,
         seed: ResponseItem,
+        cancel: CancellationToken,
     ) -> None:
-        """后台分离 task：跑子 skill turn 至完成/挂起/失败，回写句柄 + emit 终态。
+        """首发后台分离 task:经统一驱动入口跑子 skill turn 至终态。
 
-        外层宽 except 兜底：任何意外异常都把句柄落 error + emit SpawnFailed，
-        绝不让句柄卡在 running（也不静默吞错——记日志 + emit）。收尾必释放 K1 slot。
-
-        C1：seed 由 spawn_skill 构造并落盘后传入，此处不重建——保证 store 与
-        history_buffer[0] 使用完全相同的对象（相同 id），冷恢复时不会重建出不同图谱。
+        C1:seed 由 spawn_skill 构造并落盘后传入,此处不重建——保证 store 与
+        history_buffer[0] 使用完全相同的对象(相同 id),冷恢复时不会重建出不同图谱。
+        K1 slot 由 spawn_skill 预留(``slot_owned=True``,入口 finally 释放);取消
+        token 亦在 spawn_skill 登记句柄的同一同步步派生并登记(首发前 kill 可命中)。
 
         Args:
             handle_id: 本次 spawn 的句柄 id。
-            target: 子 skill 定义。
-            child_thread_id: 子 thread id（句柄已登记的引用）。
-            seed: 已落盘的种子 user_message（由 spawn_skill 构造并 append 到 store）。
+            target: 子 skill 定义(spawn_skill 已解析)。
+            child_thread_id: 子 thread id(句柄已登记的引用)。
+            seed: 已落盘的种子 user_message。
+            cancel: spawn_skill 已登记的本 spawn 取消 token。
+        """
+        del child_thread_id  # 由句柄解析;参数保留以对齐 spawn_skill 的调用形状
+
+        async def _prepare() -> SpawnDrivePlan:
+            return SpawnDrivePlan(history=[seed])
+
+        await self._drive(
+            handle_id, label="spawn", prepare=_prepare,
+            expect_status=("running",), slot_owned=True, cancel=cancel,
+            target=target,
+        )
+
+    def _thread_lock(self, child_thread_id: str) -> asyncio.Lock:
+        """按 child_thread_id 取重载互斥锁(惰性创建;peer 投递与二次驱动重载段互斥)。"""
+        lock = self._thread_locks.get(child_thread_id)
+        if lock is None:
+            lock = self._thread_locks[child_thread_id] = asyncio.Lock()
+        return lock
+
+    async def _drive(
+        self,
+        handle_id: str,
+        *,
+        label: str,
+        prepare: Callable[[], Awaitable[SpawnDrivePlan | None]],
+        expect_status: tuple[str, ...],
+        slot_owned: bool = False,
+        cancel: CancellationToken | None = None,
+        target: Any | None = None,
+    ) -> None:
+        """detached 子 runner 的**唯一**驱动入口(spawn-module-structure 契约)。
+
+        五条路径——首发 / 直接 resume / 嵌套 resume / rewind 重推 / peer 唤醒——
+        只提供 ``prepare`` 与期望状态,其余语义在此闭合:
+          1. **K1**:``slot_owned=False`` 时等待式预留(并发满额排队;句柄已终态 /
+             根取消即放弃)。此前 resume / rewind 重推不占 slot,广度闸被绕过。
+          2. **线程锁内**:``prepare()`` 产出逻辑 history 与采样参数(None → 调用方
+             已 emit 拒绝,放弃);**状态 CAS**——句柄不在 ``expect_status`` 内(典型:
+             resume 期间被 kill 已落 cancelled)→ 放弃,不改状态、不 emit;随后
+             **同一同步步**登记取消 token、回写 running、构造 runner、登记 live
+             (其间无 await)。此前「set_result(running) → await → 登记 token /
+             live」之间的窗口让 kill 要么取消旧 token、要么被 running 覆盖终态,
+             一个句柄发出 spawn_cancelled 后又发 spawn_completed。
+          3. ``runner.run()`` → ``_finalize_spawn`` 单点收敛(再挂起 → 可再 resume)。
+          4. 宽 except → ``_settle_failed``(不静默、不卡 running);finally 释放 K1。
+
+        Args:
+            handle_id: 已登记的句柄 id。
+            label: 取消 token 名前缀(spawn / spawn_resume / spawn_rewind / peer_wake)。
+            prepare: 线程锁内产出 ``SpawnDrivePlan``;返回 None 表示放弃(已 emit 拒绝)。
+            expect_status: 本路径允许起跑的句柄状态集(CAS 判据)。
+            slot_owned: 调用方已 ``reserve_manual``(首发 / 唤醒)则 True;本方法
+                finally 一律 ``release_manual``。
+            cancel: 调用方已派生并登记的 token(首发 / rewind / 唤醒在各自的同步步
+                派生,使 runner 起跑前的 kill 也能命中);None → 此处派生。
+            target: 已解析的子 skill 定义;None → 按句柄 skill_id 经 snapshot 解析。
         """
         eng = self._engine
-        try:
-            assert eng._root_cancel is not None  # spawn_skill 已校验  # noqa: SLF001
-            cancel = eng._root_cancel.child(f"spawn:{handle_id}")  # noqa: SLF001
-            # 登记本 spawn 的取消 token，供 kill_spawn 精确取消单个 spawn 子树。
-            self._spawn_cancels[handle_id] = cancel
-            runner = eng._build_child_runner(  # noqa: SLF001
-                target, child_thread_id, seed, cancel
+        handle = self._spawn_handles.get(handle_id)
+        assert handle is not None, handle_id
+        child_tid = handle.child_thread_id
+        if not slot_owned:
+            acquired = await eng._spawn_registry.acquire_manual(  # noqa: SLF001
+                should_abort=lambda: (
+                    self._spawn_handles.is_terminal(handle_id)
+                    or eng._root_cancel is None  # noqa: SLF001
+                    or eng._root_cancel.is_cancelled  # noqa: SLF001
+                ),
             )
-            # peer-mailbox：登记 live runner（QueueOnly 投运行中目标用其 pending_input）
-            self._live_runners[child_thread_id] = runner
+            if not acquired:
+                return
+        try:
+            async with self._thread_lock(child_tid):
+                plan = await prepare()
+                if plan is None:
+                    return
+                if handle.status not in expect_status:
+                    # 典型:resume 核销期间被 kill(suspended → cancelled)。kill 已
+                    # 收敛终态,这里放弃即是「kill 胜出」,不得再起 runner。
+                    logger.info(
+                        "spawn drive abandoned (%s): handle=%s status=%s expected=%s",
+                        label, handle_id, handle.status, expect_status)
+                    return
+                skill = target if target is not None else eng._snapshot.get(  # noqa: SLF001
+                    handle.skill_id)
+                if skill is None:
+                    raise RuntimeError(f"{label}_skill_missing: {handle.skill_id}")
+                assert eng._root_cancel is not None  # engine.run 已启动  # noqa: SLF001
+                token = cancel or eng._root_cancel.child(f"{label}:{handle_id}")  # noqa: SLF001
+                # —— 同一同步步:token 登记 → running → 构造 → live 登记(无 await)——
+                self._spawn_cancels[handle_id] = token
+                self._spawn_handles.set_result(handle_id, status="running", result=None)
+                runner = eng._build_child_runner(  # noqa: SLF001
+                    skill, child_tid, plan.history[0], token,
+                    history=plan.history,
+                    auto_retry_count=plan.auto_retry_count,
+                    sample_scope_id=plan.sample_scope_id,
+                )
+                if plan.seed_pending_call_id is not None:
+                    # rewind retry_tool:采样前先补跑被保留的悬空 call
+                    runner._seed_pending_call_id = plan.seed_pending_call_id  # noqa: SLF001
+                if plan.cache_break_reason is not None:
+                    # R2:蓄意回退上下文 → 首采样 cache 失效记为 expected
+                    runner._next_cache_break_expected = True  # noqa: SLF001
+                    runner._next_cache_break_reason = plan.cache_break_reason  # noqa: SLF001
+                self._live_runners[child_tid] = runner
             try:
                 outcome = await runner.run()
             finally:
-                self._live_runners.pop(child_thread_id, None)
-            await self._finalize_spawn(handle_id, child_thread_id, outcome)
+                self._live_runners.pop(child_tid, None)
+            await self._finalize_spawn(handle_id, child_tid, outcome)
         except Exception as e:  # noqa: BLE001
-            # 兜底：不让句柄卡死在 running。记日志（不静默）+ 单点收敛失败终态
-            # （含 join-barrier 重查；barrier 自身故障抑制为日志，不逃出后台 task）。
-            logger.exception("detached spawn driver crashed: %s", handle_id)
+            # 兜底:不让句柄卡死在 running。记日志(不静默)+ 单点收敛失败终态
+            # (含 join-barrier 重查;barrier 自身故障抑制为日志,不逃出后台 task)。
+            logger.exception("spawn drive crashed (%s): %s", label, handle_id)
             await self._settle_failed(
                 handle_id, str(e), suppress_barrier_errors=True)
         finally:
-            # K1：detached 语义下手动占用的 slot 在子 task 收尾时释放。
+            # K1:无论谁预留的 slot,都在驱动收尾时释放。
             eng._spawn_registry.release_manual()  # noqa: SLF001
 
     async def _finalize_spawn(

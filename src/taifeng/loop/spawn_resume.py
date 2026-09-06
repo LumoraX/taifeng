@@ -24,6 +24,7 @@ from taifeng.loop.event import (
     SuspensionResolved,
     SuspensionResolveRejected,
 )
+from taifeng.loop.spawn_handle import SpawnDrivePlan
 from taifeng.loop.submission import Resume, Submission
 
 if TYPE_CHECKING:
@@ -185,42 +186,28 @@ class SpawnResumeChain:
                 "request_ids": sorted(record.request_ids())}),
         ))
 
-        # 句柄回到 running（子 turn 又要跑了）；abort 则不续跑，直接落终态。
-        drv._spawn_handles.set_result(  # noqa: SLF001
-            handle.handle_id, status="running", result=None)
         if plan.abort:
             # abort 裁决（TTL 到期 / 人工）：子 turn 在挂起点终止 → 失败终态
             # 单点收敛（含 join-barrier 重查——否则被等待的句柄虽落终态但
-            # barrier 永不触发，聚合 turn 挂死）。
+            # barrier 永不触发，聚合 turn 挂死）。无 runner 可跑,不经统一驱动。
             await drv._settle_failed(  # noqa: SLF001
                 handle.handle_id, f"spawn_aborted: {record.record_id}")
             return
 
-        # 2. 以补齐后的子 thread 历史重建 detached 子 TurnRunner，续跑至终态。
-        target = eng._snapshot.get(handle.skill_id)  # noqa: SLF001
-        if target is None:
-            raise RuntimeError(
-                f"spawn_resume_skill_missing: {handle.skill_id}")
-        assert eng._root_cancel is not None  # engine.run 已启动  # noqa: SLF001
-        cancel = eng._root_cancel.child(  # noqa: SLF001
-            f"spawn_resume:{handle.handle_id}")
-        # 续跑期间也登记取消 token：覆盖首发遗留的旧 token，使 kill_spawn 取消
-        # 的是当前正在跑的续跑子树（而非已结束的首发子树）。
-        drv._spawn_cancels[handle.handle_id] = cancel  # noqa: SLF001
-        resumed_history = await eng._load_thread_items(child_tid)  # noqa: SLF001
-        runner = eng._build_child_runner(  # noqa: SLF001
-            target, child_tid, resumed_history[0], cancel,
-            history=resumed_history,
-            auto_retry_count=auto_retries,
-            sample_scope_id=sub.id,
+        # 2. 经统一驱动入口续跑:K1 排队 → 线程锁内重载逻辑 history → CAS(仍
+        #    suspended;核销期间被 kill 则放弃,kill 胜出)→ 续跑至终态 →
+        #    _finalize_spawn(再挂起 → 可再 resume,支持多轮错峰 HITL)。
+        async def _prepare() -> SpawnDrivePlan:
+            return SpawnDrivePlan(
+                history=await eng._load_thread_items(child_tid),  # noqa: SLF001
+                sample_scope_id=sub.id,
+                auto_retry_count=auto_retries,
+            )
+
+        await drv._drive(  # noqa: SLF001
+            handle.handle_id, label="spawn_resume", prepare=_prepare,
+            expect_status=("suspended",),
         )
-        drv._live_runners[child_tid] = runner  # peer-mailbox：续跑期也可被投递  # noqa: SLF001
-        try:
-            outcome = await runner.run()
-        finally:
-            drv._live_runners.pop(child_tid, None)  # noqa: SLF001
-        # 3. 与 _drive_spawn 收尾一致：回写句柄 + emit 终态（再挂起 → 可再 resume）。
-        await drv._finalize_spawn(handle.handle_id, child_tid, outcome)  # noqa: SLF001
 
     async def resume_spawn_nested(
         self, sub: Submission, handle: SpawnHandle
@@ -316,23 +303,18 @@ class SpawnResumeChain:
                 # spawn 子层 record 还有其他挂起子未结(parallel 多子错峰):
                 # 句柄保持 suspended,等后续 Resume 结清再重跑
                 return
-            drv._spawn_handles.set_result(  # noqa: SLF001
-                handle.handle_id, status="running", result=None)
-            target = eng._snapshot.get(handle.skill_id)  # noqa: SLF001
-            if target is None:
-                raise RuntimeError(f"spawn_resume_skill_missing: {handle.skill_id}")
-            resumed_history = await eng._load_thread_items(child_tid)  # noqa: SLF001
-            runner = eng._build_child_runner(  # noqa: SLF001
-                target, child_tid, resumed_history[0], cancel,
-                history=resumed_history, sample_scope_id=sub.id)
-            drv._live_runners[child_tid] = runner  # peer-mailbox：续跑期也可被投递  # noqa: SLF001
-            try:
-                outcome = await runner.run()
-            finally:
-                drv._live_runners.pop(child_tid, None)  # noqa: SLF001
-            # 与 _drive_spawn / resume_spawn 收尾一致：回写句柄 + emit 终态 + 检查 join-barrier。
-            await drv._finalize_spawn(  # noqa: SLF001
-                handle.handle_id, child_tid, outcome)
+            # 经统一驱动入口重跑 spawn 子 thread(detached 独立根语义):沿用本链
+            # 早已登记的 cancel(leaf / 中间层续跑期间 kill 命中的同一 token)。
+            async def _prepare() -> SpawnDrivePlan:
+                return SpawnDrivePlan(
+                    history=await eng._load_thread_items(child_tid),  # noqa: SLF001
+                    sample_scope_id=sub.id,
+                )
+
+            await drv._drive(  # noqa: SLF001
+                handle.handle_id, label="spawn_resume", prepare=_prepare,
+                expect_status=("suspended",), cancel=cancel,
+            )
         except Exception as e:  # noqa: BLE001
             logger.exception(
                 "detached spawn nested resume crashed: %s", handle.handle_id)

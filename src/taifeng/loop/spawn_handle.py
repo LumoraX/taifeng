@@ -24,6 +24,30 @@ class SpawnHandle:
 
 
 @dataclass(frozen=True)
+class SpawnDrivePlan:
+    """一次 detached 子 runner 驱动的采样参数(各路径的 prepare 在线程锁内产出)。
+
+    统一驱动入口(``SpawnDriver._drive``)只认这一个形状:首发 / 直接 resume /
+    嵌套 resume / rewind 重推 / peer 唤醒各自决定「以什么 history、什么采样作用域
+    起跑」,K1 / kill / 互斥 / 收敛语义则在入口内闭合(spawn-module-structure 契约)。
+
+    Attributes:
+        history: 起跑 buffer(首发 ``[seed]``;二次驱动为逻辑 history,或 rewind
+            截断后的 buffer)。首项即 seed。
+        sample_scope_id: Responses 逻辑采样作用域(None → runner 默认)。
+        auto_retry_count: TTL 自动 retry 的谱系计数透传。
+        seed_pending_call_id: rewind retry_tool 保留的悬空 call,采样前先补跑。
+        cache_break_reason: 首采样 cache 失效的预期归因(rewind → "rewind")。
+    """
+
+    history: list[Any]
+    sample_scope_id: str | None = None
+    auto_retry_count: int = 0
+    seed_pending_call_id: str | None = None
+    cache_break_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class JoinBarrier:
     """登记「{句柄集}全终态 → 起聚合 skill」;fired 幂等由 store 标记保证。"""
 

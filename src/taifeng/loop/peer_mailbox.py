@@ -30,6 +30,7 @@ from taifeng.loop.event import (
     PeerWaitResolved,
     PeerWaitStarted,
 )
+from taifeng.loop.spawn_handle import SpawnDrivePlan
 
 if TYPE_CHECKING:
     from taifeng.loop.cancellation import CancellationToken
@@ -154,18 +155,22 @@ class PeerMailbox:
                 h for h in drv._spawn_handles.handles.values()  # noqa: SLF001
                 if h.child_thread_id == target_tid
             )
-            live = drv._live_runners.get(target_tid)  # noqa: SLF001
-            if live is not None and handle.status == "running":
-                # 运行中：投 pending_input（TriggerTurn 在此降级，不打断采样）
-                live.pending_input.append(item)
-                delivered_via = "pending_input"
-                mode_downgraded = mode == "trigger_turn"
-            else:
-                # 空闲 / 挂起：即时落子 thread 历史（R5）
-                await eng._store.append(item)  # noqa: SLF001
-                if mode == "trigger_turn" and handle.status != "suspended":
-                    # 空闲（终态）spawn child → 续跑范式唤醒；suspended 只落史。
-                    woken = await self._wake_peer_turn(handle, submission_id)
+            # 与该 thread 的二次驱动重载段互斥(wave2b D6):消息要么在重载前落史
+            # (进新 runner 的 buffer),要么在 live 登记后投 pending_input,不会落在
+            # 「已重载、未登记」窗口只存 store 不进 buffer。
+            async with drv._thread_lock(target_tid):  # noqa: SLF001
+                live = drv._live_runners.get(target_tid)  # noqa: SLF001
+                if live is not None and handle.status == "running":
+                    # 运行中：投 pending_input（TriggerTurn 在此降级，不打断采样）
+                    live.pending_input.append(item)
+                    delivered_via = "pending_input"
+                    mode_downgraded = mode == "trigger_turn"
+                else:
+                    # 空闲 / 挂起：即时落子 thread 历史（R5）
+                    await eng._store.append(item)  # noqa: SLF001
+                    if mode == "trigger_turn" and handle.status != "suspended":
+                        # 空闲（终态）spawn child → 续跑范式唤醒；suspended 只落史。
+                        woken = await self._wake_peer_turn(handle, submission_id)
 
         await eng._emit(EventMsg(  # noqa: SLF001
             submission_id=submission_id or sender,
@@ -204,11 +209,13 @@ class PeerMailbox:
         await drv._await_root_cancel_ready()  # noqa: SLF001
         await eng._spawn_registry.reserve_manual()  # noqa: SLF001
         try:
-            # 句柄回 running（_finalize_spawn 的终态幂等以此放行新收敛）
-            drv._spawn_handles.set_result(  # noqa: SLF001
-                handle.handle_id, status="running", result=None)
+            # 取消 token 在此同步步派生并登记:唤醒 task 起跑前的 kill 也能命中
+            # (中断遗留 running 句柄尤其如此)。running 回写交给统一驱动的 CAS。
+            assert eng._root_cancel is not None  # _await_root_cancel_ready 已保证  # noqa: SLF001
+            cancel = eng._root_cancel.child(f"peer_wake:{handle.handle_id}")  # noqa: SLF001
+            drv._spawn_cancels[handle.handle_id] = cancel  # noqa: SLF001
             drv._start_owned_task(  # noqa: SLF001
-                self._drive_woken_turn(handle),
+                self._drive_woken_turn(handle, cancel),
                 name=f"peer-wake:{handle.handle_id}",
             )
         except Exception:
@@ -223,43 +230,27 @@ class PeerMailbox:
         ))
         return True
 
-    async def _drive_woken_turn(self, handle: SpawnHandle) -> None:
-        """被唤醒 turn 的后台驱动（镜像 ``_drive_spawn``：兜底 + finalize + 释放 K1）。"""
+    async def _drive_woken_turn(
+        self, handle: SpawnHandle, cancel: CancellationToken,
+    ) -> None:
+        """被唤醒 turn 的后台驱动:经统一驱动入口(K1 由 _wake_peer_turn 预留)。
+
+        放行状态 = 唤醒判定放行的全部形态(终态三值 + 中断遗留 running);
+        suspended 在投递层已被挡下(只落史不唤醒)。
+        """
         drv = self._driver
         eng = drv._engine  # noqa: SLF001
         child_tid = handle.child_thread_id
-        try:
-            assert eng._root_cancel is not None  # noqa: SLF001
-            cancel = eng._root_cancel.child(  # noqa: SLF001
-                f"peer_wake:{handle.handle_id}")
-            drv._spawn_cancels[handle.handle_id] = cancel  # noqa: SLF001
+
+        async def _prepare() -> SpawnDrivePlan:
             history = await eng._load_thread_items(child_tid)  # noqa: SLF001
-            target = eng._snapshot.get(handle.skill_id)  # noqa: SLF001
-            if target is None:
-                # snapshot 热更后 skill 消失:显式失败(外层 except 落 error 终态)
-                raise RuntimeError(f"peer_wake_skill_missing: {handle.skill_id}")
-            runner = eng._build_child_runner(  # noqa: SLF001
-                target=target,
-                child_thread_id=child_tid,
-                seed=history[0],
-                cancel=cancel,
-                history=history,
-                sample_scope_id=history[-1].id,
-            )
-            drv._live_runners[child_tid] = runner  # noqa: SLF001
-            try:
-                outcome = await runner.run()
-            finally:
-                drv._live_runners.pop(child_tid, None)  # noqa: SLF001
-            await drv._finalize_spawn(  # noqa: SLF001
-                handle.handle_id, child_tid, outcome)
-        except Exception as e:  # noqa: BLE001
-            logger.exception("peer wake driver crashed: %s", handle.handle_id)
-            # 失败终态单点收敛（barrier 故障抑制为日志，不逃出后台 task）。
-            await drv._settle_failed(  # noqa: SLF001
-                handle.handle_id, str(e), suppress_barrier_errors=True)
-        finally:
-            eng._spawn_registry.release_manual()  # noqa: SLF001
+            return SpawnDrivePlan(history=history, sample_scope_id=history[-1].id)
+
+        await drv._drive(  # noqa: SLF001
+            handle.handle_id, label="peer_wake", prepare=_prepare,
+            expect_status=("running", "done", "error", "cancelled"),
+            slot_owned=True, cancel=cancel,
+        )
 
     async def wait_spawn_terminal(
         self,

@@ -18,6 +18,10 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class SpawnLimitError(Exception):
@@ -73,6 +77,37 @@ class SpawnSlotRegistry:
                 raise SpawnLimitError("concurrent", self.max_concurrent)
             self._active += 1
             self._total += 1
+
+    async def acquire_manual(
+        self,
+        *,
+        should_abort: Callable[[], bool],
+        poll_seconds: float = 0.05,
+    ) -> bool:
+        """等待式预留一个 spawn slot(二次驱动专用):并发满额时排队而非抛错。
+
+        resume / rewind 重推与首发一样是一个在飞 runner,必须占 ``max_concurrent``
+        (wave2b 复现 d:此前续跑不占 slot,广度闸被绕过)。但续跑不是新的发起——
+        满额时抛错会把一次合法的 HITL 核销变成 error 终态,故改为轮询等待,直到
+        ``should_abort()`` 为真(句柄已被 kill / 根取消)才放弃并返回 False。
+        ``max_total`` 触顶仍立即抛 ``SpawnLimitError``(累计上限是 runaway 兜底,
+        等待也不会回落)。成功预留返回 True,调用方 finally 必须 ``release_manual``。
+
+        Args:
+            should_abort: 每轮等待前询问是否放弃(无参谓词,纯内存检查)。
+            poll_seconds: 轮询间隔(与 wait_peer 同粒度)。
+        """
+        while True:
+            async with self._lock:
+                if self._total >= self.max_total:
+                    raise SpawnLimitError("total", self.max_total)
+                if self._active < self.max_concurrent:
+                    self._active += 1
+                    self._total += 1
+                    return True
+            if should_abort():
+                return False
+            await asyncio.sleep(poll_seconds)
 
     def release_manual(self) -> None:
         """释放一个由 ``reserve_manual`` 占用的 slot（不取锁；``_active`` 自减）。

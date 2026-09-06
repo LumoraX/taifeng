@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from taifeng.conversation.models import function_call, system_injection
 from taifeng.loop.event import EventMsg, RewindRejected, TurnRewound
 from taifeng.loop.rewind import derive_rewind_log
+from taifeng.loop.spawn_handle import SpawnDrivePlan
 from taifeng.loop.submission import Rewind, Submission
 
 if TYPE_CHECKING:
@@ -120,7 +121,8 @@ class SpawnRewindChain:
         if eng._find_active_suspension_in(logical) is not None:  # noqa: SLF001
             await self._reject(sub.id, op.node_id, "turn_suspended")
             return
-        # 4. 节点定位 + mode/kind 相容(与根路径 _handle_rewind 同形)
+        # 4. 节点定位 + mode/kind 相容(与根路径 _handle_rewind 同形)。守卫全部
+        #    在 K1 等待之前完成——拒绝必须及时,不能排在并发闸后面。
         nodes = derive_rewind_log(logical)
         cp = next((c for c in nodes if c.node_id == op.node_id), None)
         if cp is None:
@@ -131,65 +133,54 @@ class SpawnRewindChain:
         ):
             await self._reject(sub.id, op.node_id, "mode_kind_mismatch")
             return
-
-        # 5. 选截点 + 落 marker(append-only;cut_index 供冷恢复 reconstruct 重放)
         cut = (
             cp.inner_history_len
             if op.mode == "retry_tool" and cp.inner_history_len is not None
             else cp.history_len
         )
-        marker = system_injection(
-            f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
-            thread_id=child_tid, source="rewind",
-            extra={"cut_index": cut},
-        )
-        await eng._store.append(marker)  # noqa: SLF001
-
-        # 6. emit turn_rewound(R3;带 thread_id 与根路径区分)
-        await eng._emit(EventMsg(submission_id=sub.id, msg=TurnRewound(data={  # noqa: SLF001
-            "thread_id": child_tid, "node_id": op.node_id,
-            "node_kind": cp.kind, "mode": op.mode, "cut_index": cut,
-        })))
-
-        # 7. 截断内存 buffer;retry_tool + new_args → 改写悬空 fc(只改内存,
-        #    store 原样保留 append-only;改写经 marker 留痕,与根路径同语义)
-        buffer = list(logical[:cut])
-        if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
-            self._rewrite_buffer_args(buffer, cp.call_id, op.new_args, child_tid)
-
-        # 8. 重推(对齐 _resume_spawn_settled 尾段范式):句柄回 running →
-        #    派生取消 token(kill_spawn 可达,R4)→ 重建 detached 子 runner
-        drv._spawn_handles.set_result(  # noqa: SLF001
-            handle.handle_id, status="running", result=None)
-        target = eng._snapshot.get(handle.skill_id)  # noqa: SLF001
-        if target is None:
-            raise RuntimeError(f"spawn_rewind_skill_missing: {handle.skill_id}")
+        # 取消 token 在守卫通过的同一同步步派生并登记(先于任何 await):中断遗留
+        # running 句柄在重推起跑前被 kill 也能命中(R4),不再取消到旧 token。
         assert eng._root_cancel is not None  # engine.run 已启动  # noqa: SLF001
         cancel = eng._root_cancel.child(  # noqa: SLF001
             f"spawn_rewind:{handle.handle_id}")
         drv._spawn_cancels[handle.handle_id] = cancel  # noqa: SLF001
-        runner = eng._build_child_runner(  # noqa: SLF001
-            target,
-            child_tid,
-            buffer[0],
-            cancel,
-            history=buffer,
-            sample_scope_id=sub.id,
+
+        async def _prepare() -> SpawnDrivePlan:
+            """线程锁内:落 marker → emit → 截断 buffer(peer 落史与之互斥)。"""
+            # 5. 落 marker(append-only;cut_index 供冷恢复 reconstruct 重放)
+            marker = system_injection(
+                f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
+                thread_id=child_tid, source="rewind",
+                extra={"cut_index": cut},
+            )
+            await eng._store.append(marker)  # noqa: SLF001
+            # 6. emit turn_rewound(R3;带 thread_id 与根路径区分)
+            await eng._emit(EventMsg(submission_id=sub.id, msg=TurnRewound(data={  # noqa: SLF001
+                "thread_id": child_tid, "node_id": op.node_id,
+                "node_kind": cp.kind, "mode": op.mode, "cut_index": cut,
+            })))
+            # 7. 截断内存 buffer;retry_tool + new_args → 改写悬空 fc(只改内存,
+            #    store 原样保留 append-only;改写经 marker 留痕,与根路径同语义)
+            buffer = list(logical[:cut])
+            if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
+                self._rewrite_buffer_args(buffer, cp.call_id, op.new_args, child_tid)
+            return SpawnDrivePlan(
+                history=buffer,
+                sample_scope_id=sub.id,
+                # retry_tool:采样前先补跑被保留的悬空 call(与根路径 seed 注入同法)
+                seed_pending_call_id=cp.call_id if op.mode == "retry_tool" else None,
+                # R2:rewind 蓄意回退上下文 → 重推首采样的 cache 失效记为 expected
+                cache_break_reason="rewind",
+            )
+
+        # 8. 经统一驱动入口重推:K1 排队 → 锁内 prepare → running → run →
+        #    _finalize_spawn 单点收敛(回写句柄 + emit 终态 + barrier 幂等重查)。
+        #    放行状态 = 活性守卫已放行的全部形态(终态三值 + 中断遗留 running)。
+        await drv._drive(  # noqa: SLF001
+            handle.handle_id, label="spawn_rewind", prepare=_prepare,
+            expect_status=("running", "done", "error", "cancelled"),
+            cancel=cancel,
         )
-        if op.mode == "retry_tool":
-            # 采样前先补跑被保留的悬空 call(与根路径 seed 注入同法)
-            runner._seed_pending_call_id = cp.call_id  # noqa: SLF001
-        # R2:rewind 蓄意回退上下文 → 重推首采样的 cache 失效记为 expected
-        runner._next_cache_break_expected = True  # noqa: SLF001
-        runner._next_cache_break_reason = "rewind"  # noqa: SLF001
-        drv._live_runners[child_tid] = runner  # peer-mailbox:重推期也可被投递  # noqa: SLF001
-        try:
-            outcome = await runner.run()
-        finally:
-            drv._live_runners.pop(child_tid, None)  # noqa: SLF001
-        # 9. 与 _drive_spawn / resume_spawn 收尾一致:回写句柄 + emit 终态 +
-        #    barrier 幂等重查(已 fired 的不二次触发)。
-        await drv._finalize_spawn(handle.handle_id, child_tid, outcome)  # noqa: SLF001
 
     def _rewrite_buffer_args(
         self,
