@@ -270,7 +270,7 @@ async def test_prompter_no_timeout_when_zero() -> None:
 
 @pytest.mark.asyncio
 async def test_prompter_timeout_returns_deny() -> None:
-    """CallbackPrompter 睡 5s + timeout=0.1 → 0.5s 内拿到 deny。"""
+    """CallbackPrompter 睡 5s + timeout=0.1 → deny，且**实际生效**的是配置的期限。"""
 
     async def slow_cb(req: PermissionRequest) -> PermissionDecision:
         await anyio.sleep(5.0)
@@ -285,8 +285,14 @@ async def test_prompter_timeout_returns_deny() -> None:
     d = await policy.check(PermissionRequest(scope="custom", target="/x"))
     elapsed = anyio.current_time() - started
     assert not d.granted
-    assert "prompter_timeout" in d.reason
-    assert elapsed < 0.5, f"超时未生效，用时 {elapsed:.2f}s"
+    # reason 精确到期限值：防「reason 文案漂移 / 报了别的秒数」。
+    assert d.reason == "prompter_timeout_0.1s", d.reason
+    # 这条**必须**是墙钟：要防的回归是「配置被忽略、回退到更长的默认值」，而
+    # 「实际生效的期限是多少」除了耗时没有别的观测量 —— reason 只反映配置值，
+    # 变异验证已确认它抓不到（fail_after 写死 3.0 时 reason 照样是 0.1s）。
+    # 上界取 1.0s：实际 ~0.1s，留 10x 抖动余量（原值 0.5s 只留 0.4s，是全仓
+    # 最紧的行为期限之一）；同时仍远低于任何可能的错误默认值（3s/30s/60s）。
+    assert elapsed < 1.0, f"配置的 0.1s 期限未生效，实际用时 {elapsed:.2f}s"
 
 
 @pytest.mark.asyncio
