@@ -122,31 +122,51 @@ def test_unknown_top_level_usage_fields_still_ok() -> None:
     assert terminal.usage.input_tokens == 20
 
 
-# --- 实际读取的键：维持 fail closed -----------------------------------------
+# --- 实际读取的键：取不到就置空，不判死 turn（ADR 0034） --------------------
 
 
 @pytest.mark.parametrize(
-    "details",
+    ("details", "expected"),
     [
-        {"cached_tokens": "5"},      # 字符串会让提取器 int() 崩，必须挡在前面
-        {"cached_tokens": -1},
-        {"cached_tokens": True},     # bool 是 int 子类，不得被 coercion 蒙混
-        {"cached_tokens": 1.5},
+        ({"cached_tokens": "5"}, 5),     # 数字字符串：表示法差异，照常采用
+        ({"cached_tokens": 1.5}, 1),     # 浮点：截断采用
+        ({"cached_tokens": 0.0}, 0),
+        ({"cached_tokens": -1}, 0),      # 负计数无意义 → 置空
+        ({"cached_tokens": True}, 0),    # bool 不得被 coercion 蒙混 → 置空
+        ({"cached_tokens": "abc"}, 0),   # 真坏值 → 置空
+        ({"cached_tokens": {"n": 1}}, 0),
+        ({"cached_tokens": None}, 0),
     ],
 )
-def test_read_input_detail_key_is_still_strict(details: dict[str, Any]) -> None:
-    """cached_tokens 是我们真读的值 —— 非非负整数仍须 fail closed。"""
-    with pytest.raises(InvalidResponseError, match="input_tokens_details"):
-        _run(_usage(input_tokens_details=details))
+def test_read_input_detail_key_never_kills_turn(
+    details: dict[str, Any], expected: int
+) -> None:
+    """cached_tokens 是纯记账量：能用就用，用不了置空，**绝不判死 turn**。
+
+    ADR 0032 曾对它 fail closed，理由是「提取器 int() 会在更深处炸出非
+    LLMError」。ADR 0034 让提取器自己容忍后该理由消失，而闸门的副作用是：
+    中转网关把数字发成 "0" / 0.0 / null 这类表示法差异都会判死整条链路。
+    """
+    terminal = _run(_usage(input_tokens_details=details))
+    assert terminal.usage.cache_read_input_tokens == expected
+    assert terminal.usage.input_tokens == 20  # 主计数不受影响
 
 
 @pytest.mark.parametrize(
-    "details", [{"reasoning_tokens": "3"}, {"reasoning_tokens": -1}, {"reasoning_tokens": True}]
+    ("details", "expected"),
+    [
+        ({"reasoning_tokens": "3"}, 3),
+        ({"reasoning_tokens": -1}, 0),
+        ({"reasoning_tokens": True}, 0),
+        ({"reasoning_tokens": "oops"}, 0),
+    ],
 )
-def test_read_output_detail_key_is_still_strict(details: dict[str, Any]) -> None:
+def test_read_output_detail_key_never_kills_turn(
+    details: dict[str, Any], expected: int
+) -> None:
     """reasoning_tokens 同理。"""
-    with pytest.raises(InvalidResponseError, match="output_tokens_details"):
-        _run(_usage(output_tokens_details=details))
+    terminal = _run(_usage(output_tokens_details=details))
+    assert terminal.usage.reasoning_tokens == expected
 
 
 @pytest.mark.parametrize(

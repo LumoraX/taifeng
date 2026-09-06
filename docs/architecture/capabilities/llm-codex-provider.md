@@ -160,14 +160,21 @@ payload 规则：
 - `response.completed` 是唯一成功完成门，必须恰好出现一次；其 `response` 必须是 object，`id` 必须为
   非空字符串，`status` 必须精确为 `completed`。
 - `usage` 必须是 object，`input_tokens`、`output_tokens`、`total_tokens` 必须是非 bool 的非负整数，且
-  `total_tokens == input_tokens + output_tokens`（这三个计数喂 K2 会话 token 天花板等资源决策，错值会
-  导致错误调度，故严格 fail closed）。
-- token detail 容器（`input_tokens_details` / `prompt_tokens_details` / `output_tokens_details` /
-  `completion_tokens_details`）中，**只有实际会被读取的键**（前两者的 `cached_tokens`、后两者的
-  `reasoning_tokens`）必须是非 bool 的非负整数；**明细里其余字段、以及整体不是 object 的明细，一律忽略，
-  不得据此失败**（ADR 0032）。usage 是纯记账元数据，不影响输出正确性，而上游会持续往明细里加新字段——
-  因为一个不被读取的字段把已成功产出内容、已 `response.completed` 的 attempt 判死是不可辩护的。忽略非
-  object 明细与提取器行为一致（其本就在非 dict 时跳过）。校验键集必须与提取器的查找集合保持一一对应。
+  `total_tokens == input_tokens + output_tokens`（这三个计数是规范必填整数，且喂会话 token 天花板等资源
+  决策，错值会导致错误调度，故严格 fail closed）。
+- **除这三个主计数外，`usage` 里的一切记账量取不到就置空（0），不得据此失败**（ADR 0034）。覆盖
+  `cache_read_input_tokens` / `cache_creation_input_tokens` / `prompt_cache_hit_tokens`，以及四个
+  detail 容器（`input_tokens_details` / `prompt_tokens_details` / `output_tokens_details` /
+  `completion_tokens_details`）里的 `cached_tokens` / `reasoning_tokens`。它们要么不是 OpenAI 正式顶层
+  字段（Anthropic 风格 / DeepSeek 特有），要么是可选明细，**不影响输出正确性、不驱动任何决策**——把一个
+  已成功产出内容、已 `response.completed` 的 attempt 因为一条记账数据判死是不可辩护的。
+- 记账量「可用」的判定**宽在表示法、严在语义**：数字字符串（`"128"`）与浮点（`0.0` / `1.5`）照常采用
+  （中转网关改一下序列化就会产出这些，属表示法差异）；负数、`bool`、解析不了的值一律置 0（token 计数
+  不可能为负；`bool` 是 `int` 子类，`int(True)==1` 会把布尔标志蒙混成计数）。每个字段首次出现不可用值
+  时告警一次，之后静默。
+- ADR 0032 曾要求「实际会被读取的明细键」维持 fail closed，理由是提取器 `int()` 会在更深处炸出非
+  `LLMError`。ADR 0034 让提取器自身容忍后该前提消失，闸门连同其键集常量一并删除；主计数的坏值改由提取器
+  抛分类过的 `InvalidResponseError`，不再裸崩。
 - done items 是 Codex 输出事实源。若 `completed.response.output` 是空 list，则仅使用已验证 done items；若
   是非空 list，则数组 position 就是隐式 `output_index`，显式 `output_index` 若存在必须等于 position；该
   数组必须与 done items 在索引、顺序、类型、身份和所有白名单正文/状态字段上 canonical 等价，否则 fail

@@ -1,6 +1,6 @@
 # ADR 0032：usage 记账元数据不得判死一个已成功的 turn（Amends #0026）
 
-- 状态：Accepted
+- 状态：Accepted（明细读取键那半条已被 [ADR 0034](0034-usage-accounting-never-fails-a-turn.md) 收窄）
 - 日期：2026-09-05
 - 相关：[ADR 0030](0030-codex-sse-noise-tolerance.md)（同一条「未知形状不得升格为不可恢复故障」原则的
   另一半）；契约见 [Codex Responses Provider 能力契约](../architecture/capabilities/llm-codex-provider.md) §5.2。

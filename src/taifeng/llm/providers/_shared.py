@@ -438,15 +438,28 @@ _ACCOUNTING_NOISE_SEEN: set[str] = set()
 
 
 def _coerce_count(value: object) -> int | None:
-    """把 usage 计数强制成整数；无法解析返回 ``None`` 交调用方定夺。
+    """把 usage 计数强制成**非负**整数；无法解析或语义无效返回 ``None``。
 
-    只负责「能不能解析」，不替调用方决定「解析不了算不算致命」——
+    只负责「这个值能不能当计数用」，不替调用方决定「用不了算不算致命」——
     主计数与记账字段的处置完全不同（见下面两个调用点）。
+
+    判为用不了的三类：
+      - 解析不了（``"abc"`` / dict / list）；
+      - ``bool`` —— 它是 ``int`` 子类，``int(True) == 1`` 会把一个布尔标志
+        蒙混成计数；
+      - 负数 —— token 计数不可能为负，放行会污染 ``cache_hit_ratio`` 之类的
+        下游计算。
+
+    宽容的部分同样明确：数字字符串（``"128"``）与浮点（``0.0`` / ``1.5``）照常
+    接受——中转网关改一下序列化就会产出这些，它们是**表示法差异**而非坏数据。
     """
+    if isinstance(value, bool):
+        return None
     try:
-        return int(value)  # type: ignore[call-overload]
+        parsed = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
+    return parsed if parsed >= 0 else None
 
 
 def _spec_count(raw: dict[str, Any], *keys: str, default: int = 0) -> int:
