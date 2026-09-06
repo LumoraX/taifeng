@@ -51,7 +51,7 @@
 
 | 参数 | 默认值 | 内核维度 | 说明 | 对标 |
 | --- | --- | --- | --- | --- |
-| **`max_concurrent_spawns`** | `16` | K1 广度准入 | 单 engine 内并发**在飞**（running）detached spawn 的上限。防 fork-bomb。超限时内核把 `SpawnLimitError` 转成 `SkillSpawnRejected` **事件** + `ToolResult.error`。⚠️ **nuance**：只统计 `runner.run()` in-flight 的 spawn；HITL 挂起的 spawn **退栈即释放 slot**（suspended 不计并发），resume 时重新占用——HITL 等待期不消耗并发额度。详见 [detached-spawn 契约](architecture/capabilities/detached-spawn.md) §K1 | codex `agent/registry.rs::reserve_spawn_slot` |
+| **`max_concurrent_spawns`** | `16` | K1 广度准入 | 单 engine 内并发**在飞**（running）detached spawn 的上限。防 fork-bomb。超限时内核把 `SpawnLimitError` 转成 `SkillSpawnRejected` **事件** + `ToolResult.error`。⚠️ **nuance**：只统计 `runner.run()` in-flight 的 spawn；HITL 挂起的 spawn **退栈即释放 slot**（suspended 不计并发），resume / rewind 重推经统一驱动重新占用——满额时**排队等待**而非拒绝（被 kill / 根取消即放弃；ADR 0035）——HITL 等待期不消耗并发额度。详见 [detached-spawn 契约](architecture/capabilities/detached-spawn.md) §K1 | codex `agent/registry.rs::reserve_spawn_slot` |
 | **`max_total_spawns`** | `1000` | K1 广度准入 | 单 engine 生命周期内累计 spawn 上限（单调递增，不回收；兜底 runaway 循环），与并发上限独立 | codex 同上 |
 | **`max_session_tokens`** | `None` | K2 资源强制 | 会话累计 token 硬天花板（OOM-killer）。`None`=不强制（只告警）。设值后：跨 turn 累计触顶 → pre-turn 拒新 turn（`turn_refused`）；turn 内触顶且有后续 tool call → `ResourceLimitExceeded(turn_aborted)` 事件 + 停采样 | codex `UsageLimitReached` |
 | **`memory_store`** | `None` | K3 内存层级 | `MemoryStore` 协议实现（长期记忆 swap/缺页接口）：`prefetch` 换入注入 prompt 尾部 / `writeback` 脏页写回 / `on_pre_evict` 换出前抢救 digest / `on_session_end` teardown。`None`=无内存层级（=`NullMemoryStore`）。全 best-effort（钩子异常不打断 turn）。后端（向量库/KV/RAG）是 **userspace**，业务自接。协议见 `src/taifeng/context/memory.py`。**最简只读接入**：继承 `NullMemoryStore` 仅覆写 `prefetch`；**多源**：`CompositeMemoryStore([知识库, 会话记忆])` fan-out 组合（单子异常不传染） | hermes `memory_provider.py`（剔业务字段） |
@@ -838,7 +838,7 @@ pool = await EnginePool.create(
 - `kill_skill` 的 unknown handle → `ToolResult.error`；terminal handle → `{killed:false}`（no-op）；running/suspended → 取消该 token，兄弟 spawn 不受影响
 - 父 turn 结束后（engine keepalive 中），LLM 在下一条 `UserMessage` 的 turn 内可继续调用上述工具操作已有句柄
 
-**K1 配额 nuance**：`max_concurrent_spawns` 只统计 running（in-flight runner）的 spawn；suspended spawn 释放 slot，不计入并发额度（见 §1.0）。
+**K1 配额 nuance**：`max_concurrent_spawns` 只统计 running（in-flight runner）的 spawn；suspended spawn 释放 slot，不计入并发额度；resume / rewind 重推重新占用，满额排队（见 §1.0）。
 
 ## 7. LLM 强类型输出（structured_output / P1）
 

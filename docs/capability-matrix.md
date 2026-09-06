@@ -122,7 +122,7 @@ The mechanisms live in the kernel; policy values and external backends are injec
 
 | Knob | Kernel Dimension | Summary | Entry Point | Example | Real LLM Validation |
 | --- | --- | --- | --- | --- | --- |
-| `max_concurrent_spawns` / `max_total_spawns` | K1 breadth admission | Limits in-flight spawn breadth to prevent fork bombs; HITL-suspended children do not consume running slots | `EnginePool.create(max_concurrent_spawns=)` | [kernel_knobs/](../examples/kernel_knobs/) | [`kernel_knobs`](real-llm-ledger.md) |
+| `max_concurrent_spawns` / `max_total_spawns` | K1 breadth admission | Limits in-flight spawn breadth to prevent fork bombs; HITL-suspended children do not consume running slots; resume / rewind re-drives re-acquire a slot and queue (never reject) when the cap is reached | `EnginePool.create(max_concurrent_spawns=)` | [kernel_knobs/](../examples/kernel_knobs/) | [`kernel_knobs`](real-llm-ledger.md) |
 | `max_session_tokens` | K2 resource enforcement | Session-wide token hard ceiling that rejects new turns or stops sampling when reached | `EnginePool.create(max_session_tokens=)` | [kernel_knobs/](../examples/kernel_knobs/) | [`kernel_knobs`](real-llm-ledger.md) |
 | `memory_store` | K3 memory hierarchy | Long-term memory swap/page-fault surface with host-provided backend hooks | `memory_store=` / `MemoryStore` protocol | [memory/](../examples/memory/) | — |
 | `submission_queue_size` / `event_queue_size` | K4 flow control | Inbound backpressure and outbound event queue sizing | `EnginePool.create(...)` | [kernel_knobs/](../examples/kernel_knobs/) | — |

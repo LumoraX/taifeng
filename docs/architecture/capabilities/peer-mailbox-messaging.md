@@ -50,7 +50,7 @@
 | 目标状态 | QueueOnly | TriggerTurn |
 | --- | --- | --- |
 | 运行中(live runner 在册) | 投其 `pending_input`(B1 steering 同一队列,下迭代边界 drain 并入) | **降级 QueueOnly**,`mode_downgraded=true`(不打断采样) |
-| 空闲(spawn child 终态) | `store.append` 即时落史(R5) | 落史 + `_build_child_runner` 续跑范式唤醒新 detached turn,emit `peer_agent_woken`,K1 slot 重新占用(finally 释放),`_finalize_spawn` 收敛终态(再挂起可再 resume) |
+| 空闲(spawn child 终态) | `store.append` 即时落史(R5) | 落史 + 经 `SpawnDriver._drive` 统一驱动唤醒新 detached turn(token 在唤醒判定的同步步登记;K1 slot 重新占用,finally 释放;以逻辑 history 重载),emit `peer_agent_woken`,`_finalize_spawn` 收敛终态(再挂起可再 resume) |
 | suspended(HITL) | 仅落史 | 仅落史,**不唤醒**(挂起只能由 Resume 解除;落史后随续跑可见) |
 | root thread | 有活跃 turn 投 pending_input,否则落 engine 历史 | **拒绝**(`trigger_turn_root_forbidden`——root 由用户驱动,对标 codex) |
 
@@ -94,7 +94,7 @@
 
 ### Requirement: 与既有机制正交
 
-join-barrier 语义不受影响(peer 消息不计入 barrier 条件);kill_spawn 取消 token 表照常覆盖唤醒 turn(`peer_wake:<handle>`);K1 配额、K2 token 上限、max_iterations 是消息风暴的既有兜底(内核不做限流——「过多」是业务语义,R1)。
+投递与二次驱动重载互斥(ADR 0035):非 root 目标的「live 判定 → 落史 / 唤醒」段与该 child_thread_id 的 `_drive` 重载段持同一把锁,消息要么在重载前落史(进新 runner 的 buffer)、要么在 live 登记后投 `pending_input`,不会落在「已重载、未登记」窗口只存 store 不进 buffer。join-barrier 语义不受影响(peer 消息不计入 barrier 条件);kill_spawn 取消 token 表照常覆盖唤醒 turn(`peer_wake:<handle>`);K1 配额、K2 token 上限、max_iterations 是消息风暴的既有兜底(内核不做限流——「过多」是业务语义,R1)。
 
 ## R1–R5 影响
 

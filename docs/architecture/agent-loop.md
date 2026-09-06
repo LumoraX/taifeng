@@ -547,23 +547,30 @@ child task 运行（独立 TurnRunner @ child thread）：
   → 正常完成  → _finalize_spawn → emit spawn_completed
               → _check_barriers（每次终态均检查）
   → HITL 挂起 → 挂起 record 落 child thread → emit spawn_suspended{handle_id, thread_id, record_id, pending}
-              → task 退栈，K1 slot 释放（suspended 不占并发额度）
+              → task 退栈，K1 slot 释放（suspended 不占并发额度；resume / rewind 重推重新占用，满额排队）
   → 错误      → emit spawn_failed → _check_barriers
   → 取消      → emit spawn_cancelled → _check_barriers
 
 Resume(thread_id=<child_thread_id>, resolutions=...)
   → engine 先查 SpawnHandleRegistry：命中挂起态 → SpawnDriver.resume_spawn（专用路径）
   → SuspensionResolver request 级核销（子集合法,全量达成才结算续跑）
-  → _build_child_runner（call_stack 为空 → 独立根 turn）→ 续跑
-  → 终态 → _finalize_spawn → _check_barriers
+  → SpawnDriver._drive 统一驱动（K1 排队 → 线程锁内重载逻辑 history → 状态 CAS
+     → token / running / live 同一同步步 → _build_child_runner，call_stack 为空 → 独立根 turn）→ 续跑
+  → 终态 → _finalize_spawn（+ 子 thread spawn_settled 锚）→ _check_barriers
   → abort 裁决（TTL 到期 / 人工）→ _settle_failed → emit spawn_failed → _check_barriers
   → 再挂起 → 句柄重标 suspended，可再 Resume（多轮 HITL）
 
 终态写入单点收敛：done/suspended/cancelled/error 经 _finalize_spawn；
-suspended-kill 经 kill_spawn 内联；abort 裁决与各驱动宽 except 兜底经
-_settle_failed —— 三个收敛点均「回写 + emit + _check_barriers」成套 + 终态
-幂等（终态事件恰好一次），禁止任何路径手写三件套（详见 detached-spawn 契约
-§终态写入单点收敛）。
+suspended-kill / 续跑链取消解到 spawn 子 thread 经 _settle_cancelled_suspended
+（落 resolved marker + settled 锚、撤销 TTL）；abort 裁决与统一驱动宽 except 兜底经
+_settle_failed —— 三个收敛点均「回写 + 子 thread spawn_settled 锚 + emit +
+_check_barriers」成套 + 终态幂等（终态事件恰好一次），禁止任何路径手写
+（详见 detached-spawn 契约 §终态写入单点收敛；ADR 0035）。
+
+detached 子 runner 只在 SpawnDriver._drive 一处构造：首发 / 直接 resume / 嵌套
+resume / rewind 重推 / peer 唤醒只提供 prepare（逻辑 history + 采样参数）与期望
+状态；K1、kill 窗口（CAS + 同步步登记）、投递与重载互斥（按 child_thread_id 的锁）
+在入口内闭合。
 
 join-barrier（全终态触发）：
   set_join_barrier(handle_ids=[A,B,C], then_skill_id="joint-review")
@@ -611,13 +618,13 @@ join-barrier（全终态触发）：
 1. **先查 `SpawnHandleRegistry`**：命中 suspended 句柄 → `SpawnDriver.resume_spawn`（专用路径，不走父链）
 2. **未命中** → 走原有 `_handle_resume` / `_handle_child_resume`（call_skill 嵌套挂起续跑链）
 
-两条路径**严格不重叠**：detached spawn 用专用路径，call_skill 嵌套挂起用父链。
+两条路径**严格不重叠**：detached spawn 用专用路径，call_skill 嵌套挂起用父链。两条链都是**可取消整体**（ADR 0035）：链级 token 一次派生、各层 turn token 派生自它；任一层 cancelled → 逐层回填 `sub_skill_failed: cancelled` + 结算但不重跑，根链以 `turn_failed{cancelled}` 终结、spawn 链句柄收敛为 cancelled。
 
 ### K1 配额语义（nuance）
 
 | 旋钮 | 维度 | suspended 是否占用 |
 | --- | --- | --- |
-| `max_concurrent_spawns` | 并发（in-flight runner） | **否**——runner 退栈即释放 slot |
+| `max_concurrent_spawns` | 并发（in-flight runner） | **否**——runner 退栈即释放 slot；resume / rewind 重推经统一驱动重新占用，满额时**排队**（不抛错，被 kill / 根取消即放弃） |
 | `max_total_spawns` | 生命周期累计（单调） | 是（每次 spawn 调用递增，不回收） |
 
 结论：HITL 等待期不消耗并发额度，可支持大量错峰 HITL 并发场景。
@@ -687,7 +694,7 @@ Resume(thread_id, resolutions)
 
 **子 skill 战绩沉淀**：`_spawn_sub_runner` 在子 skill 到达**终态**（`end_reason != "suspended"`）后，通过注入的 `OutcomeJudge`（默认 `StructuralOutcomeJudge`）裁决出 `success / failure / abandoned`，构造 `SkillExecutionRecord`，调 `store.append([skill_outcome_item(...)])` 旁路追加到子 thread JSONL，并 emit `SkillOutcomeRecorded` 事件。`suspended` 提前返回路径**不记录**（挂起不是终态）。`skill_outcome` item 不进 LLM 消息视图（`build_api_request` 跳过）。完整契约见 [skill-outcome-record.md](capabilities/skill-outcome-record.md)。
 
-**子 thread 嵌套挂起 + 续跑回传父 call_skill**：`call_skill` 派发的子 skill 在独立子 thread 运行（`_spawn_sub_runner`，history 隔离）。子 turn 挂起时挂起记录落**子 thread**，子 emit `turn_suspended`（子 thread_id）。`_spawn_sub_runner` 在子 `end_reason=="suspended"` 时抛 `SuspendSignal(reason=CHILD_SKILL, detail={sub_thread_id, skill_id})` → 父 `call_skill` 随之挂起 → 逐层上抛至根 → 根也 emit `turn_suspended`。`Resume(thread_id=<子 thread>)` 经 `_handle_resume` 分流到 `_handle_child_resume` 续跑链：自根沿 `CHILD_SKILL` pending 串链至 leaf（不依赖 `get_metadata`，谱系由父挂起 record 的 pending detail 携带）→ 核销 leaf 用户挂起 + 续跑子 turn → 把子结果逐层回填父 `call_skill` 的 `function_call_output` + 续跑父 turn → 根以 `_build_and_run_runner` 收尾。子层续跑 turn `is_root=False`（engine 注入非空 `call_stack`），根续跑 `is_root=True`。**`Resume` 经 `asyncio.create_task` 异步派发**（与 `UserMessage` 一致），使续跑链多 turn 不阻塞 run 循环、且给 `subscribe(submission_id)` 留出注册窗口（**该窗口只是缓解、非保证**；错过窗口的订阅者由 ADR 0031 的终态补投兜底）。详见 [suspend-resume 契约](capabilities/suspend-resume.md) §子 thread resume 续跑链。
+**子 thread 嵌套挂起 + 续跑回传父 call_skill**：`call_skill` 派发的子 skill 在独立子 thread 运行（`_spawn_sub_runner`，history 隔离）。子 turn 挂起时挂起记录落**子 thread**，子 emit `turn_suspended`（子 thread_id）。`_spawn_sub_runner` 在子 `end_reason=="suspended"` 时抛 `SuspendSignal(reason=CHILD_SKILL, detail={sub_thread_id, skill_id})` → 父 `call_skill` 随之挂起 → 逐层上抛至根 → 根也 emit `turn_suspended`。`Resume(thread_id=<子 thread>)` 经 `_handle_resume` 分流到 `_handle_child_resume` 续跑链：自根沿 `CHILD_SKILL` pending 串链至 leaf（不依赖 `get_metadata`，谱系由父挂起 record 的 pending detail 携带）→ 核销 leaf 用户挂起 + 续跑子 turn → 把子结果逐层回填父 `call_skill` 的 `function_call_output` + 续跑父 turn → 根以 `_build_and_run_runner` 收尾。子层续跑 turn `is_root=False`（engine 注入非空 `call_stack`），根续跑 `is_root=True`。链取消即停并逐层解链（`CancelTurn(resume_sub)` 打在任一层：leaf cancelled → 上层只回填 + 结算不重跑 → 根 `turn_failed{cancelled}`，根不再挂在 CHILD_SKILL 上；ADR 0035）。**`Resume` 经 `asyncio.create_task` 异步派发**（与 `UserMessage` 一致），使续跑链多 turn 不阻塞 run 循环、且给 `subscribe(submission_id)` 留出注册窗口（**该窗口只是缓解、非保证**；错过窗口的订阅者由 ADR 0031 的终态补投兜底）。详见 [suspend-resume 契约](capabilities/suspend-resume.md) §子 thread resume 续跑链。
 
 - [x] `cancel.child()` 派生层级正确，父取消级联 —— `tests/loop/test_cancellation.py::test_child_cancel_propagates_from_parent`
 

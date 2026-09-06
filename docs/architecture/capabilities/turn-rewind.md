@@ -89,10 +89,10 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 
 `Rewind.thread_id` 指向某 spawn 句柄的 `child_thread_id` 时，engine SHALL 路由到 `SpawnDriver.rewind_spawn`（`loop/spawn_rewind.py`，与 `Resume` 的 thread 寻址分流同形）：
 
-1. **节点表**：`engine.rewind_nodes_for(thread_id)` 只读暴露；子 thread 节点 SHALL 从 `reconstruct_logical_history(raw)` 后的逻辑 history 经 `derive_rewind_log` 派生（**禁止对 raw 直接 derive**——坐标会错位）。
+1. **节点表**：`engine.rewind_nodes_for(thread_id)` 只读暴露；子 thread 节点 SHALL 从 `_load_thread_items`（非根 thread 逻辑 history 的单一入口，已 `reconstruct_logical_history`）经 `derive_rewind_log` 派生（**禁止对 raw 直接 derive**——坐标会错位）。
 2. **活性守卫（禁状态白名单）**：拒绝按**活性**判定而非句柄状态——冷重建状态推断不产出 `error`（失败子 thread 冷启后呈现 done / running），按状态拦会挡死冷重试。放行集合 = error / done / cancelled 终态 + 中断遗留 running（不在 live 运行表）。
-3. **截断**：`[rewind]` marker（`cut_index`）append 到**子 thread** store（append-only，R5）；重推以 reconstruct 后的逻辑 history 重建 detached 子 runner（`_build_child_runner`），`retry_tool` + `new_args` 只改内存 buffer、store 原样。
-4. **收敛**：重推完成经 `_finalize_spawn` 单点收敛（回写句柄 + emit 终态 + barrier 幂等重查——已 fired 的 barrier 不二次触发）；重推 token 自根取消派生并登记 spawn 取消表（kill_spawn 可达，R4）。
+3. **截断**：守卫全部通过后（拒绝不排在并发闸后面），经 `SpawnDriver._drive` 统一驱动入口重推（ADR 0035）：占 K1 并发 slot（满额排队）→ 线程锁内落 `[rewind]` marker（`cut_index`，append 到**子 thread** store，append-only，R5）+ emit `turn_rewound` + 以逻辑 history 截断 buffer → 重建 detached 子 runner（`_build_child_runner`）；`retry_tool` + `new_args` 只改内存 buffer、store 原样。二次驱动（再次 resume / peer 唤醒）读到的逻辑 history 不含被截断的旧圈与 marker。
+4. **收敛**：重推完成经 `_finalize_spawn` 单点收敛（回写句柄 + 子 thread `spawn_settled` 锚 + emit 终态 + barrier 幂等重查——已 fired 的 barrier 不二次触发）；重推 token 在守卫通过的同步步自根取消派生并登记 spawn 取消表（重推起跑前的 kill 也能命中，R4）。
 5. **事件**：成功 emit `turn_rewound`，data **含 `thread_id`**（与根路径区分）。
 
 典型用途：失败 spawn 的人工 retry——`error` 终态子 thread 对其最后一个 dispatch 节点 `re_reason`，LLM 重新决策失败步，前序步骤与已答 HITL 回填全部保留（业务"从失败步续跑"）。

@@ -13,7 +13,8 @@
 - `src/taifeng/loop/spawn_resume.py`（`SpawnResumeChain`：错峰续跑链——直接挂起核销重跑 / 嵌套挂起下探回填）
 - `src/taifeng/loop/spawn_rewind.py`（`SpawnRewindChain`：thread 寻址 rewind——活性守卫 / 截断落 marker / 重推收敛，见 [turn-rewind](turn-rewind.md) §thread 寻址）
 - `src/taifeng/loop/spawn_barrier.py`（`JoinBarrierCoordinator`：join-barrier 登记/重查/触发 + 冷恢复重建）
-- `src/taifeng/loop/spawn_handle.py`（`SpawnHandle`、`SpawnHandleRegistry`、`JoinBarrier`）
+- `src/taifeng/loop/spawn_handle.py`（`SpawnHandle`、`SpawnHandleRegistry`、`JoinBarrier`、`SpawnDrivePlan`）
+- **detached 子 runner 只在 `SpawnDriver._drive` 一处构造**（首发 / 直接 resume / 嵌套 resume / rewind 重推 / peer 唤醒五条路径只提供 prepare 与期望状态，见「统一驱动入口」Requirement；ADR 0035）
 - `src/taifeng/loop/engine.py`（薄转发层：`spawn_skill / set_join_barrier / spawn_status / kill_spawn / has_live_spawns`）
 - `src/taifeng/loop/event.py`（7 类新事件）
 - `src/taifeng/tool/builtins/`（4 个 LLM 工具：`spawn_skill / await_skills / join_skill / kill_skill`）
@@ -55,8 +56,9 @@ running → done | error | cancelled
 | `spawn` | `spawn_skill` 调用成功后追加到**父 thread** | `{handle_id, skill_id, child_thread_id}` |
 | `join_barrier` | `set_join_barrier` 注册后追加到**父 thread** | `{barrier_id, handle_ids, then_skill_id}` |
 | `join_barrier_fired` | barrier 触发后追加（幂等锚） | `{barrier_id, then_thread_id}` |
+| `spawn_settled` | 句柄进入 done / error / cancelled 时追加到**子 thread**（三个收敛点统一经 `_persist_settled`，durable 先于 emit） | `{handle_id, status, result}` |
 
-冷恢复靠这三类 item 重建全部状态（见「Requirements: 冷恢复」）。
+冷恢复靠父 thread 三类锚重建句柄表 / barrier / 守卫集，再据子 thread 的 `spawn_settled` 锚与活跃挂起推断状态（见「Requirements: 冷恢复」）。`spawn_settled` 落子 thread 而非父 thread：父 thread 在飞 turn 期间只有 runner 一个写者（ADR 0029），detached 收敛时刻不可控；子 thread 此时无热 buffer，store 即真相。suspended 非终态不落锚。
 
 ### 7 个 EventMsg（`loop/event.py`）
 
@@ -111,8 +113,8 @@ running → done | error | cancelled
 
 `resume_spawn` 内部：
 - 复用 `SuspensionResolver`（request 级核销:子集合法,全量达成才落 marker / 重跑）
-- 复用 `_build_child_runner`（call_stack 为空 → 子 turn 是**独立根 turn**，无 DispatchPolicy entry 门控）
-- 复用 `_finalize_spawn`（终态回调 + barrier 检查，与首发路径完全一致）
+- 重跑经 `SpawnDriver._drive` 统一驱动入口：K1 **排队等待**（续跑不是新的发起，满额不抛错）、线程锁内重载**逻辑 history**（`_load_thread_items`，已 reconstruct）、状态 CAS（核销期间被 kill → 放弃，kill 胜出）、`_build_child_runner`（call_stack 为空 → 子 turn 是**独立根 turn**，无 DispatchPolicy entry 门控）
+- 复用 `_finalize_spawn`（终态回调 + `spawn_settled` 锚 + barrier 检查，与首发路径完全一致）
 
 **关键**：直接挂起（DATA/FORM/permission 落在 spawn 子 thread 自身）不复用 `_handle_child_resume`，因为后者假设父 turn 此刻仍挂在 `CHILD_SKILL` pending gap 上并需要沿链回填；detached spawn 的父 turn 早已结束，不存在这条链。
 
@@ -141,12 +143,44 @@ running → done | error | cancelled
 - **THEN** `Resume(thread_id=A_child_thread_id)` 仅恢复 A，B 不受影响
 - **AND** A 完成后 emit `spawn_completed{handle_id=A}`
 
+#### Scenario: resume 排队等 K1
+
+- **GIVEN** `max_concurrent_spawns=1`，A 挂起（slot 已释放）、B 运行中占满 slot
+- **WHEN** `Resume(thread_id=A_child_thread_id)` 核销完成
+- **THEN** A 不起 runner（句柄仍 suspended、子脚本下一轮未消费）；B 终态后 A 自动起跑并落终态
+
+#### Scenario: resume 窗口内 kill
+
+- **GIVEN** A 的 Resume 已开始核销（marker 未落或已落）、尚未起 runner
+- **WHEN** `kill_spawn(A)`
+- **THEN** A 落 cancelled 且 `spawn_cancelled` 恰好一次；Resume 放弃起 runner，A 的子脚本第二轮未被消费，不再有 `spawn_completed`
+
 #### Scenario: 多轮错峰 HITL
 
 - **WHEN** A Resume 后再次 HITL
 - **THEN** emit 第二条 `spawn_suspended{handle_id=A}`，handle 状态回 `suspended`
 - **AND** 第二条事件携带**新的** `record_id`（≠ 首挂），消费方据 `(handle_id, record_id)` 分轮去重
 - **AND** 再次 `Resume(thread_id=A_child_thread_id)` 仍可续跑
+
+### Requirement: detached 子 runner 唯一驱动入口
+
+首发 `_drive_spawn` / 直接 resume `_resume_spawn_settled` / 嵌套 resume `resume_spawn_nested` / rewind 重推 `_rewind_spawn_guarded` / peer 唤醒 `_drive_woken_turn` 五条路径 SHALL 经 `SpawnDriver._drive(handle_id, label, prepare, expect_status, slot_owned, cancel)` 驱动，各自只提供 `prepare`（线程锁内产出 `SpawnDrivePlan`：逻辑 history + 采样参数）与期望状态。入口序列：
+
+1. **K1**：`slot_owned=False`（resume / rewind）→ `SpawnSlotRegistry.acquire_manual` 等待式预留：并发满额排队，句柄已终态 / 根取消即放弃；`max_total` 触顶仍抛 `SpawnLimitError`。首发（`spawn_skill` 已 reserve）与唤醒（`_wake_peer_turn` 已 reserve，满额即 raise 的既有语义不变）传 `slot_owned=True`。
+2. **线程锁内**（按 child_thread_id，与 peer 投递的非 live 分支互斥）：`prepare()` → None 即放弃（调用方已 emit 拒绝）；**状态 CAS**：句柄不在 `expect_status` 内（resume 期望 `suspended`；唤醒 / rewind 期望非 live 的任意状态）→ 放弃，不改状态、不 emit；随后**同一同步步**登记取消 token、回写 running、构造 runner、登记 live（其间无 await）。
+3. `runner.run()` → `_finalize_spawn`；宽 except → `_settle_failed`；finally 释放 K1。
+
+取消 token SHALL 在各路径「登记句柄 / 守卫通过 / 唤醒判定」的同步步派生并登记（`spawn_skill` / rewind / peer 唤醒），使 runner 起跑前的 `kill_spawn` 也能命中；resume 由 CAS 保证终局。
+
+#### Scenario: 首发前 kill
+
+- **WHEN** `spawn_skill` 返回后、后台驱动尚未起 runner 时 `kill_spawn`
+- **THEN** 取消命中登记时派生的 token，runner 在首个边界以 cancelled 收敛，`spawn_cancelled` 恰好一次
+
+#### Scenario: 重载窗口内投递不丢
+
+- **WHEN** 目标正在被二次驱动重载（history 已读、runner 未登记）时 QueueOnly 投递
+- **THEN** 投递等待锁释放后进入 `pending_input`（或在重载前落史进 buffer），其下次采样 prompt 可见
 
 ### Requirement: join-barrier 全终态自动触发聚合
 
@@ -226,13 +260,15 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 
 ### Requirement: 终态写入单点收敛
 
-句柄终态写入必须经唯一收敛点完成「状态回写 + 终态事件 emit + barrier 重查」三件套，禁止任何路径手写其中一件（历史事故：abort 裁决分支漏调 barrier 重查 → 被等待句柄虽落终态但聚合 turn 永不触发、会诊挂死）：
+句柄终态写入必须经唯一收敛点完成「状态回写 + 子 thread `spawn_settled` 锚 + 终态事件 emit + barrier 重查」四件套，禁止任何路径手写其中一件（历史事故：abort 裁决分支漏调 barrier 重查 → 被等待句柄虽落终态但聚合 turn 永不触发、会诊挂死）：
 
 | 终态 | 唯一收敛点 | 覆盖路径 |
 | --- | --- | --- |
-| done / suspended / cancelled / error（驱动正常退栈） | `_finalize_spawn` | 首发 `_drive_spawn`、续跑 `resume_spawn(_nested)`、peer-wake `_drive_woken_turn` 收尾 |
-| cancelled（挂起句柄被 kill，无 live runner 驱动 finalize） | `kill_spawn` 内联 | suspended-kill |
-| error（abort 裁决 / 各驱动宽 except 兜底） | `_settle_failed` | `resume_spawn` 的 `plan.abort` 分支（TTL 到期 / 人工 abort）；`_drive_spawn` / `resume_spawn` / `resume_spawn_nested` / `_drive_woken_turn` 四处宽 except |
+| done / suspended / cancelled / error（驱动正常退栈） | `_finalize_spawn` | 统一驱动入口 `_drive` 的收尾（首发 / 续跑 / 嵌套续跑 / rewind 重推 / peer 唤醒） |
+| cancelled（挂起句柄，无 live runner 驱动 finalize） | `_settle_cancelled_suspended`（调用方先在同步步置 cancelled） | suspended-kill；续跑链取消解到 spawn 子 thread |
+| error（abort 裁决 / 驱动宽 except 兜底） | `_settle_failed` | `resume_spawn` 的 `plan.abort` 分支（TTL 到期 / 人工 abort）；`_drive` 的宽 except 兜底 |
+
+`_settle_cancelled_suspended` 另落 `suspend_resolved:<record_id>` marker 核销残余挂起并撤销该 record 的 TTL 定时器——否则冷恢复推断回 suspended（僵尸复活）、TTL 对已 kill 句柄提交裁决、`match_suspended_spawn` 允许再次 Resume。
 
 三个收敛点均实施**终态幂等**守卫：已终态句柄再收敛是 no-op（不覆盖状态、不重复 emit、不重复 barrier 重查），每个句柄的终态事件对外**恰好一次**。
 
@@ -285,7 +321,8 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 | --- | --- |
 | 未知 | raise `KeyError` |
 | 终态（done / error / cancelled） | 空操作（benign no-op） |
-| running / suspended | 取消该 spawn 的 token → 触发 `spawn_cancelled` |
+| running | 取消该 spawn 的 token（登记于发起 / 重推 / 唤醒的同步步）→ runner 在迭代边界退栈 → `_finalize_spawn` 落 cancelled + `spawn_settled` 锚 + `spawn_cancelled` |
+| suspended | 同步步置 cancelled（并发 resume 的 CAS 据此放弃）→ `_settle_cancelled_suspended`：落 `suspend_resolved` marker + `spawn_settled(cancelled)`、撤销 TTL、`spawn_cancelled`、barrier 重查 |
 
 #### Scenario: kill 单个不影响兄弟
 
@@ -304,23 +341,23 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 
 进程重启、同 session 重载后，`SpawnDriver.rebuild_from_history` 扫描父 thread items，重建：
 
-1. `SpawnHandleRegistry`（从 `spawn` items）：每个 handle status 由对应 child thread 终态推断：
-   - child thread 末条 item 为活跃挂起 record → `suspended`
-   - child thread 末条 item 为 assistant_message（done）→ `done`
-   - 无终态 item → `running`（mid-flight 中断，v1 限制：不自动重驱动，留为 best-effort）
+1. `SpawnHandleRegistry`（从 `spawn` items）：每个 handle status 由对应 child thread 的**逻辑 history**（`_load_thread_items`，已 reconstruct）推断：
+   - 「最后一条活跃挂起 record」与「最后一条 `spawn_settled` 锚」按位置靠后者胜：挂起在后 → `suspended`；锚在后 → 锚的 status / result（done / error / cancelled）
+   - 两者皆无（本 change 之前的转录）→ 旧启发：有 assistant_message → `done`（result = 最后一条 assistant 文本）；否则 → `running`（mid-flight 中断，v1 限制：不自动重驱动，留为 best-effort）
 2. barriers（从 `join_barrier` items）
 3. `_fired_barriers`（从 `join_barrier_fired` markers，幂等）
 4. 调用 `_check_barriers()`（幂等）：若某 barrier 全部句柄已终态且未 fired → 立即触发聚合
+5. 句柄表就绪后武装挂起态 spawn 子 thread 的 TTL（`_rearm_spawn_ttl_timers_cold`；`run()` 起跑时句柄表尚空，只武装根 record）
 
 **v1 限制**：mid-flight 中断（重启时 status 推为 running）的 spawn 不自动重驱动，需业务侧干预。
 
 ## R1–R5 影响
 
 - **R1**：`SpawnHandle` / `JoinBarrier` / 4 个 LLM 工具全通用，无业务概念；spawn 目标须在 caller 白名单内，但**可为 entry skill**（`allow_entry_target=True`，与 `call_skill` 不同——spawn 是独立根，调 entry 合法）；业务侧通过 `ctx.extras["spawn_coordinator"]` 经 engine 注入的协调器接口使用。
-- **R2**：spawn 仅往父 history **尾部**追加 `spawn` ResponseItem（同 tool_call，不动 head）；child thread 有独立 cache 生命周期；spawn 本身不触发压缩。suspended spawn 释放其 K1 并发 slot（不计入 `max_concurrent_spawns`，只有 running 的 spawn 占 slot），即 HITL 等待期不消耗并发额度。
+- **R2**：spawn 仅往父 history **尾部**追加 `spawn` ResponseItem（同 tool_call，不动 head）；child thread 有独立 cache 生命周期；spawn 本身不触发压缩。二次驱动的 `history_buffer` 与热路径等价（逻辑 history），不再把被压缩 / 被截断的原文重新塞回 prompt。suspended spawn 释放其 K1 并发 slot（不计入 `max_concurrent_spawns`，只有 running 的 spawn 占 slot），即 HITL 等待期不消耗并发额度；resume / rewind 重推重新占用，满额时排队。
 - **R3**：7 类事件（spawn_started / suspended / completed / failed / cancelled / join_barrier_registered / join_barrier_fired）均入 `EventMsg`，经 `TelemetrySink` 可观测。
-- **R4**：每个 spawn `cancel.child(f"spawn:{handle_id}")`；`kill_spawn` 杀单个，兄弟 spawn 不受影响；`pool.close()` / `release(force=True)` 级联取消全部 detached child。
-- **R5**：`spawn` / `join_barrier` / `join_barrier_fired` 三类 ResponseItem 落父 thread（append-only，不改已有 items）；child threads 自带 suspend-resume；进程重启后 `rebuild_from_history` 重建 registry + barriers + fired 集合，suspended 专家可继续 Resume，done 专家结果可读，barrier 幂等触发。
+- **R4**：每个 spawn `cancel.child(f"spawn:{handle_id}")`（发起 / 重推 / 唤醒各自的同步步登记，起跑前的 kill 也能命中）；`kill_spawn` 杀单个，兄弟 spawn 不受影响；resume 期间的 kill 由状态 CAS 保证终局（不再起 runner）；K1 等待可被 kill / 根取消打断；`pool.close()` / `release(force=True)` 级联取消全部 detached child。
+- **R5**：`spawn` / `join_barrier` / `join_barrier_fired` 三类 ResponseItem 落父 thread，`spawn_settled` 落子 thread（均 append-only，不改已有 items）；child threads 自带 suspend-resume；进程重启后 `rebuild_from_history` 重建 registry + barriers + fired 集合，终态 / 被 kill 的句柄推断与热状态一致，suspended 专家可继续 Resume 且 TTL 重武装，barrier 幂等触发。
 
 ## 演示 / 参考实现
 
@@ -331,7 +368,7 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 | 限制 | 描述 |
 | --- | --- |
 | mid-flight 中断 spawn | 重建时状态推为 `running`，但不自动重驱动；需业务侧干预（下一版本补 checkpoint 断点续跑） |
-| suspended spawn 释放 K1 slot | suspended 状态下 slot 已释放（slot 仅计算飞行中 runner，run() 退栈即释放）；lifetime cap `max_total_spawns` 仍单调递增不回收 |
+| suspended spawn 释放 K1 slot | suspended 状态下 slot 已释放（slot 仅计算飞行中 runner，run() 退栈即释放）；resume / rewind 重推重新占用，满额排队；lifetime cap `max_total_spawns` 仍单调递增不回收（每次重推计一次） |
 | barrier 仅全终态触发 | any / 超时触发留后续 |
 | 无 model-B parked turn | 父 turn 不阻塞等待；「同 turn 内 join 结果后继续 LLM 推理」需业务侧在聚合 skill 内完成 |
 | then_skill_id 不校验 entry 资格 | 聚合 turn 通过 `_build_child_runner`（call_stack 为空）发起，无 DispatchPolicy entry 门控；then_skill_id 可为 entry:true 或 entry:false，只校验存在性 |

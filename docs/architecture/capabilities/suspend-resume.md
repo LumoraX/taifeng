@@ -149,14 +149,14 @@ Resume(thread_id, resolutions)
 - **声明**：业务挂起经 `make_request_user_input_tool(ttl_seconds=...)` 工厂参数（DATA，到期恒 abort）；内核自产挂起（SYSTEM_RETRY / RESOURCE_LIMIT）经 `EnginePool.create(failure_suspend_ttl_seconds=..., failure_suspend_on_expire=...)`。LLM SHALL NOT 可控 ttl（R1：存活期是业务策略）。
 - **record 级生效**：`SuspensionRecord.expires_at` 为派生属性 = `created_at + min(各 pending ttl)`（全 None → None）；到期对 record 当前**剩余未核销** pending 一次性裁决（已核销跳过）。真相在 pending 序列化字段，冷热一致（R5），旧 JSONL 无字段 → 永不过期（前向兼容）。
 - **武装**：engine 借唯一事件总线簿记——`turn_suspended`（data 含 `expires_at`）武装 asyncio 定时器，`suspension_resolved` 撤销（**先核销者胜**：触发时重读活跃挂起验证 record_id，已核销 no-op）；shutdown 取消全部（R4）。所有层级 turn（根 / call_skill 子链 / spawn 子 thread）的挂起事件都流经 engine emit，热路径单点全覆盖。
-- **冷重武装**：engine.run 启动时扫根 history + 挂起态 spawn 句柄的子 thread：已过期立即裁决、未过期按剩余壁钟时长重武装。v1 边界：深层 call_skill leaf 的 ttl 仅热路径覆盖（冷恢复后该 leaf 再次挂起时重新武装）。
+- **冷重武装**：根 record 在 engine.run 启动时武装；挂起态 spawn 句柄的子 thread 在句柄表重建（`_rebuild_spawn_state_from_history`）完成后武装——run() 起跑时句柄表尚空，重建前枚举不到；两段按 record_id 去重。已过期立即裁决、未过期按剩余壁钟时长重武装。v1 边界：深层 call_skill leaf 的 ttl 仅热路径覆盖（冷恢复后该 leaf 再次挂起时重新武装）。
 - **裁决 = 内核签发等价 Resume**：到期 emit `suspension_expired`（data `{record_id, thread_id, on_expire, reasons}`，R3）后以 `EXPIRE_SENTINEL`（`{"__expired__": true}`）payload 提交公共 `Resume` Op——root / 嵌套 / spawn 三条续跑链零改动复用。resolver 对哨兵按 pending 裁决：系统位按 `on_expire`（retry → 重建续跑；abort → 终止）；人类输入类 / CHILD_SKILL → 悬空 fc 回填 error output（保配对，R5；文案按 reason 渲染——PERMISSION → `permission_denied: ...`,其余 → `suspension_expired: ...`,数据问询超时不被误读为权限拒绝）+ 整体 abort。request 级核销下哨兵只对**剩余未核销** pending 签发。哨兵是内核内部形态，业务伪造等价于自行 deny/abort，无能力增益。
 - **到期路由 fire 时解析（suspension-ttl-hardening）**：定时器只记 record_id + 原 thread_id；fire 时在「根 → call_skill 链（根链可下探）→ 挂起态 spawn 句柄子链（含嵌套 leaf,以 **spawn 子 tid** 提交,与人工 Resume 约定一致）」中解析可路由入口,带有界重试消化挂起上浮的毫秒级窗口；解析失败 log + no-op（冷装载重武装再试）。
 - **在飞守卫**：Resume 命中 record 后立即占位（finally 释放）；定时器 fire 验证「未核销 且 不在飞」；同 record 并发第二个 Resume → `SuspensionResolveRejected(resolve_in_flight)`。任何交错下同一 record 至多被裁决一次。
 - **定时器生命周期（R4）**：Shutdown / root-cancel / 异常退出任一路径均在 `run()` finally 统一取消全部定时器,无孤儿定时器向已死队列提交。
 - **边界校验**：resolver 对结构化 payload 的 reason（PERMISSION / SYSTEM_RETRY / RESOURCE_LIMIT）收到非 dict payload → `ResolveError`（FORM/DATA 的 payload 本就是任意 JSON,不受限）；`failure_suspend_ttl_seconds ≤ 0` 在 engine / pool 构造期 `ValueError`；`failure_class == "cancelled"` 的 LLM 异常不进 failure policy（取消非失败,直接走取消链）。
 - **挂起态拒收新 UserMessage（suspend-review-fixes）**：根 thread 有活跃挂起时,新 UserMessage 在**落史之前**被显式拒绝（`TurnFailed {error:"active_suspension", kind:"thread_suspended", record_id}`,不消耗 LLM、线程状态零变化）——裁决（Resume retry/abort）是继续会话的唯一出口。放行会让新 turn 的同名编排 call_id fco 污染 request 级核销凭据（假核销）,并使 engine 级 K2 record 叠加成僵尸。已知退化：挂起中 `InjectUserInput` 仍落史（R5 不丢输入）→ 编排重放锚后移 → 已完成段重派发（方向安全）。
-- **spawn 直接 Resume 同等防护（suspend-review-fixes）**：`resume_spawn` 命中 record 后立即占位在飞守卫（finally 释放）——异步 MessageStore 下并发双 Resume 的双结算窗口闭合；`auto_retry_count` 经 `_build_child_runner` 透传,谱系熔断对 spawn 拓扑生效。
+- **spawn 直接 Resume 同等防护（suspend-review-fixes）**：`resume_spawn` 命中 record 后立即占位在飞守卫（finally 释放）——异步 MessageStore 下并发双 Resume 的双结算窗口闭合；`auto_retry_count` 经 `_build_child_runner` 透传,谱系熔断对 spawn 拓扑生效。重跑经 `SpawnDriver._drive` 统一驱动（ADR 0035）：占 K1 并发 slot（满额排队等待，被 kill / 根取消即放弃）、状态 CAS（核销期间被 kill 则放弃）；被 kill 的挂起句柄经 `_settle_cancelled_suspended` 落 resolved marker + `spawn_settled(cancelled)` 并撤销 TTL，不复活、不再收裁决。
 - **到期可靠投递（suspend-review-fixes）**：路由解析失败 → 2s 退避**重新武装**（不放弃,人工核销/Shutdown 经既有取消路径终止）；哨兵 resolutions 在 plan 前与未核销 pending 求交（空交集 no-op 让位,陈旧快照不重复回填）；结算锁「被并发抢先」分支 emit `SuspensionResolveRejected(reason="superseded_by_concurrent_settlement")`。
 - **时钟**：`now_factory` 构造期注入（默认 `time.time`，测试可固定）；壁钟回拨仅影响触发时刻不影响裁决正确性。
 
@@ -209,11 +209,17 @@ Resume(thread_id, resolutions)
 
 任一层续跑若**又挂起**，该层各自 emit `turn_suspended`，续跑链在该层中止（上层 `call_skill` 仍挂起，等下一次 `Resume`）。续跑链各层 turn 的事件均带 `Resume` submission 的 `submission_id`；子层续跑 turn 标记 `is_root=False`（engine 注入非空 `call_stack`），仅根续跑 turn `is_root=True`。
 
+**取消即停并解链（ADR 0035）**：整条续跑链是一个可取消整体——链级 token `root_cancel.child("resume:<sub_id>")` 一次派生，各层 turn token 派生自它，`_run_thread_turn` 遮蔽 / 还原链级 `_pending` 登记项，`CancelTurn(sub_id)` 打在任一层或层间都能让链停下。任一层 turn 以 `cancelled` 结束 → 返回哨兵 `CHAIN_CANCELLED_RESULT`（`"sub_skill_failed: cancelled"`，`suspend/resolver.py`）：上层照常回填该 call_skill 的 error fco 并做 record 级结算（全量达成落 resolved-marker；仍有未核销 pending 则 partial、不落 marker），但**不重跑任何上层**；根链以 `turn_failed{kind: "cancelled", is_root: true}` 终结该 Resume submission，根此刻不再挂在 CHILD_SKILL 上，可接新 `UserMessage` / `Rewind`。spawn 嵌套链解到 spawn 子 thread 后句柄经 `_settle_cancelled_suspended` 收敛为 cancelled（可 `Rewind(thread_id=<child>)` 重推）。取消发生在 leaf 核销前不写入任何内容（Resume 可重提）。
+
 > **R1**：`CHILD_SKILL` 是纯内核派发态（`sub_thread_id` / `skill_id` / `call_id` 均为基础调度 id），无业务概念。**R5**：续跑链全程基于 store 持久态（子 thread `load_thread` + 父 record pending detail），跨进程 resume 可行。
 
 #### Scenario: 子 skill 内挂起 → Resume 子 thread → 续跑回传父 → 根完成
 - **WHEN** 父 `call_skill` 派子，子内 `permission` 挂起 → `Resume(thread_id=<子 thread>, resolutions={req: {granted: true}})`
 - **THEN** `turn_suspended` 携子 thread_id（≠ 根）；resume 后 `suspension_resolved`（leaf + 父各一）、子续跑输出落子 thread、被挂起 call 补回 `function_call_output`、整个 submission 以根 `turn_completed(is_root=True)` 收尾
+
+#### Scenario: leaf 续跑被 CancelTurn
+- **WHEN** 根 → 子链续跑中对 Resume submission 提交 `CancelTurn`，leaf turn 以 cancelled 结束
+- **THEN** 父层与根均不再采样；根 history 末尾为 `sub_skill_failed: cancelled` fco + resolved-marker；订阅方收到 `turn_failed{kind: cancelled, is_root: true}`；随后 `UserMessage` 正常开 turn
 
 ### Requirement: resolutions 边界校验（request 级核销下）
 

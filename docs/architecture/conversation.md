@@ -196,9 +196,10 @@ reasoning provider state、function call 和后续 `origin_llm_sample_id` 工具
 | `compacted`（带 `replaced_range=(s, e)`） | 把 `logical[s:e]` 折叠掉：`logical = logical[:s] + [placeholder] + ([salvage] if salvage else []) + logical[e:]` |
 | `system_injection`，`source ∈ {rewind, rollback}` | 截断信号：`logical = logical[:cut_index]`（`cut_index` 从 payload 读），**marker 本身不进 logical** |
 | `skill_outcome`（战绩旁路记账） | `logical.append(item)`（正常追加，保留在 logical history 供后续相位读取）；但 `build_api_request` 在构建 LLM 消息序列时**跳过**此 kind——旁路语义，不进 LLM 视图 |
+| `spawn_settled`（spawn 句柄终态锚，落子 thread） | `logical.append(item)`；`build_api_request` 同样跳过（与 `spawn` / `suspension` 等记账 item 同类）；rewind 截断时随 `cut_index` 一并折叠，重推后由新终态再落一条（冷推断取最后一条） |
 | 其余所有 item | `logical.append(item)` |
 
-**副作用：修正既存 resume 隐患**。冷加载（`initial_history`）和 `pool.py` resume 路径均改为先 `reconstruct_logical_history`，使压缩过的 thread resume 后**不再把废弃项重发给 LLM**（原先 resume 不崩故未被发现，但会在下次 pre-turn 重压前多发一轮废弃上下文）。
+**副作用：修正既存 resume 隐患**。冷加载（`initial_history`）和 `pool.py` resume 路径均改为先 `reconstruct_logical_history`，使压缩过的 thread resume 后**不再把废弃项重发给 LLM**（原先 resume 不崩故未被发现，但会在下次 pre-turn 重压前多发一轮废弃上下文）。**非根 thread 单一入口（ADR 0035）**：engine 对子 thread 的任何读取（续跑重载 / 冷推断 / 续跑链寻址 / TTL 活跃性验证 / rewind 节点派生）都经 `_load_thread_items` = `reconstruct_logical_history(load_thread)`，不再直接以 raw 作 `history_buffer` 或推断依据；`reconstruct` 对逻辑 history 是恒等映射，可重复调用。
 
 **依赖契约（R5）**：`reconstruct` 依赖 `MessageStore.load_thread` 按写入顺序、完整吐回所有 `ResponseItem`（不去重 marker、不丢、不乱序）。默认 `JsonlMessageStore` 天然满足；自实现 DB store 时为协议红线。
 
