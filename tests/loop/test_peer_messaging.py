@@ -654,9 +654,30 @@ async def test_wait_any_wakes_on_first_terminal(wait_any_skills,
     await pool.close()
 
 
+class _SleepSpy:
+    """记账代理：替换 ``peer_mailbox`` 模块级的 ``asyncio`` 名字,只记该模块的 sleep。
+
+    为什么不直接 patch 全局 ``asyncio.sleep``：测试进程里并发跑着别的协程,它们的
+    sleep 会混进来,断言就失去针对性。换掉**被测模块的模块级名字**把观测面收在
+    模块内;其余属性（``get_running_loop`` 等）透传真 asyncio。
+    """
+
+    def __init__(self) -> None:
+        self.slept: list[float] = []
+
+    def __getattr__(self, name: str):  # noqa: ANN204 - 透传真 asyncio 的其余属性
+        return getattr(asyncio, name)
+
+    async def sleep(self, delay: float) -> None:
+        """记下这一觉再真睡。"""
+        self.slept.append(delay)
+        await asyncio.sleep(delay)
+
+
 @pytest.mark.asyncio
-async def test_wait_any_collects_all_settled_at_wake(wait_any_skills,
-                                                     threads_dir) -> None:
+async def test_wait_any_collects_all_settled_at_wake(
+    wait_any_skills, threads_dir, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """唤醒时收走当时**全部**已终态句柄,且已终态时立即返回(不空转一个轮询周期)。"""
     gate = asyncio.Event()
     pool, engine = await _make_wa_engine(wait_any_skills, threads_dir, gate)
@@ -668,19 +689,26 @@ async def test_wait_any_collects_all_settled_at_wake(wait_any_skills,
     assert await _wait(lambda: all(
         engine.spawn_status([h])[h]["status"] == "done" for h in (a, b)))
 
+    from taifeng.loop import peer_mailbox
     from taifeng.loop.cancellation import CancellationToken
 
-    loop = asyncio.get_running_loop()
-    t0 = loop.time()
+    # 「已终态时立即返回、不空转一个轮询周期」拆成两条**结构性**断言,不用墙钟:
+    #   ① 零等待预算(timeout_seconds=0.0)下仍须返回 terminal —— 轮询圈必须
+    #      「先收终态、再判超时」;谁把超时判定挪到收之前,结果立刻变 timeout;
+    #   ② 整个调用一次轮询 sleep 都不许睡 —— 谁在收之前插一觉,spy 立刻记到。
+    # 原写法 `assert elapsed < 0.05` 拿墙钟当证据,而轮询粒度恰好也是 0.05s：
+    # 调度抖动量级与它重叠 → 机器一慢就误报,且 ① 那类真回归在快机器上照样漏抓。
+    spy = _SleepSpy()
+    monkeypatch.setattr(peer_mailbox, "asyncio", spy)
     out = await engine.wait_spawn_any(
-        handle_ids=[a, b], timeout_seconds=5.0,
+        handle_ids=[a, b], timeout_seconds=0.0,
         cancel=CancellationToken(name="wa2"))
-    elapsed = loop.time() - t0
+    monkeypatch.undo()
 
-    assert out["outcome"] == "terminal"
+    assert out["outcome"] == "terminal", "已终态须在首圈即收走,不得空转一个轮询周期"
     assert set(out["settled"]) == {a, b}, "同批多个终态须一次收全,不逼调用方复调"
     assert out["pending"] == []
-    assert elapsed < 0.05, f"已终态应立即返回,实测等了 {elapsed:.3f}s"
+    assert spy.slept == [], f"已终态时不得先睡再收,实测睡了 {spy.slept}"
     gate.set()
     await pool.close()
 
