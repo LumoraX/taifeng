@@ -903,9 +903,12 @@ async def test_settle_failed_barrier_error_isolation(expert_skills, threads_dir)
     # suppress(兜底场景):不外抛;句柄已收敛 error、spawn_failed 已发
     await driver._settle_failed(a, "crash", suppress_barrier_errors=True)
     assert engine.spawn_status([a])[a]["status"] == "error"
-    await asyncio.sleep(0.05)
-    assert any(m.kind == "spawn_failed" and m.data.get("handle_id") == a
-               for m in events)
+    # 等事件真的进到收集器 —— 睡估计值在负载下会先断言后到达（假红）
+    await wait_for_condition(
+        lambda: any(m.kind == "spawn_failed" and m.data.get("handle_id") == a
+                    for m in events),
+        message="spawn_failed 未在守卫期限内送达",
+    )
     # 非 suppress(正常控制流):向上抛;句柄状态/事件仍已完成(故障仅在重查)
     with pytest.raises(RuntimeError, match="join_barrier_skill_missing"):
         await driver._settle_failed(b, "crash2")

@@ -289,7 +289,11 @@ async def test_trigger_turn_running_downgrades(peer_skills, threads_dir) -> None
     h = await engine.spawn_skill(skill_id="expert", args={}, reason="x")
     hid, child_tid = h["handle_id"], h["child_thread_id"]
     # 等子 turn 进入 gate_wait(运行中)
-    await asyncio.sleep(0.05)
+    # 等子 turn 真的进入 running —— 睡估计值会在负载下「还没到」就断言（假红）
+    await wait_for_condition(
+        lambda: engine.spawn_status([hid])[hid]["status"] == "running",
+        message="子 turn 未在守卫期限内进入 running",
+    )
     assert engine.spawn_status([hid])[hid]["status"] == "running"
 
     events: list = []

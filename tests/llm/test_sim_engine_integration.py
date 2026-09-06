@@ -219,8 +219,14 @@ async def test_rollback_truncation_reflected_in_ledger(
     assert await _run_turn(engine, "第二问") == "turn_completed"
 
     # 回滚最近 1 轮（截掉第二问及其答复）
+    # rollback 是 turn 间操作、没有终态事件可等，但**效果本身可观测**：history 变短。
+    # 等这个状态，而不是睡一个估计值——后者在负载下会「还没回滚完」就往下走。
+    before_rollback = len(engine.history_snapshot())
     await engine.submit(ThreadRollback(turns=1))
-    await asyncio.sleep(0.05)  # rollback 是 turn 间操作，无终态事件可等
+    await wait_for_condition(
+        lambda: len(engine.history_snapshot()) < before_rollback,
+        message="ThreadRollback 未在守卫期限内截断 history",
+    )
 
     assert await _run_turn(engine, "回滚后的新问") == "turn_completed"
     await pool.close()

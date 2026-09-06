@@ -166,7 +166,10 @@ async def test_rollback_waits_for_inflight_turn(
         sub_r = await engine.submit(ThreadRollback(num_turns=1))
         await rec.wait_kind(sub_r, "submission_queued")
         await rec.wait_kind(sub_a, "turn_completed")
-        await asyncio.sleep(0.2)
-        assert engine.history_snapshot() == []
+        # 等回滚真的落到 history —— 睡估计值在负载下可能还没落（假红）
+        await wait_for_condition(
+            lambda: engine.history_snapshot() == [],
+            message="回滚未在守卫期限内清空 history",
+        )
     finally:
         await pool.close()

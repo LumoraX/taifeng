@@ -278,7 +278,11 @@ async def test_manual_resume_wins_over_timer(ask_skills, threads_dir):
     async for ev in engine.subscribe(resume_id):
         if ev.msg.kind == "turn_completed":
             break
-    await asyncio.sleep(0.05)
+    # 等定时器真的被撤销 —— 睡估计值在负载下可能还没撤（假红）
+    await wait_for_condition(
+        lambda: not engine._ttl_timers,  # noqa: SLF001
+        message="人工核销后定时器未在守卫期限内撤销",
+    )
     assert not engine._ttl_timers, "人工核销后定时器应撤销"  # noqa: SLF001
     await pool.close()
 
