@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -430,6 +431,74 @@ def parse_sse_event(
 # Usage 提取（OpenAI 家族 —— 含 DeepSeek）
 # ---------------------------------------------------------------------------
 
+logger = logging.getLogger(__name__)
+
+_ACCOUNTING_NOISE_SEEN: set[str] = set()
+"""已告警过的记账字段标签——同一坏字段只吼一次，避免每 turn 刷屏。"""
+
+
+def _coerce_count(value: object) -> int | None:
+    """把 usage 计数强制成整数；无法解析返回 ``None`` 交调用方定夺。
+
+    只负责「能不能解析」，不替调用方决定「解析不了算不算致命」——
+    主计数与记账字段的处置完全不同（见下面两个调用点）。
+    """
+    try:
+        return int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+
+
+def _spec_count(raw: dict[str, Any], *keys: str, default: int = 0) -> int:
+    """读取**规范要求**的主计数（input / output / total）。
+
+    这三个是 OpenAI Chat / Responses 规范里的必填整数，而且直接喂会话 token
+    天花板等资源决策——坏值会让调度判断出错，所以 fail closed。但必须抛
+    **分类过的** ``InvalidResponseError``，而不是让 ``int()`` 裸崩出
+    ``ValueError`` / ``TypeError``：后者不是 ``LLMError``，失败策略分不了类，
+    拿不到 SUSPEND / TERMINAL 处置。
+    """
+    for key in keys:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if not value:  # 0 / None / "" —— 与历史 `or 0` 语义一致
+            return default
+        parsed = _coerce_count(value)
+        if parsed is None:
+            raise InvalidResponseError(
+                f"usage {key} must be an integer, got {type(value).__name__}"
+            )
+        return parsed
+    return default
+
+
+def _accounting_count(value: object, label: str) -> int:
+    """读取**纯记账**的可选计数（cache 命中 / reasoning tokens）。
+
+    这些字段要么不是 OpenAI 正式顶层字段（``cache_*_input_tokens`` 是 Anthropic
+    风格、``prompt_cache_hit_tokens`` 是 DeepSeek 特有），要么是可选明细。它们
+    只用于观测 cache 命中率，**不影响输出正确性、也不驱动任何决策**。
+
+    所以坏值一律按「缺失」处理并记一条日志，绝不判死一个已经成功产出内容的
+    turn——上游随时会往 usage 里加新字段 / 改表示法，为一个我们只拿来记账的
+    值把 turn 判死是不可辩护的（同 ADR 0030 对 SSE 未知帧的处置口径）。
+    """
+    if not value:  # 0 / None / "" —— 与历史 `or 0` 语义一致
+        return 0
+    parsed = _coerce_count(value)
+    if parsed is not None:
+        return parsed
+    if label not in _ACCOUNTING_NOISE_SEEN:
+        _ACCOUNTING_NOISE_SEEN.add(label)
+        logger.warning(
+            "usage 记账字段 %s 无法解析为整数（%r），按缺失处理；"
+            "turn 不受影响，后续同类值不再重复告警",
+            label, value,
+        )
+    return 0
+
+
 
 def extract_usage_openai_family(raw: dict[str, Any]) -> TokenUsage:
     """把 OpenAI chat/completions 风格的 ``usage`` 对象解析为 ``TokenUsage``。
@@ -442,31 +511,39 @@ def extract_usage_openai_family(raw: dict[str, Any]) -> TokenUsage:
     DeepSeek 还有 ``prompt_cache_miss_tokens`` —— 当前不映射，业务侧通过
     ``TokenUsage.raw`` 读原始值。
     """
-    pt = int(raw.get("prompt_tokens", raw.get("input_tokens", 0)) or 0)
-    ct = int(raw.get("completion_tokens", raw.get("output_tokens", 0)) or 0)
-    tt = int(raw.get("total_tokens", pt + ct) or (pt + ct))
+    # 主计数：规范必填 + 驱动资源决策 → 坏值 fail closed（但抛分类错误）
+    pt = _spec_count(raw, "prompt_tokens", "input_tokens")
+    ct = _spec_count(raw, "completion_tokens", "output_tokens")
+    tt = _spec_count(raw, "total_tokens", default=pt + ct)
 
-    # cache_read 三优先级查找
+    # cache_read 三优先级查找（纯记账 → 坏值按缺失处理，不判死 turn）
     cache_read = raw.get("cache_read_input_tokens")
+    label = "cache_read_input_tokens"
     if not cache_read:
         pt_details = raw.get("prompt_tokens_details")
         if not isinstance(pt_details, dict):
             pt_details = raw.get("input_tokens_details")
         if isinstance(pt_details, dict):
             cache_read = pt_details.get("cached_tokens")
+            label = "prompt_tokens_details.cached_tokens"
     if not cache_read:
         cache_read = raw.get("prompt_cache_hit_tokens")
-    cache_read_int = int(cache_read or 0)
+        label = "prompt_cache_hit_tokens"
+    cache_read_int = _accounting_count(cache_read, label)
 
-    cache_creation = int(raw.get("cache_creation_input_tokens", 0) or 0)
+    cache_creation = _accounting_count(
+        raw.get("cache_creation_input_tokens"), "cache_creation_input_tokens"
+    )
 
-    # reasoning_tokens（OpenAI o1 / DeepSeek R1）
+    # reasoning_tokens（OpenAI o1 / DeepSeek R1）—— 同为纯记账
     ct_details = raw.get("completion_tokens_details")
     if not isinstance(ct_details, dict):
         ct_details = raw.get("output_tokens_details")
     reasoning = 0
     if isinstance(ct_details, dict):
-        reasoning = int(ct_details.get("reasoning_tokens", 0) or 0)
+        reasoning = _accounting_count(
+            ct_details.get("reasoning_tokens"), "completion_tokens_details.reasoning_tokens"
+        )
 
     return TokenUsage(
         input_tokens=pt,
