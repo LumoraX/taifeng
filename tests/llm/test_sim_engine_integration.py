@@ -32,6 +32,7 @@ from taifeng.llm.events import (
 from taifeng.llm.providers import RoutingSimClient, SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import ThreadRollback
+from tests.conftest import wait_for_condition
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -51,27 +52,33 @@ async def _run_turn(engine: taifeng.AgentEngine, text: str) -> str:
 
 
 async def _wait(cond, tries: int = 200) -> bool:
-    """轮询等待条件成立（spawn 后台 task 用）。"""
-    for _ in range(tries):
-        if cond():
-            return True
-        await asyncio.sleep(0.01)
-    return False
+    """轮询等待条件成立。
+
+    ``tries`` 仅为兼容既有调用点保留：固定圈数等于把守卫期限写死成 N×10ms
+    （2~4s），在全量跑的调度抖动下会把「慢」误判成「没发生」。实际期限统一走
+    ``GUARD_TIMEOUT_SECONDS``，详见 capabilities/test-layout.md。
+    """
+    del tries
+    try:
+        await wait_for_condition(cond)
+    except AssertionError:
+        return False
+    return True
 
 
 class _ExtraContentToolSession:
     """模拟 provider 在 tool_call_done 上返回专属扩展字段。"""
 
-    def __init__(self, client: "_ExtraContentToolClient") -> None:
+    def __init__(self, client: _ExtraContentToolClient) -> None:
         self._client = client
 
-    async def __aenter__(self) -> "_ExtraContentToolSession":
+    async def __aenter__(self) -> _ExtraContentToolSession:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
         pass
 
-    async def stream(self, request: "ApiRequest") -> "AsyncIterator[ResponseEvent]":
+    async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
         self._client.requests.append(request)
         yield created()
         yield server_model("sim-extra")
@@ -107,7 +114,7 @@ class _ExtraContentToolClient:
     def session(
         self,
         *,
-        cancel: "CancellationToken",
+        cancel: CancellationToken,
         model: str | None = None,
     ) -> _ExtraContentToolSession:
         return _ExtraContentToolSession(self)

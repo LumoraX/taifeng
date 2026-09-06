@@ -24,15 +24,22 @@ from taifeng.llm.providers import SimTurn
 from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+from tests.conftest import wait_for_condition
 
 
 async def _wait(cond, tries: int = 300) -> bool:
-    """轮询等待条件成立（每次 10ms），用于等后台分离 task 收敛。"""
-    for _ in range(tries):
-        if cond():
-            return True
-        await asyncio.sleep(0.01)
-    return False
+    """轮询等待条件成立。
+
+    ``tries`` 仅为兼容既有调用点保留：固定圈数等于把守卫期限写死成 N×10ms
+    （2~4s），在全量跑的调度抖动下会把「慢」误判成「没发生」。实际期限统一走
+    ``GUARD_TIMEOUT_SECONDS``，详见 capabilities/test-layout.md。
+    """
+    del tries
+    try:
+        await wait_for_condition(cond)
+    except AssertionError:
+        return False
+    return True
 
 
 # 专家 agent：composite + entry=false，top turn 通过 call_skill 编排一个子 skill。

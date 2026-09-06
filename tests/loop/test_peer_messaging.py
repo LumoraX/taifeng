@@ -15,7 +15,7 @@ import asyncio
 import pytest
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.loop.submission import SendToPeer
 from taifeng.tool.builtins.send_message import make_send_message_tool
 from taifeng.tool.builtins.spawn_skill import make_spawn_skill_tool
@@ -24,15 +24,22 @@ from taifeng.tool.builtins.wait_peer import (
     make_wait_peer_tool,
 )
 from taifeng.tool.spec import ToolResult, ToolSpec
+from tests.conftest import wait_for_condition
 
 
 async def _wait(cond, tries: int = 300) -> bool:
-    """轮询等待条件成立(每次 10ms,最多 3s),等后台分离 task 收敛。"""
-    for _ in range(tries):
-        if cond():
-            return True
-        await asyncio.sleep(0.01)
-    return False
+    """轮询等待条件成立。
+
+    ``tries`` 仅为兼容既有调用点保留：固定圈数等于把守卫期限写死成 N×10ms
+    （2~4s），在全量跑的调度抖动下会把「慢」误判成「没发生」。实际期限统一走
+    ``GUARD_TIMEOUT_SECONDS``，详见 capabilities/test-layout.md。
+    """
+    del tries
+    try:
+        await wait_for_condition(cond)
+    except AssertionError:
+        return False
+    return True
 
 
 _COORD = """---
