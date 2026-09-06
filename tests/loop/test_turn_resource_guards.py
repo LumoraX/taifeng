@@ -16,6 +16,7 @@ from taifeng.llm.providers.sim import RoutingSimClient
 from taifeng.loop.denial_breaker import DenialBreakerConfig
 from taifeng.permission import PermissionPolicy
 from taifeng.tool.spec import ToolResult, ToolSpec
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 _ENTRY = """---
 name: guard-entry
@@ -116,7 +117,7 @@ async def test_denial_circuit_opens_and_terminates(guard_skills, threads_dir):
     # 配对完整：第 3 轮未被采样（第 2 圈边界即终止）
     assert done[0].data["iterations"] == 2
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -179,10 +180,10 @@ async def test_child_budget_independent_e2e(guard_skills, threads_dir):
         return [m for m in events
                 if m.kind == "turn_completed" and m.data.get("is_root")]
 
-    for _ in range(300):  # 轮询等 root turn 终态（composite 流多 turn_completed）
-        if _root_done():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(
+        lambda: _root_done(),
+        message="轮询等 root turn 终态（composite 流多 turn_completed）",
+    )
 
     root = _root_done()[0]
     assert root.data["end_reason"] == "completed"
@@ -195,7 +196,7 @@ async def test_child_budget_independent_e2e(guard_skills, threads_dir):
     blob = " ".join(str(it.payload) for it in hist)
     assert "SUB_DONE" in blob, "子 skill 未完整跑完（子预算被父挤兑？）"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -242,7 +243,7 @@ async def test_prompter_timeout_deny_counts_toward_breaker(guard_skills, threads
     done = [m for m in events if m.kind == "turn_completed"]
     assert done and done[0].data["end_reason"] == "denial_circuit_open"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 

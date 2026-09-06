@@ -7,6 +7,7 @@ import asyncio
 from taifeng.llm.providers.sim import RoutingSimClient, SimCoordinator, SimTurn
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 
 def _req(text: str) -> ApiRequest:
@@ -26,13 +27,13 @@ async def test_coordinator_signal_then_wait_any_order():
     """先 signal 后 wait / 先 wait 后 signal 均成立（Event 幂等）。"""
     coord = SimCoordinator()
     coord.signal("done")
-    await asyncio.wait_for(coord.wait("done"), timeout=1.0)
+    await asyncio.wait_for(coord.wait("done"), timeout=GUARD_TIMEOUT_SECONDS)
 
     coord2 = SimCoordinator()
     waiter = asyncio.create_task(coord2.wait("later"))
     await asyncio.sleep(0)
     coord2.signal("later")
-    await asyncio.wait_for(waiter, timeout=1.0)
+    await asyncio.wait_for(waiter, timeout=GUARD_TIMEOUT_SECONDS)
 
 
 async def test_orchestrated_completion_order():
@@ -49,7 +50,7 @@ async def test_orchestrated_completion_order():
 
     # 同时起跑：A 先被调度也必须等 B 点亮信号
     await asyncio.wait_for(
-        asyncio.gather(run("TRACK_A"), run("TRACK_B")), timeout=5.0
+        asyncio.gather(run("TRACK_A"), run("TRACK_B")), timeout=GUARD_TIMEOUT_SECONDS
     )
     assert order == ["TRACK_B", "TRACK_A"]
 
@@ -62,8 +63,12 @@ async def test_emit_signal_fires_before_completed():
         coordinator=coord,
     )
     await _drain_text(client, "R")
-    # 信号已点亮（wait 立即返回）
-    await asyncio.wait_for(coord.wait("mid"), timeout=0.1)
+    # 「completed 之前就已点亮」是本用例的断言本体 —— 用**同步查 Event 状态**判定，
+    # 不用 `wait_for(..., timeout=0.1)`：那种写法拿墙钟当证据，期限与调度抖动同
+    # 数量级会误报；而放宽期限又会把断言变成恒真（信号晚点亮也照样通过）。
+    assert coord._event("mid").is_set(), (  # noqa: SLF001
+        "emit_signal 必须在 completed 之前点亮，drain 结束时信号应已就绪"
+    )
 
 
 async def test_reset_clears_signals():
@@ -74,4 +79,4 @@ async def test_reset_clears_signals():
     await asyncio.sleep(0.01)
     assert not waiter.done()  # reset 后旧信号失效
     coord.signal("s")
-    await asyncio.wait_for(waiter, timeout=1.0)
+    await asyncio.wait_for(waiter, timeout=GUARD_TIMEOUT_SECONDS)

@@ -14,6 +14,7 @@ import taifeng
 if TYPE_CHECKING:
     from pathlib import Path
 from taifeng.llm.providers import SimClient, SimTurn
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -90,7 +91,7 @@ async def test_tool_batch_dispatched_event_emitted(
             break
     await pool.close()
     try:
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     except TimeoutError:
         task.cancel()
 

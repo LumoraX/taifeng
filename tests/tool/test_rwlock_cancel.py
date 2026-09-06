@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 
 from taifeng.tool.runtime import _RwLock
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 
 async def test_cancelled_waiting_writer_does_not_block_future_readers() -> None:
@@ -33,7 +34,7 @@ async def test_cancelled_waiting_writer_does_not_block_future_readers() -> None:
     await lock.release_read()  # R1 释放
 
     # 新读者 R2：若写者计数残留，这里会永久阻塞
-    await asyncio.wait_for(lock.acquire_read(), timeout=1.0)
+    await asyncio.wait_for(lock.acquire_read(), timeout=GUARD_TIMEOUT_SECONDS)
     await lock.release_read()
     assert lock._waiting_writers == 0
 
@@ -63,5 +64,5 @@ async def test_uncancelled_writer_still_blocks_readers_until_released() -> None:
     assert not reader_task.done()  # 写者排队中，读者被挡
 
     await lock.release_read()  # R1 释放 → 写者进 → 写者出 → 读者进
-    await asyncio.wait_for(asyncio.gather(writer_task, reader_task), timeout=1.0)
+    await asyncio.wait_for(asyncio.gather(writer_task, reader_task), timeout=GUARD_TIMEOUT_SECONDS)
     assert lock._waiting_writers == 0

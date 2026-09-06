@@ -17,6 +17,7 @@ import pytest
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.submission import Rewind, Submission
+from tests.conftest import wait_for_condition
 
 
 def _is_root_end(ev: object) -> bool:
@@ -61,13 +62,9 @@ async def _run_to_end(engine: taifeng.AgentEngine, text: str) -> None:
     rewind_checkpoints)回写在 run() **返回后**;故收尾轮询等节点表落地(仓库既有
     settle 模式),保证 rewind_nodes() 对调用方可见。
     """
-    import asyncio
     sub_id = await engine.submit(taifeng.UserMessage(text=text))
     await _consume_to_root_end(engine, sub_id)
-    for _ in range(100):
-        if engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: engine.rewind_nodes(), message="条件未在守卫期限内满足")
 
 
 def test_rewind_op_defaults_and_discriminator() -> None:

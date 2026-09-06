@@ -12,6 +12,7 @@ import taifeng
 from taifeng.llm.client import ModelClient
 from taifeng.llm.events import created, server_model, text_delta
 from taifeng.loop.submission import CancelTurn
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -66,7 +67,7 @@ async def test_cancelled_turn_persists_partial_assistant_text(
     try:
         engine = await pool.get_or_create(session_id="s", entry_skill_id="code-reviewer")
         sub_id = await engine.submit(taifeng.UserMessage(text="hi"))
-        await asyncio.wait_for(client.stalled.wait(), timeout=3.0)
+        await asyncio.wait_for(client.stalled.wait(), timeout=GUARD_TIMEOUT_SECONDS)
         await engine.submit(CancelTurn(submission_id=sub_id))
 
         async def _terminal() -> dict[str, Any]:
@@ -75,7 +76,7 @@ async def test_cancelled_turn_persists_partial_assistant_text(
                     return dict(ev.msg.data)
             return {}
 
-        data = await asyncio.wait_for(_terminal(), timeout=3.0)
+        data = await asyncio.wait_for(_terminal(), timeout=GUARD_TIMEOUT_SECONDS)
         assert data.get("end_reason") == "cancelled"
         await asyncio.sleep(0.1)
 
@@ -158,14 +159,14 @@ async def test_engine_shutdown_cancels_tool_running_under_resume(
             if ev.msg.kind in kinds:
                 return
 
-    await asyncio.wait_for(_until(("turn_suspended",), sub_id), timeout=3.0)
+    await asyncio.wait_for(_until(("turn_suspended",), sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     items = [it async for it in await pool.store.load_thread(engine.thread_id)]
     rec = SuspensionRecord.from_item(next(it for it in items if it.kind == "suspension"))
     req_id = rec.pending[0].request_id
 
     await engine.submit(Resume(thread_id=engine.thread_id, resolutions={req_id: {"granted": True}}))
-    await asyncio.wait_for(tool_started.wait(), timeout=3.0)
+    await asyncio.wait_for(tool_started.wait(), timeout=GUARD_TIMEOUT_SECONDS)
 
     await engine.submit(Shutdown())
-    await asyncio.wait_for(tool_cancelled.wait(), timeout=3.0)
+    await asyncio.wait_for(tool_cancelled.wait(), timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()

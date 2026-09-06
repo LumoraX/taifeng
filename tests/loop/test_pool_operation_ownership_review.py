@@ -11,6 +11,7 @@ import taifeng.loop.pool_lifecycle as lifecycle_module
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.pool_lifecycle import EnginePoolUnresponsiveError
 from taifeng.loop.submission import UserMessage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_engine_bootstrap import _JournalCore, _pool
 
 if TYPE_CHECKING:
@@ -91,11 +92,11 @@ async def test_release_cancels_and_awaits_real_engine_dispatch(
         )
     else:
         await engine.submit(operation)  # type: ignore[arg-type]
-    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await asyncio.wait_for(started.wait(), timeout=GUARD_TIMEOUT_SECONDS)
 
     await asyncio.wait_for(
         pool.release(f"ses-owned-{handler_name}"),
-        timeout=1.0,
+        timeout=GUARD_TIMEOUT_SECONDS,
     )
     converged_before_release = finished.is_set()
     terminal_after_convergence = (
@@ -158,10 +159,10 @@ async def test_unresponsive_real_operation_preserves_pool_ownership(
         0.01,
     )
     await engine.submit(UserMessage(text="block"))
-    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await asyncio.wait_for(started.wait(), timeout=GUARD_TIMEOUT_SECONDS)
 
     release = asyncio.create_task(pool.release(session_id))
-    error = await asyncio.wait_for(_task_error(release), timeout=1.0)
+    error = await asyncio.wait_for(_task_error(release), timeout=GUARD_TIMEOUT_SECONDS)
     ownership_preserved = (
         session_id in pool._engines  # noqa: SLF001
         and session_id in pool._engine_tasks  # noqa: SLF001

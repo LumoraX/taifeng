@@ -32,6 +32,7 @@ from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.skill.registry import FilesystemSkillRegistry
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -117,10 +118,10 @@ async def _collect(engine: object) -> tuple[asyncio.Task, list]:
 
 
 async def _wait_for(events: list, kind: str) -> None:
-    for _ in range(100):
-        if any(m.kind == kind for m in events):
-            return
-        await asyncio.sleep(0.01)
+    await wait_for_condition(
+        lambda: any(m.kind == kind for m in events),
+        message=f"守卫期限内未等到事件 {kind}",
+    )
 
 
 @pytest.mark.asyncio
@@ -146,7 +147,7 @@ async def test_inject_routed_to_active_turn(
     await _wait_for(events, "user_input_injected")
 
     await pool.close()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
     injected = [m for m in events if m.kind == "user_input_injected"]
     assert injected and injected[0].data["delivered"] is True
@@ -174,7 +175,7 @@ async def test_inject_no_active_turn_no_new_turn(
     await _wait_for(events, "user_input_injected")
 
     await pool.close()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
     injected = [m for m in events if m.kind == "user_input_injected"]
     assert injected and injected[0].data["delivered"] is False
@@ -232,7 +233,7 @@ async def test_inject_consumed_by_running_turn_e2e(
     await _wait_for(events, "turn_completed")
 
     await pool.close()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
     # 注入被活跃 turn 接收
     injected = [m for m in events if m.kind == "user_input_injected"]

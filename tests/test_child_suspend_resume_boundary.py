@@ -21,7 +21,7 @@ import pytest
 
 from taifeng.suspend.reason import SuspendReason
 from taifeng.suspend.record import SuspensionRecord
-from tests.conftest import last_turn_terminal
+from tests.conftest import GUARD_TIMEOUT_SECONDS, last_turn_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -243,7 +243,7 @@ async def test_nested_grandchild_suspension_propagates_to_root(tmp_path: Path, t
                 return tids
             await asyncio.sleep(0.02)
 
-    susp_tids = await asyncio.wait_for(_three_suspended(), timeout=8.0)
+    susp_tids = await asyncio.wait_for(_three_suspended(), timeout=GUARD_TIMEOUT_SECONDS)
     assert len(susp_tids) == 3, f"祖父三层应各 emit turn_suspended，实得 {susp_tids}"
     leaf_tid, leaf_rec = await _leaf_with_user_pending(pool, susp_tids)
     assert leaf_tid is not None and leaf_tid != root_tid, "叶 thread 必须含用户 pending 且非根"

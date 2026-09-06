@@ -20,7 +20,7 @@ from taifeng.mcp.server import (
     McpServerInitiatedRequestError,
     McpStdioServer,
 )
-from tests.conftest import guard_ticks, wait_for_condition
+from tests.conftest import GUARD_TIMEOUT_SECONDS, guard_ticks, wait_for_condition
 
 
 # --------------------------------------------------------------------
@@ -84,7 +84,7 @@ async def _start_server() -> tuple[
 
 async def _stop_server(reader: asyncio.StreamReader, task: asyncio.Task[None]) -> None:
     reader.feed_eof()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
 
 # --------------------------------------------------------------------

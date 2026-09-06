@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from taifeng.mcp.server import McpStdioServer
-from tests.conftest import wait_for_condition
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 
 def _make_pipe() -> tuple[asyncio.StreamReader, asyncio.StreamWriter, list[bytes]]:
@@ -79,7 +79,7 @@ async def test_success_emits_started_then_completed() -> None:
     )
     await responder
     reader.feed_eof()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
     kinds = [k for k, _ in events]
     # 期望 started 在前，completed 在后；不应有 timed_out
@@ -116,7 +116,7 @@ async def test_timeout_emits_started_then_timed_out_then_completed_timeout() -> 
         )
 
     reader.feed_eof()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
     kinds = [k for k, _ in events]
     assert "elicitation_started" in kinds
@@ -145,4 +145,4 @@ async def test_none_emit_does_not_raise() -> None:
     with pytest.raises(TimeoutError):
         await server.server_initiated_request("ping", {}, timeout=0.1)
     reader.feed_eof()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)

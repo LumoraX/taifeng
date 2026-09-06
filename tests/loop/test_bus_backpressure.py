@@ -13,6 +13,7 @@ from taifeng.loop.event import EngineLog, EventMsg
 from taifeng.skill.registry import FilesystemSkillRegistry
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 
 class _FakeStore:
@@ -78,7 +79,15 @@ async def test_event_drop_is_counted_not_silent(skills_dir: Path) -> None:
 async def test_submission_unbounded_when_size_zero(skills_dir: Path) -> None:
     """submission_queue_size<=0 → 不限（逃生口），submit 不阻塞。"""
     engine = await _make_engine(skills_dir, submission_queue_size=0)
+    # 逃生口的**结构性**证据：maxsize==0 即 asyncio.Queue 的「不限」语义。
+    # 原来只靠 `wait_for(..., timeout=0.5)` 侧面证明「没阻塞」——引擎没 run、队列
+    # 不被 drain，一旦退化成 bounded 就是永久阻塞，所以守卫期限放宽不影响判定力；
+    # 但直接断言 maxsize 更快失败、也更说明意图。
+    assert engine._submissions.maxsize == 0, (  # noqa: SLF001
+        f"size<=0 应映射为不限队列，实得 maxsize={engine._submissions.maxsize}"  # noqa: SLF001
+    )
     for i in range(50):
         await asyncio.wait_for(
-            engine.submit(taifeng.UserMessage(text=str(i))), timeout=0.5
+            engine.submit(taifeng.UserMessage(text=str(i))),
+            timeout=GUARD_TIMEOUT_SECONDS,
         )  # 不阻塞

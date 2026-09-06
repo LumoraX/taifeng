@@ -15,6 +15,7 @@ from taifeng.llm.events import completed, normalized_output
 from taifeng.llm.types import ApiRequest, TokenUsage
 from taifeng.loop.submission import Resume, Rewind
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+from tests.conftest import wait_for_condition
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -95,12 +96,18 @@ def _done(items: list[dict[str, object]], *, end_turn: bool) -> list[ResponseEve
 
 
 async def _wait_until(predicate: Callable[[], bool], *, attempts: int = 300) -> bool:
-    """短轮询 detached spawn 终态，避免测试依赖固定长等待。"""
-    for _ in range(attempts):
-        if predicate():
-            return True
-        await asyncio.sleep(0.01)
-    return False
+    """轮询等待条件成立。
+
+    ``attempts`` 仅为兼容既有调用点保留：固定圈数等于把守卫期限写死成 N×间隔，
+    在全量跑的调度抖动下会把「慢」误判成「没发生」。实际期限统一走
+    ``GUARD_TIMEOUT_SECONDS``，详见 capabilities/test-layout.md。
+    """
+    del attempts
+    try:
+        await wait_for_condition(predicate)
+    except AssertionError:
+        return False
+    return True
 
 
 def _write_spawn_skills(root: Path) -> Path:

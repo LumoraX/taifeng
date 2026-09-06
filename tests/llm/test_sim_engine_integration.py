@@ -32,7 +32,7 @@ from taifeng.llm.events import (
 from taifeng.llm.providers import RoutingSimClient, SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import ThreadRollback
-from tests.conftest import wait_for_condition
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -322,7 +322,7 @@ async def test_concurrent_spawn_orchestrated_completion_order(
     assert await _wait(lambda: all(
         engine.spawn_status([h])[h]["status"] == "done" for h in (h_a, h_b)
     ))
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
     # 确定性时序：A 等 B 的信号 → B 必先完成

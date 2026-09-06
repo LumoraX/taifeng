@@ -24,6 +24,7 @@ import pytest
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -390,7 +391,7 @@ async def test_suspended_sub_skill_emits_no_record(
     await asyncio.sleep(0)
     await engine.submit(taifeng.UserMessage(text="go"))
     try:
-        await asyncio.wait_for(done.wait(), timeout=10.0)
+        await asyncio.wait_for(done.wait(), timeout=GUARD_TIMEOUT_SECONDS)
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

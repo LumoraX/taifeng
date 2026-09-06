@@ -15,6 +15,7 @@ from taifeng.llm.providers.sim import SimClient
 from taifeng.loop.pool import EnginePool
 from taifeng.loop.pool_lifecycle import EnginePoolReleaseError
 from taifeng.tool.registry import ToolRegistry
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_engine_bootstrap import (
     _EngineSpy,
     _JournalCore,
@@ -169,7 +170,7 @@ async def test_unresponsive_shutdown_preserves_session_and_audit_ownership(
 
     done, _ = await asyncio.wait({release}, timeout=0.2)
     completed_in_bound = release in done
-    error = await asyncio.wait_for(_release_exception(release), timeout=1.0)
+    error = await asyncio.wait_for(_release_exception(release), timeout=GUARD_TIMEOUT_SECONDS)
 
     assert completed_in_bound is True
     assert getattr(error, "code", None) == "engine_pool_release_unresponsive"
@@ -291,7 +292,7 @@ async def test_unresponsive_actor_preserves_session_and_audit_ownership(
 
     done, _ = await asyncio.wait({release}, timeout=0.2)
     completed_in_bound = release in done
-    error = await asyncio.wait_for(_release_exception(release), timeout=1.0)
+    error = await asyncio.wait_for(_release_exception(release), timeout=GUARD_TIMEOUT_SECONDS)
 
     assert completed_in_bound is True
     assert actor_cancelled.is_set()

@@ -11,6 +11,7 @@ from taifeng.conversation.models import (
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.rewind import derive_rewind_log
 from taifeng.loop.submission import Rewind
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 T = "thr"
 
@@ -86,7 +87,6 @@ async def _run_to_root_end(engine: object, text: str) -> None:
     runner.run() 内发出，engine 状态在 run() 返回后回写；轮询直到
     rewind_nodes() 非空才返回。
     """
-    import asyncio
 
     import taifeng
 
@@ -105,10 +105,7 @@ async def _run_to_root_end(engine: object, text: str) -> None:
                 break
 
     # 等节点表回写（engine 在 run() 返回后落 _rewind_checkpoints）
-    for _ in range(100):
-        if engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: engine.rewind_nodes(), message="条件未在守卫期限内满足")
 
 
 async def test_parity_derive_equals_live_recorded_events(
@@ -131,7 +128,6 @@ async def test_parity_derive_equals_live_recorded_events(
     注：事件不携带 inner_history_len / args_digest / call_id / turn_index，
     故这些字段由其他单元测试（test_rewind_cold 的 pure derive 测试）覆盖。
     """
-    import asyncio
 
     import taifeng
     from taifeng.llm.providers import SimClient, SimTurn
@@ -184,10 +180,7 @@ async def test_parity_derive_equals_live_recorded_events(
                 break
 
     # 等节点表回写
-    for _ in range(100):
-        if engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: engine.rewind_nodes(), message="条件未在守卫期限内满足")
 
     # ── 取 derive 推导结果（post-turn history）─────────────────────────────
     derived = derive_rewind_log(engine.history_snapshot())
@@ -282,7 +275,6 @@ async def test_rewind_marker_persists_cut_index(
     从 store 加载全部 items，找到 source=='rewind' 的 system_injection，
     断言其 payload['cut_index'] == it2.history_len（即 rewind 截断点）。
     """
-    import asyncio
 
     # 三圈模型：圈 1/2 各一次 read_skill，圈 3 收尾；rewind 后重推用第 4 条
     client = SimClient(turns=[
@@ -309,10 +301,7 @@ async def test_rewind_marker_persists_cut_index(
     # 第一轮 turn，等节点表落地
     sub_id = await engine.submit(taifeng.UserMessage(text="请审查"))
     await _drain_to_root_end(engine, sub_id)
-    for _ in range(100):
-        if engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: engine.rewind_nodes(), message="条件未在守卫期限内满足")
 
     # 取 t1:it2 节点（圈 2 的 iteration 节点）
     it2 = next(n for n in engine.rewind_nodes() if n.node_id == "t1:it2")
@@ -358,7 +347,6 @@ async def test_cold_load_rebuilds_rewind_table(
     3. 断言新 engine.rewind_nodes() 非空（冷重建成功）；
     4. 验证 node_id 与热路径一致（冷推导坐标系自洽）。
     """
-    import asyncio
     from pathlib import Path
 
     import taifeng
@@ -399,10 +387,7 @@ async def test_cold_load_rebuilds_rewind_table(
             data = ev.msg.data if hasattr(ev.msg, "data") else {}
             if data.get("is_root"):
                 break
-    for _ in range(100):
-        if engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: engine.rewind_nodes(), message="条件未在守卫期限内满足")
 
     # 热 engine 的节点表与 thread_id
     live_nodes = engine.rewind_nodes()
@@ -513,10 +498,7 @@ async def test_cold_load_then_re_reason_executes(
             data = ev.msg.data if hasattr(ev.msg, "data") else {}
             if data.get("is_root"):
                 break
-    for _ in range(100):
-        if hot_engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: hot_engine.rewind_nodes(), message="条件未在守卫期限内满足")
 
     hot_nodes = hot_engine.rewind_nodes()
     assert hot_nodes, "热 engine 节点表不应为空"
@@ -585,7 +567,7 @@ async def test_cold_load_then_re_reason_executes(
     # 关停冷 engine
     await cold_engine.shutdown()
     try:
-        await asyncio.wait_for(run_task, timeout=5.0)
+        await asyncio.wait_for(run_task, timeout=GUARD_TIMEOUT_SECONDS)
     except (TimeoutError, asyncio.CancelledError):
         run_task.cancel()
 
@@ -722,10 +704,7 @@ async def test_cold_then_new_turn_node_ids_no_collision(
             data = ev.msg.data if hasattr(ev.msg, "data") else {}
             if data.get("is_root"):
                 break
-    for _ in range(100):
-        if hot_engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: hot_engine.rewind_nodes(), message="条件未在守卫期限内满足")
 
     t1_nodes = hot_engine.rewind_nodes()
     assert t1_nodes, "热 engine 节点表不应为空"
@@ -799,16 +778,15 @@ async def test_cold_then_new_turn_node_ids_no_collision(
                 break
 
     # 等节点表回写（含新 t2 节点）
-    for _ in range(100):
-        nodes_after = cold_engine.rewind_nodes()
-        if any(n.node_id.startswith("t2:") for n in nodes_after):
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(
+        lambda: any(n.node_id.startswith("t2:") for n in cold_engine.rewind_nodes()),
+        message="节点表未在守卫期限内回写出 t2 节点",
+    )
 
     # 关停冷 engine
     await cold_engine.shutdown()
     try:
-        await asyncio.wait_for(run_task, timeout=5.0)
+        await asyncio.wait_for(run_task, timeout=GUARD_TIMEOUT_SECONDS)
     except (TimeoutError, asyncio.CancelledError):
         run_task.cancel()
 
@@ -909,10 +887,7 @@ async def test_cold_rewind_resolves_instructions(
             data = ev.msg.data if hasattr(ev.msg, "data") else {}
             if data.get("is_root"):
                 break
-    for _ in range(100):
-        if hot_engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: hot_engine.rewind_nodes(), message="条件未在守卫期限内满足")
 
     hot_last_resolved = hot_engine.instructions_snapshot()
     assert hot_last_resolved, "热 engine 跑完 turn 后 instructions_snapshot() 不应为空"
@@ -993,7 +968,7 @@ async def test_cold_rewind_resolves_instructions(
 
     await cold_engine.shutdown()
     try:
-        await asyncio.wait_for(run_task, timeout=5.0)
+        await asyncio.wait_for(run_task, timeout=GUARD_TIMEOUT_SECONDS)
     except (TimeoutError, asyncio.CancelledError):
         run_task.cancel()
 
@@ -1200,7 +1175,7 @@ async def test_cold_rewind_compacted_thread_reconstructed_correctly(
 
     await cold_engine.shutdown()
     try:
-        await asyncio.wait_for(run_task, timeout=5.0)
+        await asyncio.wait_for(run_task, timeout=GUARD_TIMEOUT_SECONDS)
     except (TimeoutError, asyncio.CancelledError):
         run_task.cancel()
 
@@ -1484,10 +1459,7 @@ async def test_cold_rewind_uses_construction_entry_skill_not_history_origin(
             data = ev.msg.data if hasattr(ev.msg, "data") else {}
             if data.get("is_root"):
                 break
-    for _ in range(100):
-        if hot_engine.rewind_nodes():
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_condition(lambda: hot_engine.rewind_nodes(), message="条件未在守卫期限内满足")
     thread_id = hot_engine.thread_id
     await pool.close()
 
@@ -1553,7 +1525,7 @@ async def test_cold_rewind_uses_construction_entry_skill_not_history_origin(
 
     await cold_engine.shutdown()
     try:
-        await asyncio.wait_for(run_task, timeout=5.0)
+        await asyncio.wait_for(run_task, timeout=GUARD_TIMEOUT_SECONDS)
     except (TimeoutError, asyncio.CancelledError):
         run_task.cancel()
 

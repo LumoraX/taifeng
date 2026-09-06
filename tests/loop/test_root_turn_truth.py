@@ -17,7 +17,7 @@ from taifeng.loop.submission import (
     InjectUserInput,
     Shutdown,
 )
-from tests.conftest import wait_for_condition
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -132,7 +132,7 @@ async def test_subscriber_after_shutdown_receives_terminal_event(
                 return ev.msg.kind, dict(ev.msg.data)
             return "iterator-ended", {}
 
-        kind, data = await asyncio.wait_for(_first_kind(), timeout=3.0)
+        kind, data = await asyncio.wait_for(_first_kind(), timeout=GUARD_TIMEOUT_SECONDS)
         assert kind == "turn_failed"
         assert data["kind"] == "engine_shutdown"
     finally:
@@ -233,7 +233,7 @@ async def test_crashed_operation_emits_terminal_and_clears_pending(
                 return ev.msg.kind, dict(ev.msg.data)
             return "iterator-ended", {}
 
-        kind, data = await asyncio.wait_for(_first(), timeout=3.0)
+        kind, data = await asyncio.wait_for(_first(), timeout=GUARD_TIMEOUT_SECONDS)
         assert kind == "turn_failed"
         assert data["kind"] == "RuntimeError"
         assert "resumed_tool_call_not_found" in data["error"]
@@ -262,6 +262,6 @@ async def test_late_subscriber_after_engine_closed_gets_terminal(
                 return ev.msg.kind
             return "iterator-ended"
 
-        assert await asyncio.wait_for(_first(), timeout=3.0) == "turn_failed"
+        assert await asyncio.wait_for(_first(), timeout=GUARD_TIMEOUT_SECONDS) == "turn_failed"
     finally:
         await pool.close()

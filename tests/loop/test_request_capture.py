@@ -16,6 +16,7 @@ import pytest
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 
 async def _run_turn_collect(
@@ -52,7 +53,7 @@ async def _run_turn_collect(
             break
     await pool.close()
     try:
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         task.cancel()
     return collected

@@ -27,7 +27,7 @@ import pytest
 from taifeng.mcp.prompter import McpPrompter
 from taifeng.mcp.server import McpStdioServer
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
-from tests.conftest import guard_ticks, wait_for_condition
+from tests.conftest import GUARD_TIMEOUT_SECONDS, guard_ticks, wait_for_condition
 
 
 def _make_pipe() -> tuple[asyncio.StreamReader, asyncio.StreamWriter, list[bytes]]:
@@ -131,7 +131,7 @@ async def test_hitl_full_round_trip_allow() -> None:
         assert decision.reason == "trusted"
     finally:
         reader.feed_eof()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -175,7 +175,7 @@ async def test_hitl_full_round_trip_deny() -> None:
         assert decision.reason == "blocked"
     finally:
         reader.feed_eof()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -200,7 +200,7 @@ async def test_hitl_timeout_falls_back_to_deny() -> None:
         assert decision.reason == "elicitation_timeout"
     finally:
         reader.feed_eof()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +324,7 @@ async def test_tools_call_path_hitl_gets_client_answer_before_timeout() -> None:
         assert decisions and decisions[0].granted is True
     finally:
         reader.feed_eof()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -349,5 +349,5 @@ async def test_run_exit_converges_in_flight_tools_call() -> None:
         lambda: _HangingEngine.started, message="tools/call 未进入在飞状态"
     )
     reader.feed_eof()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     assert _HangingEngine.cancelled is True

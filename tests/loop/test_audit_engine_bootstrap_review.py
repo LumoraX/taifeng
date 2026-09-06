@@ -22,6 +22,7 @@ from taifeng.llm.providers.sim import SimClient
 from taifeng.loop.audit_config import AuditCapabilityError
 from taifeng.loop.pool import EnginePool
 from taifeng.tool.registry import ToolRegistry
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 from tests.loop.test_audit_engine_bootstrap import (
     _config,
     _EngineSpy,
@@ -625,8 +626,8 @@ async def test_cancelled_release_caller_does_not_cancel_finish(
     assert "ses-cancel-release" in pool._audit_sessions  # noqa: SLF001
     worker = pool._release_tasks["ses-cancel-release"]  # noqa: SLF001
     shutdown_continue.set()
-    await asyncio.wait_for(lease_closed.wait(), timeout=1.0)
-    await asyncio.wait_for(asyncio.shield(worker), timeout=1.0)
+    await asyncio.wait_for(lease_closed.wait(), timeout=GUARD_TIMEOUT_SECONDS)
+    await asyncio.wait_for(asyncio.shield(worker), timeout=GUARD_TIMEOUT_SECONDS)
     assert "ses-cancel-release" not in pool._audit_sessions  # noqa: SLF001
     assert core.close_calls == 1
     await pool.close()

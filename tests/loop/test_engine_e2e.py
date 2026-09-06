@@ -10,6 +10,7 @@ import pytest
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -46,7 +47,7 @@ async def test_pool_engine_basic_turn(skills_dir: Path, threads_dir: Path) -> No
 
     await pool.close()
     try:
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         task.cancel()
 

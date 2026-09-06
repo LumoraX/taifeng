@@ -17,6 +17,7 @@ import taifeng
 from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
 from taifeng.loop.submission import Resume
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,11 +89,18 @@ class _AsyncStore:
 
 
 async def _wait(cond, tries: int = 200) -> bool:
-    for _ in range(tries):
-        if cond():
-            return True
-        await asyncio.sleep(0.02)
-    return False
+    """轮询等待条件成立。
+
+    ``tries`` 仅为兼容既有调用点保留：固定圈数等于把守卫期限写死成 N×间隔，
+    在全量跑的调度抖动下会把「慢」误判成「没发生」。实际期限统一走
+    ``GUARD_TIMEOUT_SECONDS``，详见 capabilities/test-layout.md。
+    """
+    del tries
+    try:
+        await wait_for_condition(cond)
+    except AssertionError:
+        return False
+    return True
 
 
 async def _watch(engine, sink: list) -> None:
@@ -162,7 +170,7 @@ async def test_spawn_concurrent_resume_single_settlement_async_store(
         f"后到者应收 resolve_in_flight,实得 {[m.data for m in rejected]}"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -237,7 +245,7 @@ async def test_spawn_auto_retry_lineage_exhaustion(
         f"熔断后不得继续自动采样(首发 + 1 次 retry),实采 {client.sample_count}"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -309,7 +317,7 @@ max_call_depth: 2
         "结清后新消息应照常执行"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -392,7 +400,7 @@ max_call_depth: 2
     assert fail_once["n"] >= 1, "注入的首轮失败应被触发"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -452,5 +460,5 @@ max_call_depth: 2
                and m.data["scope"] == "turn_refused" for m in events)
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()

@@ -24,7 +24,7 @@ from taifeng.mcp.server import (
     SKILL_URI_PREFIX,
     McpStdioServer,
 )
-from tests.conftest import guard_ticks
+from tests.conftest import GUARD_TIMEOUT_SECONDS, guard_ticks
 
 # --------------------------------------------------------------------
 # Fixtures
@@ -92,7 +92,7 @@ async def _roundtrip(server: McpStdioServer, line: bytes, rid: int) -> dict[str,
         raise AssertionError(f"守卫期限内未等到 id={rid} 的响应")
     finally:
         reader.feed_eof()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
 
 # --------------------------------------------------------------------

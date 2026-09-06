@@ -18,6 +18,7 @@ from taifeng.suspend.reason import PendingRequest, SuspendReason
 from taifeng.suspend.record import SuspensionRecord
 from taifeng.suspend.resolver import EXPIRE_SENTINEL, SuspensionResolver
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 
 def _rec(*reqs, created_at: int = 1000) -> SuspensionRecord:
@@ -439,11 +440,18 @@ def ttl_spawn_skills(tmp_path):
 
 
 async def _wait_status(engine, hid: str, want: str, tries: int = 200) -> bool:
-    for _ in range(tries):
-        if engine.spawn_status([hid])[hid]["status"] == want:
-            return True
-        await asyncio.sleep(0.02)
-    return False
+    """轮询等待条件成立。
+
+    ``tries`` 仅为兼容既有调用点保留：固定圈数等于把守卫期限写死成 N×间隔，
+    在全量跑的调度抖动下会把「慢」误判成「没发生」。实际期限统一走
+    ``GUARD_TIMEOUT_SECONDS``，详见 capabilities/test-layout.md。
+    """
+    del tries
+    try:
+        await wait_for_condition(lambda: engine.spawn_status([hid])[hid]["status"] == want)
+    except AssertionError:
+        return False
+    return True
 
 
 async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_dir):
@@ -490,14 +498,14 @@ async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_d
               and m.data.get("handle_id") == hid]
     assert failed, "到期 abort 应 emit SpawnFailed"
     # abort 终态 → barrier 全终态重查 → 触发(修复前漏调重查,此处永等不到)
-    for _ in range(200):
-        if any(m.kind == "join_barrier_fired" for m in events):
-            break
-        await asyncio.sleep(0.02)
+    await wait_for_condition(
+        lambda: any(m.kind == "join_barrier_fired" for m in events),
+        message="条件未在守卫期限内满足",
+    )
     assert any(m.kind == "join_barrier_fired" for m in events), \
         "abort 终态后单句柄 barrier 应触发"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -548,10 +556,7 @@ async def test_spawn_abort_recheck_fires_join_barrier(ttl_spawn_skills, threads_
         f"到期 abort 后句柄应 error,实为 {engine.spawn_status([b])[b]}"
     assert await _wait_status(engine, a, "done")
     # 核心断言:abort 终态使句柄集全终态 → barrier 重查触发(修复前永不触发)
-    for _ in range(200):
-        if fired["v"] is not None:
-            break
-        await asyncio.sleep(0.02)
+    await wait_for_condition(lambda: fired["v"] is not None, message="条件未在守卫期限内满足")
     assert fired["v"] is not None, \
         "abort 终态后 join-barrier 应重查触发聚合 turn,实际未触发(聚合挂死)"
     # 聚合种子含两专家终态:a done / b error(失败专家不被静默丢弃)
@@ -561,7 +566,7 @@ async def test_spawn_abort_recheck_fires_join_barrier(ttl_spawn_skills, threads_
     assert payload[a]["status"] == "done"
     assert payload[b]["status"] == "error"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -665,7 +670,7 @@ async def test_spawn_nested_leaf_expire_routes_and_unblocks(tmp_path, threads_di
     assert not rejected, f"到期裁决不得因路由死角被拒: {[m.data for m in rejected]}"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -686,10 +691,10 @@ async def test_root_cancel_clears_ttl_timers(ask_skills, threads_dir):
     assert engine._ttl_timers, "挂起后应有武装中的定时器"  # noqa: SLF001
     # root-cancel(非 Shutdown Op)退出
     engine._root_cancel.cancel()  # noqa: SLF001
-    for _ in range(100):
-        if not engine._ttl_timers:  # noqa: SLF001
-            break
-        await asyncio.sleep(0.02)
+    await wait_for_condition(
+        lambda: not engine._ttl_timers,  # noqa: SLF001
+        message="root-cancel 退出后定时器未清空",
+    )
     assert not engine._ttl_timers, "root-cancel 退出必须清空定时器(R4)"  # noqa: SLF001
     await pool.close()
 
@@ -728,10 +733,10 @@ async def test_inflight_guard_timer_noop_and_second_resume_rejected(
     from taifeng.loop.submission import Resume
     await engine.submit(Resume(
         thread_id=engine.thread_id, resolutions={req_id: {"answer": "x"}}))
-    for _ in range(100):
-        if any(m.kind == "suspension_resolve_rejected" for m in events2):
-            break
-        await asyncio.sleep(0.02)
+    await wait_for_condition(
+        lambda: any(m.kind == "suspension_resolve_rejected" for m in events2),
+        message="条件未在守卫期限内满足",
+    )
     rejects = [m for m in events2 if m.kind == "suspension_resolve_rejected"]
     assert rejects and rejects[0].data["reason"] == "resolve_in_flight"
 
@@ -739,14 +744,14 @@ async def test_inflight_guard_timer_noop_and_second_resume_rejected(
     engine._resolving_records.discard(rid)  # noqa: SLF001
     await engine.submit(Resume(
         thread_id=engine.thread_id, resolutions={req_id: {"answer": "好"}}))
-    for _ in range(150):
-        if any(m.kind == "suspension_resolved" for m in events2):
-            break
-        await asyncio.sleep(0.02)
+    await wait_for_condition(
+        lambda: any(m.kind == "suspension_resolved" for m in events2),
+        message="条件未在守卫期限内满足",
+    )
     assert any(m.kind == "suspension_resolved" for m in events2)
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 

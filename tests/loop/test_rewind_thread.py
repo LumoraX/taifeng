@@ -21,7 +21,7 @@ import taifeng
 from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.loop.submission import Rewind
 from taifeng.tool.spec import ToolResult, ToolSpec
-from tests.conftest import wait_for_condition
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 _WORKER = """---
 name: worker
@@ -188,7 +188,7 @@ async def test_rewind_unknown_thread_rejected(rw_skills, threads_dir) -> None:
     })
     engine = await pool.get_or_create(session_id="g1", entry_skill_id="host")
     sub_id = await engine.submit(Rewind(node_id="t1:it1", thread_id="no-such"))
-    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=3)
+    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     assert data["reason"] == "unknown_thread"
     await pool.close()
 
@@ -208,7 +208,7 @@ async def test_rewind_running_spawn_rejected(rw_skills, threads_dir) -> None:
         # spawn 后立即 rewind:子 runner 还卡在采样信号上(running + live)
         sub_id = await engine.submit(Rewind(node_id="t1:it1", thread_id=ctid))
         data = await asyncio.wait_for(
-            _collect_rejected(engine, sub_id), timeout=3)
+            _collect_rejected(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
         assert data["reason"] == "thread_running"
     finally:
         client.coordinator.signal("release")
@@ -233,7 +233,7 @@ async def test_rewind_suspended_spawn_rejected(rw_skills, threads_dir) -> None:
         lambda: engine.spawn_status([hid])[hid]["status"] == "suspended"
     ), "SuspendByDefaultPolicy 下触顶应挂起"
     sub_id = await engine.submit(Rewind(node_id="t1:it1", thread_id=ctid))
-    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=3)
+    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     assert data["reason"] == "turn_suspended"
     await pool.close()
 
@@ -251,7 +251,7 @@ async def test_rewind_unknown_node_on_child_rejected(
     _hid, ctid = await _spawn_until_error(engine)
     sub_id = await engine.submit(
         Rewind(node_id="does-not-exist", thread_id=ctid))
-    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=3)
+    data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     assert data["reason"] == "unknown_node"
     await pool.close()
 
@@ -313,7 +313,7 @@ async def test_rewind_failed_spawn_re_reason_to_done(
     disp = next(c for c in nodes if c.kind == "dispatch")
     sub_id = await engine.submit(
         Rewind(node_id=disp.node_id, thread_id=ctid, mode="re_reason"))
-    data = await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=3)
+    data = await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     assert data["thread_id"] == ctid
     assert data["node_id"] == disp.node_id
     assert await _wait(
@@ -343,7 +343,7 @@ async def test_rewind_retry_tool_new_args_store_untouched(
     sub_id = await engine.submit(Rewind(
         node_id=disp.node_id, thread_id=ctid,
         mode="retry_tool", new_args={"v": "new"}))
-    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=3)
+    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "done")
     # 工具以新参重跑(seed 补跑)
@@ -371,7 +371,7 @@ async def test_rewind_fail_again_then_rewind_again(
         c for c in await engine.rewind_nodes_for(ctid) if c.kind == "dispatch")
     sub_id = await engine.submit(
         Rewind(node_id=disp.node_id, thread_id=ctid))
-    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=3)
+    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "error"
     ), "重推剧本再次派发应再次触顶落 error"
@@ -380,7 +380,7 @@ async def test_rewind_fail_again_then_rewind_again(
         c for c in await engine.rewind_nodes_for(ctid) if c.kind == "dispatch")
     sub_id2 = await engine.submit(
         Rewind(node_id=disp2.node_id, thread_id=ctid))
-    await asyncio.wait_for(_rewound_data(engine, sub_id2), timeout=3)
+    await asyncio.wait_for(_rewound_data(engine, sub_id2), timeout=GUARD_TIMEOUT_SECONDS)
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "done")
     assert engine.spawn_status([hid])[hid]["result"] == "三跑成功"
@@ -402,7 +402,7 @@ async def test_rewind_stale_running_allowed(rw_skills, threads_dir) -> None:
     disp = next(
         c for c in await engine.rewind_nodes_for(ctid) if c.kind == "dispatch")
     sub_id = await engine.submit(Rewind(node_id=disp.node_id, thread_id=ctid))
-    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=3)
+    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "done")
     await pool.close()
@@ -424,7 +424,7 @@ async def test_rewind_marker_cold_reconstruct_consistent(
     disp = next(
         c for c in await engine.rewind_nodes_for(ctid) if c.kind == "dispatch")
     sub_id = await engine.submit(Rewind(node_id=disp.node_id, thread_id=ctid))
-    data = await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=3)
+    data = await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     await _wait(lambda: engine.spawn_status([hid])[hid]["status"] == "done")
     # 冷重放:raw 含 marker;reconstruct 后被截掉的旧 echo 派发不复现
     raw = [it async for it in await pool.store.load_thread(ctid)]
@@ -460,7 +460,7 @@ async def test_rewind_repush_kill_spawn_cancels(
     disp = next(
         c for c in await engine.rewind_nodes_for(ctid) if c.kind == "dispatch")
     sub_id = await engine.submit(Rewind(node_id=disp.node_id, thread_id=ctid))
-    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=3)
+    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     # 等重推 runner 上线(live)后 kill;取消是协作式的(事件边界检查),
     # 放行信号让流恢复出事件,runner 在下一边界观察到取消 → cancelled
     assert await _wait(lambda: ctid in engine._spawn._live_runners)  # noqa: SLF001
@@ -507,11 +507,11 @@ async def test_rewind_done_spawn_fired_barrier_not_refired(
         c for c in await engine.rewind_nodes_for(ctid)
         if c.kind == "iteration")
     sub_id = await engine.submit(Rewind(node_id=it_node.node_id, thread_id=ctid))
-    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=3)
+    await asyncio.wait_for(_rewound_data(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["result"] == "二跑")
     # barrier 幂等:重推终态触发的 _check_barriers 被 fired 守卫跳过
     assert fired.count(bid) == 1, f"已 fired 的 barrier 不得二次触发: {fired}"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()

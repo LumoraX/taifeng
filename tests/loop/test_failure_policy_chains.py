@@ -24,6 +24,7 @@ from taifeng.loop.submission import Resume
 from taifeng.suspend.reason import SuspendReason
 from taifeng.suspend.record import SuspensionRecord
 from taifeng.tool.spec import ToolResult, ToolSpec
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 _EXPERT = """---
 name: budget-expert
@@ -83,12 +84,18 @@ def chain_skills(tmp_path):
 
 
 async def _wait(cond, tries: int = 200) -> bool:
-    """轮询等待条件成立(spawn 子 task 调度无确定时序)。"""
-    for _ in range(tries):
-        if cond():
-            return True
-        await asyncio.sleep(0.02)
-    return False
+    """轮询等待条件成立。
+
+    ``tries`` 仅为兼容既有调用点保留：固定圈数等于把守卫期限写死成 N×间隔，
+    在全量跑的调度抖动下会把「慢」误判成「没发生」。实际期限统一走
+    ``GUARD_TIMEOUT_SECONDS``，详见 capabilities/test-layout.md。
+    """
+    del tries
+    try:
+        await wait_for_condition(cond)
+    except AssertionError:
+        return False
+    return True
 
 
 async def _spawn_until_suspended(pool, engine):
@@ -176,7 +183,7 @@ async def test_spawn_resource_limit_resume_abort_to_failed(chain_skills, threads
               and m.data.get("handle_id") == hid]
     assert failed, "abort 应 emit SpawnFailed(终态可被 barrier 消费)"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -302,7 +309,7 @@ async def test_call_skill_chain_inherits_policy_and_nested_resume(
         "嵌套续跑链应推进至根 turn 完成"
     assert _root_completed()["end_reason"] == "completed"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(watch_task, timeout=5.0)
+    await asyncio.wait_for(watch_task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -364,7 +371,7 @@ async def test_cancelled_error_bypasses_policy(chain_skills, threads_dir) -> Non
     task = asyncio.create_task(watch())
     await asyncio.sleep(0)
     await engine.submit(taifeng.UserMessage(text="go"))
-    await asyncio.wait_for(task, timeout=8.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
     kinds = [m.kind for m in events]
     assert "turn_suspended" not in kinds, \

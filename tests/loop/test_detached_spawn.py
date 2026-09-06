@@ -9,7 +9,7 @@ import pytest
 import taifeng
 from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.loop.spawn_handle import SpawnHandleRegistry
-from tests.conftest import ATOMIC_SKILL, wait_for_condition
+from tests.conftest import ATOMIC_SKILL, GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 
 async def _wait(cond, tries: int = 200) -> bool:
@@ -849,7 +849,7 @@ async def test_settle_failed_idempotent_on_terminal(expert_skills, threads_dir):
         m.kind == "spawn_failed" and m.data.get("handle_id") == a
         for m in events), "已终态句柄不得再 emit spawn_failed"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -911,7 +911,7 @@ async def test_settle_failed_barrier_error_isolation(expert_skills, threads_dir)
         await driver._settle_failed(b, "crash2")
     assert engine.spawn_status([b])[b]["status"] == "error"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 

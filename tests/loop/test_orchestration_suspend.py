@@ -18,6 +18,7 @@ from taifeng.loop.submission import Resume
 from taifeng.suspend.reason import SuspendReason
 from taifeng.suspend.record import SuspensionRecord
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
+from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -74,11 +75,18 @@ async def _watch_all(engine, events: list):
 
 
 async def _wait(cond, tries: int = 200) -> bool:
-    for _ in range(tries):
-        if cond():
-            return True
-        await asyncio.sleep(0.02)
-    return False
+    """轮询等待条件成立。
+
+    ``tries`` 仅为兼容既有调用点保留：固定圈数等于把守卫期限写死成 N×间隔，
+    在全量跑的调度抖动下会把「慢」误判成「没发生」。实际期限统一走
+    ``GUARD_TIMEOUT_SECONDS``，详见 capabilities/test-layout.md。
+    """
+    del tries
+    try:
+        await wait_for_condition(cond)
+    except AssertionError:
+        return False
+    return True
 
 
 def _root_suspended(events: list, root_tid: str):
@@ -170,7 +178,7 @@ async def test_orch_suspend_resume_replay_e2e(tmp_path: Path, threads_dir: Path)
     assert 0 in counts, f"重入首段应零派发(重放命中),实得 {counts}"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -232,7 +240,7 @@ async def test_orch_mixed_parallel_batch(tmp_path: Path, threads_dir: Path) -> N
     assert await _wait(lambda: any(
         m.kind == "turn_completed" and m.data.get("is_root") for m in events))
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -300,7 +308,7 @@ async def test_orch_when_branch_replay_consistent(
         "重入后 when 判定应与挂起前一致(then 段),else 段不得执行"
     assert sum(1 for c in all_fc if "picker" in c) == 1, "picker 重放不重跑"
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -350,7 +358,7 @@ async def test_orch_second_user_message_full_redispatch(
     assert counts == [1, 1], f"两轮都应实际派发,实得 {counts}"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -475,7 +483,7 @@ async def test_orch_parallel_two_suspended_staggered_resume(
     assert counts[-1] == 0, f"父重入应全量重放零派发,实得 {counts}"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -515,7 +523,7 @@ async def test_orch_partial_then_expire_remaining(tmp_path, threads_dir) -> None
         "B 的回填应为 error 输出(sub_skill_aborted)"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
 
 
@@ -547,5 +555,5 @@ async def test_orch_concurrent_resume_single_settlement(
     assert len(resolved) == 1, f"根 record 整体核销必须恰一次,实得 {len(resolved)}"
 
     await engine.submit(taifeng.loop.Shutdown())
-    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()
