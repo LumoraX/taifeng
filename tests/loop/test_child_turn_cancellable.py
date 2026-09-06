@@ -108,5 +108,13 @@ async def test_cancel_turn_reaches_child_thread_resume(tmp_path: Path, threads_d
         child_items = [it async for it in await pool.store.load_thread(child_tid)]
         blob = " ".join(str(it.payload) for it in child_items)
         assert "CHILD_DONE_MARK" not in blob, "被取消的续跑不应落完成输出"
+        # wave2b D5:链取消即停——父 / 根不再重跑,Resume submission 以
+        # turn_failed{cancelled} 终结(完整解链断言见 test_spawn_redrive_truth.py)。
+        root_term = next(
+            ev for ev in events2
+            if ev.msg.kind in ("turn_completed", "turn_failed")
+            and ev.msg.data.get("is_root"))
+        assert root_term.msg.kind == "turn_failed", "链取消后根不得再采样完成"
+        assert root_term.msg.data.get("kind") == "cancelled"
     finally:
         await pool.close()

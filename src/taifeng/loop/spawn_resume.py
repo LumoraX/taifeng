@@ -26,6 +26,7 @@ from taifeng.loop.event import (
 )
 from taifeng.loop.spawn_handle import SpawnDrivePlan
 from taifeng.loop.submission import Resume, Submission
+from taifeng.suspend.resolver import CHAIN_CANCELLED_RESULT
 
 if TYPE_CHECKING:
     from taifeng.loop.spawn_driver import SpawnDriver
@@ -298,6 +299,15 @@ class SpawnResumeChain:
                         "reason": "no_active_suspension",
                         "record_id": None, "detail": {}}),
                 ))
+                return
+            if child_result == CHAIN_CANCELLED_RESULT:
+                # 链取消解到 spawn 子 thread(wave2b D5):gap 已回填(全量达成则已核销),
+                # 不重跑;句柄经 cancelled 收敛(与 suspended-kill 同路径:同步步置
+                # cancelled → 核销残余挂起 + 撤销 TTL + 落 settled 锚 + emit + barrier),
+                # 之后可 Rewind(thread_id=<child>) 重推。
+                drv._spawn_handles.set_result(  # noqa: SLF001
+                    handle.handle_id, status="cancelled", result=None)
+                await drv._settle_cancelled_suspended(handle)  # noqa: SLF001
                 return
             if settle == "partial":
                 # spawn 子层 record 还有其他挂起子未结(parallel 多子错峰):

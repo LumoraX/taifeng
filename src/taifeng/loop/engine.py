@@ -113,6 +113,7 @@ from taifeng.loop.submission import (
 from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.suspend.record import SuspensionRecord
+from taifeng.suspend.resolver import CHAIN_CANCELLED_RESULT
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -2806,10 +2807,21 @@ class AgentEngine:
                 data={"reason": "no_active_suspension", "record_id": None, "detail": {}})))
             return
 
+        # 链级取消 token(wave2b D5):整条续跑链是一个可取消的整体——各层 turn 的 token
+        # 派生自它,CancelTurn(sub.id) 无论打在哪一层还是层间都能让链停下。登记为
+        # 非根 pending(链上没有在飞的根 runner,InjectSystemMessage 仍走 engine 直写);
+        # 沿用 gate 登记项的注入队列引用,不丢排队期间的注入。
+        chain_cancel = root_cancel.child(f"resume:{sub.id}")
+        gate_pending = self._pending.get(sub.id)
+        self._pending[sub.id] = _PendingTurn(
+            submission_id=sub.id, cancel=chain_cancel, is_root=False,
+            pending_input=gate_pending.pending_input if gate_pending is not None else [],
+        )
+
         # 2. leaf：核销用户挂起 + 续跑，拿到回传给父的结果字符串
         leaf_tid, leaf_skill_id, _ = chain[-1]
         leaf_result = await self._resume_leaf_thread(
-            sub, leaf_tid, leaf_skill_id, op.resolutions, root_cancel)
+            sub, leaf_tid, leaf_skill_id, op.resolutions, chain_cancel)
         if leaf_result is None:
             # leaf 核销失败（已 emit Rejected）或又挂起（已 emit turn_suspended）→ 不上溯
             return
@@ -2822,11 +2834,16 @@ class AgentEngine:
             # 本层 call_skill 的 call_id = 子层元素携带的"父 call_id"
             call_id = chain[level + 1][2]
             cont = await self._resume_parent_level(
-                sub, parent_tid, parent_skill_id, call_id, child_result, root_cancel)
+                sub, parent_tid, parent_skill_id, call_id, child_result, chain_cancel)
             if cont is None:
                 # 父是根（根分支已收尾）/ 父又挂起 → 链终止
                 return
             child_result = cont
+        # 链因取消解到根(各层 gap 已回填 + 结算,根未重跑):以 turn_failed{cancelled}
+        # 终结本 Resume submission(2a 终结信号语义)。根此刻已无活跃挂起,可接新
+        # UserMessage / Rewind——不会卡在 CHILD_SKILL 上。
+        if child_result == CHAIN_CANCELLED_RESULT:
+            await self._emit_operation_terminal(sub.id, None, kind="cancelled")
 
     async def _build_resume_chain(
         self, leaf_thread_id: str
@@ -2987,6 +3004,9 @@ class AgentEngine:
         if outcome.end_reason == "suspended":
             # 子续跑又挂起：本层 emit 了 turn_suspended，续跑链中止（等下次 Resume）
             return None
+        if outcome.end_reason == "cancelled":
+            # 链取消(wave2b D5):向上只解链(回填 + 结算),不重跑任何上层
+            return CHAIN_CANCELLED_RESULT
         return outcome.final_text if outcome.success else (
             f"sub_skill_failed: {outcome.error or outcome.end_reason}")
 
@@ -3011,6 +3031,8 @@ class AgentEngine:
         # 回填父 call_skill 的 function_call_output（= 正常 run_sub_skill 的成功回传）
         is_error = (child_result.startswith("sub_skill_failed:")
                     or child_result.startswith("sub_skill_aborted:"))
+        # 链取消解链(wave2b D5):本层照常回填 + 结算,但不重跑,哨兵继续向上传
+        cancelled = child_result == CHAIN_CANCELLED_RESULT
         out = function_call_output(
             call_id=call_id, output=child_result,
             thread_id=parent_tid, is_error=is_error)
@@ -3033,7 +3055,7 @@ class AgentEngine:
                     submission_id=sub.id, msg=SuspensionResolveRejected(data={
                         "reason": "superseded_by_concurrent_settlement",
                         "record_id": record.record_id, "detail": {}})))
-                return None
+                return CHAIN_CANCELLED_RESULT if cancelled else None
             remaining = self._unsettled_pendings(record, fresh)
             if remaining:
                 # request 级核销:仍有未核销 pending → 不落 marker、不续跑父 turn
@@ -3047,7 +3069,7 @@ class AgentEngine:
                             if p.related_call_id == call_id],
                         "remaining_request_ids": sorted(
                             p.request_id for p in remaining)})))
-                return None
+                return CHAIN_CANCELLED_RESULT if cancelled else None
             # 全量达成:锁内落 marker(并发链经 fresh 重读可见,不会二次结算)
             marker = system_injection(
                 text=f"suspend_resolved:{record.record_id}",
@@ -3059,11 +3081,19 @@ class AgentEngine:
         await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
             data={"record_id": record.record_id,
                   "request_ids": sorted(record.request_ids())})))
+        if cancelled:
+            # 用户已喊停:本层 gap 已回填 + 结算(根不再挂在 CHILD_SKILL 上),上层继续
+            # 采样是 R4 违约 → 不重跑,哨兵继续向上,由链根终结 / 收敛句柄。
+            return CHAIN_CANCELLED_RESULT
         if is_root:
-            # 根：续跑(重入重放已回填的全部子输出)
+            # 根：续跑(重入重放已回填的全部子输出);沿用链级登记项的注入队列引用
             turn_cancel = root_cancel.child(f"sub:{sub.id}")
+            chain_pending = self._pending.get(sub.id)
             self._pending[sub.id] = _PendingTurn(
-                submission_id=sub.id, cancel=turn_cancel)
+                submission_id=sub.id, cancel=turn_cancel,
+                pending_input=(chain_pending.pending_input
+                               if chain_pending is not None else []),
+            )
             await self._build_and_run_runner(
                 sub.id, turn_cancel, list(self._last_resolved or []))
             return None  # 根是终点，链结束
@@ -3073,6 +3103,9 @@ class AgentEngine:
             submission_id=submission_id)
         if outcome.end_reason == "suspended":
             return None
+        if outcome.end_reason == "cancelled":
+            # 中间层被取消:同样只解链不重跑(wave2b D5)
+            return CHAIN_CANCELLED_RESULT
         return outcome.final_text if outcome.success else (
             f"sub_skill_failed: {outcome.error or outcome.end_reason}")
 
@@ -3309,15 +3342,21 @@ class AgentEngine:
             pinned_states=self._pinned_states,
             call_stack=sub_stack,
         )
-        # 子 thread 续跑登记 _pending（is_root=False）：CancelTurn(sub.id) 才能触达（R4）
+        # 子 thread 续跑登记 _pending（is_root=False）：CancelTurn(sub.id) 才能触达（R4）。
+        # 链级登记项(wave2b D5)可能已占同一 key:本层以自己的 turn token 遮蔽,退栈后
+        # 还原——否则层与层之间的 CancelTurn 找不到目标,链在层间不可取消。
         pending_key = submission_id or sub.id
+        outer = self._pending.get(pending_key)
         self._pending[pending_key] = _PendingTurn(
             submission_id=pending_key, cancel=turn_cancel, is_root=False,
         )
         try:
             return await runner.run()
         finally:
-            self._pending.pop(pending_key, None)
+            if outer is not None:
+                self._pending[pending_key] = outer
+            else:
+                self._pending.pop(pending_key, None)
 
     async def _execute_resumed_tool_on_thread(
         self, thread_id: str, entry_skill_id: str, call_id: str

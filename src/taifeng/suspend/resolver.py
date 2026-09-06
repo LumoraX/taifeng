@@ -32,6 +32,11 @@ EXPIRE_SENTINEL = "__expired__"
 # engine 在 fire 时判定 auto_retry_count ≥ failure_suspend_max_auto_retries 后置入,
 # resolver 据此强制 abort(即便 on_expire="retry"),熔断无人值守自动循环。
 EXPIRE_EXHAUSTED = "__exhausted__"
+# 续跑链取消的回填哨兵(wave2b D5):子 thread 续跑 turn 以 cancelled 结束时,链
+# 逐层把它当 call_skill 的 error output 回填(与 sub_skill_failed 同形,LLM 视角
+# 即「子任务被取消」),但**不重跑**任何上层;链根据此发 turn_failed{cancelled} /
+# 把 spawn 句柄收敛为 cancelled。取值即回填文案,冷读转录可直接辨认。
+CHAIN_CANCELLED_RESULT = "sub_skill_failed: cancelled"
 
 
 def _is_expire_payload(payload: Any) -> bool:
