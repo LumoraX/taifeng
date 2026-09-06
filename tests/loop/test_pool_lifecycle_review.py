@@ -168,7 +168,10 @@ async def test_unresponsive_shutdown_preserves_session_and_audit_ownership(
     release = asyncio.create_task(pool.release("ses-stuck-shutdown"))
     await shutdown_started.wait()
 
-    done, _ = await asyncio.wait({release}, timeout=0.2)
+    # 期限放宽到守卫常量：内部超时被 monkeypatch 成 0.01s，正常路径 ~0.03s 完成；
+    # 而这条断言要防的回归是「超时不生效 → release 永久挂住」，那是无限挂而不是
+    # 变慢，放宽期限照样必抓。原值 0.2s 只留 ~0.17s 余量，与调度抖动同数量级。
+    done, _ = await asyncio.wait({release}, timeout=GUARD_TIMEOUT_SECONDS)
     completed_in_bound = release in done
     error = await asyncio.wait_for(_release_exception(release), timeout=GUARD_TIMEOUT_SECONDS)
 
@@ -290,7 +293,10 @@ async def test_unresponsive_actor_preserves_session_and_audit_ownership(
     actor_task = pool._engine_tasks["ses-stuck-actor"]  # noqa: SLF001
     release = asyncio.create_task(pool.release("ses-stuck-actor"))
 
-    done, _ = await asyncio.wait({release}, timeout=0.2)
+    # 期限放宽到守卫常量：内部超时被 monkeypatch 成 0.01s，正常路径 ~0.03s 完成；
+    # 而这条断言要防的回归是「超时不生效 → release 永久挂住」，那是无限挂而不是
+    # 变慢，放宽期限照样必抓。原值 0.2s 只留 ~0.17s 余量，与调度抖动同数量级。
+    done, _ = await asyncio.wait({release}, timeout=GUARD_TIMEOUT_SECONDS)
     completed_in_bound = release in done
     error = await asyncio.wait_for(_release_exception(release), timeout=GUARD_TIMEOUT_SECONDS)
 

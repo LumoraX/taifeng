@@ -21,6 +21,7 @@ from taifeng.conversation.journal.jsonl import (
     DefaultSyncFileAdapter,
     JsonlSessionJournalCore,
 )
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +71,7 @@ class _BlockingAppendAdapter(DefaultSyncFileAdapter):
         """捕获 precommit bytes，等待测试放行后再写入。"""
         self.payload = payload
         self.started.set()
-        if not self.release.wait(timeout=2):
+        if not self.release.wait(timeout=GUARD_TIMEOUT_SECONDS):
             raise TimeoutError("test release timed out")
         super().append_durable(path, payload)
 
@@ -112,7 +113,7 @@ class _BlockingUnknownFailureAdapter(DefaultSyncFileAdapter):
             stream.write(payload.splitlines(keepends=True)[0])
             stream.flush()
             self.started.set()
-            if not self.release.wait(timeout=2):
+            if not self.release.wait(timeout=GUARD_TIMEOUT_SECONDS):
                 raise TimeoutError("test release timed out")
         raise OSError("secret=cancel-window")
 
