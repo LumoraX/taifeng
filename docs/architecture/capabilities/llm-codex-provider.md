@@ -191,6 +191,17 @@ payload 规则：
 - 客户端只在 completed 校验成功且确认其后无新协议 event 时，按顺序发布唯一 `normalized_output`，随后
   发布唯一 `completed`。失败、取消或未知终态不得发布 partial `normalized_output`/`completed`。
 
+- `error` 事件的字段 SHALL 同时接受两种形状：官方 `ResponseErrorEvent` 的**扁平**形式
+  （`code` / `message` / `param` 在顶层，优先）与中转网关常见的**嵌套**变体
+  （`{"type":"error","error":{"type":...,"code":...,"message":...}}`）。只读顶层会把整条诊断
+  吃掉（上层只看到 `error | <no message>`），且 code 归类规则拿不到 code，只能靠兜底归成通用
+  `ServerError`——嵌套的 `rate_limit` 会因此丢掉限流语义与 retry hint。嵌套对象的 `type` 字段
+  SHALL 一并参与归类（真实语义常只写在它上面，实测 `service_unavailable_error`）。
+- 限流的 `retry_after_seconds` SHALL 优先取**结构化字段**（error 对象或事件顶层的
+  `retry_after` / `retry_after_seconds`），仅在缺失时才回落到从 `message` 正文解析 JSON。流内
+  失败事件给的是字段而非 HTTP body，拿散文 message 喂 body 解析器必然失败，会让流内
+  `RateLimitError.retry_after_seconds` 恒为 None。
+
 ### 5.3 非协议帧容忍
 
 中转网关会往 SSE 流里注入不属于 Codex Responses 协议的帧（心跳、计费标记、路由探针）。这类帧

@@ -213,3 +213,76 @@ def test_accumulator_raises_normalized_error(event: dict[str, Any], expected: ty
     with pytest.raises(LLMError) as caught:
         accumulator.accept(event)
     assert isinstance(caught.value, expected)
+
+
+# ============================================================
+# 中转网关的嵌套 error 变体（实测帧，2026-09-06）
+# ============================================================
+
+def test_nested_error_object_variant_preserves_diagnostics() -> None:
+    """中转网关把 code/message 嵌在 ``error`` 对象里时，诊断信息不得被吃掉。
+
+    实测帧（apiproxy 中转，12 次请求里 2 次）：
+
+        {"type":"error","error":{"type":"service_unavailable_error",
+         "code":"server_is_overloaded","message":"Our servers are currently
+         overloaded. Please try again later.","param":null},"sequence_number":3}
+
+    官方 ``ResponseErrorEvent`` 是扁平的（code/message/param 在顶层），所以只读顶层
+    会把整条诊断丢掉，上层只看到 ``error | <no message>``，且 code 归类规则拿不到
+    code——只能靠兜底归成通用 ServerError。
+    """
+    exc = classify_responses_stream_failure({
+        "type": "error",
+        "error": {
+            "type": "service_unavailable_error",
+            "code": "server_is_overloaded",
+            "message": "Our servers are currently overloaded. Please try again later.",
+            "param": None,
+        },
+        "sequence_number": 3,
+    })
+    assert isinstance(exc, ServerError)
+    assert exc.retryable is True
+    text = str(exc)
+    assert "server_is_overloaded" in text
+    assert "currently overloaded" in text
+    assert "<no message>" not in text
+
+
+def test_nested_error_type_drives_classification() -> None:
+    """``error.type`` 也参与归类——真实语义常只写在它上面。
+
+    嵌套 rate_limit 若拿不到 code/type，会被兜底归成通用 ServerError，
+    连带丢掉 retry hint。
+    """
+    exc = classify_responses_stream_failure({
+        "type": "error",
+        "error": {"type": "rate_limit_error", "message": "slow down", "retry_after": 7},
+    })
+    assert isinstance(exc, RateLimitError)
+    assert exc.retry_after_seconds == 7
+
+
+def test_structured_retry_after_beats_prose_message() -> None:
+    """结构化 ``retry_after`` 字段优先于从 message 里捞——流内事件给的是字段不是 body。"""
+    exc = classify_responses_stream_failure(
+        _error_event(code="rate_limit_exceeded", message="Rate limit reached.")
+        | {"retry_after": 30}
+    )
+    assert isinstance(exc, RateLimitError)
+    assert exc.retry_after_seconds == 30
+
+
+def test_flat_official_shape_still_wins_over_nested() -> None:
+    """回归护栏：官方扁平形状仍按顶层字段解析，不被嵌套回落干扰。"""
+    exc = classify_responses_stream_failure({
+        "type": "error",
+        "code": "rate_limit_exceeded",
+        "message": "Rate limit reached.",
+        "param": "input",
+        "error": {"code": "should_be_ignored", "message": "should_be_ignored"},
+    })
+    assert isinstance(exc, RateLimitError)
+    assert "rate_limit_exceeded" in str(exc)
+    assert "should_be_ignored" not in str(exc)

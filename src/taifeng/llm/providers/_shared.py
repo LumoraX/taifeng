@@ -185,6 +185,22 @@ _STREAM_ERROR_CODE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
 _INCOMPLETE_REASONS = ("content_filter", "max_output_tokens")
 
 
+def _error_object_fields(container: object) -> tuple[object, object, object, object]:
+    """从一个 error 对象里取 ``(code, message, param, type)``。
+
+    ``type`` 也带出来参与归类：中转网关常把真实语义只写在它上面
+    （实测 ``{"type": "service_unavailable_error", "code": "server_is_overloaded"}``）。
+    """
+    if not isinstance(container, dict):
+        return None, None, None, None
+    return (
+        container.get("code"),
+        container.get("message"),
+        container.get("param"),
+        container.get("type"),
+    )
+
+
 def _stream_failure_detail(
     kind: str, code: object, message: object, param: object
 ) -> str:
@@ -199,10 +215,36 @@ def _stream_failure_detail(
     return " | ".join(parts)
 
 
-def _stream_error_from_bucket(bucket: str, detail: str, message: str) -> LLMError:
-    """按归类桶构造对应 ``LLMError``（rate_limit 顺带解析服务端 hint）。"""
+def _retry_after_hint(*containers: object) -> float | None:
+    """从结构化 error 对象里取 ``retry_after`` 数值提示（秒）。
+
+    流内失败事件给的是**字段**而非 JSON body，所以不能复用 ``_parse_retry_after``
+    （它 ``json.loads`` 一段 body 文本；拿散文 message 喂它必然解析失败，导致流内
+    ``RateLimitError.retry_after_seconds`` 恒为 None，服务端提示白给）。
+    """
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in ("retry_after_seconds", "retry_after"):
+            value = container.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and value >= 0:
+                return float(value)
+    return None
+
+
+def _stream_error_from_bucket(
+    bucket: str, detail: str, retry_after: float | None, message: str
+) -> LLMError:
+    """按归类桶构造对应 ``LLMError``（rate_limit 带上服务端 retry hint）。
+
+    hint 取值优先级：**结构化字段** > message 里的 JSON body。后者是历史兼容——
+    个别上游会把整段 JSON 塞进 message，``_parse_retry_after`` 能从中捞出来。
+    """
     if bucket == "rate_limit":
-        return RateLimitError(detail, retry_after_seconds=_parse_retry_after(message))
+        hint = retry_after if retry_after is not None else _parse_retry_after(message)
+        return RateLimitError(detail, retry_after_seconds=hint)
     if bucket == "transient":
         return TransientNetworkError(detail)
     if bucket == "auth":
@@ -260,20 +302,34 @@ def classify_responses_stream_failure(event: dict[str, Any]) -> LLMError:
     if kind == "response.failed":
         response = event.get("response")
         raw_error = response.get("error") if isinstance(response, dict) else None
-        code = raw_error.get("code") if isinstance(raw_error, dict) else None
-        message = raw_error.get("message") if isinstance(raw_error, dict) else None
-        param: object = None
+        code, message, param, err_type = _error_object_fields(raw_error)
+        retry_after = _retry_after_hint(raw_error, response)
     else:
+        # 官方 ResponseErrorEvent 是**扁平**的（code/message/param 在顶层）；
+        # 但实测中转网关会发嵌套变体：
+        #   {"type":"error","error":{"type":"service_unavailable_error",
+        #    "code":"server_is_overloaded","message":"..."},"sequence_number":3}
+        # 顶层读不到就回落到嵌套 error 对象——否则整条诊断被吃掉（报成
+        # "<no message>"），且下面的 code 归类规则拿不到 code，只能靠兜底
+        # 归成通用 ServerError：嵌套的 rate_limit 会因此丢掉 retry_after。
         code, message, param = event.get("code"), event.get("message"), event.get("param")
+        err_type = None
+        nested = event.get("error")
+        if code is None and message is None:
+            code, message, param, err_type = _error_object_fields(nested)
+        retry_after = _retry_after_hint(nested, event)
 
     detail = _stream_failure_detail(kind, code, message, param)
-    # code + message 一起参与匹配：中转网关常把真实原因只写在 message 里
+    # code + type + message 一起参与匹配：真实原因可能只写在其中任意一个上
     code_text = code if isinstance(code, str) else ""
     message_text = message if isinstance(message, str) else ""
-    text = f"{code_text} {message_text}".lower()
+    type_text = err_type if isinstance(err_type, str) else ""
+    text = f"{code_text} {type_text} {message_text}".lower()
     for needles, bucket in _STREAM_ERROR_CODE_RULES:
         if any(needle in text for needle in needles):
-            return _stream_error_from_bucket(bucket, detail, message_text)
+            return _stream_error_from_bucket(
+                bucket, detail, retry_after, message_text
+            )
     # code 无法识别时再看正文关键字（与 HTTP 分类共用同一张表）
     if any(kw in text for kw in _CONTEXT_OVERFLOW_KEYWORDS):
         return ContextOverflowError(detail)
