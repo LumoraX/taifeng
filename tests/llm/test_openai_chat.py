@@ -32,6 +32,7 @@ from taifeng.llm.types import (
     ToolSpecRef,
 )
 from taifeng.loop.cancellation import CancellationToken
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -278,8 +279,8 @@ async def test_chat_stalled_read_is_interrupted_by_cancel_token(
             pass
 
     task = asyncio.create_task(consume())
-    await asyncio.wait_for(body.started.wait(), timeout=1)
+    await asyncio.wait_for(body.started.wait(), timeout=GUARD_TIMEOUT_SECONDS)
     cancel.cancel()
 
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)

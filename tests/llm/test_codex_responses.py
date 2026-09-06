@@ -17,6 +17,7 @@ from taifeng.llm.providers.codex.responses import (
 )
 from taifeng.llm.types import ApiMessageItem, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 
 def _sse(*events: dict[str, object]) -> bytes:
@@ -230,11 +231,11 @@ async def test_codex_stalled_read_is_interrupted_by_cancel_token(
             pass
 
     task = asyncio.create_task(consume())
-    await asyncio.wait_for(body.started.wait(), timeout=1)
+    await asyncio.wait_for(body.started.wait(), timeout=GUARD_TIMEOUT_SECONDS)
     cancel.cancel()
 
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1)
+        await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
 
 
 def test_strict_attempt_adapter_accepts_exact_codex_client() -> None:

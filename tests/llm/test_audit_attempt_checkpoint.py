@@ -39,6 +39,7 @@ from taifeng.llm.types import (
     TokenUsage,
 )
 from taifeng.loop.cancellation import CancellationToken
+from tests.conftest import GUARD_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -217,7 +218,7 @@ async def test_complete_checkpoint_ack_precedes_all_visible_events(
         tasks.start_soon(consume)
         await provider_session.ended.wait()
         assert visible == []
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await observer.after_entered.wait()
         observer.allow_ack.set()
 
@@ -362,7 +363,7 @@ async def test_error_checkpoint_ack_precedes_provider_exception(
 
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(consume)
-        with anyio.fail_after(1):
+        with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             await observer.after_entered.wait()
         assert visible == []
         assert caught == []
