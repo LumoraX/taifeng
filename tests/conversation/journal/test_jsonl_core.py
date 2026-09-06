@@ -91,6 +91,31 @@ class _SlowAppendAdapter(DefaultSyncFileAdapter):
         super().append_durable(path, payload)
 
 
+class _BlockingAppendAdapter(DefaultSyncFileAdapter):
+    """append 阻塞到测试显式放行 —— 让「commit 超期」确定性发生。
+
+    为什么不用 ``_SlowAppendAdapter(0.08)`` + ``commit_timeout=0.01``：那个期限
+    罩住的是**事件循环 → 线程池 → 回事件循环**的整条往返，实测该往返在空闲时
+    中位 0.1ms、16 并发时中位 3.3ms、且空载就能冒出 13ms 的尖刺——与 10ms 预算
+    同数量级。于是「超期」到底由人为的 80ms 触发还是由调度抖动触发就成了掷骰子，
+    全量跑里随机变红（2026-09-04 把 CI 跑红的正是本用例）。
+
+    把「慢」做成**无限**（阻塞到放行）之后，只要期限 >> 调度抖动，两个方向都确定：
+    期限必然到期、且必然是被阻塞触发的。
+    """
+
+    def __init__(self) -> None:
+        """初始化进入/放行两个信号。"""
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def append_durable(self, path: Path, payload: bytes) -> None:
+        """阻塞到测试放行后再执行真实 durable append。"""
+        self.entered.set()
+        self.release.wait()
+        super().append_durable(path, payload)
+
+
 class _FailOnceAppendAdapter(DefaultSyncFileAdapter):
     """第一次 append 注入 IO 失败，之后恢复真实文件行为。"""
 
@@ -414,29 +439,35 @@ async def test_post_start_cancellation_is_shielded_to_ack(tmp_path: Path) -> Non
 async def test_commit_deadline_freezes_writer_as_recovery_required(
     tmp_path: Path,
 ) -> None:
-    """同步 commit 超过期限时必须有界返回并关闭普通追加。"""
-    # 分两段设期限：建会话走的是 ``create_exclusive``（真 mkdir + 文件 fsync +
-    # 目录 fsync，_SlowAppendAdapter 并不覆盖它），拿 10ms 去套它等于用测试期限
-    # 赌磁盘——2026-09-04 的 CI 就是这么红的（Python 3.13 job 红、3.12 同码绿）。
-    # 建会话给足期限，进入被测阶段前再收紧到「只有人为拖慢的 append 会撞上」。
-    adapter = _SlowAppendAdapter(0.08)
+    """同步 commit 超过期限时必须有界返回并关闭普通追加。
+
+    两处刻意的设计（见 ``_BlockingAppendAdapter`` docstring）：
+    ① append 阻塞到放行，使「超期」与机器快慢无关；② 期限 0.2s 远大于调度抖动
+    （实测 16 并发下线程池往返 p90 4.6ms），使「没超期」也与机器快慢无关。
+    建会话阶段用更宽的期限，因为它走 ``create_exclusive``，不在被测范围内。
+    """
+    adapter = _BlockingAppendAdapter()
     journal = JsonlSessionJournalCore(
         tmp_path,
         sync_file_adapter=adapter,
         commit_timeout=5.0,
     )
     created = await journal.create_session(_descriptor())
-    journal._commit_timeout = 0.01  # noqa: SLF001 —— 被测阶段才收紧
+    journal._commit_timeout = 0.2  # noqa: SLF001 —— 被测阶段才收紧
 
-    with pytest.raises(JournalRecoveryRequiredError):
-        await journal.append(_record(), lease=created.lease, expected_seq=3)
-    with pytest.raises(JournalRecoveryRequiredError):
-        await journal.append(
-            _record(record_id="rec_2"),
-            lease=created.lease,
-            expected_seq=3,
-        )
-    await anyio.sleep(0.1)
+    try:
+        with pytest.raises(JournalRecoveryRequiredError):
+            await journal.append(_record(), lease=created.lease, expected_seq=3)
+        assert adapter.entered.is_set(), "超期必须由阻塞触发，而不是由调度抖动触发"
+        with pytest.raises(JournalRecoveryRequiredError):
+            await journal.append(
+                _record(record_id="rec_2"),
+                lease=created.lease,
+                expected_seq=3,
+            )
+    finally:
+        # 放行被阻塞的 worker thread，避免线程池名额泄漏影响后续用例
+        adapter.release.set()
 
 
 @pytest.mark.anyio
