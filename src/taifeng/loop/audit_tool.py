@@ -69,7 +69,7 @@ def _classify_outcome(
 
     - suspend 非 None：声明 non-suspending 的工具在运行时挂起 → capability 违约，
       记 error 终态（调用方随后冻结）。
-    - not_offered / not_in_registry：拒绝执行 → rejected。
+    - not_offered / not_in_registry / invalid_arguments：拒绝执行 → rejected。
     - cancelled / timeout：对可能有外部效果的分类无法证明是否已发生 → unknown；
       对 pure/idempotent 分别记 cancelled / error。
     - 其他 is_error → error；成功 → success。
@@ -78,7 +78,7 @@ def _classify_outcome(
         return ToolStatus.ERROR
     result: ToolResult = outcome.result
     reason = result.data.get("reason") if isinstance(result.data, dict) else None
-    if reason in {"not_offered", "not_in_registry"}:
+    if reason in {"not_offered", "not_in_registry", "invalid_arguments"}:
         return ToolStatus.REJECTED
     ambiguous = effect_kind in _AMBIGUOUS_EFFECT_KINDS
     if reason == "cancelled":

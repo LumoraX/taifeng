@@ -112,6 +112,8 @@ from taifeng.loop.submission import (
 )
 from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.skill.dispatch import DispatchPolicy
+from taifeng.loop.tool_batch import parse_tool_arguments
+from taifeng.tool.spec import ToolResult
 from taifeng.suspend.record import SuspensionRecord
 from taifeng.suspend.resolver import CHAIN_CANCELLED_RESULT
 
@@ -3376,12 +3378,9 @@ class AgentEngine:
                 fc = item
         if fc is None:
             raise RuntimeError(f"resumed_tool_call_not_found: {call_id}@{thread_id}")
-        import json
         name = fc.payload["name"]
-        try:
-            args = json.loads(fc.payload.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {}
+        # 与派发层同一解析入口:坏参数不退化为 {} 执行(下方按 args_error 结算)
+        args, args_error = parse_tool_arguments(fc.payload.get("arguments") or "{}")
         entry = self._snapshot.get(entry_skill_id) or self._entry_skill
         cancel = self._resume_tool_cancel(call_id)
         ctx = ToolContext(
@@ -3400,9 +3399,17 @@ class AgentEngine:
                 "script_executors": self._script_executors,
             },
         )
-        if self._permission_policy is not None:
-            self._permission_policy.preapprove(call_id)
-        result = await self._tool_runtime.dispatch(name=name, arguments=args, ctx=ctx)
+        if args_error is not None:
+            # 参数非法 → 不执行 handler,以 invalid_arguments error 结算(同派发层规则)
+            result = ToolResult.error(
+                f"invalid_arguments: {args_error}", reason="invalid_arguments"
+            )
+        else:
+            if self._permission_policy is not None:
+                self._permission_policy.preapprove(call_id)
+            result = await self._tool_runtime.dispatch(
+                name=name, arguments=args, ctx=ctx
+            )
         out = function_call_output(
             call_id=call_id, output=result.output,
             thread_id=thread_id, is_error=result.is_error)
@@ -3598,12 +3605,9 @@ class AgentEngine:
                 fc = item
         if fc is None:
             raise RuntimeError(f"resumed_tool_call_not_found: {call_id}")
-        import json
         name = fc.payload["name"]
-        try:
-            args = json.loads(fc.payload.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {}
+        # 与派发层同一解析入口:坏参数不退化为 {} 执行(下方按 args_error 结算)
+        args, args_error = parse_tool_arguments(fc.payload.get("arguments") or "{}")
         # 构造 ToolContext：resume 续跑发生在 engine 层（无 TurnRunner），extras 提供
         # 工具运行所需的最小上下文（snapshot / 可见 skill / 权限策略 / 元数据）。
         # 关键：permission_policy 不再注入 ask prompter 的挂起语义——本次执行是"已批准"
@@ -3627,10 +3631,18 @@ class AgentEngine:
                 "script_executors": self._script_executors,
             },
         )
-        # resume：人类已批准该挂起 call → 预批准，避免重跑时再次触发 prompter（防无限挂起）
-        if self._permission_policy is not None:
-            self._permission_policy.preapprove(call_id)
-        result = await self._tool_runtime.dispatch(name=name, arguments=args, ctx=ctx)
+        if args_error is not None:
+            # 参数非法 → 不执行 handler,以 invalid_arguments error 结算(同派发层规则)
+            result = ToolResult.error(
+                f"invalid_arguments: {args_error}", reason="invalid_arguments"
+            )
+        else:
+            # resume：人类已批准该挂起 call → 预批准，避免重跑时再次触发 prompter（防无限挂起）
+            if self._permission_policy is not None:
+                self._permission_policy.preapprove(call_id)
+            result = await self._tool_runtime.dispatch(
+                name=name, arguments=args, ctx=ctx
+            )
         out = function_call_output(
             call_id=call_id, output=result.output,
             thread_id=self._thread_id, is_error=result.is_error)

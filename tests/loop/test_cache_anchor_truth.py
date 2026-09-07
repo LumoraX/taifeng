@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import pytest
-
 import taifeng
 from taifeng.context.budget import ContextBudget
 from taifeng.context.compressor import (

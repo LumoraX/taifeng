@@ -113,7 +113,11 @@ from taifeng.loop.injection import injection_event
 from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.rewind import RewindLog, count_turns
-from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch
+from taifeng.loop.tool_batch import (
+    ToolCallRequest,
+    dispatch_batch,
+    parse_tool_arguments,
+)
 from taifeng.skill.dispatch import CallStack, DispatchPolicy
 from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获，不可放 TYPE_CHECKING
 from taifeng.tool.spec import ToolContext, ToolResult
@@ -1459,11 +1463,9 @@ class TurnRunner:
                     data={"call_id": call_id, "name": name, "arguments": arguments_str}
                 )
             )
-            # 解析参数（坏 JSON → 空 dict，与历史行为一致）
-            try:
-                arguments = json.loads(arguments_str) if arguments_str else {}
-            except json.JSONDecodeError:
-                arguments = {}
+            # 解析参数(单一入口):坏 JSON / 非对象不再退化为 {} 执行,错误随请求
+            # 带到派发层,由 dispatch_batch 以 invalid_arguments 核销(hook 之前)
+            arguments, arguments_error = parse_tool_arguments(arguments_str)
             tool_spec = self.tool_runtime._registry.get(name)  # noqa: SLF001
             parallel_safe = bool(tool_spec.parallel_safe) if tool_spec else False
             requests.append(
@@ -1475,6 +1477,7 @@ class TurnRunner:
                     arguments_raw=arguments_str,
                     parallel_safe=parallel_safe,
                     extra_content=tc.get("extra_content"),
+                    arguments_error=arguments_error,
                 )
             )
 
@@ -1756,15 +1759,15 @@ class TurnRunner:
             raise RuntimeError(f"seed_call_not_found: {call_id}")
         name = fc.payload["name"]
         raw = fc.payload.get("arguments") or "{}"
-        try:
-            args = json.loads(raw)
-        except json.JSONDecodeError:
-            args = {}
+        # 与主派发同一解析入口:坏参数不退化为 {} 补跑,由 dispatch_batch 以
+        # invalid_arguments 核销(retry_tool 重跑的是同一条 fc,规则不能更宽)
+        args, args_error = parse_tool_arguments(raw)
         tool_spec = self.tool_runtime._registry.get(name)  # noqa: SLF001
         parallel_safe = bool(tool_spec.parallel_safe) if tool_spec else False
         req = ToolCallRequest(
             index=0, call_id=call_id, name=name,
             arguments=args, arguments_raw=raw, parallel_safe=parallel_safe,
+            arguments_error=args_error,
         )
         outcomes = await dispatch_batch(
             [req], runtime=self.tool_runtime,
