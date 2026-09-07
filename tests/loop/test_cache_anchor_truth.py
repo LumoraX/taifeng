@@ -367,6 +367,7 @@ async def test_overflow_second_stage_compacts_head_when_tail_too_narrow() -> Non
     压缩,break 标 expected(reason=compaction_overflow),重采样恰一次。"""
     events: list[Any] = []
     history = [user_message(f"m{i} " + "x" * 120, thread_id=TID) for i in range(10)]
+    original_len = len(history)  # history_buffer 与 history 同一对象,压缩就地改写
     client = _OverflowOnceClient()
     runner = _runner(
         client=client, history=history, compressors=_summary_compressor(),
@@ -380,7 +381,7 @@ async def test_overflow_second_stage_compacts_head_when_tail_too_narrow() -> Non
     assert any(m.data["success"] and m.data["cache_invalidated"] for m in done), (
         f"第二档应动 head 成功压缩,实得 {[m.data for m in done]}"
     )
-    assert len(runner.history_buffer) < len(history)
+    assert len(runner.history_buffer) < original_len
     assert runner._next_cache_break_expected is True  # noqa: SLF001
     assert runner._next_cache_break_reason == "compaction_overflow"  # noqa: SLF001
 

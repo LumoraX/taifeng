@@ -1323,9 +1323,18 @@ class TurnRunner:
                         data={"reason": "context_overflow", "iteration": iteration}
                     )
                 )
-                await self._maybe_compress(
+                # 两档自愈(reactive-compaction-recovery):第一档只动 anchor 后的 tail
+                # (DO_NOT_INJECT 保 cache);未应用(无策略 / 策略失败 / 边界过窄 / 完整性
+                # 回滚)且确有已缓存前缀时进第二档,允许动 head——请求已被 provider 拒绝,
+                # 活下来比保 cache 重要;随之的 cache break 由压缩成功分支标 expected
+                applied = await self._maybe_compress(
                     phase="overflow", force=True, bypass_trigger=True
                 )
+                if not applied and self.cache_anchor_index >= 0:
+                    await self._maybe_compress(
+                        phase="overflow", force=True, bypass_trigger=True,
+                        allow_head=True,
+                    )
                 # 单次重采样：递归深度恒为 1（标志已置 True，二次必走硬失败）
                 return await self._sample_once(iteration)
             # 取消不是失败:按 ModelClient 协议字面实现的 provider 会抛
@@ -1917,8 +1926,13 @@ class TurnRunner:
             )
 
     async def _maybe_compress(
-        self, *, phase: str, force: bool = False, bypass_trigger: bool = False
-    ) -> None:
+        self,
+        *,
+        phase: str,
+        force: bool = False,
+        bypass_trigger: bool = False,
+        allow_head: bool = False,
+    ) -> bool:
         """触发压缩判断。
 
         Args:
@@ -1927,15 +1941,22 @@ class TurnRunner:
             bypass_trigger: 走 orchestrator.force_compress 绕过各策略 should_trigger
                 （A1 overflow 自愈：本地估算偏低、provider 已判超长，should_trigger
                 必返回 None，必须强制压缩）。
+            allow_head: 把注入语义切到 BEFORE_LAST_USER_MESSAGE（允许动 anchor 之前的
+                head）。overflow 自愈第二档专用；pre_turn / manual 本就允许，mid_turn
+                不该传 True。
+
+        Returns:
+            本轮是否**应用**了压缩结果（history 已改写）。无压缩器 / 阈值未达 / hook
+            拒绝 / 策略失败 / 完整性回滚均为 False——overflow 自愈据此决定是否进第二档。
         """
         if self.compressors is None:
-            return
+            return False
         tokens = self._history_token_estimate()
         if not force:
             if phase == "pre_turn" and not self.budget.is_soft_exceeded(tokens):
-                return
+                return False
             if phase == "mid_turn" and not self.budget.is_soft_exceeded(tokens):
-                return
+                return False
 
         # === pre_compact hook ===
         # 业务侧拦截点：在 strategy 执行前可拒绝本轮压缩。
@@ -1965,12 +1986,14 @@ class TurnRunner:
                     "token_estimate": tokens,
                     "history_length": len(self.history_buffer),
                 }))
-                return
+                return False
 
+        # 注入语义：pre_turn / manual 允许动 head；mid_turn / overflow 默认只动 anchor 后
+        # 的 tail（DO_NOT_INJECT 保 cache）；overflow 第二档以 allow_head=True 切到可动 head
         injection = (
-            InitialContextInjection.DO_NOT_INJECT
-            if phase in ("mid_turn", "overflow")
-            else InitialContextInjection.BEFORE_LAST_USER_MESSAGE
+            InitialContextInjection.BEFORE_LAST_USER_MESSAGE
+            if allow_head or phase in ("pre_turn", "manual")
+            else InitialContextInjection.DO_NOT_INJECT
         )
 
         ctx = CompressionContext(
@@ -1992,7 +2015,7 @@ class TurnRunner:
         else:
             result = await self.compressors.maybe_compress(ctx, injection)
         if result is None:
-            return
+            return False
         # G1b：压缩成功，但若产物相对原 history 引入了新的 tool 配对孤儿 → 回滚
         # （不应用），保留原 history。保留历史优于把损坏会话喂给 provider。
         if result.success:
@@ -2016,7 +2039,7 @@ class TurnRunner:
                         }
                     )
                 )
-                return
+                return False
         # 应用压缩结果
         if result.success:
             # K3 on_pre_evict（swap-out 抢救）：把将被换出的 items 交给 memory
@@ -2039,11 +2062,14 @@ class TurnRunner:
             # 如果压缩破坏了 cache，标记下一次 LLM 调用的 break 为预期内
             if result.cache_invalidated:
                 self._next_cache_break_expected = True
+                # overflow 第二档蓄意动 head → compaction_overflow（预期内，不计 unexpected）
                 self._next_cache_break_reason = (
                     "compaction_pre_turn"
                     if phase == "pre_turn"
                     else "compaction_manual"
                     if phase == "manual"
+                    else "compaction_overflow"
+                    if phase == "overflow"
                     else "compaction_mid_turn_anchor_lost"
                 )
             # G1c：成功压缩计数；达阈值后每次压缩 emit 降级告警
@@ -2070,6 +2096,7 @@ class TurnRunner:
                 }
             )
         )
+        return result.success
 
     # ---- dispatcher 接口（供 call_skill tool 调用）----
 
