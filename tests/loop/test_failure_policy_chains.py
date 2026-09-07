@@ -176,12 +176,18 @@ async def test_spawn_resource_limit_resume_abort_to_failed(chain_skills, threads
         thread_id=ctid,
         resolutions={rec.pending[0].request_id: {"action": "abort"}},
     ))
+    def _failed() -> list:
+        return [m for m in events if m.kind == "spawn_failed"
+                and m.data.get("handle_id") == hid]
+
+    # 守卫必须覆盖事件：_fail_spawn 的顺序是回写 error → await 落盘 → emit
+    # SpawnFailed，状态位先于事件可见。只等状态位会让下面的事件断言在调度
+    # 抖动下抢跑，把「事件晚到」误判成「事件没发」。等事件是更强的守卫。
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "error"
-    ), "abort 后句柄应落 error 终态"
-    failed = [m for m in events if m.kind == "spawn_failed"
-              and m.data.get("handle_id") == hid]
-    assert failed, "abort 应 emit SpawnFailed(终态可被 barrier 消费)"
+        and bool(_failed())
+    ), "abort 后句柄应落 error 终态并 emit SpawnFailed"
+    assert _failed(), "abort 应 emit SpawnFailed(终态可被 barrier 消费)"
     await engine.submit(taifeng.loop.Shutdown())
     await asyncio.wait_for(task, timeout=GUARD_TIMEOUT_SECONDS)
     await pool.close()

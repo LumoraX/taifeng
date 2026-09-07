@@ -496,11 +496,19 @@ async def test_spawn_suspend_expire_aborts_to_failed(ttl_spawn_skills, threads_d
     # 挂起(SpawnSuspended)后定时器立即到期 → 自动 abort → 句柄 error
     assert await _wait_status(engine, hid, "error"), \
         f"到期 abort 后句柄应 error,实为 {engine.spawn_status([hid])[hid]}"
-    kinds = [m.kind for m in events]
-    assert "suspension_expired" in kinds
-    failed = [m for m in events if m.kind == "spawn_failed"
-              and m.data.get("handle_id") == hid]
-    assert failed, "到期 abort 应 emit SpawnFailed"
+    def _failed() -> list:
+        return [m for m in events if m.kind == "spawn_failed"
+                and m.data.get("handle_id") == hid]
+
+    # 同上：状态位（_wait_status 已等到 error）先于事件可见，事件类断言必须
+    # 自己等事件，不能借状态位当守卫，否则调度抖动下会抢在投递之前跑。
+    await wait_for_condition(
+        lambda: "suspension_expired" in [m.kind for m in events]
+        and bool(_failed()),
+        message="条件未在守卫期限内满足",
+    )
+    assert "suspension_expired" in [m.kind for m in events]
+    assert _failed(), "到期 abort 应 emit SpawnFailed"
     # abort 终态 → barrier 全终态重查 → 触发(修复前漏调重查,此处永等不到)
     await wait_for_condition(
         lambda: any(m.kind == "join_barrier_fired" for m in events),

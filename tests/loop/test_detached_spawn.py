@@ -409,10 +409,15 @@ async def test_spawn_staggered_hitl(expert_skills, threads_dir):
         # 3. Resume(子 thread) 回填表单答案
         await engine.submit(Resume(
             thread_id=child_tid, resolutions={req_id: {"answer": "ok"}}))
-        # 4. 等该 handle 的 spawn_completed
-        assert await _wait(
-            lambda: engine.spawn_status([handle_id])[handle_id]["status"] == "done"), \
-            f"{handle_id} 未完成"
+        # 4. 等该 handle 的 spawn_completed —— 等**事件**而非只等状态位。
+        #    _finalize_spawn 的顺序是 set_result(done) → await 落盘 → emit
+        #    SpawnCompleted，状态位先于事件可见；只等状态位会在调度抖动下让
+        #    断言抢在事件投递到订阅者之前跑，把「事件晚到」误判成「事件没发」。
+        #    等事件是更强的守卫：事件到了状态位必然已到，事件真没发仍会超时红。
+        assert await _wait(lambda: (
+            engine.spawn_status([handle_id])[handle_id]["status"] == "done"
+            and _find("spawn_completed", handle_id) is not None
+        )), f"{handle_id} 未完成"
 
     # === A：spawn → 挂起 → Resume → 完成 ===
     a = await engine.spawn_skill(skill_id="expert-a", args={}, reason="A")
