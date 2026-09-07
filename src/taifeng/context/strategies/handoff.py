@@ -255,10 +255,9 @@ class HandoffCompactionStrategy:
             return self._fail(ctx, "too_few_to_compact")
 
         if injection == InitialContextInjection.DO_NOT_INJECT:
-            # mid-turn：不能动 cache_anchor 之前的内容。
-            # anchor=-1（从未压缩/无锚）必须钳到 0：负值会让区间切片走负索引，
-            # 压缩产物不缩反增（首次 overflow 自愈必死）；无锚即无可保，从头压合法
-            start = max(ctx.cache_anchor_index, 0)
+            # mid-turn：anchor 本条及之前已缓存不可动（含语义，cache-anchor 契约），
+            # 首个可变下标 = anchor+1；anchor=-1（无锚）自然得 0，从头压合法
+            start = ctx.cache_anchor_index + 1
         else:
             # pre-turn / manual：从 head 开始（但避开 system_injection 段）
             start = 0
@@ -266,6 +265,10 @@ class HandoffCompactionStrategy:
                 start += 1
 
         end = len(history) - ctx.budget.preserve_tail_messages
+        # anchor 活值化后 tail 可能不足两条（start 甚至已越过 end）：先判窄再收敛边界，
+        # 不让 resolve_compaction_range 对非法区间抛 ValueError 打死 overflow 自愈
+        if end - start < 2:
+            return self._fail(ctx, "boundary_too_narrow")
         start, end = resolve_compaction_range(
             history,
             start,

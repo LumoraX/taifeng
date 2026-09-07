@@ -24,6 +24,16 @@ from taifeng.conversation.models import compacted
 logger = logging.getLogger(__name__)
 
 
+def _too_narrow(ctx: CompressionContext) -> CompressionResult:
+    """可压区间不足两条时的统一失败构造 —— 不改 history、anchor 原样。"""
+    return CompressionResult(
+        success=False,
+        cache_invalidated=False,
+        anchor_preserved_until=ctx.cache_anchor_index,
+        reason="boundary_too_narrow",
+    )
+
+
 class SlidingWindowStrategy:
     """滑窗兜底。"""
 
@@ -56,16 +66,23 @@ class SlidingWindowStrategy:
             )
 
         if injection == InitialContextInjection.DO_NOT_INJECT:
-            # anchor=-1（从未压缩/无锚）必须钳到 0：负索引会让 history[:head_end]
-            # 变成“保留到倒数第一条”，压缩产物不缩反增（首次 overflow 自愈必死）
-            head_end = max(ctx.cache_anchor_index, 0)
+            # 含语义（cache-anchor 契约）：anchor 本条及之前已缓存，首个可变下标 =
+            # anchor+1；anchor=-1（无锚）自然得 0，从头压合法（不会出现负索引让
+            # history[:head_end] 变成“保留到倒数第一条”、产物不缩反增的旧病）
+            head_end = ctx.cache_anchor_index + 1
         else:
             head_end = 0
             while head_end < len(history) and history[head_end].kind == "system_injection":
                 head_end += 1
 
         tail_start = max(head_end + 1, len(history) - self._keep_tail)
+        # anchor 活值化后 tail 可能不足两条（head_end 甚至已越过末尾）：非法区间直接
+        # 判窄返回失败，不让 resolve_compaction_range 抛 ValueError 打死 overflow 自愈
+        if tail_start > len(history):
+            return _too_narrow(ctx)
         tail_start = _walk_back_to_safe_boundary(history, tail_start)
+        if tail_start - head_end < 2:
+            return _too_narrow(ctx)
         head_end, tail_start = resolve_compaction_range(
             history,
             head_end,
@@ -75,12 +92,7 @@ class SlidingWindowStrategy:
         )
 
         if tail_start - head_end < 2:
-            return CompressionResult(
-                success=False,
-                cache_invalidated=False,
-                anchor_preserved_until=ctx.cache_anchor_index,
-                reason="boundary_too_narrow",
-            )
+            return _too_narrow(ctx)
 
         removed = tail_start - head_end
         thread_id = history[0].thread_id if history else "unknown"

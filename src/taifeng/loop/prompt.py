@@ -613,14 +613,14 @@ def build_api_request(
             model_capabilities=resolved_capabilities,
         )
 
-    # cache anchor 坐标换算(cache-anchor-message-index):anchor 是 history
-    # 下标(压缩 anchor_preserved_until,[0, N) 为稳定前缀),CacheBreakpoint.index
-    # 是 messages 下标(anthropic 据此打 cache_control)。打点位置 = 稳定前缀
-    # 产出的最后一条消息;前缀无产出消息(N<=0 / 全是记账 item)则不打点。
+    # cache anchor 坐标换算(cache-anchor 契约):anchor 是 history 下标,含语义——
+    # [0, anchor] 为已缓存前缀,-1 为无缓存;CacheBreakpoint.index 是 messages 下标
+    # (anthropic 据此打 cache_control)。打点位置 = 前缀产出的最后一条消息(来源
+    # history 下标 <= anchor);前缀无产出消息(全是记账 item)则不打点。
     breakpoints: list[CacheBreakpoint] = []
-    if cache_anchor_index > 0:
+    if cache_anchor_index >= 0:
         for i in range(len(source_indexes) - 1, -1, -1):
-            if source_indexes[i] < cache_anchor_index:
+            if source_indexes[i] <= cache_anchor_index:
                 breakpoints.append(CacheBreakpoint(index=i))
                 break
 

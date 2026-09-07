@@ -267,7 +267,8 @@ class SurgicalTrimStrategy:
     ) -> CompressionResult:
         """按 ratio 分级执行三 pass，就地改写 output payload。
 
-        窗口语义（R2）：常规窗口 = [cache_anchor_index, len - protect_tail)；
+        窗口语义（R2）：常规窗口 = [cache_anchor_index + 1, len - protect_tail)
+        （含语义：anchor 本条及之前已缓存不可动，cache-anchor 契约）；
         仅 ``allow_head_clear=True`` 且 pre_turn（BEFORE_LAST_USER_MESSAGE）时
         hard-clear 可越过 anchor（跳过开头 system_injection 引导段），越过则
         如实标 ``cache_invalidated=True``。
@@ -282,7 +283,7 @@ class SurgicalTrimStrategy:
 
         # pass 1：去重（恒启用——LLM-free 零成本），常规窗口
         normal = self._candidates(
-            history, names, ctx.cache_anchor_index, protect_from
+            history, names, ctx.cache_anchor_index + 1, protect_from
         )
         detail["deduped"] = self._dedup_pass(history, normal)
         await asyncio.sleep(0)  # 协作取消检查点
@@ -291,7 +292,7 @@ class SurgicalTrimStrategy:
         anchor_preserved = ctx.cache_anchor_index
         if ratio >= self._hard_ratio:
             # pass 3：hard-clear（取代 soft——同窗口直接清，占位符更省）
-            start = ctx.cache_anchor_index
+            start = ctx.cache_anchor_index + 1  # 含语义：anchor 本条已缓存
             if (
                 self._allow_head_clear
                 and injection == InitialContextInjection.BEFORE_LAST_USER_MESSAGE
@@ -305,7 +306,8 @@ class SurgicalTrimStrategy:
                     start += 1
             hard = self._candidates(history, names, start, protect_from)
             detail["hard_cleared"] = self._hard_pass(history, hard)
-            crossed = [i for i in hard if i < ctx.cache_anchor_index]
+            # 越 anchor 判定含 anchor 本条（下标 <= anchor 均在已缓存前缀内）
+            crossed = [i for i in hard if i <= ctx.cache_anchor_index]
             if detail["hard_cleared"] and crossed:
                 cache_invalidated = True
                 anchor_preserved = min(crossed) - 1

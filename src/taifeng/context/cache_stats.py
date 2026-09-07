@@ -12,6 +12,8 @@ CacheBreakReason = Literal[
     "compaction_pre_turn",
     "compaction_manual",
     "compaction_mid_turn_anchor_lost",
+    "compaction_overflow",  # overflow 自愈第二档蓄意动 head（reactive-compaction-recovery）
+    "rewind",  # Rewind 蓄意回退 anchor 后的首采样（turn-rewind）
     "skill_snapshot_changed",
     "tool_spec_changed",
     "system_prompt_changed",

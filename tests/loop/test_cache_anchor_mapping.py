@@ -1,7 +1,8 @@
 """cache-anchor-message-index 回归:cache anchor 的 history→messages 坐标映射。
 
 CacheBreakpoint.index 语义是 messages 下标(anthropic 据此打 cache_control),
-而 cache_anchor_index 是 history 下标(压缩 anchor_preserved_until)。
+而 cache_anchor_index 是 history 下标(含语义:最后一条已缓存条目,-1 无缓存;
+与压缩 anchor_preserved_until 同语义)。
 history→messages 非 1:1(记账 item 跳过/同轮合并),必须映射。
 """
 from __future__ import annotations
@@ -54,7 +55,7 @@ def test_anchor_maps_past_bookkeeping_items() -> None:
                    pending=[], created_at=0, thread_id=TID),    # h1 → (无产出)
         assistant_message("b", thread_id=TID, model="m"),        # h2 → m1
     ]
-    req = _req(hist, anchor=3)
+    req = _req(hist, anchor=2)
     assert [bp.index for bp in req.cache_breakpoints] == [1], \
         f"应打在 messages 下标 1,实得 {[bp.index for bp in req.cache_breakpoints]}"
 
@@ -68,14 +69,20 @@ def test_anchor_maps_with_round_merge() -> None:
         function_call(call_id="c1", name="ask", arguments="{}", thread_id=TID),  # h3 → 并入 m1
         function_call_output(call_id="c1", output="答", thread_id=TID),           # h4 → m2
     ]
-    req = _req(hist, anchor=5)
+    req = _req(hist, anchor=4)
     assert [bp.index for bp in req.cache_breakpoints] == [2], \
         f"应打在 messages 下标 2(tool 消息),实得 {[bp.index for bp in req.cache_breakpoints]}"
 
 
-def test_anchor_zero_or_no_prefix_message_no_breakpoint() -> None:
-    """anchor=0 / 前缀无产出消息:不打点。"""
-    hist = [user_message("a", thread_id=TID)]
+def test_anchor_prefix_without_message_no_breakpoint() -> None:
+    """anchor 及之前全是记账 item(无产出消息):不打点。"""
+    from taifeng.conversation.models import suspension_item
+
+    hist = [
+        suspension_item(record_id="r", submission_id="s", turn_index=1,
+                        pending=[], created_at=0, thread_id=TID),   # h0 → (无产出)
+        user_message("a", thread_id=TID),                             # h1 → m0
+    ]
     assert _req(hist, anchor=0).cache_breakpoints == []
 
 

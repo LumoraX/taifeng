@@ -93,17 +93,17 @@ async def test_handoff_do_not_inject_preserves_anchor() -> None:
         history=items,
         token_estimate=int(budget.soft_limit) + 100,
         budget=budget,
-        cache_anchor_index=2,  # 前 3 条已 cache
+        cache_anchor_index=2,  # 下标 0..2 已 cache（含语义）
         phase="mid_turn",
         available_injections=frozenset({InitialContextInjection.DO_NOT_INJECT}),
     )
     result = await strategy.compress(ctx, InitialContextInjection.DO_NOT_INJECT)
     assert result.success
     assert not result.cache_invalidated
-    # cache_anchor_index=2 → compactable_start=2 → 前 2 条（索引 0, 1）原样保留
-    assert result.new_history[:2] == items[:2]
-    # 第 3 条应被替换为 compacted summary
-    assert result.new_history[2].kind == "compacted"
+    # cache_anchor_index=2 → compactable_start=3 → 下标 0..2 原样保留（anchor 本条不可动）
+    assert result.new_history[:3] == items[:3]
+    # 第 4 条起被替换为 compacted summary
+    assert result.new_history[3].kind == "compacted"
 
 
 _UUID = "550e8400-e29b-41d4-a716-446655440000"

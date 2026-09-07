@@ -338,7 +338,9 @@ class TurnRunner:
     在此查找执行器。业务侧通过 ``EnginePool(script_executors=...)`` 注入。"""
     # 当前 turn 的初始调用栈（默认仅 entry skill）
     call_stack: CallStack = field(default_factory=CallStack)
-    # cache anchor —— 业务层在每轮后更新
+    # cache anchor(含语义,cache-anchor 契约):history 中最后一条已被 provider 缓存的
+    # 条目下标,-1 = 无缓存。采样成功后 _sample_once 推进到「发出时末项」;压缩回写
+    # anchor_preserved_until;rewind 回退 cut-1;跨进程重载置 -1
     cache_anchor_index: int = -1
     # 单 turn 内最大循环（LLM ↔ tool 配对次数）；超过强制 max_iterations 结束
     max_iterations: int = DEFAULT_MAX_INNER_ITERATIONS
@@ -1120,6 +1122,8 @@ class TurnRunner:
 
         input_capabilities = model_capabilities(self.model_client)
         is_responses = input_capabilities.protocol == "responses"
+        # cache-anchor:记发出时 history 长度——流成功完成后 anchor 推进到此处的末项
+        sent_history_len = len(self.history_buffer)
         request = build_api_request(
             entry=self.entry_skill,
             snapshot=self.snapshot,
@@ -1340,6 +1344,11 @@ class TurnRunner:
                 # 该 SuspendSignal 穿透回 run_turn 的 except SuspendSignal(Task 7 已加),落盘挂起。
                 raise SuspendSignal(self._system_retry_pending(e)) from e
             raise  # 确定性失败:照旧上抛硬失败(走 run_turn 宽 except → TurnFailed)
+
+        # cache-anchor:流正常完成 → provider 已缓存本次发出的前缀,anchor 推进到发出时
+        # 末项下标(含语义)。本轮产出(assistant / fc)尚未进缓存,不计入;LLMError /
+        # overflow / 取消路径不经此处,不推进
+        self.cache_anchor_index = sent_history_len - 1
 
         if is_responses:
             if normalized_items is None or not responses_completed:
