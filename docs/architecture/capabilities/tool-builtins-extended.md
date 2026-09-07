@@ -61,6 +61,18 @@ handler SHALL 实现**两阶段原子语义**：
 - **WHEN** path 已存在的文件被请求 create
 - **THEN** SHALL 失败，reason 含 `path_exists`
 
+### Requirement: 子进程默认继承最小 env 白名单
+
+派生子进程的三条路径（`shell_exec` / `run_in_background` / `ShellScriptExecutor`）SHALL 共用 `tool/subprocess_env.py` 的同一份白名单实现（`PATH` / `HOME` / `LANG` + 强制 `LC_ALL=C.UTF-8`）。`env` 参数缺省时 SHALL 使用该白名单，SHALL NOT 继承宿主完整 `os.environ`——否则子进程可读 API key 等全部凭据。需要额外变量的业务 SHALL 显式传入 `env`（此时白名单不再叠加）。
+
+#### Scenario: 默认不泄漏凭据
+- **WHEN** 宿主环境含 `LLM_BOOTSTRAP_API_KEY`，业务未传 `env`
+- **THEN** 子进程环境 SHALL NOT 含该变量，且 SHALL 含 `PATH`
+
+#### Scenario: 显式 env 原样生效
+- **WHEN** 业务显式传入 `env`
+- **THEN** 子进程 SHALL 使用该 env
+
 ### Requirement: BackgroundTaskRegistry 进程内管理
 
 系统 SHALL 提供 `taifeng.tool.builtins.BackgroundTaskRegistry`：

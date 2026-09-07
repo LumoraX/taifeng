@@ -213,6 +213,23 @@ async def retry_async(func, config, cancel) -> Any:
     异常的 ``kind`` 不在 retryable_kinds 中则立即透传，不重试。"""
 ```
 
+#### 接线：`RetryingModelClient`（流式路径的唯一重试入口）
+
+`retry_async` 只能重试「返回一个值的协程」，而采样是 **async generator** —— 一旦开始 yield 事件，重发就意味着调用方收到重复文本 / 重复 tool call。故流式重试由装饰器 `RetryingModelClient`（`llm/retrying.py`）承担：
+
+```python
+from taifeng.llm import RetryConfig, RetryingModelClient
+
+client = RetryingModelClient(native_client, config=RetryConfig(max_attempts=3))
+```
+
+- **零产出才重试**：任一 `text_delta` / `reasoning_delta` / `tool_call_delta` / `tool_call_done` / `structured_output` / `normalized_output` 已 yield 即置位；置位后失败直接抛。这是正确性基石。
+- 元信息事件（`created` / `server_model` / `rate_limits`）只投递一次，重试不重发。
+- 退避走 `wait_cancelled` 竞速而非裸 `sleep`（限流 hint 可达数十秒，`CancelTurn` 必须立即生效，R4）；两条重试路径共用 `compute_backoff_delay`。
+- **与 strict audit 互斥**：它一次 `stream` 可发生多个网络 attempt，故**刻意不声明** `OneNetworkAttemptModelClient`；strict audit 模式会如实拒绝它（ADR 0037）。需要 attempt 观测时构造 native client（`build_model_client(retry=False)`）。
+
+`retry_async` 保留为业务侧**非流式**重试的公共工具（如自定义的一次性 provider 调用）。
+
 `retryable_kinds` 匹配 `LLMError.kind`（见 `llm/errors.py`）。**不重试的错误**：
 - `4xx` 客户端错误（除 429）—— 是 bug，重试无用
 - `content_filter` —— provider 拒绝，重试是浪费（**前提**：端点如实上报 finish_reason；见下方 `trust_finish_reason`）

@@ -215,7 +215,7 @@ SSE 事件 SHALL 按 Gemini `data: {...}\n\n` 单行格式解析：
 
 ### Requirement: 网络异常映射到 TransientNetworkError
 
-四家 native client SHALL 在捕获 httpx 网络异常时直接 raise `TransientNetworkError`，使其归入 `retryable_kinds`：
+四家 native client SHALL 捕获 **`httpx.TransportError` 全族**并 raise `TransientNetworkError`，使其归入 `retryable_kinds`。放宽到 `TransportError` 而非只 catch `NetworkError` 是必需的：`RemoteProtocolError`（"Server disconnected without sending a response"，代理/网关流中途断连，本仓实测高发）属 `ProtocolError` ≠ `NetworkError`，只 catch 后者会让它裸逃到 `unknown` 硬失败（ADR 0037）。
 
 | httpx 异常 | Taifeng 异常 |
 | --- | --- |
@@ -300,23 +300,56 @@ native client SHALL 在 `api_key` 为空或纯空白时**省略**鉴权头/参�
 - **WHEN** 读 `docs/configurable-knobs.md`
 - **THEN** SHALL 看到 `AnthropicClient` + `GeminiClient` + `DeepSeekClient` 三家的构造时参数清单
 
-### Requirement: 异常终止（finish_reason）暴露为错误
+### Requirement: 流终止真相（全 provider 统一规则）
 
-`openai_compat` provider 在流末 SHALL 检查 `choices[].finish_reason`。当 `finish_reason=content_filter`（模型/网关主动拦截，返回空 content）且本次流未累积任何 tool call 时，provider SHALL：
+每家 provider 在流末 SHALL 判定是否见过**终止标记**，未见到 SHALL 抛 `InvalidResponseError`，SHALL NOT emit `completed` 把中途断连伪造成「成功的空回复」：
 
-1. 先 emit 一个 `error` 事件（`kind="content_filter"`、`retryable=False`），与 HTTP 错误路径一致；
-2. 再抛 `ContentFilterError`（回填服务端 `request_id`）；
-3. **不得** emit `completed` 事件（不把被拦截伪造成功）。
+| provider | 终止标记 |
+| --- | --- |
+| `openai_compat` / `deepseek` | `[DONE]` 或任一 `finish_reason` |
+| `gemini` | 任一 `finishReason` |
+| `anthropic` | `message_stop` 事件 |
+| `litellm` | 任一 `finish_reason` |
+| Responses（openai / codex） | `response.completed`（accumulator 已校验） |
 
-正常终止（`finish_reason=stop` / `tool_calls` / 无 finish_reason 但有内容）SHALL 不受影响，照常 emit `completed`。
+见到**异常终止原因**且本次调用**零内容产出**时，provider SHALL：① 先 emit `error` 事件（与 HTTP 错误路径一致）；② 再抛既有分类异常（回填 `request_id`）；③ 不 emit `completed`。分类由共享的 `_shared.classify_abnormal_finish()` 给出：
+
+- 安全拦截类（gemini `SAFETY` / `PROHIBITED_CONTENT` / `BLOCKLIST` / `SPII` / `IMAGE_SAFETY`、anthropic `refusal`、openai 与 litellm `content_filter`）→ `ContentFilterError`；
+- 函数调用畸形类（`MALFORMED_FUNCTION_CALL` / `UNEXPECTED_TOOL_CALL` / `function_call_filter*`）→ `InvalidResponseError`。
+
+**已有产出则不判失败**——模型确实交付了内容，异常终止原因不作废它。正常终止（`stop` / `tool_calls` / `length` 等）照常 emit `completed`。
 
 #### Scenario: content_filter 空流抛 ContentFilterError
-- **WHEN** provider 收到 `finish_reason=content_filter` + 空 content + 0 token 的流
+- **WHEN** provider 收到安全拦截类终止原因 + 空 content 的流
 - **THEN** SHALL emit `error{kind=content_filter}` 事件并抛 `ContentFilterError`，且不 emit `completed`
+
+#### Scenario: 流未见终止标记
+- **WHEN** SSE 连接在没有任何终止标记时结束
+- **THEN** SHALL 抛 `InvalidResponseError`，不 emit `completed`
+
+#### Scenario: 有产出时不作废
+- **WHEN** 终止原因异常但本次调用已产出 tool call
+- **THEN** SHALL 正常收束（既有产出保留）
 
 #### Scenario: 正常 stop 不受影响
 - **WHEN** provider 收到 `finish_reason=stop` + 非空 content 的流
 - **THEN** SHALL 照常 emit `text_delta` + `completed`，不抛异常
+
+### Requirement: completed 透传原生 stop_reason
+
+`completed` 事件 SHALL 携带 `stop_reason: str | None` —— provider 的**原生**终止原因字符串（anthropic `stop_reason`、gemini `finishReason`、openai 与 litellm `finish_reason`、Responses `status`）。内核 SHALL NOT 跨 provider 归一为统一枚举（各家语义不等价，归一必然丢信息，交业务侧按 provider 解释）。既有 `end_turn: bool` 语义与默认值不变；读不到终止原因时为 `None`。turn 侧透出 `turn_completed.data.stop_reason`。
+
+#### Scenario: 截断与自然结束可区分
+- **WHEN** 模型因 max_tokens 截断
+- **THEN** `completed.data.stop_reason` SHALL 为该 provider 的原生截断标识（`length` / `MAX_TOKENS` / `max_tokens`），与自然结束取值不同
+
+### Requirement: gemini functionResponse 使用真实函数名
+
+gemini provider 组装 `contents` 时，tool 角色消息的 `functionResponse.name` SHALL 填该 `tool_call_id` 对应的**函数名**（扫同一请求内 assistant 消息的 `tool_calls` 建 `call_id → name` 索引）。回溯不到时 SHALL 保持 `tool_call_id` 兜底，SHALL NOT 猜测或伪造函数名。
+
+#### Scenario: 工具结果带真实函数名
+- **WHEN** 请求含 assistant `tool_calls`（`id=call_1`, `name=read_file`）与配对的 tool 消息
+- **THEN** 渲染出的 `functionResponse.name` SHALL 为 `read_file`
 
 ### Requirement: 无显式错误的空 completion 视为正常完成（loop 层不臆断）
 

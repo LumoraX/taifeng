@@ -218,7 +218,7 @@ class SurgicalTrimStrategy:
 - **三 pass**：① 去重（恒启用，`md5[:12]` 反扫保最新，≥ `min_dedup_chars` 才参与）；② soft-trim（`soft_trim_ratio ≤ ratio < hard_clear_ratio`，truncate_middle 头尾截断）；③ hard-clear（`ratio ≥ hard_clear_ratio`，整体换含原始长度的占位符）。占位符前缀（`[duplicate` / `[pruned:`）是幂等守卫——二次 compress 零改写、`reason="nothing_to_trim"`。
 - **窗口（R2）**：常规 = `[cache_anchor_index + 1, len − protect_tail_messages)`（anchor 本条及之前已缓存不可动）；仅 `allow_head_clear=True` 且 pre_turn 时 hard-clear 可越 anchor（跳过开头 system_injection 引导段），越过判定 = 改写了下标 `<= anchor` 的条目，越过则如实标 `cache_invalidated=True`。
 - **cache-TTL 对齐触发（opt-in）**：`cache_ttl_seconds` 启用后，距上次成功剪枝不足 ttl 时 `should_trigger` 返回 None——把有损动作对齐到 prompt cache 反正要过期的时刻。时间源 `clock` 注入（默认 `time.monotonic`），自管 `_last_trim_at`，不依赖 `PromptCacheStats`。
-- **glob 选择性**：工具名 `fnmatch` allow/deny（deny 优先），「哪些工具可剪」由业务注入（R1）。
+- **glob 选择性**：工具名 `fnmatch` allow/deny（deny 优先），「哪些工具可剪」由业务注入（R1）。孤儿 output 拿不到工具名：**默认全允许**（`allow=["*"]` 且无 deny，判定与工具名无关）时可剪，配了具体 glob 时仍跳过（不猜测工具名）。
 - **明细透出（R3）**：`CompressionResult.detail = {"deduped", "soft_trimmed", "hard_cleared"}`，turn 组装 `compaction_completed` 事件时透传（既有策略为空 dict）。
 - **取消（R4）**：pass 边界 `await asyncio.sleep(0)` 协作检查点（`CompressionContext` 不携带 CancellationToken、context/ 不反向依赖 loop/——外部 task 取消在边界生效）。
 
@@ -241,6 +241,7 @@ class OffloadStrategy:
 - **选择性触发**：仅当 tail 中存在「超 `offload_bytes_threshold`、有配对 fc、非占位符」的 output 才命中；否则 `should_trigger` 返回 None，让位给有损档。orchestrator 是 first-wins，本档高 priority + 选择性触发 = 「有大结果就优先无损，否则退化 trim/摘要」。`pre_turn` 永不命中（只动 tail）。
 - **回溯 = LLM 主动读**：系统**不**自动 rehydrate；stub 即上下文内的回溯凭证。`file_read` 新增 `offset`/`limit`（按行）分页通道，绕过整文件 byte-cap。
 - **窗口（R2）**：仅改写 `index > cache_anchor_index` 的 tail（首个可变索引 = anchor+1），`cache_invalidated` 恒为 False、`anchor_preserved_until` 不前移。
+- **孤儿 output 照常处理**：`call_id` 回溯不到配对 `function_call` 的 output 不再跳过——offload 就地替换 output 文本、不删条目，不可能产生新的配对孤儿；而压缩恰恰常吃掉 fc 留下大 output，跳过它们等于压不动最大的那条（ADR 0037）。
 - **幂等**：复用共享 `context/placeholders.py` 守卫，已落盘 stub 不被二次处理。
 - **失败回退**：单条落盘抛 OSError → 保留原始 output（不静默丢数据、不产半截 stub），继续处理其余候选。
 - **明细透出（R3）**：`detail = {"offloaded", "bytes_saved"}`，turn 透传 `compaction_completed`。

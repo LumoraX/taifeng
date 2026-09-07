@@ -109,6 +109,17 @@ class JournalEnvelope:
 - `record_hash = SHA256(RFC8785(envelope_without_record_hash))`。
 - datetime 进入 hash 前转为 UTC RFC 3339；非 canonical 对象必须在写文件前拒绝。
 
+### 2.4 Conversation item payload 形状
+
+item payload 模型是 `extra="forbid"`（未知键必须暴露，不静默吞）。因此它 MUST 覆盖 `conversation/models.py` **实际会写入**的全部键，否则一条合法 item 会被判非法而冻结整个 session：
+
+| item kind | 必填 | 可选（缺省不写键） |
+| --- | --- | --- |
+| `function_call` | `call_id` / `name` / `arguments` | `extra_content`（provider 专属 tool_call 扩展，原样落史回放） |
+| `function_call_output` | `call_id` / `output` / `is_error` | `attachments`（已通过 admission 的图片附件列表） |
+
+可选键缺省时 **不出现在 payload 中**（逐键形状与既有持久化数据一致，冷恢复重放与审计比对依赖它）。历史缺口见 ADR 0037。
+
 ## 3. Canonical byte 格式
 
 规范序列化使用 RFC 8785 UTF-8 bytes；frame/envelope 写文件时以该 bytes 加 `\n`。例如：

@@ -38,7 +38,7 @@
 
 ### Requirement: 三 pass 分级、就地改写、配对安全
 - **WHEN** `compress` 执行
-- **THEN** 仅对可剪窗口内、glob 命中、非占位符的 `function_call_output` 操作：去重（反扫保最新）恒启用；`soft ≤ ratio < hard` 头尾截断；`ratio ≥ hard` 整体占位符替换。就地替换 payload、不删条目、不触碰配对 `function_call`；孤儿 output（call_id 无配对 fc）跳过。
+- **THEN** 仅对可剪窗口内、glob 命中、非占位符的 `function_call_output` 操作：去重（反扫保最新）恒启用；`soft ≤ ratio < hard` 头尾截断；`ratio ≥ hard` 整体占位符替换。就地替换 payload、不删条目、不触碰配对 `function_call`。孤儿 output（call_id 无配对 fc）拿不到工具名喂 glob：**默认全允许**（`allow=["*"]` 且无 deny，判定与工具名无关）时照常参与，配了具体 glob 时跳过（不猜测工具名，ADR 0037）。
 
 ### Requirement: 窗口与 cache（R2）
 - 常规窗口起点 = `cache_anchor_index + 1`（含语义：anchor 本条及之前已缓存；DO_NOT_INJECT 下逐字节不变 → `cache_invalidated=False`）；尾部 `protect_tail_messages` 条永不剪。

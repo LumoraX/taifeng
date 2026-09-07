@@ -49,12 +49,12 @@
 ## 行为契约
 
 ### Requirement: 触发(独立 bytes 阈值 / 仅 tool-result / 非 pre_turn)
-- **WHEN** tail(`index > cache_anchor_index`)中存在超 `offload_bytes_threshold`、有配对 fc、非占位符的 `function_call_output`,且 `phase != pre_turn`
+- **WHEN** tail(`index > cache_anchor_index`)中存在超 `offload_bytes_threshold`、非占位符的 `function_call_output`,且 `phase != pre_turn`（**不要求有配对 fc**：就地替换 output 文本不涉配对，孤儿照常处理，ADR 0037）
 - **THEN** `should_trigger` 返回 `CompressionTrigger`;否则返回 None(让位有损档)
 
 ### Requirement: 落盘 + stub 替换
 - **WHEN** `compress` 命中候选
-- **THEN** 完整内容写确定性路径;history 中该条 output 原地替换为 stub(保留 item id/thread_id);非 tool-result、孤儿 output、已占位符条目跳过
+- **THEN** 完整内容写确定性路径;history 中该条 output 原地替换为 stub(保留 item id/thread_id);非 tool-result、已占位符、带图片附件的条目跳过
 
 ### Requirement: LLM 主动回溯,系统不自动 rehydrate
 - **WHEN** LLM 未主动 `file_read` 某 offload 内容
