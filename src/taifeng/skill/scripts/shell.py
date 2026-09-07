@@ -23,28 +23,16 @@ import time
 from typing import Any
 
 from taifeng.skill.scripts.executor import ScriptExecutionError, ScriptExecutor
+from taifeng.tool.subprocess_env import SAFE_ENV_KEYS, default_safe_env
 from taifeng.skill.scripts.types import ScriptInvocation, ScriptResult
 
-# 默认 env 白名单 —— subprocess 仅可见这三个 system-level 变量
-_SAFE_ENV_KEYS: tuple[str, ...] = ("PATH", "HOME", "LANG")
+# 默认 env 白名单实现已提到 tool/subprocess_env.py（内置工具与本执行器共用同一
+# 份安全判据，避免第二个副本各自漂移）；此处保留别名以兼容既有引用。
+_SAFE_ENV_KEYS = SAFE_ENV_KEYS
+_default_safe_env = default_safe_env
 
 # SIGTERM → SIGKILL 之间的宽限期
 _SIGKILL_GRACE_SECONDS: float = 1.0
-
-
-def _default_safe_env() -> dict[str, str]:
-    """构建仅含白名单 key 的最小 env 字典。"""
-    env: dict[str, str] = {}
-    for key in _SAFE_ENV_KEYS:
-        # 注：此处 os.environ 是 subprocess 启动所需的 system env，不是业务配置
-        value = os.environ.get(key)
-        if value is not None:
-            env[key] = value
-    # 强制 LC_ALL=C.UTF-8 以稳定 child 进程的 locale 输出
-    env.setdefault("LC_ALL", "C.UTF-8")
-    if "LANG" not in env:
-        env["LANG"] = "C.UTF-8"
-    return env
 
 
 def _format_args_to_argv(inv: ScriptInvocation) -> list[str]:

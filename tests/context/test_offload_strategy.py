@@ -145,15 +145,19 @@ async def test_offload_idempotent_on_stub(tmp_path: Path) -> None:
     assert not r2.success
 
 
-async def test_offload_skips_orphan_output(tmp_path: Path) -> None:
-    """无配对 function_call 的孤儿 output 不 offload(不猜测)。"""
+async def test_offload_handles_orphan_output(tmp_path: Path) -> None:
+    """孤儿 output 照常 offload(ADR 0037)。
+
+    offload 就地替换 output 文本、不删条目,不可能产生新的配对孤儿;而压缩恰恰
+    常吃掉 fc 留下大 output,跳过它们等于压不动最大的那条。
+    """
     history = [
         user_message("请分析", thread_id=TID),
         function_call_output(call_id="orphan", output=BIG, thread_id=TID),
     ]
     strat = _strategy(tmp_path)
     result = await strat.compress(_ctx(history), InitialContextInjection.DO_NOT_INJECT)
-    assert not result.success
+    assert result.success and result.detail["offloaded"] == 1
 
 
 # ---- 失败回退 ----

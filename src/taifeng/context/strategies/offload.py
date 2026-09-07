@@ -134,8 +134,7 @@ class OffloadStrategy:
         if ctx.phase == "pre_turn":
             return None
         history = list(ctx.history)
-        names = _build_name_index(history)
-        if self._eligible_indices(history, names, ctx.cache_anchor_index):
+        if self._eligible_indices(history, ctx.cache_anchor_index):
             return CompressionTrigger(reason="tool_overflow", threshold_pct=1.0)
         return None
 
@@ -144,22 +143,22 @@ class OffloadStrategy:
     def _eligible_indices(
         self,
         history: list[ResponseItem],
-        names: dict[str, str],
         anchor: int,
     ) -> list[int]:
-        """anchor 之后(index > anchor)、超阈值、非占位符、有配对的 output 索引。
+        """anchor 之后(index > anchor)、超阈值、非占位符的 output 索引。
 
         ``cache_anchor_index``(含)及之前已 cached(R2),首个可变索引 = anchor+1。
-        排除:孤儿 output(call_id 回溯不到配对 fc)、已是占位符的条目(幂等)、
-        未达阈值的小结果。
+        排除:已是占位符的条目(幂等)、未达阈值的小结果、带图片附件的条目。
+
+        **孤儿 output(call_id 回溯不到配对 fc)照常处理**:offload 就地替换 output
+        文本、不删条目,不可能产生新的配对孤儿;而压缩恰恰常吃掉 fc 留下大 output,
+        跳过它们等于压不动最大的那条(ADR 0037)。
         """
         picked: list[int] = []
         start = max(anchor + 1, 0)
         for i in range(start, len(history)):
             it = history[i]
             if it.kind != "function_call_output":
-                continue
-            if it.payload["call_id"] not in names:
                 continue
             # 图片无法无损回溯：base64 落盘后 file_read 回来是文本，模型看不见。
             # 本策略的定位是「无损可回溯」，兑现不了就不该接手——交给诚实有损的
@@ -187,11 +186,10 @@ class OffloadStrategy:
         失败回退:某条落盘抛 OSError → 保留其原始 output,继续处理其余候选。
         """
         history = list(ctx.history)
-        names = _build_name_index(history)
         offloaded = 0
         bytes_saved = 0
 
-        for i in self._eligible_indices(history, names, ctx.cache_anchor_index):
+        for i in self._eligible_indices(history, ctx.cache_anchor_index):
             it = history[i]
             call_id = it.payload["call_id"]
             output = it.payload["output"]

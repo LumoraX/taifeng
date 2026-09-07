@@ -60,7 +60,7 @@ def test_openai_protocol_selects_official_client(
     monkeypatch.setenv("LLM_BOOTSTRAP_API_KEY", "sk-test-placeholder")
     monkeypatch.setenv("LLM_BOOTSTRAP_MODEL", "gpt-5.6")
 
-    client, meta = build_model_client()
+    client, meta = build_model_client(retry=False)
 
     assert isinstance(client, client_type)
     assert client.capabilities.protocol == protocol
@@ -73,7 +73,7 @@ def test_openai_protocol_defaults_to_chat(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("LLM_BOOTSTRAP_PROVIDER", "openai")
     monkeypatch.setenv("LLM_BOOTSTRAP_API_KEY", "sk-test-placeholder")
 
-    client, meta = build_model_client()
+    client, meta = build_model_client(retry=False)
 
     assert isinstance(client, OpenAIChatClient)
     assert meta["protocol"] == "chat"
@@ -112,7 +112,7 @@ def test_codex_protocol_selects_independent_responses_client(
     monkeypatch.setenv("LLM_BOOTSTRAP_API_KEY", "sk-test-placeholder")
     monkeypatch.setenv("LLM_BOOTSTRAP_BASE_URL", "https://proxy.example/v1/")
 
-    client, meta = build_model_client()
+    client, meta = build_model_client(retry=False)
 
     assert isinstance(client, CodexResponsesClient)
     assert client.capabilities.provider == "codex"
@@ -203,7 +203,7 @@ def test_codex_optional_key_still_validates_url_without_key_tail(
     monkeypatch.setenv("LLM_BOOTSTRAP_PROVIDER", "codex")
     monkeypatch.setenv("LLM_BOOTSTRAP_BASE_URL", "https://proxy.example/v1/")
 
-    client, meta = build_model_client(require_api_key=False)
+    client, meta = build_model_client(require_api_key=False, retry=False)
 
     assert isinstance(client, CodexResponsesClient)
     assert meta["base_url"] == "https://proxy.example/v1"
@@ -220,3 +220,22 @@ def test_env_example_documents_openai_and_independent_codex_choice() -> None:
     assert "# LLM_BOOTSTRAP_MODEL=gpt-5.6-luna" in content
     assert "# LLM_BOOTSTRAP_BASE_URL=https://your-codex-proxy.example/v1" in content
     assert "LLM_BOOTSTRAP_CODEX_" not in content
+
+
+def test_default_wraps_with_retrying_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认 retry=True → native client 被 RetryingModelClient 包一层。
+
+    一次网关抖动不该把整个 turn 推进 SYSTEM_RETRY 挂起（wave2c 台账实测痛点）。
+    """
+    from taifeng.llm.retrying import RetryingModelClient
+
+    monkeypatch.setenv("LLM_BOOTSTRAP_PROVIDER", "codex")
+    monkeypatch.setenv("LLM_BOOTSTRAP_API_KEY", "sk-test-placeholder")
+    monkeypatch.setenv("LLM_BOOTSTRAP_BASE_URL", "https://proxy.example/v1/")
+
+    client, meta = build_model_client()
+    assert isinstance(client, RetryingModelClient)
+    assert isinstance(client.inner, CodexResponsesClient)
+    assert meta["retry"] == "on"

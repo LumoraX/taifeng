@@ -18,6 +18,7 @@ from typing import Any
 
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from taifeng.tool.subprocess_env import default_safe_env
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,9 @@ def make_shell_exec_tool(
     Args:
         policy: PermissionPolicy；不提供则**每次拒绝**（强保守）
         cwd: 工作目录
-        env: 环境变量（不提供则继承）
+        env: 环境变量。**不提供时使用最小白名单**（`tool/subprocess_env.py`），
+            不继承宿主完整 os.environ —— 否则子进程可读 API key 等全部凭据。
+            需要更多变量的业务显式传入完整 env。
         timeout_seconds: 单次执行超时
         max_output_bytes: 截断输出
         enable_safety_blacklist: 启用启发式黑名单
@@ -105,6 +108,8 @@ def make_shell_exec_tool(
                 f"permission_denied: {decision.reason}", reason="permission_denied",
             )
 
+        # env=None → 最小白名单（不继承宿主全环境，防 API key 等凭据泄漏给子进程）
+        child_env = env if env is not None else default_safe_env()
         try:
             if allow_shell:
                 proc = await asyncio.create_subprocess_shell(
@@ -112,7 +117,7 @@ def make_shell_exec_tool(
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
-                    env=env,
+                    env=child_env,
                 )
             else:
                 argv = shlex.split(command)
@@ -121,7 +126,7 @@ def make_shell_exec_tool(
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
-                    env=env,
+                    env=child_env,
                 )
         except OSError as e:
             return ToolResult.error(f"spawn_error: {e}", reason="spawn_error")

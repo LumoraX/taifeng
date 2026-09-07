@@ -286,15 +286,19 @@ def test_glob_deny_priority() -> None:
     assert "已省略" in outs[1]
 
 
-def test_orphan_output_skipped() -> None:
-    """2.1：找不到配对 function_call 的 output 视为不可剪，跳过不抛错。"""
+def test_orphan_output_skipped_when_globs_configured() -> None:
+    """2.1：配了具体 glob 时，找不到配对 function_call 的 output 不可剪。
+
+    ADR 0037：孤儿拿不到工具名，无法喂 glob；只有默认全允许（判定与工具名无关）
+    才剪它，配了具体 glob 就仍跳过（不猜测）。
+    """
     big = "J" * 5_000
     hist = [
         user_message("u", thread_id=TID),
         function_call_output(call_id="ghost", output=big, thread_id=TID),
         assistant_message("tail", thread_id=TID, model="m"),
     ]
-    s = _strategy()
+    s = _strategy(allow_globs=("read_*",))
     ctx = _ctx(hist, token_estimate=4_000)
     res = asyncio.run(s.compress(ctx, InitialContextInjection.DO_NOT_INJECT))
     assert res.success is False and res.reason == "nothing_to_trim"

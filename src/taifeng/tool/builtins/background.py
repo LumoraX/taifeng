@@ -27,6 +27,7 @@ from typing import Any
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
 from taifeng.tool.builtins.shell import _quick_safety_check
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from taifeng.tool.subprocess_env import default_safe_env
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,8 @@ class BackgroundTaskRegistry:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env=env,
+                # env=None → 最小白名单（不继承宿主全环境，防凭据泄漏给子进程）
+                env=env if env is not None else default_safe_env(),
             )
             task = _BgTask(
                 task_id=task_id,

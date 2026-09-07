@@ -172,6 +172,16 @@ class SurgicalTrimStrategy:
             return False
         return any(fnmatchcase(name, g) for g in self._allow_globs)
 
+    def _globs_are_permissive(self) -> bool:
+        """glob 是否为「默认全允许」（任何工具名都会命中）。
+
+        用途：孤儿 output（call_id 回溯不到配对 fc）拿不到工具名，无法喂 glob。
+        全允许时判定结果与工具名无关，剪它不违背「无法判定即不动」——而剪枝就地
+        改写 payload、不删条目，也不可能造出新的配对孤儿。配置了任何具体 glob 时
+        仍跳过（不猜测工具名）。见 ADR 0037。
+        """
+        return tuple(self._allow_globs) == ("*",) and not self._deny_globs
+
     def _candidates(
         self,
         history: list[ResponseItem],
@@ -190,7 +200,11 @@ class SurgicalTrimStrategy:
             if it.kind != "function_call_output":
                 continue
             name = names.get(it.payload["call_id"])
-            if name is None or not self._tool_allowed(name):
+            if name is None:
+                # 孤儿：只有默认全允许 glob 时才剪（判定与工具名无关）
+                if not self._globs_are_permissive():
+                    continue
+            elif not self._tool_allowed(name):
                 continue
             if _is_placeholder(it.payload["output"]):
                 continue

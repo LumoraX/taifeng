@@ -475,19 +475,31 @@ class _AssistantMessageItemPayload(JournalModel):
 
 
 class _FunctionCallItemPayload(JournalModel):
-    """function_call 的稳定 payload 形状。"""
+    """function_call 的稳定 payload 形状。
+
+    ``extra_content`` 是 provider 专属的 tool_call 扩展（派发不解释，仅供落史
+    回放）。模型 ``extra="forbid"``，缺这个字段会把带 extra_content 的合法
+    function_call 判为非法 → 冻结整个 session（ADR 0037）。缺省时
+    ``conversation/models.py`` 不写该键，故默认 None。
+    """
 
     call_id: NonEmptyStr
     name: NonEmptyStr
     arguments: str
+    extra_content: CanonicalMapping | None = None
 
 
 class _FunctionCallOutputItemPayload(JournalModel):
-    """function_call_output 的稳定 payload 形状。"""
+    """function_call_output 的稳定 payload 形状。
+
+    ``attachments`` 是已通过 admission 的图片附件列表；同上，缺字段会让一条带
+    图片的工具结果直接冻结 session。缺省时不写该键，故默认 None。
+    """
 
     call_id: NonEmptyStr
     output: str
     is_error: bool
+    attachments: CanonicalList | None = None
 
 
 class _ProviderStateEnvelopeV1(JournalModel):

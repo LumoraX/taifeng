@@ -12,6 +12,7 @@ from typing import Any
 from taifeng.context.budget import ContextBudget
 from taifeng.context.compressor import CompressionContext
 from taifeng.context.injection import InitialContextInjection
+from taifeng.context.placeholders import is_placeholder
 from taifeng.context.strategies.offload import OffloadStrategy
 from taifeng.context.strategies.surgical_trim import SurgicalTrimStrategy
 from taifeng.conversation.models import (
@@ -52,7 +53,7 @@ async def test_offload_handles_orphan_output(tmp_path: Path) -> None:
     result = await strat.compress(_ctx(hist), DNI)
     assert result.success and result.detail["offloaded"] == 1
     out: Any = result.new_history[1].payload["output"]
-    assert len(out) < 5_000, "孤儿 output 未被替换为 stub"
+    assert is_placeholder(out), "孤儿 output 未被替换为 stub"
 
 
 async def test_surgical_trims_orphan_under_default_globs() -> None:

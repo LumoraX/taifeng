@@ -7,12 +7,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 
 from taifeng.loop.cancellation import CancellationToken
+from taifeng.permission import PermissionPolicy
 from taifeng.tool.builtins.background import (
     BackgroundTaskRegistry,
     make_run_in_background_tool,
@@ -25,6 +25,11 @@ _SECRET = "LLM_BOOTSTRAP_API_KEY"
 _DUMP = "/usr/bin/env"  # 绝对路径:显式 env 场景下子进程没有 PATH
 
 
+def _policy() -> PermissionPolicy:
+    """shell_exec 默认拒绝无 policy 调用；本组测的是 env 而非授权。"""
+    return PermissionPolicy(default_mode="allow")
+
+
 def _ctx() -> ToolContext:
     return ToolContext(call_id="c1", cancel=CancellationToken(name="t"), thread_id="t")
 
@@ -34,7 +39,7 @@ async def test_shell_exec_default_env_excludes_host_secrets(
 ) -> None:
     """默认 env 必须是白名单:不含宿主凭据,含 PATH。"""
     monkeypatch.setenv(_SECRET, "sk-should-not-leak")
-    tool = make_shell_exec_tool(allow_shell=True)
+    tool = make_shell_exec_tool(allow_shell=True, policy=_policy())
     result = await tool.handler({"command": _DUMP}, _ctx())
 
     assert not result.is_error, result.output
@@ -49,10 +54,10 @@ async def test_background_default_env_excludes_host_secrets(
     monkeypatch.setenv(_SECRET, "sk-should-not-leak")
     registry = BackgroundTaskRegistry()
     try:
-        spawn = make_run_in_background_tool(registry=registry)
+        spawn = make_run_in_background_tool(registry=registry, policy=_policy())
         spawned = await spawn.handler({"command": _DUMP}, _ctx())
         assert not spawned.is_error, spawned.output
-        task_id = json.loads(spawned.output)["task_id"]
+        task_id = spawned.data["task_id"]
 
         waited = await make_wait_for_task_tool(registry=registry).handler(
             {"task_id": task_id, "timeout_seconds": 10}, _ctx(),
@@ -64,7 +69,9 @@ async def test_background_default_env_excludes_host_secrets(
 
 async def test_explicit_env_still_wins() -> None:
     """显式传 env 时原样生效（白名单不再叠加）。"""
-    tool = make_shell_exec_tool(allow_shell=True, env={"MARKER": "explicit-value"})
+    tool = make_shell_exec_tool(
+        allow_shell=True, policy=_policy(), env={"MARKER": "explicit-value"},
+    )
     result = await tool.handler({"command": _DUMP}, _ctx())
     assert "MARKER=explicit-value" in result.output
 
