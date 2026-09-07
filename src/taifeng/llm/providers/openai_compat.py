@@ -300,6 +300,7 @@ class OpenAICompatSession:
             usage=self._last_usage or TokenUsage(),
             end_turn=not bool(tool_calls_acc),
             request_id=request_id,
+            stop_reason=self._last_finish_reason,
         )
 
     async def _process_chunk(

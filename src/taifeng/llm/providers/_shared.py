@@ -676,3 +676,42 @@ __all__ = [
     "parse_sse_data",
     "parse_sse_event",
 ]
+
+
+# ── 异常终止原因分类（llm-provider-native 契约「流终止真相」）─────────────────
+# 各家原生取值不同，规则同一份：安全拦截类 → ContentFilterError；函数调用畸形类
+# → InvalidResponseError；其余（length / MAX_TOKENS / tool_calls …）不是失败。
+# 调用方仅在**本次调用零内容产出**时询问本函数——已有产出说明模型确实干了活，
+# 不作废（与 openai_compat 的既有判据一致）。
+_CONTENT_FILTER_FINISHES = frozenset({
+    "SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY",
+    "content_filter", "refusal",
+})
+_MALFORMED_FINISHES = frozenset({
+    "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL",
+})
+
+
+def classify_abnormal_finish(
+    finish_reason: str, *, provider: str,
+) -> LLMError | None:
+    """把异常终止原因映射到既有 LLMError 分类；正常终止返回 None。
+
+    Args:
+        finish_reason: provider 原生终止原因字符串。
+        provider: provider 名（仅用于错误消息可读性）。
+
+    Returns:
+        ``ContentFilterError`` / ``InvalidResponseError``；不是异常终止则 None。
+    """
+    if finish_reason in _CONTENT_FILTER_FINISHES:
+        return ContentFilterError(
+            f"{provider}: response blocked by content policy "
+            f"(finish_reason={finish_reason})"
+        )
+    if finish_reason in _MALFORMED_FINISHES:
+        return InvalidResponseError(
+            f"{provider}: response stopped by provider function call filter "
+            f"(finish_reason={finish_reason})"
+        )
+    return None

@@ -388,6 +388,8 @@ class TurnRunner:
     enable_request_capture: bool = False
     # turn-级累积 usage
     total_usage: TokenUsage = field(default_factory=TokenUsage)
+    # 最后一次采样的 provider 原生终止原因（llm-provider-native 契约，不跨家归一）
+    last_stop_reason: str | None = field(default=None)
     history_buffer: list[ResponseItem] = field(default_factory=list)
     """In-memory 视图，与 store 同步追加。"""
     # budget-awareness（ADR 0017 规则②）：是否已对当前「超 soft episode」注过预算提示。
@@ -1030,6 +1032,8 @@ class TurnRunner:
                         "usage": self.total_usage.model_dump(),
                         "end_reason": end_reason,
                         "success": outcome.success,
+                        # provider 原生终止原因（最后一次采样），不跨家归一
+                        "stop_reason": self.last_stop_reason,
                         # is_root 区分主/子 turn —— 业务桥接层（如 Web SSE 桥）只在
                         # 根 turn completed 时认为 submission 真正结束。
                         "is_root": is_root,
@@ -1277,6 +1281,8 @@ class TurnRunner:
                         rid = ev.data.get("request_id")
                         if rid:
                             self._last_request_id = rid
+                        # provider 原生终止原因：原样记下，供 turn_completed 透出
+                        self.last_stop_reason = ev.data.get("stop_reason")
                     elif ev.kind == "prompt_cache":
                         cache_read = int(ev.data.get("cache_read_input_tokens") or 0)
                         cache_creation = int(ev.data.get("cache_creation_input_tokens") or 0)

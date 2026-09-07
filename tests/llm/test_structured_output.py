@@ -227,7 +227,9 @@ async def test_litellm_passes_response_format_kwarg(
 
     stub_module = types.ModuleType("litellm")
     chunks = [
-        {"choices": [{"delta": {"content": '{"a":1}'}}],
+        # 带 finish_reason —— 真实 litellm 流一定有终止标记；缺了会被
+        # 「流终止真相」判为中途断连（llm-provider-native 契约）
+        {"choices": [{"delta": {"content": '{"a":1}'}, "finish_reason": "stop"}],
          "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}},
     ]
     stub = _StubAcompletion(chunks)

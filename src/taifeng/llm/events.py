@@ -136,7 +136,21 @@ def completed(
     usage: TokenUsage,
     end_turn: bool | None = True,
     request_id: str | None = None,
+    stop_reason: str | None = None,
 ) -> ResponseEvent:
+    """流正常终止事件。
+
+    Args:
+        response_id: provider 侧响应 id（多数 chat 端点为 None）。
+        usage: 本次调用的 token 记账。
+        end_turn: 是否「模型说完了」（还有 tool call 待跑时为 False）。既有语义不变。
+        request_id: 服务端 request-id（成功路径回流，供工单关联）。
+        stop_reason: provider **原生**终止原因字符串，原样透传不跨家归一
+            （anthropic ``stop_reason`` / gemini ``finishReason`` /
+            openai 与 litellm ``finish_reason`` / Responses ``status``）。
+            各家取值语义不等价，归一必然丢信息，交业务侧按 provider 解释；
+            读不到时为 None。见 capabilities/llm-provider-native.md。
+    """
     return ResponseEvent(
         kind="completed",
         data={
@@ -145,6 +159,7 @@ def completed(
             "end_turn": end_turn,
             # G3：服务端 request-id（成功路径回流，供工单关联）
             "request_id": request_id,
+            "stop_reason": stop_reason,
         },
     )
 

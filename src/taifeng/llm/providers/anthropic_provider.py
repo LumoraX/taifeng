@@ -21,7 +21,10 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
+    ContentFilterError,
     InvalidRequestError,
+    InvalidResponseError,
+    LLMError,
     TransientNetworkError,
 )
 from taifeng.llm.events import (
@@ -290,8 +293,27 @@ class AnthropicSession:
                             yield ev
             except httpx.TimeoutException as exc:
                 raise TransientNetworkError(f"anthropic timeout: {exc}") from exc
-            except httpx.NetworkError as exc:
-                raise TransientNetworkError(f"anthropic network: {exc}") from exc
+            except httpx.TransportError as exc:
+                # 同 openai_compat / gemini：放宽到 TransportError 以覆盖
+                # RemoteProtocolError（网关中途断连），避免裸逃成 unknown 硬失败。
+                raise TransientNetworkError(f"anthropic transport: {exc}") from exc
+
+        # 流终止真相（llm-provider-native 契约）：Anthropic 以 message_stop 收束，
+        # 没见到即流被中途掐断，不得伪造成功。
+        if not self._saw_message_stop:
+            raise InvalidResponseError(
+                "anthropic stream ended without message_stop terminal event"
+            )
+        produced = bool(tool_calls_acc) or self._produced_text
+        if not produced and self._last_stop_reason == "refusal":
+            failure: LLMError = ContentFilterError(
+                "response refused by model (stop_reason=refusal)"
+            )
+            failure.request_id = request_id
+            yield error(
+                message=str(failure), kind=failure.kind, retryable=failure.retryable,
+            )
+            raise failure
 
         # 流末 tool_call_done 事件
         for acc in tool_calls_acc.values():
@@ -315,9 +337,13 @@ class AnthropicSession:
             usage=self._last_usage or TokenUsage(),
             end_turn=self._end_turn,
             request_id=request_id,
+            stop_reason=self._last_stop_reason,
         )
 
     _end_turn: bool = True  # 默认 end_turn=True；message_delta 含 stop_reason 时更新
+    _last_stop_reason: str | None = None  # 原生 stop_reason，供终止真相判定与透传
+    _saw_message_stop: bool = False  # 见过 message_stop 才算流正常终止
+    _produced_text: bool = False  # 本次流是否产出过文本（异常终止判定用）
 
     async def _process_event(
         self,
@@ -374,6 +400,7 @@ class AnthropicSession:
             if stop_reason is not None:
                 # tool_use → 还有 tool 要跑，end_turn=False
                 self._end_turn = stop_reason in {"end_turn", "stop_sequence"}
+                self._last_stop_reason = stop_reason
             usage_raw = payload.get("usage")
             if usage_raw:
                 # message_delta 的 usage 是增量（仅 output_tokens 等），需要合并
@@ -394,6 +421,7 @@ class AnthropicSession:
             return
 
         if name == "message_stop":
+            self._saw_message_stop = True
             return
 
         if name == "ping":

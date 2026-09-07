@@ -213,6 +213,9 @@ class CodexResponsesSession:
             usage=terminal.usage,
             end_turn=not has_calls,
             request_id=request_id,
+            # Responses 协议的终止原因即 response.status（accumulator 已校验为
+            # "completed"，非 completed 的终态在 ADR 0033 归一为分类 LLMError）
+            stop_reason="completed",
         )
 
 

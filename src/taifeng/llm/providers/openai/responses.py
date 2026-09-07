@@ -508,6 +508,7 @@ class OpenAIResponsesSession:
             usage=usage,
             end_turn=not has_calls,
             request_id=request_id,
+            stop_reason="completed",
         )
 
 

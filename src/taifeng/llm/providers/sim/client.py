@@ -229,6 +229,7 @@ class _SimSession:
             usage=turn.usage,
             end_turn=_end_turn(turn),
             request_id=turn.request_id,
+            stop_reason=_stop_reason(turn),
         )
 
 
@@ -237,6 +238,17 @@ def _end_turn(turn: SimTurn) -> bool:
     if turn.finish is None:
         return not bool(turn.tool_calls)
     return turn.finish in ("end_turn", "length")
+
+
+def _stop_reason(turn: SimTurn) -> str:
+    """剧本 finish → openai_compat 口径的原生 finish_reason 字符串。
+
+    sim 是 openai_compat 的 conformance 模拟器，故取值与其一致：显式 finish
+    优先（``end_turn`` 归一到线缆值 ``stop``），未声明时按有无 tool_calls 推。
+    """
+    if turn.finish is not None:
+        return "stop" if turn.finish == "end_turn" else turn.finish
+    return "tool_calls" if turn.tool_calls else "stop"
 
 
 class _SimClientBase(OneNetworkAttemptModelClient):

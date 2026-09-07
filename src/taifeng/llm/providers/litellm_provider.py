@@ -16,6 +16,7 @@ from taifeng.llm.errors import (
     ContentFilterError,
     ContextOverflowError,
     InvalidRequestError,
+    InvalidResponseError,
     LLMError,
     RateLimitError,
     ServerError,
@@ -70,6 +71,14 @@ def _classify_litellm_error(exc: Exception) -> LLMError:
         or "connection reset" in msg_lower
         or "connection refused" in msg_lower
         or "remote disconnected" in msg_lower
+        # httpx.RemoteProtocolError 经 LiteLLM 包装后类名/正文的两种常见形态
+        # （"Server disconnected without sending a response" / 截断读取）——
+        # 与 native provider 的 TransportError 归一保持同一判据
+        or "remoteprotocolerror" in cls_name
+        or "protocolerror" in cls_name
+        or "server disconnected" in msg_lower
+        or "incompleteread" in msg_lower
+        or "peer closed connection" in msg_lower
     ):
         return TransientNetworkError(message)
     # 服务端 5xx：HTTP 状态码出现在 message 或类名为 InternalServerError
@@ -240,6 +249,8 @@ class LiteLLMSession:
 
         # 累积 tool call 增量
         tool_calls_acc: dict[str, dict[str, Any]] = {}
+        # 本次流最后一个非空 finish_reason（None = 从未见到 → 流未正常终止）
+        last_finish_reason: str | None = None
         # P1 structured_output：累积全文用于流末解析
         full_text_parts: list[str] = []
 
@@ -250,6 +261,11 @@ class LiteLLMSession:
                 chunk_dict = chunk if isinstance(chunk, dict) else chunk.model_dump()
                 choices = chunk_dict.get("choices") or []
                 if choices:
+                    # 记录非空 finish_reason（stop / tool_calls / content_filter /
+                    # length …），供流末判定终止真相 + 原样透传
+                    chunk_finish = choices[0].get("finish_reason")
+                    if chunk_finish:
+                        last_finish_reason = chunk_finish
                     delta = choices[0].get("delta") or {}
                     # 文本增量
                     text = delta.get("content")
@@ -298,6 +314,25 @@ class LiteLLMSession:
             yield error(message=str(classified), kind=classified.kind, retryable=classified.retryable)
             raise classified from exc
 
+        # 流终止真相（llm-provider-native 契约）：没见过任何 finish_reason 说明流被
+        # 中途掐断，不得伪造成功的空回复。
+        if last_finish_reason is None:
+            raise InvalidResponseError(
+                "litellm stream ended without any finish_reason terminal marker"
+            )
+        if last_finish_reason == "content_filter" and not (
+            tool_calls_acc or full_text_parts
+        ):
+            filtered = ContentFilterError(
+                "response blocked by content filter (finish_reason=content_filter)"
+            )
+            yield error(
+                message=str(filtered),
+                kind=filtered.kind,
+                retryable=filtered.retryable,
+            )
+            raise filtered
+
         # tool_call_done 事件
         for acc in tool_calls_acc.values():
             if acc["id"] and acc["name"]:
@@ -325,6 +360,7 @@ class LiteLLMSession:
             response_id=None,
             usage=self._last_usage or TokenUsage(),
             end_turn=not bool(tool_calls_acc),
+            stop_reason=last_finish_reason,
         )
 
     @property

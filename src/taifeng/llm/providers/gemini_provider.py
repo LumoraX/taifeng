@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
     InvalidRequestError,
+    InvalidResponseError,
     TransientNetworkError,
 )
 from taifeng.llm.events import (
@@ -35,6 +36,7 @@ from taifeng.llm.events import (
     tool_call_done,
 )
 from taifeng.llm.providers._shared import (
+    classify_abnormal_finish,
     classify_http_error,
     extract_rate_limit_snapshot,
     extract_request_id,
@@ -68,6 +70,8 @@ def _to_gemini_contents(
         - 文本 content → ``parts: [{text}]``
         - assistant.tool_calls → ``parts: [{functionCall: {name, args}}]``
         - tool 角色的 result → ``parts: [{functionResponse: {name, response}}]``
+          （``name`` 是**函数名**，由同一请求内 assistant 的 tool_calls 回溯
+          ``call_id → name``；回溯不到时退回 call_id 兜底，不猜测函数名）
     """
     sys_parts = [s for s in req.system_prompt if s]
     system_instruction: dict[str, Any] | None = None
@@ -75,6 +79,19 @@ def _to_gemini_contents(
         system_instruction = {
             "parts": [{"text": "\n\n".join(sys_parts)}],
         }
+
+    # call_id → 函数名映射：Gemini 的 functionResponse.name 要求填**函数名**，
+    # 而 ApiMessage 的 tool 消息只带 tool_call_id。先扫一遍 assistant 的
+    # tool_calls 建索引，让 tool 结果能对上其函数声明（对不上则退回 call_id）。
+    call_id_to_name: dict[str, str] = {}
+    for msg in req.messages:
+        if msg.role != "assistant" or not msg.tool_calls:
+            continue
+        for tc in msg.tool_calls:
+            call_id = tc.get("id")
+            fn_name = (tc.get("function") or {}).get("name")
+            if call_id and fn_name:
+                call_id_to_name[str(call_id)] = str(fn_name)
 
     contents: list[dict[str, Any]] = []
     for msg in req.messages:
@@ -86,9 +103,12 @@ def _to_gemini_contents(
 
         # tool 角色 → functionResponse
         if msg.role == "tool":
-            # Gemini 要求 functionResponse 的 name 字段。ApiMessage 没存
-            # function name，用 tool_call_id 兜底（业务侧若需要可直接传
-            # list 形态 content 透传）
+            # Gemini 要求 functionResponse.name 是**函数名**。优先用上面建好的
+            # call_id → name 映射；回溯不到（如业务直接构造的裸 tool 消息）时
+            # 退回 tool_call_id 兜底，不猜测、不伪造函数名。
+            fn_name = call_id_to_name.get(
+                str(msg.tool_call_id or ""), msg.tool_call_id or "",
+            )
             if isinstance(msg.content, list):
                 parts.extend(msg.content)
             else:
@@ -100,7 +120,7 @@ def _to_gemini_contents(
                 # 把 string 包成 functionResponse.response.content
                 parts.append({
                     "functionResponse": {
-                        "name": msg.tool_call_id or "",
+                        "name": fn_name,
                         "response": {"content": raw},
                     },
                 })
@@ -179,6 +199,10 @@ class GeminiSession:
         self._previous_cache_read = previous_cache_read
         self._last_usage: TokenUsage | None = None
         self._end_turn = True
+        # 本次流最后一个非空 finishReason —— 供流末判定终止真相 + 原样透传
+        self._last_finish_reason: str | None = None
+        # 本次流是否产出过文本（判异常终止时用：有产出就不作废）
+        self._produced_text = False
 
         # 空 key 时省略鉴权（与其余 native client 一致）。header 模式不发空
         # x-goog-api-key；query 模式见 _build_url —— 空 key 不挂 &key=。
@@ -279,8 +303,33 @@ class GeminiSession:
                             yield ev
             except httpx.TimeoutException as exc:
                 raise TransientNetworkError(f"gemini timeout: {exc}") from exc
-            except httpx.NetworkError as exc:
-                raise TransientNetworkError(f"gemini network: {exc}") from exc
+            except httpx.TransportError as exc:
+                # 传输层失败统一归瞬时网络错。放宽到 TransportError 是为了覆盖
+                # ProtocolError —— 尤其 RemoteProtocolError（"Server disconnected
+                # without sending a response"，代理/网关流中途断连）。它不属
+                # NetworkError，此前会裸逃 → classify_failure 落 unknown 硬失败，
+                # 既不重试也不挂起恢复（与 openai_compat 同一处修复）。
+                raise TransientNetworkError(f"gemini transport: {exc}") from exc
+
+        # 流终止真相（llm-provider-native 契约）：没见过任何 finishReason 说明流被
+        # 中途掐断，绝不能发 completed 把它伪造成「成功的空回复」。
+        if self._last_finish_reason is None:
+            raise InvalidResponseError(
+                "gemini stream ended without any finishReason terminal marker"
+            )
+        produced = bool(pending_tool_calls) or self._produced_text
+        if not produced:
+            failure = classify_abnormal_finish(
+                self._last_finish_reason, provider="gemini",
+            )
+            if failure is not None:
+                failure.request_id = request_id
+                yield error(
+                    message=str(failure),
+                    kind=failure.kind,
+                    retryable=failure.retryable,
+                )
+                raise failure
 
         # 流末把累积的 functionCall 整体发出
         for tc in pending_tool_calls:
@@ -302,6 +351,7 @@ class GeminiSession:
             usage=self._last_usage or TokenUsage(),
             end_turn=self._end_turn,
             request_id=request_id,
+            stop_reason=self._last_finish_reason,
         )
 
     async def _process_chunk(
@@ -318,6 +368,7 @@ class GeminiSession:
                 if "text" in part:
                     t = part.get("text", "")
                     if t:
+                        self._produced_text = True
                         yield text_delta(t)
                 elif "functionCall" in part:
                     fc = part["functionCall"] or {}
@@ -330,9 +381,10 @@ class GeminiSession:
                     })
 
             finish_reason = cand.get("finishReason")
-            if finish_reason is not None:
+            if finish_reason:
                 # STOP → end_turn=True；其他（TOOL_CALL / MAX_TOKENS / ...） → False
                 self._end_turn = finish_reason == "STOP"
+                self._last_finish_reason = finish_reason
 
         # usage 元数据通常在末 chunk
         usage_raw = chunk.get("usageMetadata")

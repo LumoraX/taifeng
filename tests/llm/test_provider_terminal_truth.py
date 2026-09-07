@@ -201,7 +201,7 @@ async def test_anthropic_refusal_stop_reason_raises_content_filter(
     body = _ant_sse([
         ("message_start", {"message": {"usage": {"input_tokens": 5}}}),
         ("message_delta", {"delta": {"stop_reason": "refusal"}, "usage": {}}),
-        ("message_stop", {}),
+        ("message_stop", {"type": "message_stop"}),
     ])
     _patch_httpx(monkeypatch, lambda _r: httpx.Response(200, content=body))
     with pytest.raises(ContentFilterError):
@@ -219,7 +219,7 @@ async def test_anthropic_completed_carries_stop_reason(
             "index": 0, "delta": {"type": "text_delta", "text": "答"},
         }),
         ("message_delta", {"delta": {"stop_reason": "max_tokens"}, "usage": {}}),
-        ("message_stop", {}),
+        ("message_stop", {"type": "message_stop"}),
     ])
     _patch_httpx(monkeypatch, lambda _r: httpx.Response(200, content=body))
     events = await _consume(_ant_session().stream(_req()))
@@ -245,7 +245,8 @@ async def test_gemini_completed_carries_stop_reason(
 
 def _litellm_session() -> LiteLLMSession:
     return LiteLLMSession(
-        model="m", api_key="k", base_url=None, cancel=CancellationToken(),
+        model="m", api_key="k", base_url=None, extra_params={},
+        cancel=CancellationToken(),
     )
 
 
