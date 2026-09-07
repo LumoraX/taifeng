@@ -125,7 +125,10 @@ async def test_cancel_during_backoff_stops_retrying() -> None:
     inner = _ScriptedClient([(TransientNetworkError("boom"), False)])
     cancel = CancellationToken(name="t")
     client = RetryingModelClient(
-        inner, config=_fast_config(max_attempts=5, min_delay_ms=5_000),
+        inner,
+        config=_fast_config(
+            max_attempts=5, min_delay_ms=5_000, max_delay_ms=10_000, jitter=0.0,
+        ),
     )
 
     async def _cancel_soon() -> None:

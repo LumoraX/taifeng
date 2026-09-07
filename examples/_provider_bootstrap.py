@@ -51,6 +51,7 @@ from taifeng.llm.providers import (
     GeminiClient,
 )
 from taifeng.llm.providers.openai import OpenAIChatClient, OpenAIResponsesClient
+from taifeng.llm.retrying import RetryingModelClient
 
 if TYPE_CHECKING:
     from taifeng.llm.client import ModelClient
@@ -248,12 +249,18 @@ def build_model_client(
     *,
     require_api_key: bool = True,
     timeout_seconds: float = 300.0,
+    retry: bool = True,
 ) -> tuple[ModelClient, dict[str, str | int]]:
     """按 env 构造 native ``ModelClient`` + 返回 meta（用于日志）。
 
     ``require_api_key=True``（默认）时若 api_key 缺失会 raise
     ``ProviderBootstrapError``；某些场景（如 web_ui demo 启动时 key 还没设）
     可传 ``False`` 让构造继续，调用 LLM 时再失败。
+
+    ``retry=True``（默认）在 native client 外套一层 ``RetryingModelClient``：
+    限流 / 瞬时网络 / provider 5xx 在**零产出**时退避重试，避免一次网关抖动就
+    把整个 turn 推进 SYSTEM_RETRY 挂起。需要 strict audit 的 attempt 观测时传
+    ``retry=False``（装饰器刻意不声明 OneNetworkAttemptModelClient，见 ADR 0037）。
     """
     provider, protocol, api_key, model, base_url = resolve_bootstrap_env()
 
@@ -305,6 +312,10 @@ def build_model_client(
     else:  # pragma: no cover —— 已在 resolve_bootstrap_env 拦截
         raise ProviderBootstrapError(f"unsupported provider: {provider}")
 
+    if retry:
+        # 有界重试：默认 3 次、指数退避、仅零产出时重试（详见 llm/retrying.py）
+        client = RetryingModelClient(client)
+
     meta: dict[str, str | int] = {"provider": provider, "model": model}
     if protocol is not None:
         meta["protocol"] = protocol
@@ -317,6 +328,7 @@ def build_model_client(
     ctx_win = resolve_context_window(provider, model)
     if ctx_win is not None:
         meta["context_window"] = ctx_win
+    meta["retry"] = "on" if retry else "off"
     return client, meta
 
 

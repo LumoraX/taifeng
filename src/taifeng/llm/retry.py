@@ -32,8 +32,12 @@ class RetryConfig:
     )
 
 
-def _compute_delay(attempt: int, config: RetryConfig) -> float:
-    """指数退避 + 抖动，单位：秒。"""
+def compute_backoff_delay(attempt: int, config: RetryConfig) -> float:
+    """指数退避 + 抖动，单位：秒。
+
+    非流式的 ``retry_async`` 与流式的 ``RetryingModelClient`` 共用同一份退避算法
+    （单一真相：两条重试路径的时序行为必须一致）。
+    """
     base = config.min_delay_ms * (config.backoff_multiplier ** attempt)
     capped = min(base, config.max_delay_ms)
     jitter_range = capped * config.jitter
@@ -74,7 +78,7 @@ async def retry_async(
             ):
                 delay = exc.retry_after_seconds
             else:
-                delay = _compute_delay(attempt, config)
+                delay = compute_backoff_delay(attempt, config)
 
             if cancel is not None:
                 try:
