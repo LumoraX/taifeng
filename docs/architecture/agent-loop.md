@@ -158,7 +158,7 @@ async def run_turn(turn_ctx: TurnContext, cancel: CancellationToken) -> TurnOutc
             result = await strategy.compress(turn_ctx, injection=BEFORE_LAST_USER_MESSAGE)
             await turn_ctx.emit(CompactionAttempted(phase="pre_turn", ...))
 
-    # 2. 注入 skill / tool / env 上下文（保留 cache anchor）
+    # 2. 注入 skill / tool / env 上下文（保留 cache anchor；anchor 映射为 cache_breakpoints）
     prompt = build_prompt(
         history=turn_ctx.history,
         skills=turn_ctx.skill_snapshot,
@@ -180,7 +180,7 @@ async def run_turn(turn_ctx: TurnContext, cancel: CancellationToken) -> TurnOutc
                         if not event.data["needs_follow_up"]:
                             return TurnOutcome.done(usage=event.usage)
 
-        # 4. mid-turn 压缩（只能动 tail，保 cache anchor）
+        # 4. mid-turn 压缩（只能动 anchor+1 起的 tail；anchor 已在采样成功后推进到发出末项）
         if token_status(prompt).limit_reached:
             result = await compress_mid_turn(
                 prompt,
@@ -526,6 +526,10 @@ Rewind(node_id, mode, new_args?)
 ```
 
 R2：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`reason="rewind"`），不计 `unexpected_cache_breaks`。冷加载跨进程 cache 不可信，`__init__` 置 `_cache_anchor_index = -1`。
+
+### cache anchor 的推进（cache-anchor 契约）
+
+`_sample_once` 在构建请求前记下 `history_buffer` 长度 N，ResponseEvent 流正常完成后置 `cache_anchor_index = N - 1`（含语义：最后一条已被 provider 缓存的条目；本轮产出的 assistant / fc 尚未进缓存，不计入）。LLMError / overflow / 取消路径不推进。turn 结束时 engine 回写 runner 的 anchor；下一 turn 的 `build_api_request` 据它打 `CacheBreakpoint`（映射到 messages 坐标），mid-turn 压缩只动 `anchor+1` 起的 tail。详见 [`capabilities/cache-anchor.md`](capabilities/cache-anchor.md)。
 
 ## 分离式 spawn + join-barrier（detached-spawn 契约）
 

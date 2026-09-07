@@ -104,7 +104,7 @@ class ApiRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)  # provider-specific 透传
 ```
 
-`cache_breakpoints` 是关键 —— 告诉 provider「这些位置之前的内容应该被缓存」。Anthropic 支持显式 `cache_control`，OpenAI 暂不支持但保留字段以备未来。**坐标系契约**：`CacheBreakpoint.index` 是 **messages 下标**；`build_api_request` 负责把压缩返回的 `cache_anchor_index`（history 下标，`[0, N)` 稳定前缀）换算到 messages 坐标——打点在稳定前缀产出的最后一条消息，前缀无产出消息则不打点（history→messages 非 1:1：记账 item 跳过、同轮合并折叠）。`response_format` 非 None 时 provider 强制 LLM 返回符合 schema 的 JSON（详见 `capabilities/llm-structured-output.md`）。
+`cache_breakpoints` 是关键 —— 告诉 provider「这些位置之前的内容应该被缓存」。Anthropic 支持显式 `cache_control`，OpenAI 暂不支持但保留字段以备未来。**坐标系契约**：`CacheBreakpoint.index` 是 **messages 下标**；`build_api_request` 负责把 `cache_anchor_index`（history 下标，含语义：`[0, anchor]` 为已缓存前缀，`-1` 无缓存；由采样成功推进 / 压缩回写，见 `capabilities/cache-anchor.md`）换算到 messages 坐标——`anchor >= 0` 时打点在最后一条来源 history 下标 `<= anchor` 的产出消息，前缀无产出消息或 `anchor == -1` 则不打点（history→messages 非 1:1：记账 item 跳过、同轮合并折叠）。`response_format` 非 None 时 provider 强制 LLM 返回符合 schema 的 JSON（详见 `capabilities/llm-structured-output.md`）。
 
 ### reasoning 回传（thinking 模型续传契约）
 

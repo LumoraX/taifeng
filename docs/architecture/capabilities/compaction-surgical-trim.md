@@ -41,8 +41,8 @@
 - **THEN** 仅对可剪窗口内、glob 命中、非占位符的 `function_call_output` 操作：去重（反扫保最新）恒启用；`soft ≤ ratio < hard` 头尾截断；`ratio ≥ hard` 整体占位符替换。就地替换 payload、不删条目、不触碰配对 `function_call`；孤儿 output（call_id 无配对 fc）跳过。
 
 ### Requirement: 窗口与 cache（R2）
-- 常规窗口起点 = `cache_anchor_index`（DO_NOT_INJECT 下 anchor 前逐字节不变 → `cache_invalidated=False`）；尾部 `protect_tail_messages` 条永不剪。
-- **WHEN** `allow_head_clear=True` 且 BEFORE_LAST_USER_MESSAGE，hard-clear 改写 anchor 前条目
+- 常规窗口起点 = `cache_anchor_index + 1`（含语义：anchor 本条及之前已缓存；DO_NOT_INJECT 下逐字节不变 → `cache_invalidated=False`）；尾部 `protect_tail_messages` 条永不剪。
+- **WHEN** `allow_head_clear=True` 且 BEFORE_LAST_USER_MESSAGE，hard-clear 改写了下标 `<= anchor` 的条目
 - **THEN** `cache_invalidated=True` 且 `anchor_preserved_until` 如实反映新边界。
 
 ### Requirement: 触发与 cache-TTL 闸

@@ -69,8 +69,8 @@ class CompressionContext:
     history: list[ResponseItem]
     token_estimate: int
     budget: ContextBudget              # 不再是裸 int —— 含 context_window / soft / hard / max_request_bytes
-    cache_anchor_index: int            # 此 index（含）之前的 history 已缓存，mid-turn 不应触碰
-    phase: Literal["pre_turn", "mid_turn", "manual"]
+    cache_anchor_index: int            # 最后一条已缓存 history 下标（含），-1 无缓存；首个可变 = anchor+1
+    phase: Literal["pre_turn", "mid_turn", "manual", "overflow"]
     available_injections: frozenset[InitialContextInjection]
 
 @dataclass(frozen=True)
@@ -82,7 +82,7 @@ class CompressionTrigger:
 class CompressionResult:
     success: bool
     cache_invalidated: bool            # ← 关键：必须显式声明（mid-turn 应为 False）
-    anchor_preserved_until: int        # ← 关键：保 cache 到哪一条之前
+    anchor_preserved_until: int        # ← 关键：压缩后仍成立的 anchor（含）；动了 head 返回 -1
     new_history: list[ResponseItem] = field(default_factory=list)  # 压缩后完整 history（保留段 + summary）
     removed_item_count: int = 0
     summary_item_id: str | None = None
@@ -134,7 +134,8 @@ class HandoffCompactionStrategy:
     ) -> CompressionResult:
         # 1. 切片：head（保留）+ middle（压缩）+ tail（保留近 N 条）
         keep_tail_n = 4
-        compactable_start = ctx.cache_anchor_index if injection == DO_NOT_INJECT else 0
+        # 含语义：anchor 本条已缓存不可动，首个可变下标 = anchor+1（-1 无锚 → 0）
+        compactable_start = ctx.cache_anchor_index + 1 if injection == DO_NOT_INJECT else 0
         compactable_end = len(ctx.history) - keep_tail_n
 
         # 2. 边界保护：tool_use / tool_result 不能切断
@@ -154,7 +155,7 @@ class HandoffCompactionStrategy:
         return CompressionResult(
             success=True,
             cache_invalidated=(injection != DO_NOT_INJECT),
-            anchor_preserved_until=compactable_start,
+            anchor_preserved_until=compactable_start - 1,   # 含语义：保留段末项
             removed_item_count=compactable_end - compactable_start,
             summary_item_id=...,
         )
@@ -215,7 +216,7 @@ class SurgicalTrimStrategy:
 
 - **只改写 `function_call_output` 的 payload、永不删条目**：fc/output 配对与条目顺序天然不变（不触发 G1b 配对回滚），resume 重放结构稳定（R5）。工具名经 `call_id` 回溯配对 fc 解析；孤儿 output 视为不可剪（不猜测）。
 - **三 pass**：① 去重（恒启用，`md5[:12]` 反扫保最新，≥ `min_dedup_chars` 才参与）；② soft-trim（`soft_trim_ratio ≤ ratio < hard_clear_ratio`，truncate_middle 头尾截断）；③ hard-clear（`ratio ≥ hard_clear_ratio`，整体换含原始长度的占位符）。占位符前缀（`[duplicate` / `[pruned:`）是幂等守卫——二次 compress 零改写、`reason="nothing_to_trim"`。
-- **窗口（R2）**：常规 = `[cache_anchor_index, len − protect_tail_messages)`；仅 `allow_head_clear=True` 且 pre_turn 时 hard-clear 可越 anchor（跳过开头 system_injection 引导段），越过则如实标 `cache_invalidated=True`。
+- **窗口（R2）**：常规 = `[cache_anchor_index + 1, len − protect_tail_messages)`（anchor 本条及之前已缓存不可动）；仅 `allow_head_clear=True` 且 pre_turn 时 hard-clear 可越 anchor（跳过开头 system_injection 引导段），越过判定 = 改写了下标 `<= anchor` 的条目，越过则如实标 `cache_invalidated=True`。
 - **cache-TTL 对齐触发（opt-in）**：`cache_ttl_seconds` 启用后，距上次成功剪枝不足 ttl 时 `should_trigger` 返回 None——把有损动作对齐到 prompt cache 反正要过期的时刻。时间源 `clock` 注入（默认 `time.monotonic`），自管 `_last_trim_at`，不依赖 `PromptCacheStats`。
 - **glob 选择性**：工具名 `fnmatch` allow/deny（deny 优先），「哪些工具可剪」由业务注入（R1）。
 - **明细透出（R3）**：`CompressionResult.detail = {"deduped", "soft_trimmed", "hard_cleared"}`，turn 组装 `compaction_completed` 事件时透传（既有策略为空 dict）。
@@ -329,6 +330,20 @@ def _would_orphan_tool(history: list[ResponseItem], cut: int) -> bool:
     return False
 ```
 
+## Cache anchor 的产生与消费（cache-anchor 契约）
+
+`cache_anchor_index` = history 中**最后一条已被 provider 缓存的条目下标（含）**，`-1` = 无缓存，首个可变下标 = `anchor + 1`。它的生命周期：
+
+```
+采样成功（流收到 completed）→ anchor = 发出时 history 长度 - 1     # _sample_once 推进；失败 / overflow / 取消不推进
+mid_turn / overflow 第一档压缩 → 策略只改写 [anchor+1, ...)，anchor 原样回写
+pre_turn / manual / overflow 第二档压缩动 head → anchor_preserved_until = -1，break 标 expected
+Rewind 截到 cut → anchor = min(anchor, cut - 1)，首采样 break 标 expected（reason=rewind）
+跨进程重载 → -1（provider cache 不可信），首采样成功后才推进
+```
+
+四个消费点共用同一语义：sliding / handoff 的 compactable 起点、surgical / offload 的候选窗口起点均为 `anchor + 1`；surgical 越 anchor 判定为「改写了下标 `<= anchor` 的条目」；`build_api_request` 把 anchor 映射到 messages 坐标——打点在最后一条来源 history 下标 `<= anchor` 的产出消息（anthropic `cache_control`），`anchor == -1` 或前缀无产出消息不打点。契约全文见 [`capabilities/cache-anchor.md`](capabilities/cache-anchor.md)，历史与取舍见 ADR 0036。
+
 ## Cache break 检测与归因
 
 参照 claw-code `prompt_cache.rs`：
@@ -336,11 +351,13 @@ def _would_orphan_tool(history: list[ResponseItem], cut: int) -> bool:
 ```python
 # src/taifeng/context/cache_stats.py
 
-# CacheBreakReason —— 7 类归因 taxonomy（G-CACHE 自动判定接线）
+# CacheBreakReason —— 9 类归因 taxonomy（G-CACHE 自动判定接线）
 CacheBreakReason = Literal[
     "compaction_pre_turn",                 # 预期内：pre-turn 压缩动 head
     "compaction_manual",                   # 预期内：用户 /compact
     "compaction_mid_turn_anchor_lost",     # ⚠️ mid-turn 压缩本不该破 anchor 却破了
+    "compaction_overflow",                 # 预期内：overflow 自愈第二档蓄意动 head
+    "rewind",                              # 预期内：Rewind 蓄意回退 anchor 后的首采样
     "skill_snapshot_changed",              # 预期内：skill 列表变更
     "tool_spec_changed",                   # 预期内：工具集变更
     "system_prompt_changed",               # 预期内：system prompt / instructions 变更
@@ -418,10 +435,14 @@ class CompressionOrchestrator:
 _sample_once 采样 → provider 抛 ContextOverflowError
   └─ except LLMError：isinstance(ContextOverflowError) ∧ 未自愈过 ∧ 有压缩器
        ├─ emit ProviderRetry(reason=context_overflow)
-       ├─ _maybe_compress(phase="overflow", force=True, bypass_trigger=True)
+       ├─ 第一档 _maybe_compress(phase="overflow", force=True, bypass_trigger=True)
        │     └─ orchestrator.force_compress（绕过 should_trigger，因本地估算偏低
-       │        必致 should_trigger 返回 None）；DO_NOT_INJECT 保 cache anchor
-       └─ return await _sample_once(iteration)   # 单次重采样
+       │        必致 should_trigger 返回 None）；DO_NOT_INJECT 只动 anchor 后 tail、保 cache
+       ├─ 第一档未应用（无策略 / 失败 / boundary_too_narrow / 回滚）∧ anchor ≥ 0
+       │     └─ 第二档 _maybe_compress(..., allow_head=True)：BEFORE_LAST_USER_MESSAGE
+       │        语义允许动 head，策略如实报 cache_invalidated=True → break 标 expected
+       │        （reason=compaction_overflow）。活下来比保 cache 重要
+       └─ return await _sample_once(iteration)   # 单次重采样（两档共用同一次机会）
   └─ 二次仍 overflow → _overflow_recovered=True → 硬失败（context_window）
 ```
 
@@ -472,7 +493,8 @@ class MemoryStore(Protocol):
 
 > 全部已覆盖（`tests/loop/test_compaction_hardening.py` / `test_cache_break_reason.py` / `test_memory_swap.py` 及 `tests/` 下压缩测试）。
 
-- [x] `DO_NOT_INJECT` 模式下，history[:cache_anchor_index] byte-identical 保留
+- [x] `DO_NOT_INJECT` 模式下，history[:cache_anchor_index + 1] byte-identical 保留（anchor 本条含）
+- [x] 采样成功后 anchor 推进到发出时末项；第二次请求携带 `cache_breakpoints`；overflow 两档（`tests/loop/test_cache_anchor_truth.py`）
 - [x] tool_use/tool_result 配对永不被切断（随机切点验证）
 - [x] handoff 摘要标识符审计 + 缺失则有界重生成（G1a）
 - [x] 多策略按 priority 顺序触发

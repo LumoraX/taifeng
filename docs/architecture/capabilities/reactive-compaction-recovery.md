@@ -6,7 +6,7 @@ turn 内一次 LLM 采样被 provider 以「上下文超长」（`ContextOverflo
 
 参照：openclaw `pi-embedded-subscribe.ts` 的 `pendingCompactionRetry`（overflow → 记 compaction debt → 强制压缩 → 放行重采样）。第三轮 codex/openclaw/hermes 对比分析 P0 缺口 A1。
 
-实现：`src/taifeng/context/compressor.py`（`CompressionOrchestrator.force_compress`）、`src/taifeng/loop/turn.py`（`_sample_once` overflow 自愈分支 + `_overflow_recovered` + `_maybe_compress(bypass_trigger=...)`）、`src/taifeng/loop/event.py`（`ProviderRetry`）。
+实现：`src/taifeng/context/compressor.py`（`CompressionOrchestrator.force_compress`）、`src/taifeng/loop/turn.py`（`_sample_once` overflow 自愈两档分支 + `_overflow_recovered` + `_maybe_compress(bypass_trigger=..., allow_head=...)`）、`src/taifeng/loop/event.py`（`ProviderRetry`）。
 变更提案：`openspec/changes/reactive-compaction-recovery/`。
 
 ## 数据契约
@@ -20,9 +20,11 @@ turn 内一次 LLM 采样被 provider 以「上下文超长」（`ContextOverflo
 | `data.reason` | 重试原因，当前取值 `context_overflow` |
 | `data.iteration` | 发生自愈的采样圈序号 |
 
-### `_maybe_compress(phase, force, bypass_trigger)`（`loop/turn.py`）
-- `phase="overflow"`：新增的 `CompressionPhase` 取值；注入语义同 mid_turn（`DO_NOT_INJECT`，保 cache anchor）。
+### `_maybe_compress(phase, force, bypass_trigger, allow_head) -> bool`（`loop/turn.py`）
+- `phase="overflow"`：`CompressionPhase` 取值；默认注入语义同 mid_turn（`DO_NOT_INJECT`，只动 `anchor+1` 起的 tail、保 cache anchor）。
 - `bypass_trigger=True`：走 `orchestrator.force_compress` 而非 `maybe_compress`。
+- `allow_head=True`：把注入语义切到 `BEFORE_LAST_USER_MESSAGE`（允许动 head）——overflow 第二档专用。
+- 返回值：本轮是否**应用**了压缩（无压缩器 / hook 拒绝 / 策略失败 / 完整性回滚均为 False），自愈据此分档。
 
 ## 行为契约
 
@@ -42,9 +44,11 @@ turn 内一次 LLM 采样被 provider 以「上下文超长」（`ContextOverflo
 - **WHEN** 强制压缩无可应用结果（无策略 / 失败 / G1b 配对回滚）
 - **THEN** history 不变；重采样再 overflow 后按「有界」硬失败（不引入新失败模式）
 
-### Requirement: Cache 友好且可观测
+### Requirement: Cache 友好两档且可观测
 - **WHEN** 自愈发生
-- **THEN** 压缩走 `DO_NOT_INJECT`、cache anchor 之前历史不改写、`CompressionResult.cache_invalidated` 如实标注；emit `provider_retry` + phase=overflow 的 `compaction_started/completed`
+- **THEN** 第一档压缩走 `DO_NOT_INJECT`、`history[0..anchor]` 不改写、`CompressionResult.cache_invalidated == False`；emit `provider_retry` + phase=overflow 的 `compaction_started/completed`
+- **WHEN** 第一档未应用（无策略 / 策略失败 / `boundary_too_narrow` / 完整性回滚）且 `cache_anchor_index >= 0`
+- **THEN** 第二档以 `allow_head=True` 允许动 head，策略如实报 `cache_invalidated=True`，随后的 cache break 标 expected、reason `compaction_overflow`；两档共用同一次自愈机会，重采样仍恰一次。sliding / handoff 对不足两条的可压区间返回 `boundary_too_narrow`（不抛 `ValueError`）
 
 ### Requirement: 自愈尊重取消
 - **WHEN** 自愈进行中 `CancellationToken` 被取消
@@ -53,14 +57,14 @@ turn 内一次 LLM 采样被 provider 以「上下文超长」（`ContextOverflo
 ## R1–R5 影响
 
 - **R1**：✅ 纯机制（overflow 既有分类异常 + 压缩/重采样在 loop+context 层，无业务概念）。
-- **R2**：✅ 正面。force 压缩 mid-turn 语义只动 tail、保 cache anchor。
+- **R2**：✅ 正面。第一档只动 `anchor+1` 起的 tail、保 cache anchor；第二档蓄意破 cache 时如实标 expected（`compaction_overflow`），不污染 `unexpected_cache_breaks`。
 - **R3**：✅ `provider_retry` + phase=overflow 压缩事件。
 - **R4**：✅ 重采样接收同一 `CancellationToken`。
 - **R5**：⚪ turn 内瞬态，无新增持久态。
 
 ## 测试
 
-`tests/loop/test_turn_overflow_recovery.py`（触发+重采样 / 有界一次 / 无压缩器 / cache-aware）、`tests/context/test_compaction.py::test_force_compress_bypasses_should_trigger`。
+`tests/loop/test_turn_overflow_recovery.py`（触发+重采样 / 有界一次 / 无压缩器 / cache-aware）、`tests/loop/test_cache_anchor_truth.py::test_overflow_second_stage_compacts_head_when_tail_too_narrow`（第二档）、`tests/context/test_compaction.py::test_force_compress_bypasses_should_trigger`。
 
 ### 真实 LLM 验证（受限，已如实记录）
 
