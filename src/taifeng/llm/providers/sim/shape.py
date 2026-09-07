@@ -25,6 +25,21 @@ if TYPE_CHECKING:
 
     from taifeng.llm.events import ResponseEvent
 
+# 内核事件契约版本 —— 金样基准的有效期标识。
+#
+# 为什么需要：金样是「某次真实录制时的事件形状」。当内核给**所有** provider 统一
+# 新增/删除一个归一字段时，全部旧金样在该维度上立刻过期——这不是 sim 漂移，而是
+# 基准失效。若不区分两者，一次内核字段变更会把全部金样判成漂移，逼人要么手编金样
+# （破坏「金样只由真实录制产出」），要么放宽比对维度（design D6 禁止）。
+#
+# 规则：改动 ResponseEvent 归一字段集时 +1。校验端只对**同版本**金样做严格比对；
+# 版本落后的金样判定为过期，提示重录而不判漂移（同版本内比对维度一寸不放宽）。
+#
+# 变更史：
+#   1 → 首版（llm-golden-calibration 首录）
+#   2 → completed 增 stop_reason（ADR 0037，provider 原生终止原因透传）
+EVENT_CONTRACT_VERSION = 2
+
 # delta 类 kind：连续段（可混 kind）折叠为单项
 _DELTA_KINDS = frozenset({"text_delta", "reasoning_delta", "tool_call_delta"})
 

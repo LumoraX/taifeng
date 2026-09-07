@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from taifeng.llm.providers.sim.shape import ShapeSignature, extract_shape
+from taifeng.llm.providers.sim.shape import (
+    EVENT_CONTRACT_VERSION,
+    ShapeSignature,
+    extract_shape,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -49,6 +53,14 @@ class _RecordingSession:
 
     async def __aexit__(self, *exc: object) -> None:
         await self._inner.__aexit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        """未知属性转发到 inner session。
+
+        内核用 getattr 探测可选协议（如 audit 的 ``last_attempt_checkpoint``），
+        包装层不该把它们挡掉。
+        """
+        return getattr(self._inner, name)
 
     async def stream(self, request: ApiRequest) -> AsyncIterator[ResponseEvent]:
         events: list[ResponseEvent] = []
@@ -89,6 +101,17 @@ class RecordingClient:
         """创建包装 session（透传 inner，挂录制旁路）。"""
         return _RecordingSession(self._inner.session(cancel=cancel, model=model), self)
 
+    def __getattr__(self, name: str) -> Any:
+        """未知属性转发到 inner client。
+
+        关键：``capabilities`` 必须透出——内核用 ``model_capabilities()`` 读它判
+        协议（Responses vs chat）。此前本包装层没转发，`--record` 跑 Responses
+        provider 时协议被降级判成 chat，底层照发的 ``normalized_output`` 被 turn
+        判为「unexpected or duplicate normalized output」，19 个场景全红（本仓
+        2026-09-07 实测）。同理 ``record_cache_read`` 等可选协议也需转发。
+        """
+        return getattr(self._inner, name)
+
     def _on_stream_end(self, sig: ShapeSignature) -> None:
         """单次 sampling 流终结回调：滤截断 → 按比对维度去重入册。"""
         if sig.terminal == "truncated":
@@ -117,7 +140,9 @@ class RecordingClient:
         """把场景签名原子写入金样 JSONL；该场景无签名则不动旧金样，返回 None。
 
         每行结构：``{"signature": {...}, "recorded_at": ..., "commit": ...,
-        "provider": ..., "model": ...}``——元数据只录不比（可溯源对账台账）。
+        "provider": ..., "model": ..., "contract_version": N}``——元数据只录不比
+        （可溯源对账台账）。``contract_version`` 标记录制时的内核事件契约版本，
+        校验端据此区分「sim 漂移」与「金样过期」。
         """
         sigs = self.signatures.get(scenario_id, [])
         if not sigs:
@@ -132,6 +157,7 @@ class RecordingClient:
                     "commit": commit,
                     "provider": provider,
                     "model": model,
+                    "contract_version": EVENT_CONTRACT_VERSION,
                 },
                 ensure_ascii=False,
                 sort_keys=True,

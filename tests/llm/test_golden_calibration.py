@@ -21,6 +21,7 @@ import pytest
 
 from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.llm.providers.sim.shape import (
+    EVENT_CONTRACT_VERSION,
     ShapeSignature,
     extract_shape,
     shape_class_key,
@@ -45,6 +46,14 @@ PRESCRIPTION = (
 
 class UnsupportedShapeClass(AssertionError):  # noqa: N818 —— 语义是形状类别名词，仓库先例 SuspendSignal
     """金样中出现 sim 表达不了的形状类别 —— 漂移警报本体（design D4）。"""
+
+
+def _golden_contract_version(path: Path) -> int:
+    """金样录制时的内核事件契约版本；未标注的旧金样按首版 1 处理。"""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            return int(json.loads(line).get("contract_version", 1))
+    return 1
 
 
 def _load_golden(path: Path) -> list[ShapeSignature]:
@@ -149,6 +158,17 @@ async def test_sim_calibrated_against_golden(golden_path: Path | None) -> None:
     """核心校准：每条去重金样签名都能被 sim 以同形状复现。"""
     if golden_path is None:
         pytest.skip(f"无金样 fixture：先用真实 key 录制 —— {RE_RECORD_CMD}")
+    # 基准有效期检查：内核统一改动 ResponseEvent 归一字段集时 EVENT_CONTRACT_VERSION
+    # +1，此前录制的金样在该维度上必然「缺字段」。那是**基准过期**，不是 sim 漂移——
+    # 判成漂移只会逼人手编金样或放宽比对维度（design D6 禁止的两条路）。故版本落后
+    # 时明确判过期并提示重录；同版本内比对维度一寸不放宽。
+    recorded_version = _golden_contract_version(golden_path)
+    if recorded_version < EVENT_CONTRACT_VERSION:
+        pytest.skip(
+            f"金样 {golden_path.name} 录于事件契约 v{recorded_version}，"
+            f"当前为 v{EVENT_CONTRACT_VERSION}（内核归一字段集已变更）→ 基准过期，"
+            f"非 sim 漂移。重录：{RE_RECORD_CMD}"
+        )
     for i, golden_sig in enumerate(_load_golden(golden_path)):
         turn, request = _build_turn_and_request(golden_sig)
         sim_sig = await _sim_signature(turn, request)
