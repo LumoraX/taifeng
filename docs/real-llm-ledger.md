@@ -3,40 +3,40 @@
 > **本文件由 `examples/real_llm/capability_matrix.py` 自动生成（数据源 `real-llm-ledger.json`），勿手编辑。**
 > 回归红线：基础层（`src/taifeng/{llm,loop,context,conversation}/`）变更必须全量重跑并提交本台账；详见 CLAUDE.md §测试约束。
 
-- **最近一次回归**：2026-09-07 09:45:28 UTC @ `fefef69`
-- **Provider / Model**：openai / gpt-5.6-luna
-- **本次跑测场景**：read_skill_lazy
+- **最近一次回归**：2026-09-07 14:37:33 UTC @ `5fe315c`
+- **Provider / Model**：codex / gpt-5.6-luna
+- **本次跑测场景**：spawn_join
 
 ## 逐场景结果
 
 | 场景 | 能力 | 结果 | 日期 @ commit | 耗时 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `budget_awareness` | 预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020） | ✅PASS | 2026-09-07 @ `fefef69` | 14s |  |
-| `codex_encrypted_state_hot_replay` | Codex encrypted state 热重放 | ✅PASS | 2026-09-07 @ `fefef69` | 18s |  |
-| `codex_image_order` | Codex 有序多图片语义 | ✅PASS | 2026-09-07 @ `fefef69` | 3s |  |
-| `codex_image_single` | Codex 单图片语义 | ✅PASS | 2026-09-07 @ `fefef69` | 2s |  |
-| `codex_image_tool_call` | Codex 图片驱动 function call | ✅PASS | 2026-09-07 @ `fefef69` | 3s |  |
-| `codex_instructions` | Codex 顶层 instructions | ✅PASS | 2026-09-07 @ `fefef69` | 3s |  |
-| `codex_legacy_jsonl_cold_resume` | Codex 图片/state legacy JSONL 冷恢复 | ✅PASS | 2026-09-07 @ `fefef69` | 18s |  |
-| `codex_tool_image_output` | Codex 工具返回图片（function_call_output 带 input_image） | ✅PASS | 2026-09-07 @ `fefef69` | 2s |  |
-| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-09-07 @ `fefef69` | 65s |  |
-| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-09-07 @ `fefef69` | 76s |  |
-| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-09-07 @ `fefef69` | 29s |  |
-| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-09-07 @ `fefef69` | 13s |  |
-| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-09-07 @ `fefef69` | 63s |  |
-| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-09-07 @ `fefef69` | 7s |  |
-| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-09-07 @ `fefef69` | 20s |  |
-| `post_turn_review` | post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序） | ✅PASS | 2026-09-07 @ `fefef69` | 23s |  |
-| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-09-07 @ `fefef69` | 55s |  |
-| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ❌FAIL | 2026-09-07 @ `fefef69` | 29s | 未 turn_completed 缺事件: ['tool_call_started', 'turn_completed'] |
-| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-09-07 @ `fefef69` | 24s |  |
-| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-09-07 @ `fefef69` | 27s |  |
-| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-09-07 @ `fefef69` | 60s |  |
-| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-09-07 @ `fefef69` | 13s |  |
-| `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-09-07 @ `fefef69` | 8s |  |
-| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-09-07 @ `fefef69` | 31s |  |
-| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-09-07 @ `fefef69` | 106s |  |
-| `wait_any` | any-of-N 等待(wait_any:先到先处理,不等最慢的) | ✅PASS | 2026-09-07 @ `fefef69` | 10s |  |
+| `budget_awareness` | 预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020） | ✅PASS | 2026-09-07 @ `5fe315c` | 10s |  |
+| `codex_encrypted_state_hot_replay` | Codex encrypted state 热重放 | ✅PASS | 2026-09-07 @ `5fe315c` | 9s |  |
+| `codex_image_order` | Codex 有序多图片语义 | ✅PASS | 2026-09-07 @ `5fe315c` | 4s |  |
+| `codex_image_single` | Codex 单图片语义 | ✅PASS | 2026-09-07 @ `5fe315c` | 5s |  |
+| `codex_image_tool_call` | Codex 图片驱动 function call | ✅PASS | 2026-09-07 @ `5fe315c` | 6s |  |
+| `codex_instructions` | Codex 顶层 instructions | ✅PASS | 2026-09-07 @ `5fe315c` | 2s |  |
+| `codex_legacy_jsonl_cold_resume` | Codex 图片/state legacy JSONL 冷恢复 | ✅PASS | 2026-09-07 @ `5fe315c` | 9s |  |
+| `codex_tool_image_output` | Codex 工具返回图片（function_call_output 带 input_image） | ✅PASS | 2026-09-07 @ `5fe315c` | 5s |  |
+| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-09-07 @ `5fe315c` | 23s |  |
+| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-09-07 @ `5fe315c` | 169s |  |
+| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-09-07 @ `5fe315c` | 58s |  |
+| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-09-07 @ `5fe315c` | 3s |  |
+| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-09-07 @ `5fe315c` | 48s |  |
+| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-09-07 @ `5fe315c` | 54s |  |
+| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-09-07 @ `5fe315c` | 11s |  |
+| `post_turn_review` | post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序） | ✅PASS | 2026-09-07 @ `5fe315c` | 12s |  |
+| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-09-07 @ `5fe315c` | 15s |  |
+| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-09-07 @ `5fe315c` | 18s |  |
+| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-09-07 @ `5fe315c` | 19s |  |
+| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-09-07 @ `5fe315c` | 16s |  |
+| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-09-07 @ `5fe315c` | 49s |  |
+| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-09-07 @ `5fe315c` | 11s |  |
+| `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-09-07 @ `5fe315c` | 22s |  |
+| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-09-07 @ `5fe315c` | 20s |  |
+| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-09-07 @ `5fe315c` | 118s |  |
+| `wait_any` | any-of-N 等待(wait_any:先到先处理,不等最慢的) | ✅PASS | 2026-09-07 @ `5fe315c` | 11s |  |
 
 ## 未执行验证
 
@@ -44,7 +44,7 @@
 
 ## R3 可观测完整性审计（最近一次全量）
 
-- 发出的事件 kind：28 种
+- 发出的事件 kind：27 种
 - ✅ 所有发出的事件 kind 都有专用 console 渲染
 - ✅ R3 经典事件全部触发
 
