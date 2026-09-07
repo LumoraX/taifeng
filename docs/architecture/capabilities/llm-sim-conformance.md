@@ -63,7 +63,20 @@ PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --record    
 PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --only <场景> --record  # 单场景
 ```
 
-只有 **PASS 场景**落金样（`tests/llm/golden/<scenario>.jsonl`，content filter 等环境噪声不固化）；truncated 终态滤除（消费侧断流与 provider 截断录制端不可区分）；每行带 recorded_at / commit / provider / model 元数据可对账台账。
+只有 **PASS 场景**落金样（`tests/llm/golden/<scenario>.jsonl`，content filter 等环境噪声不固化）；truncated 终态滤除（消费侧断流与 provider 截断录制端不可区分）；每行带 recorded_at / commit / provider / model / **contract_version** 元数据可对账台账。
+
+**录制包装层不得遮蔽 client 可选协议**：`RecordingClient` 及其 session 以 `__getattr__` 转发未知属性。其中 `capabilities` 必须透出——内核用 `model_capabilities()` 读它判协议（Responses vs chat）；遮蔽会让 Responses provider 被降级判成 chat，其 `normalized_output` 随即被 turn 判为非法（2026-09-07 实测：`--record` 跑 codex 时 19 个场景全红）。
+
+### 基准有效期：`EVENT_CONTRACT_VERSION`
+
+金样是「某次真实录制时的事件形状」。当内核**给所有 provider 统一新增 / 删除一个归一字段**时，全部旧金样在该维度上同时失效——这是**基准过期**，不是 sim 漂移。两者若不可区分，一次内核字段变更就会逼人手编金样（破坏「金样只由真实录制产出」）或放宽比对维度（D6 禁止）。
+
+故 `sim/shape.py` 维护单调递增的 `EVENT_CONTRACT_VERSION`（归一字段集变更时 +1），录制端写入金样每行的 `contract_version`（未标注的历史金样按首版 1 处理）。校验端：
+
+- 金样版本 **== 当前** → 严格比对（维度一寸不放宽）；
+- 金样版本 **< 当前** → 判基准过期，跳过并给出含重录命令的提示，不判漂移。
+
+变更史：`1` 首版；`2` `completed` 增 `stop_reason`（ADR 0037）。当前 15 份金样录于 v1，待有可用 **openai chat** 端点（sim 所对齐的协议）时重录即自动恢复严格比对——codex/Responses 录出的金样与 sim 在 `response_id`、`chunking` 上天然不符，不能作为 sim 的基准。
 
 **漂移红线语义**：校准测试按金样签名特征参数化构造 SimTurn 比对；金样出现 sim 表达不了的形状类别（error 终态 / 未知 kind）→ 测试红并打印类别 key。失败处方二选一——重录金样 + **人工 review diff**（重录而非手改 fixture），或给 sim 补合成能力（走 PR review）。比对器**无任何宽松开关**；sim 能产生金样未观测到的形状不构成失败（sim 可为超集，金样只锚定真实观测）。
 
