@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import asyncio
@@ -32,6 +33,24 @@ from typing import Any
 
 if TYPE_CHECKING:
     from taifeng.loop.turn import TurnRunner
+
+
+@dataclass(frozen=True)
+class _SamplePrep:
+    """一次采样的**请求构建阶段**产出，供后续流消费与工具派发阶段读取。
+
+    存在的理由：`sample_once` 曾是 532 行的单函数（全仓最长）。按「请求构建 →
+    流事件分派 → 工具批派发」三段切开后，只有这 6 个局部量真正跨越第一道切点
+    （其余如 policy / name 在切点后都被重新赋值），故用一个不可变载体逐字传递，
+    切分前后语义完全一致。
+    """
+
+    request: Any
+    tools: list[Any]
+    sent_history_len: int
+    structural_break_reason: str | None
+    is_responses: bool
+    iteration_history_len: int
 
 
 class TurnSample:
@@ -80,8 +99,12 @@ class TurnSample:
             return "system_prompt_changed"
         return None
 
-    async def sample_once(self, iteration: int) -> tuple[str, bool]:
-        """一次 LLM 采样 + 工具调度，返回 (本轮 assistant text, 是否有 tool call)。"""
+    async def _prepare_request(self, iteration: int) -> _SamplePrep:
+        """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检。
+
+        原为 ``sample_once`` 的前半段，行为逐字不变；抽出后只经 `_SamplePrep`
+        向后传递 6 个真正跨段的局部量。
+        """
 
         # turn-rewind：记本圈 iteration 回访节点(采样前的 history 长度 = re_reason 截点)。
         # 同一长度供本圈所有 dispatch 节点复用为 re_reason 切点(assistant 消息原子)。
@@ -208,6 +231,27 @@ class TurnSample:
                 )) is FailureDisposition.SUSPEND:
                     raise SuspendSignal(self.__sample_owner._system_retry_pending(err))
                 raise err
+        return _SamplePrep(
+            request=request,
+            tools=tools,
+            sent_history_len=sent_history_len,
+            structural_break_reason=structural_break_reason,
+            is_responses=is_responses,
+            iteration_history_len=iteration_history_len,
+        )
+
+    async def sample_once(self, iteration: int) -> tuple[str, bool]:
+        """一次 LLM 采样 + 工具调度，返回 (本轮 assistant text, 是否有 tool call)。"""
+
+        # 第 1 段（请求构建 + 预检）已抽出；下面逐字还原跨段局部量，
+        # 使其后约 400 行保持与切分前完全相同的文本与语义。
+        prep = await self._prepare_request(iteration)
+        request = prep.request
+        tools = prep.tools
+        sent_history_len = prep.sent_history_len
+        structural_break_reason = prep.structural_break_reason
+        is_responses = prep.is_responses
+        iteration_history_len = prep.iteration_history_len
 
         sess = model_session_for_turn(self.__sample_owner, iteration)
         assistant_text = ""
@@ -409,6 +453,37 @@ class TurnSample:
         # 本轮文本即将随 response_items 正常落史：取消兜底不再需要
         self.__sample_owner._streamed_text = ""
 
+        # 第 3 段（工具批派发）已抽出；其内含全部终态 return，故直接回传。
+        return await self._dispatch_tool_batch(
+            iteration,
+            assistant_text=assistant_text,
+            is_responses=is_responses,
+            iteration_history_len=iteration_history_len,
+            response_items=response_items,
+            sample_id=sample_id,
+            sess=sess,
+            tool_calls=tool_calls,
+            tools=tools,
+        )
+
+    async def _dispatch_tool_batch(
+        self,
+        iteration: int,
+        *,
+        assistant_text: Any,
+        is_responses: Any,
+        iteration_history_len: Any,
+        response_items: Any,
+        sample_id: Any,
+        sess: Any,
+        tool_calls: Any,
+        tools: Any,
+    ) -> tuple[str, bool]:
+        """采样第 3 段：audit 同批落库 → 工具批并发派发 → 结算与续圈判定。
+
+        原为 ``sample_once`` 的后半段，行为逐字不变。跨段局部量由调用方按名
+        传入（这 8 个是 AST 核出的真实跨界集合，不多不少）。
+        """
         audit_state = self.__sample_owner.audit_state
         if audit_state is not None:
             # audit：function_call 会话项必须与最终响应同批 durable（先于任何 Tool
@@ -612,6 +687,7 @@ class TurnSample:
 
             raise _turn_mod._BatchSuspend(tuple(suspended_pending))
         return assistant_text, True
+
 
     # -----------------------------------------------------------------
     # 实现已下沉 turn_tooling.py（Wave 4）。以下为薄委托：TurnRunner 是唯一白盒
