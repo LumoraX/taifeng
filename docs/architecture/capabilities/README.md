@@ -39,6 +39,7 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | [detached-spawn](detached-spawn.md) | Detached spawn, join barriers, independent child HITL, keepalive refcounts, `kill_spawn`, cold recovery rebuild, spawn/join events, and LLM-facing tools |
 | [reactive-compaction-recovery](reactive-compaction-recovery.md) | Bounded overflow recovery, forced compression, provider retry events, fallback behavior, cache awareness, and cancellation constraints |
 | [compaction-surgical-trim](compaction-surgical-trim.md) | Surgical trim passes, pair-safe output rewriting, cache-TTL triggers, glob deny precedence, `CompressionResult.detail`, and idempotent placeholders |
+| [loop-core-module-structure](loop-core-module-structure.md) | engine / turn 的模块边界、协作者按内聚度二分、宿主作为唯一白盒寻址面（含两类 monkeypatch 注入点）、行为零变化判据，以及两处具名红线例外 |
 | [cache-anchor](cache-anchor.md) | Inclusive cache anchor semantics, advancement after each successful sample, strategy windows from `anchor+1`, rollback rules, and history→messages breakpoint mapping |
 | [compaction-offload-strategy](compaction-offload-strategy.md) | Lossless offload of oversized tool results to disk with stub pointer, deterministic path derivation, `file_read` paged recall (LLM-driven, no auto-rehydrate), idempotent placeholder guard, R2 tail-only / R5 resume, thread-cascade cleanup |
 | [turn-resource-guards](turn-resource-guards.md) | `DenialBreaker`, `IterationBudget`, child budget derivation, `ToolSpec.refunds_iteration`, and single-point accounting |

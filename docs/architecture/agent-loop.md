@@ -146,6 +146,23 @@ class AgentEngine:
 
 > 「可靠 fail-stop 审计真相源」是独立的层2 课题（留 ADR 0019），不改造 EventMsg emit 路径。
 
+## 模块切分（Wave 4，ADR 0038）
+
+`engine.py` 与 `turn.py` 的实现按职责下沉到协作者模块，宿主保留公共 API、主循环与
+**同名薄委托**。完整模块表与约束见
+[loop 核心模块结构契约](capabilities/loop-core-module-structure.md)，此处只记协作要点：
+
+- **宿主是唯一白盒寻址面**。`spawn_driver` / `spawn_barrier` / `spawn_rewind` /
+  `peer_mailbox` / `spawn_resume` 五个兄弟模块与测试按 `eng._x(...)` 原名寻址，
+  故协作器内部兄弟调用一律经 `self._engine._x(...)` 回弹，而非直调本类方法。
+- **两类 monkeypatch 注入点**须分别照顾，遗漏都是**静默失效**：打宿主属性的靠委托
+  加回弹保住；打模块级符号的（如 `setattr(engine_module, "TurnRunner", ...)`）要求
+  构造点留在该模块内，或经惰性模块解析取用。
+- **`ChildResumeChain` 与 `SpawnResumeChain` 对称而不重叠**：前者管 call_skill 子链
+  （父 turn 仍在等 `function_call_output` 回填，逐层回传），后者管 detached spawn
+  （父 turn 早已结束，子 thread 是独立根 turn）。
+- **协作器无自有状态**，运行态仍由宿主唯一持有（与 `spawn-module-structure` 一致）。
+
 ## TurnRunner —— 单轮执行
 
 参考 codex `run_turn`：

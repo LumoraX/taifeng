@@ -93,8 +93,30 @@ src/taifeng/
 │   ├── submission.py     # Submission / Op（13 种含 SendToPeer，全集见 docs/capability-matrix.md）
 │   ├── event.py          # EventMsg（输出事件总线）
 │   ├── engine.py         # AgentEngine —— 主 actor（注入 entry_skill）
+│   │   # Wave 4 切分：engine 的实现按职责下沉到以下协作者模块，engine.py 保留
+│   │   # 公共 API、run() 主循环与同名薄委托（唯一白盒寻址面，见 ADR 0038）
+│   ├── engine_types.py       # DeliveredEvent / _Subscriber / _PendingTurn
+│   ├── engine_events.py      # emit / 终态记账 / 投递丢弃 / 水位告警
+│   ├── engine_operations.py  # operation 派发 / 守护 / 终结 / 收敛
+│   ├── engine_lifecycle.py   # memory 会话结束 / 生命周期收敛 / 孤儿终结
+│   ├── engine_gate.py        # 根闸 / 受闸 op / turn 执行 / 会话 token 天花板
+│   ├── engine_runner.py      # runner 回写 / 构建并跑 / post-turn 钩子
+│   ├── engine_resume.py      # 根 thread Resume
+│   ├── engine_ops.py         # rewind / rollback / update_budget / refresh_snapshot
+│   ├── suspension_ttl.py     # 挂起到期武装 / 触发 / 路由裁决 / 冷重武装
+│   ├── suspension_access.py  # thread 历史读取 / 活跃挂起定位 / 已批准工具执行
+│   ├── child_resume_chain.py # call_skill 子链续跑（逐层回填父 fc_output）
 │   ├── pool.py           # EnginePool —— 多 thread engine 复用 + resume
 │   ├── turn.py           # TurnRunner —— 单轮采样 + tool 调度 + 压缩
+│   │   # Wave 4 切分：同上，turn.py 保留 run() 主循环、字段与薄委托
+│   ├── turn_helpers.py       # 模块级纯函数（摘要哈希 / 孤儿 call_id / 失败上下文）
+│   ├── turn_guards.py        # 延迟暴露 / SYSTEM_RETRY 挂起 / 资源守卫触顶
+│   ├── turn_context.py       # 记忆预取回写 / pre-evict 抢救 / pinned state 重注
+│   ├── turn_sample.py        # 三段采样：请求构建 / 流事件分派 / 工具批派发
+│   ├── turn_tooling.py       # 工具 outcome 记账 / 选择追踪 / ToolContext 构造
+│   ├── turn_persist.py       # 挂起落盘 / usage 累加 / 半程 assistant 落史
+│   ├── turn_compaction.py    # 压缩触发（预算判定 / 策略编排 / cache 记账）
+│   ├── turn_dispatch.py      # call_skill dispatcher 接口与子 runner 构造
 │   ├── tool_batch.py     # dispatch_batch —— 一批 tool call 三段式并发派发
 │   ├── orchestration_exec.py # 声明式编排执行器（检测到 orchestration 则跳过 LLM 采样）
 │   ├── spawn.py          # K1 SpawnSlotRegistry —— 广度准入（fork-bomb 防护）
