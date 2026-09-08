@@ -1,7 +1,7 @@
 {
   "run": {
-    "timestamp_utc": "2026-09-08 14:21:22 UTC",
-    "commit": "565577f",
+    "timestamp_utc": "2026-09-08 14:55:53 UTC",
+    "commit": "f601daf",
     "provider": "codex",
     "model": "gpt-5.6-luna",
     "scenarios_run": [
@@ -301,24 +301,22 @@
     "compression": {
       "scenario_id": "compression",
       "capability": "上下文压缩（sliding，小窗触发）",
-      "verdict": "FAIL",
-      "note": "未 turn_completed",
+      "verdict": "PASS",
+      "note": "",
       "expect": [
         "turn_completed"
       ],
-      "missing": [
-        "turn_completed"
-      ],
+      "missing": [],
       "kinds": {
         "turn_started": 1,
         "rewind_checkpoint_recorded": 1,
-        "assistant_text": 3386,
-        "turn_suspended": 1
+        "assistant_text": 4720,
+        "turn_completed": 1
       },
       "grants": 0,
-      "duration_s": 224.93909137500304,
-      "commit": "565577f",
-      "timestamp_utc": "2026-09-08 14:21:22 UTC"
+      "duration_s": 91.91353262499615,
+      "commit": "f601daf",
+      "timestamp_utc": "2026-09-08 14:55:53 UTC"
     },
     "concurrent_fanout": {
       "scenario_id": "concurrent_fanout",
