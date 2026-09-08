@@ -10,14 +10,12 @@ import contextlib
 import logging
 from collections import OrderedDict
 from contextlib import suppress
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.budget import ContextBudget
 from taifeng.context.cache_stats import PromptCacheStats
 from taifeng.conversation.models import (
     ResponseItem,
-    function_call,
     function_call_output,
     system_injection,
     user_message,
@@ -77,21 +75,19 @@ from taifeng.loop.event import (
     PostTurnHookFired,
     PreTurnHookDenied,
     ResourceLimitExceeded,
-    RewindRejected,
-    RewindTableRebuilt,
     SubmissionQueued,
     SuspensionExpired,
     SuspensionPartiallyResolved,
     SuspensionResolved,
     SuspensionResolveRejected,
     TurnFailed,
-    TurnRewound,
     TurnSuspended,
     UserInputInjected,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
 from taifeng.loop.injection import injection_event
-from taifeng.loop.rewind import RewindCheckpoint, count_turns, derive_rewind_log
+from taifeng.loop import engine_ops
+from taifeng.loop.rewind import RewindCheckpoint, derive_rewind_log
 from taifeng.loop.spawn_driver import SpawnDriver
 from taifeng.loop.submission import (
     CancelTurn,
@@ -132,66 +128,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class DeliveredEvent:
-    """投递给某个订阅者的事件信封（审计可观测 层1）。
-
-    携带 per-subscriber 的投递序号 ``delivery_seq``：每个订阅各自从 0 起连续；
-    队列满被丢弃（QueueFull）时该序号仍被「烧掉」（计入但不投递），故订阅者收到的
-    ``delivery_seq`` 一旦跳号 = **它自己**漏了事件——与全局 ``event.seq`` 跳号
-    （那是过滤订阅天然只收子集所致，非丢弃）互不混淆。
-
-    属性：
-        event: 原始事件（其 ``seq`` 是该 engine 总线的全局序号）。
-        delivery_seq: 本订阅者的连续投递序号（从 0 起，含丢弃烧号）。
-    """
-
-    event: EventMsg
-    delivery_seq: int
-
-
-# submission 级终结 kind 单一真相：过滤订阅据此收尾，终态记账据此登记。
-# 二者必须同集合，否则会出现「订阅认为没结束 / 记账认为已结束」的语义分叉。
-_TERMINAL_KINDS = frozenset({"turn_completed", "turn_failed", "turn_suspended"})
-
-
-class _Subscriber:
-    """单个订阅的队列 + 投递簿记（审计可观测 层1）。
-
-    封装三件 per-subscriber 状态：
-    1. ``queue``：进程内 asyncio 队列（maxsize<=0 表示无界）。
-    2. ``next_delivery``：下一个投递序号（每次投递尝试 +1，含丢弃烧号）。
-    3. 高/低水位告警迟滞：``warned`` 标记 + ``last_warn`` 时戳，避免阈值附近刷屏。
-
-    参数：
-        maxsize: 队列容量（<=0 无界）。
-        high_ratio / low_ratio: 高/低水位占容量的比例（仅有界队列有意义）。
-    """
-
-    def __init__(self, *, maxsize: int, high_ratio: float, low_ratio: float) -> None:
-        self.queue: asyncio.Queue[DeliveredEvent] = asyncio.Queue(
-            maxsize=maxsize if maxsize > 0 else 0
-        )
-        self.next_delivery: int = 0
-        # 高/低水位绝对阈值：仅有界（maxsize>0）时可换算；无界时为 None → 不告警
-        self.high_water: int | None = int(maxsize * high_ratio) if maxsize > 0 else None
-        self.low_water: int | None = int(maxsize * low_ratio) if maxsize > 0 else None
-        self.warned: bool = False
-        self.last_warn: int | None = None
-
-
-@dataclass
-class _PendingTurn:
-    submission_id: str
-    cancel: CancellationToken
-    turn_index: int | None = None
-    # B1 midturn-input-steering：注入队列。engine 处理 InjectUserInput Op 时 append，
-    # 与对应活跃 TurnRunner.pending_input 共享同一 list 引用，runner 迭代边界 drain。
-    pending_input: list[ResponseItem] = field(default_factory=list)
-    # 是否根 thread 的 turn：InjectSystemMessage 只投给根 turn；子 thread 续跑登记
-    # `_pending`（供 CancelTurn 触达）时置 False。
-    is_root: bool = True
-
+# 进程内类型已下沉 engine_types.py（Wave 4 模块切分）。DeliveredEvent 是公共 API，
+# 此处原样再导出，`from taifeng.loop.engine import DeliveredEvent` 的既有写法不变。
+from taifeng.loop.engine_types import (  # noqa: E402
+    _PendingTurn,
+    _Subscriber,
+    _TERMINAL_KINDS,
+    DeliveredEvent,
+)
 
 class AgentEngine:
     """主 actor。
@@ -1567,7 +1511,8 @@ class AgentEngine:
                     self._start_operation(
                         self._run_gated_op(
                             sub.id, cancel,
-                            lambda _tok, sid=sub.id, n=num_turns: self._handle_rollback(
+                            lambda _tok, sid=sub.id, n=num_turns: engine_ops.handle_rollback(
+                                self,
                                 sid, n,
                             ),
                         ),
@@ -1576,13 +1521,13 @@ class AgentEngine:
                     )
                     continue
                 if isinstance(sub.op, UpdateBudget):
-                    self._handle_update_budget(sub.id, sub.op)
+                    engine_ops.handle_update_budget(self, sub.id, sub.op)
                     continue
                 if isinstance(sub.op, RefreshSnapshot):
-                    self._handle_refresh_snapshot(sub.id)
+                    engine_ops.handle_refresh_snapshot(self, sub.id)
                     continue
                 if isinstance(sub.op, UpdateInstructions):
-                    await self._handle_update_instructions(sub.id, sub.op)
+                    await engine_ops.handle_update_instructions(self, sub.id, sub.op)
                     continue
                 if isinstance(sub.op, Rewind):
                     # 与 Resume 同理用 create_task：重推会跑完整 turn(采样 + 派发),
@@ -1596,10 +1541,10 @@ class AgentEngine:
                     body = (
                         self._run_gated_op(
                             sub.id, cancel,
-                            lambda tok, s_=rewind_sub: self._handle_rewind(s_, tok),
+                            lambda tok, s_=rewind_sub: engine_ops.handle_rewind(self, s_, tok),
                         )
                         if is_root_rewind
-                        else self._handle_rewind(sub, cancel)
+                        else engine_ops.handle_rewind(self, sub, cancel)
                     )
                     self._start_operation(
                         body, name=f"rewind:{sub.id}", submission_id=sub.id,
@@ -3735,297 +3680,13 @@ class AgentEngine:
             self._rewind_checkpoints = derive_rewind_log(self._history)
 
     # -----------------------------------------------------------------
-    # Op handlers (rewind / rollback / update_budget / refresh_snapshot)
+    # Op handlers —— 实现已下沉 engine_ops.py（Wave 4 模块切分）
     # -----------------------------------------------------------------
-
-    async def _emit_rewind_rejected(
-        self, submission_id: str, node_id: str, reason: str
-    ) -> None:
-        """rewind 校验失败统一出口(禁 silent fallback,显式发事件)。"""
-        await self._emit(EventMsg(
-            submission_id=submission_id,
-            msg=RewindRejected(data={"node_id": node_id, "reason": reason}),
-        ))
 
     async def _emit_rewind_table_rebuilt(self) -> None:
         """冷恢复后补发 rewind_table_rebuilt（R3 可观测）。
 
-        pool resume 路径在 _rebuild_spawn_state_from_history 之后调用本方法，
-        告知订阅者冷重建已完成、节点表已就绪。
-        turn_count 取 history 内 user_message 数（与 count_turns 一致）。
-        submission_id 用 '*' 标记系统级事件（不属于某次具体 submission）。
+        薄委托：pool_session 按 ``engine._emit_rewind_table_rebuilt()`` 白盒寻址，
+        故保留本方法名，实现见 ``engine_ops.emit_rewind_table_rebuilt``。
         """
-        await self._emit(EventMsg(
-            submission_id="*",
-            msg=RewindTableRebuilt(data={
-                "thread_id": self._thread_id,
-                "turn_count": count_turns(self._history),
-                "node_count": len(self._rewind_checkpoints),
-            }),
-        ))
-
-    def _rewrite_seed_args(self, call_id: str, new_args: dict[str, Any]) -> None:
-        """retry_tool new_args：把内存 history 中该 call_id 的 function_call 换成新 args。
-
-        只改内存(自洽 + 供重跑读新参);store 保持 append-only,arg 覆盖经 rewind
-        marker 留痕。调用方已持锁。
-        """
-        import json
-        for i, item in enumerate(self._history):
-            if item.kind == "function_call" and item.payload.get("call_id") == call_id:
-                self._history[i] = function_call(
-                    call_id=call_id, name=item.payload["name"],
-                    arguments=json.dumps(new_args, ensure_ascii=False),
-                    thread_id=self._thread_id,
-                )
-
-    async def _handle_rewind(
-        self, sub: Submission, root_cancel: CancellationToken
-    ) -> None:
-        """回退到 turn 内某回访节点并主动重推(turn-rewind 能力)。
-
-        - re_reason：截到节点采样前 → 重采样(LLM 重新决定下游)。
-        - retry_tool：截到 retry_tool 切点(保留 assistant 的 function_call)→ 补跑
-          该工具(可换 new_args)→ 续推。仅 dispatch 节点。
-
-        actor 模型下提交 Rewind 时上一 turn 已结束(engine 空闲),故"重推" = 截断
-        engine history → 建新 root TurnRunner 重跑。详见设计 spec
-        2026-06-05-addressable-dispatch-rewind。
-        """
-        op = sub.op
-        assert isinstance(op, Rewind)
-
-        # thread-addressable rewind:thread_id 指向非根 thread → 路由到 spawn
-        # 子 thread rewind 链(守卫/截断/重推在 spawn_rewind.py;与 Resume 的
-        # thread 寻址分流同形)。缺省 None 或显式指根 → 既有根路径零变更。
-        if op.thread_id is not None and op.thread_id != self._thread_id:
-            await self._spawn.rewind_spawn(sub)
-            return
-
-        # 1. 查 checkpoint(最近一次 root turn 回写的节点表)
-        cp = next(
-            (c for c in self._rewind_checkpoints if c.node_id == op.node_id), None
-        )
-        if cp is None:
-            await self._emit_rewind_rejected(sub.id, op.node_id, "unknown_node")
-            return
-        # 2. mode/kind 相容:retry_tool 仅 dispatch 节点(且有 inner 切点)
-        if op.mode == "retry_tool" and (
-            cp.kind != "dispatch" or cp.inner_history_len is None
-        ):
-            await self._emit_rewind_rejected(sub.id, op.node_id, "mode_kind_mismatch")
-            return
-        # 3. 挂起态守卫:活跃挂起的 turn v1 不支持 rewind(挂起态 rewind 留待后续)
-        if self._find_active_suspension() is not None:
-            await self._emit_rewind_rejected(sub.id, op.node_id, "turn_suspended")
-            return
-
-        # 4. 选截点:retry_tool 用 inner(保 fc);其余用 history_len(re_reason)
-        cut = (
-            cp.inner_history_len
-            if op.mode == "retry_tool" and cp.inner_history_len is not None
-            else cp.history_len
-        )
-
-        # 5. 截断 history + 回退 cache_anchor(锁内;append-only:store 不删,仅内存截)
-        async with self._lock:
-            self._history = self._history[:cut]
-            if self._cache_anchor_index >= cut:
-                self._cache_anchor_index = cut - 1
-            # 5b. retry_tool + new_args:改写悬空 fc 的 arguments(自洽 + 重跑用新参)
-            if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
-                self._rewrite_seed_args(cp.call_id, op.new_args)
-
-        # 6. marker(审计;同 rollback 范式,落 store、不进 history)
-        # cut_index 持久化：供 reconstruct_logical_history 冷恢复时按截断点重建逻辑 history
-        marker = system_injection(
-            f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
-            thread_id=self._thread_id, source="rewind",
-            extra={"cut_index": cut},
-        )
-        await self._store.append(marker)
-
-        # 7. emit turn_rewound(R3)
-        await self._emit(EventMsg(submission_id=sub.id, msg=TurnRewound(data={
-            "node_id": op.node_id, "node_kind": cp.kind, "mode": op.mode,
-            "cut_index": cut, "cache_anchor": self._cache_anchor_index,
-        })))
-
-        # 8a. 冷 engine 惰性 resolve 指令层（spec §7 lazy-on-rewind）：
-        #   正常 turn 结束后 _last_resolved 已由 _handle_user_message 填充；
-        #   冷 engine（initial_history 注入、未跑任何 turn）_last_resolved 为空。
-        #   此处检测：resolver 存在 + _last_resolved 空 + history 非空 → 补一次
-        #   resolve，以构造期 entry skill 为锚点（已知限制：不还原历史 turn 里曾
-        #   使用的不同 entry skill 的指令层，v1 范围外）。
-        if (
-            self._instruction_resolver is not None
-            and not self._last_resolved
-            and self._history
-        ):
-            # cancel=None:rewind 时无活跃 turn-level token,刻意不传(同 warmup_engine_scope)
-            ctx = InstructionContext(
-                session_id=self._session_id,
-                thread_id=self._thread_id,
-                entry_skill_id=self._entry_skill.id,
-                turn_index=self._turn_index,
-                metadata=self._request_metadata,
-                cancel=None,
-            )
-            # best-effort:turn_rewound 已发出,resolve 失败不硬 abort(会留下不一致),
-            # 但不静默——按仓库惯例(turn.py on_pre_evict)落 warning 日志,保留可观测(R3)
-            try:
-                self._last_resolved = await self._instruction_resolver.resolve(
-                    ("engine", "session", "turn"), ctx,
-                )
-            except InstructionFetchError:
-                logger.warning(
-                    "冷 rewind 指令 resolve 失败,以空指令层续推(thread=%s)",
-                    self._thread_id,
-                )
-
-        # 8b. 主动重推:截断后建新 root TurnRunner;retry_tool 先补跑悬空 call
-        turn_cancel = root_cancel.child(f"sub:{sub.id}")
-        self._pending[sub.id] = _PendingTurn(
-            submission_id=sub.id, cancel=turn_cancel
-        )
-        seed = cp.call_id if op.mode == "retry_tool" else None
-        await self._build_and_run_runner(
-            sub.id, turn_cancel, list(self._last_resolved or []),
-            seed_pending_call_id=seed,
-            cache_break_expected_reason="rewind",
-        )
-
-    async def _handle_rollback(self, submission_id: str, num_turns: int) -> None:
-        """回滚最近 N 轮对话。
-
-        一"轮" = 以 user_message 为锚点。从 history 末尾向前数 N 个 user_message，
-        删掉它及之后的所有 items。
-        """
-        if num_turns < 1:
-            return
-        async with self._lock:
-            new_history = list(self._history)
-            removed = 0
-            user_count = 0
-            cut_idx = len(new_history)
-            for i in range(len(new_history) - 1, -1, -1):
-                if new_history[i].kind == "user_message":
-                    user_count += 1
-                    if user_count == num_turns:
-                        cut_idx = i
-                        break
-            if user_count < num_turns:
-                # 没有足够的 user_message，全部清空
-                cut_idx = 0
-            removed = len(new_history) - cut_idx
-            self._history = new_history[:cut_idx]
-            # cache anchor 也要回退
-            if self._cache_anchor_index >= cut_idx:
-                self._cache_anchor_index = cut_idx - 1
-
-        # 写一条 system_injection 标记
-        # cut_index 持久化：供 reconstruct_logical_history 冷恢复时按截断点重建逻辑 history
-        marker = system_injection(
-            f"[rollback] dropped {removed} item(s), {num_turns} turn(s)",
-            thread_id=self._thread_id,
-            source="rollback",
-            extra={"cut_index": cut_idx},
-        )
-        await self._store.append(marker)
-        await self._emit(
-            EventMsg(
-                submission_id=submission_id,
-                msg=EngineLog(
-                    data={
-                        "level": "info",
-                        "message": f"rolled back {num_turns} turn(s)",
-                        "extra": {"removed_items": removed},
-                    }
-                ),
-            )
-        )
-
-    def _handle_update_budget(self, submission_id: str, op: UpdateBudget) -> None:
-        """运行时调整 ContextBudget（部分字段）。"""
-        cur = self._budget
-        self._budget = ContextBudget(
-            context_window=(
-                op.context_window if op.context_window is not None else cur.context_window
-            ),
-            soft_limit_ratio=(
-                op.soft_limit_ratio if op.soft_limit_ratio is not None else cur.soft_limit_ratio
-            ),
-            hard_limit_ratio=(
-                op.hard_limit_ratio if op.hard_limit_ratio is not None else cur.hard_limit_ratio
-            ),
-            preserve_tail_messages=(
-                op.preserve_tail_messages
-                if op.preserve_tail_messages is not None
-                else cur.preserve_tail_messages
-            ),
-        )
-        logger.info(
-            "budget updated: window=%d soft=%.2f hard=%.2f tail=%d",
-            self._budget.context_window,
-            self._budget.soft_limit_ratio,
-            self._budget.hard_limit_ratio,
-            self._budget.preserve_tail_messages,
-        )
-
-    async def _handle_update_instructions(
-        self, submission_id: str, op: UpdateInstructions,
-    ) -> None:
-        """T4: 替换 layer 的 source + 失效缓存 + 发事件。
-
-        spec Requirement (热更):
-            - 成功 → instruction_updated（含 layer_name / new_source_kind）
-            - 未知 name → instruction_update_rejected（reason='unknown_layer'）
-            - 缓存立即失效（resolver.replace_layer 内部已清理）
-        """
-        if self._instruction_resolver is None:
-            # 没配 resolver → 视为未知 name
-            await self._emit(EventMsg(
-                submission_id=submission_id,
-                msg=InstructionUpdateRejected(data={
-                    "layer_name": op.layer_name,
-                    "reason": "no_instruction_resolver",
-                }),
-            ))
-            return
-        self._current_emit_submission_id = submission_id
-        try:
-            ok = self._instruction_resolver.replace_layer(
-                op.layer_name, op.new_source,
-            )
-        finally:
-            self._current_emit_submission_id = "*"
-        if not ok:
-            await self._emit(EventMsg(
-                submission_id=submission_id,
-                msg=InstructionUpdateRejected(data={
-                    "layer_name": op.layer_name,
-                    "reason": "unknown_layer",
-                }),
-            ))
-            return
-        new_kind = "static" if isinstance(op.new_source, str) else "dynamic"
-        await self._emit(EventMsg(
-            submission_id=submission_id,
-            msg=InstructionUpdated(data={
-                "layer_name": op.layer_name,
-                "new_source_kind": new_kind,
-            }),
-        ))
-
-    def _handle_refresh_snapshot(self, submission_id: str) -> None:
-        """从 registry 拉最新 snapshot（业务侧热更 SKILL.md 后调）。
-
-        注意：当前 entry_skill 引用保持不变（lock-in 语义）。
-        """
-        # 找父级 registry —— 由业务侧通过 _registry_ref 注入；否则 noop
-        registry = getattr(self, "_registry_ref", None)
-        if registry is None:
-            logger.warning("refresh_snapshot: no registry ref")
-            return
-        self._snapshot = registry.snapshot()
-        logger.info("snapshot refreshed → version=%d", self._snapshot.version)
+        await engine_ops.emit_rewind_table_rebuilt(self)
