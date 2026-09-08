@@ -51,12 +51,14 @@
 - 异步用 `anyio`（必要时回退 `asyncio`），不用同步阻塞调用
 - 数据类用 `@dataclass(frozen=True)` 或 `pydantic.BaseModel`
 - 文件 ≤ 800 行硬红线；函数 ≤ 80 行；圈复杂度 ≤ 10
+  - 例外必须**具名 + 可核算 + 有上限**，写进 ADR 与对应能力契约，不得口头豁免。现存两处：`loop/engine.py`（上限 2100，构成核算见 ADR 0038）与 `turn_sample`的三段采样（140/225/221，再压需在最热路径上改设计）。
 - 注释中文（覆盖默认 no-comments 规则）；module/class/function 必须有 docstring
 - 配置走依赖注入；禁止 `os.getenv` 在 src/ 内
 
 ## 测试约束
 
 - 新模块必须有 `tests/test_<module>.py`
+  - 唯一例外：**纯搬迁**抽出的模块（行为零变化、既有测试一行未改即全绿）由原有测试覆盖，不另起测试文件——为搬迁再造一份同义测试只会重复断言，不增加检出能力。
 - LLM 调用走 `SimClient`（conformance 模拟器）—— 不能在 CI 里调真实 API
 - **CI 门禁**（`.github/workflows/ci.yml`，push main / 每个 PR 自动触发）：三个 job —— Python 3.12+3.13 全量 `pytest tests/`、`scripts/verify_examples.py` 的 examples 冒烟、`ruff check --select F` 静态检查。本地跑这三条 = 预跑门禁。**只卡 ruff F 类**（未用导入 / 重名覆盖 / 未用变量 / 未定义名，零风格意见）；E501/TC/I 共 300+ 条既有欠账不入闸，要清得单独开切片。门禁只跑 sim，真实回归仍走下面的台账红线
 - **真实回归红线**：凡变更基础层（`src/taifeng/{llm,loop,context,conversation}/`），合入前必须全量跑 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 并提交更新后的 `docs/real-llm-ledger.{json,md}`；台账 commit 落后于基础层变更 → 不得标 task 完成 / openspec archive。烧 key 前可先 `examples/real_llm/selfcheck.py`（sim 干跑，零消耗）

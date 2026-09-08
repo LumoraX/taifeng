@@ -62,6 +62,17 @@ Later ADRs:
 36. [ADR 0036: cache anchor 真值化](decisions/0036-cache-anchor-truth.md): anchor 统一为「最后一条已缓存 history 下标（含）、-1 无缓存」，采样成功后推进到发出时末项，三策略窗口与 prompt 映射自 `anchor+1` / `<= anchor` 起；overflow 自愈分两档（先只动 tail，不够救再动 head 并标 `compaction_overflow`）；坏 JSON / 非对象工具参数以 `invalid_arguments` 拒绝执行而非退化为 `{}`。活文档 [cache-anchor](architecture/capabilities/cache-anchor.md)。
 37. [ADR 0037: 旧 provider 路径对齐主路径不变量](decisions/0037-legacy-provider-path-alignment.md) (Amends #0026, #0030, #0033, #0034): gemini / anthropic / litellm 补齐流终止真相（terminal_seen + 异常 finish_reason 保护）与 `TransportError` 归一；`completed` 透传原生 `stop_reason`（不跨家归一）；gemini `functionResponse.name` 用真实函数名；`retry_async` 经 `RetryingModelClient` 真正接线（零产出才重试，刻意与 strict audit 的 one-attempt 契约互斥）；子进程 env 白名单成为默认；journal payload 补 `extra_content` / `attachments`；压缩孤儿 output 可降级处理。活文档 [llm-provider-native](architecture/capabilities/llm-provider-native.md)。
 
+11. [ADR 0011: Empty API key omits the auth header](decisions/0011-empty-api-key-omits-auth.md): 空 API key 视作「不发 Authorization 头」而非发一个空头——本地网关与代理常以「有无该头」分流，发空头会被判成鉴权失败。
+12. [ADR 0012: Suspend / Resume as a kernel primitive](decisions/0012-suspend-resume-primitive.md): HITL 挂起是内核原语而非业务回调：turn 以 `SuspensionRecord` 落盘中断，`Resume` 携 resolutions 续跑，跨进程可恢复（R5）。
+13. [ADR 0013: Composite skills are tool-only](decisions/0013-composite-tool-only.md): composite skill 只经 `call_skill` 工具派发，不额外引入 agent 概念——统一到 ADR 0006 的 Skill 抽象。
+14. [ADR 0014: Turn rewind](decisions/0014-turn-rewind.md): turn 内以回访节点（iteration / dispatch）为切点回退重推，支持 `re_reason` 重采样与 `retry_tool` 换参补跑。
+15. [ADR 0015: Detached skill spawn](decisions/0015-detached-skill-spawn.md): `spawn_skill` 立即返回句柄、子 skill 在独立 thread 后台跑完，父 turn 不阻塞；join-barrier 负责全终态聚合。
+19. [ADR 0019: Post-turn hook](decisions/0019-post-turn-hook.md): turn 收尾钩子，为自我 review / 记忆固化等认知回路提供跨 turn 的顺序保证落脚点。
+20. [ADR 0020: Budget awareness hint](decisions/0020-budget-awareness-hint.md): 穿越 soft limit 时注入中性的预算事实，让模型自知剩余空间，而非由内核代它裁剪。
+21. [ADR 0021: Doom-loop detection](decisions/0021-doom-loop-detection.md): 识别工具调用的原地打转并注入提示，避免无进展的循环烧完预算。
+22. [ADR 0022: Reusable approval grants](decisions/0022-reusable-approval-grants.md): 一次人工批准可在其作用域内复用，避免同一操作反复弹审批。
+38. [ADR 0038: engine / turn 按职责切分为协作者模块](decisions/0038-loop-core-module-split.md): 切分手法按**内聚度**二分（内聚序列成协作者类、独立处理成模块函数），协作者不自持运行态；宿主是**唯一白盒寻址面**（薄委托 + 兄弟调用回弹，兼顾「打宿主属性」与「打模块级符号」两类 monkeypatch 注入点）；行为零变化的判据是「既有测试一行未改即全绿」。`engine.py` 2100 行与 `sample_once` 三段为两处具名红线例外，理由与上限均可核算。活文档 [loop-core-module-structure](architecture/capabilities/loop-core-module-structure.md)。
+
 ### Fourth Pass: Gap Tracking
 
 22. [Hermes capability gap roadmap](architecture/hermes-gap-roadmap.md): feature-level progress.

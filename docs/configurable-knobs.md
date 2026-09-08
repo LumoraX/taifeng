@@ -60,6 +60,24 @@
 | **`pinned_total_max_chars`** | `8000` | pinned 注入总预算 | 单轮注入字符总预算（按注册序累计，装不下的 source 整体丢弃并记入事件 `dropped`）；per-source 上限由各 source 的 `max_chars` 控制（truncate_middle 截断） | 防 pinned 反噬压缩收益 |
 | **`submission_queue_size`** | `256` | K4 入站流控 | 入站 submission 队列 maxsize（bounded backpressure）。满则 `submit()` 在 `put` 处 await（业务侧自然阻塞），不丢提交。与 `event_queue_size`（出站）成对 | codex bounded 入站队列 |
 
+以下 13 项此前漏登记（Wave 4 补齐；必填依赖如 `store` / `tool_runtime` 不属旋钮，不列）：
+
+| 参数 | 默认值 | 说明 | 对标 |
+| --- | --- | --- | --- |
+| `outcome_judge` | `None` | skill 战绩判定器（`skill-outcome-record`）；`None` 则不记战绩 | — |
+| `storage_dir` | `None` | 通用存储根目录（战绩 / 索引等）；`None` 则退回 `threads_dir` 同级 | — |
+| `thread_directory` | `None` | `ThreadDirectory` 实现；`None` 用默认 JSONL 目录 | — |
+| `index_hook` | `None` | `IndexHook` —— 落盘后建索引的旁路钩子（`index-hook` 契约） | — |
+| `sink` | `None` | `TelemetrySink` —— 事件外发后端；`None` 不外发（R3 仍在总线上） | codex telemetry |
+| `permission_policy` | `None` | `PermissionPolicy` —— HITL 审批策略；`None` 则工具全放行 | claw-code permission |
+| `request_metadata` | `None` | 透传给 provider 的请求级 metadata（业务侧标签） | — |
+| `audit` | `None` | `AuditConfig` —— 开启审计模式（strict 下与多 attempt 客户端互斥，见 ADR 0037） | — |
+| `hook_runner` | `None` | `HookRunner` —— PreToolUse / PostToolUse / PreCompact / PreTurn / PostTurn 钩子编排 | claw-code hooks |
+| `initial_history` | `None` | engine 构造时预置的 history（冷恢复重建用） | — |
+| `compaction_degradation_threshold` | `3` | 连续压缩无进展多少次后 emit `CompactionDegradationWarning` | — |
+| `capabilities` | `None` | 覆写模型输入能力探测结果（图片 / Responses 协议判定） | — |
+| `has_recall_backend` | `False` | 是否已接记忆召回后端；影响 `skill-recall` 提示注入 | — |
+
 ### `get_or_create` 运行时参数
 
 | 参数 | 默认值 | 说明 |
