@@ -18,6 +18,8 @@ from taifeng.skill.dispatch import CallStack
 from taifeng.tool.spec import ToolContext, ToolResult
 from typing import Any
 
+from taifeng.loop.event import SkillDispatched, SkillSpawnRejected
+
 if TYPE_CHECKING:
     from taifeng.loop.turn import TurnRunner
 
@@ -302,3 +304,87 @@ class TurnDispatch:
             f"sub_skill_failed: {outcome.error or outcome.end_reason}",
             sub_thread_id=sub_thread_id,
         )
+
+    async def run_sub_skill(
+        self,
+        *,
+        target: SkillDefinition,
+        arguments: dict[str, Any],
+        parent_stack: CallStack,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        """派发子 skill —— 启动一个嵌套 TurnRunner 处理。
+
+        子 skill 共享 store / snapshot / tool_runtime / compressors，
+        但 history_buffer 是独立的（子 skill 是隔离上下文）。
+        """
+        # 通知事件 —— call-skill-reason-field: 从 ctx.extras 取 LLM 自陈
+        # reason（call_skill handler 写入），缺省空串
+        dispatch_reason = str(ctx.extras.get("dispatch_reason") or "")
+        await self.__dispatch_owner._emit(
+            SkillDispatched(
+                data={
+                    "skill_id": target.id,
+                    "call_id": parent_stack.current.call_id if parent_stack.current else "",
+                    "depth": parent_stack.depth,
+                    "stack_path": parent_stack.path(),
+                    "reason": dispatch_reason,
+                }
+            )
+        )
+
+        # audit：在外层 call_skill Tool 意图之后先 durable skill_selected（完整
+        # definition/body 快照）；随后配额拒绝走 rejected 终态，接受走 child 谱系。
+        audit_dispatch: AuditedSkillDispatch | None = None
+        if self.__dispatch_owner.audit_state is not None:
+            parent_call_id = str(
+                ctx.extras.get("parent_call_skill_call_id") or ctx.call_id
+            )
+            audit_dispatch = AuditedSkillDispatch(
+                state=self.__dispatch_owner.audit_state,
+                parent_turn_index=self.__dispatch_owner.turn_index,
+                parent_call_id=parent_call_id,
+                submission_id=self.__dispatch_owner.submission_id,
+                cancel=ctx.cancel,
+            )
+            await audit_dispatch.commit_selected(
+                target=target, arguments=arguments
+            )
+
+        # K1 广度准入：spawn 配额（engine 注入 registry 时生效）。超限→拒绝派发，
+        # 不创建 thread / 不跑子 turn，返回 error 让 LLM 自行调整（fork-bomb 防护）。
+        if self.__dispatch_owner.spawn_registry is not None:
+            from taifeng.loop.spawn import SpawnLimitError
+            try:
+                async with self.__dispatch_owner.spawn_registry.reserve():
+                    return await self.spawn_sub_runner(
+                        target=target, arguments=arguments,
+                        parent_stack=parent_stack, ctx=ctx,
+                        audit_dispatch=audit_dispatch,
+                    )
+            except SpawnLimitError as e:
+                await self.__dispatch_owner._emit(SkillSpawnRejected(data={
+                    "skill_id": target.id,
+                    "call_id": ctx.call_id,
+                    "limit_kind": e.kind,
+                    "limit": e.limit,
+                }))
+                # audit：配额拒绝 → skill_dispatch_finished(rejected)，无 child lineage
+                if audit_dispatch is not None:
+                    await audit_dispatch.reject(
+                        reason=f"spawn_limit:{e.kind}"
+                    )
+                return ToolResult.error(
+                    f"spawn_limit_exceeded: {e.kind} >= {e.limit}",
+                    reason="spawn_limit",
+                )
+        return await self.spawn_sub_runner(
+            target=target, arguments=arguments,
+            parent_stack=parent_stack, ctx=ctx,
+            audit_dispatch=audit_dispatch,
+        )
+
+    # -----------------------------------------------------------------
+    # 实现已下沉 turn_dispatch.py（Wave 4）。以下为薄委托：TurnRunner 是唯一白盒
+    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
+    # -----------------------------------------------------------------
