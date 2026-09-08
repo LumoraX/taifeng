@@ -74,6 +74,7 @@ from taifeng.loop.engine_gate import EngineGate
 from taifeng.loop.engine_resume import EngineResume
 from taifeng.loop.engine_events import EngineEvents
 from taifeng.loop.child_resume_chain import ChildResumeChain
+from taifeng.loop.suspension_access import SuspensionAccess
 from taifeng.loop.suspension_ttl import SuspensionTtlScheduler
 from taifeng.loop.spawn_driver import SpawnDriver
 from taifeng.loop.submission import (
@@ -266,6 +267,7 @@ class AgentEngine:
         self._ttl = SuspensionTtlScheduler(self)
         # call_skill 子链续跑协作器：无自有状态，运行态仍由本 engine 持有
         self._child_chain = ChildResumeChain(self)
+        self._suspend_access = SuspensionAccess(self)
         self._events = EngineEvents(self)
         self._resume = EngineResume(self)
         self._gate = EngineGate(self)
@@ -1910,7 +1912,7 @@ class AgentEngine:
 
     async def _load_thread_items(self, thread_id: str) -> list[ResponseItem]:
         """非根 thread 的**逻辑 history 单一入口**:load_thread → reconstruct。"""
-        return await self._child_chain.load_thread_items(thread_id)
+        return await self._suspend_access.load_thread_items(thread_id)
 
     async def _apply_plan_on_thread(
         self, thread_id: str, entry_skill_id: str,
@@ -1948,51 +1950,51 @@ class AgentEngine:
         self, cancel_sub_id: str, target_sub_id: str
     ) -> None:
         """R4：若存在 submission_id 匹配的活跃挂起，追加 resolved-marker 丢弃之。"""
-        await self._child_chain.cancel_active_suspension(cancel_sub_id, target_sub_id)
+        await self._suspend_access.cancel_active_suspension(cancel_sub_id, target_sub_id)
 
     def _find_active_suspension(self) -> SuspensionRecord | None:
         """扫 self._history，返回最后一条尚未被 resolved-marker 消费的 suspension record。"""
-        return self._child_chain.find_active_suspension()
+        return self._suspend_access.find_active_suspension()
 
     @staticmethod
     def _find_active_suspension_in(
         items: list[ResponseItem],
     ) -> SuspensionRecord | None:
         """在任意 items 序列中找最后一条未被 resolved-marker 消费的 suspension record。"""
-        return ChildResumeChain.find_active_suspension_in(items)
+        return SuspensionAccess.find_active_suspension_in(items)
 
     @staticmethod
     def _deny_output_text(
         record: SuspensionRecord, call_id: str, reason_text: str,
     ) -> str:
         """按 pending reason 渲染 deny 回填文案(suspension-ttl-hardening)。"""
-        return ChildResumeChain.deny_output_text(record, call_id, reason_text)
+        return SuspensionAccess.deny_output_text(record, call_id, reason_text)
 
     def _apply_plan_session_effects(self, plan: Any, record: SuspensionRecord) -> int:
         """应用 ResolvePlan 的会话级副作用,返回续跑 runner 的 auto_retry_count。"""
-        return self._child_chain.apply_plan_session_effects(plan, record)
+        return self._suspend_access.apply_plan_session_effects(plan, record)
 
     def _effective_resolutions(
         self, record: SuspensionRecord, items: list[ResponseItem],
         resolutions: dict[str, Any],
     ) -> dict[str, Any]:
         """到期哨兵 resolutions 与未核销 pending 求交;人工 payload 原样返回。"""
-        return self._child_chain.effective_resolutions(record, items, resolutions)
+        return self._suspend_access.effective_resolutions(record, items, resolutions)
 
     def _settle_lock(self, record_id: str) -> asyncio.Lock:
         """取 record 级结算锁(惰性创建;record 终结后残留的空锁可忽略不计)。"""
-        return self._child_chain.settle_lock(record_id)
+        return self._suspend_access.settle_lock(record_id)
 
     @staticmethod
     def _unsettled_pendings(
         record: SuspensionRecord, items: list[ResponseItem],
     ) -> list[Any]:
         """返回 record 中尚未核销的 pending(request 级核销的推导真相,R5)。"""
-        return ChildResumeChain.unsettled_pendings(record, items)
+        return SuspensionAccess.unsettled_pendings(record, items)
 
     async def _execute_resumed_tool(self, call_id: str) -> None:
         """resume 时对一个被批准的挂起 tool call 真正执行，回填 function_call_output。"""
-        await self._child_chain.execute_resumed_tool(call_id)
+        await self._suspend_access.execute_resumed_tool(call_id)
 
     async def _run_compact_now(
         self,
@@ -2001,7 +2003,7 @@ class AgentEngine:
         root_cancel: CancellationToken,
     ) -> None:
         """_run_compact_now"""
-        await self._child_chain.run_compact_now(submission_id, op, root_cancel)
+        await self._suspend_access.run_compact_now(submission_id, op, root_cancel)
 
     # Op handlers —— 实现已下沉 engine_ops.py（Wave 4 模块切分）
     # -----------------------------------------------------------------
