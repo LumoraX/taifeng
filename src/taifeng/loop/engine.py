@@ -15,7 +15,6 @@ from taifeng.context.budget import ContextBudget
 from taifeng.context.cache_stats import PromptCacheStats
 from taifeng.conversation.models import (
     ResponseItem,
-    function_call_output,
     system_injection,
     user_message,
 )
@@ -63,9 +62,6 @@ from taifeng.loop.event import (
     InstructionFetchFailed,
     InstructionUpdated,
     InstructionUpdateRejected,
-    SuspensionPartiallyResolved,
-    SuspensionResolved,
-    SuspensionResolveRejected,
     UserInputInjected,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
@@ -75,6 +71,8 @@ from taifeng.loop.engine_operations import EngineOperations
 from taifeng.loop.engine_lifecycle import EngineLifecycle
 from taifeng.loop.engine_runner import EngineRunner
 from taifeng.loop.engine_gate import EngineGate
+from taifeng.loop.engine_resume import EngineResume
+from taifeng.loop.engine_events import EngineEvents
 from taifeng.loop.child_resume_chain import ChildResumeChain
 from taifeng.loop.suspension_ttl import SuspensionTtlScheduler
 from taifeng.loop.spawn_driver import SpawnDriver
@@ -268,6 +266,8 @@ class AgentEngine:
         self._ttl = SuspensionTtlScheduler(self)
         # call_skill 子链续跑协作器：无自有状态，运行态仍由本 engine 持有
         self._child_chain = ChildResumeChain(self)
+        self._events = EngineEvents(self)
+        self._resume = EngineResume(self)
         self._gate = EngineGate(self)
         self._runner = EngineRunner(self)
         self._lifecycle = EngineLifecycle(self)
@@ -855,87 +855,29 @@ class AgentEngine:
     # Internal: emit
     # -----------------------------------------------------------------
 
+    # -----------------------------------------------------------------
+    # 实现已下沉 engine_events.py（Wave 4）。以下为薄委托：engine 是唯一白盒
+    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
+    # -----------------------------------------------------------------
+
     async def _emit(self, ev: EventMsg) -> None:
         # suspension-ttl:借唯一事件总线做定时器簿记——所有层级 turn(根/子/spawn)的
         # 挂起与核销事件都流经此处,单点覆盖,无需在各续跑路径埋点。
-        kind = ev.msg.kind
-        if kind == "turn_suspended":
-            self._arm_ttl_timer(ev.msg.data)
-        elif kind == "suspension_resolved":
-            # 人工(或上一轮自动)核销 → 撤销该 record 的定时器(先核销者胜)
-            timer = self._ttl_timers.pop(ev.msg.data.get("record_id", ""), None)
-            if timer is not None:
-                timer.cancel()
-        # 审计可观测 层1：全局 seq 在入口同步分配（asyncio 单线程、本函数无 await
-        # 让出点 → 并发多 turn/spawn 下原子、不重不漏）。同一 ev 广播给所有订阅，
-        # 全局 seq 对各订阅一致；per-subscriber 的 delivery_seq 由 _deliver 各自记。
-        ev.seq = self._seq
-        self._seq += 1
-        # 广播给 all subs（firehose）
-        for sub in list(self._all_subs):
-            self._deliver(sub, ev)
-        # 投递给 per-submission sub（过滤订阅）
-        per = self._event_subs.get(ev.submission_id)
-        if per is not None:
-            self._deliver(per, ev)
-        # 终态记账（ADR 0031）：放在投递之后——先保证在线订阅者拿到，再留档给晚到者。
-        if kind in _TERMINAL_KINDS:
-            self._record_terminal(ev)
+        """_emit"""
+        await self._events.emit(ev)
 
     def _record_terminal(self, ev: EventMsg) -> None:
-        """登记一个 submission 的终结事件，供晚到订阅者补投（有界 FIFO）。
-
-        同一 submission 重复终结（如 turn_suspended 后又被 Resume 跑出 turn_completed）
-        以**最后一条**为准：晚到者关心的是「现在是什么状态」。重复登记会把该条目挪到
-        队尾（视为最新），淘汰仍从队首取。
-        """
-        if self._terminal_replay_size <= 0:
-            return
-        self._terminal_replay.pop(ev.submission_id, None)
-        self._terminal_replay[ev.submission_id] = ev
-        while len(self._terminal_replay) > self._terminal_replay_size:
-            self._terminal_replay.popitem(last=False)
+        """登记一个 submission 的终结事件，供晚到订阅者补投（有界 FIFO）。"""
+        self._events.record_terminal(ev)
 
     def _deliver(self, sub: _Subscriber, ev: EventMsg) -> None:
-        """把事件投递给单个订阅者：分配 per-subscriber delivery_seq（含丢弃烧号）→
-        入队 → 失败计数 → 高/低水位告警。永不阻塞主 actor（put_nowait，R4）。
-
-        delivery_seq 即使 QueueFull 丢弃也照常 +1（烧号），使订阅者凭自己收到的
-        delivery_seq 跳号即可精确自检「我漏了几条」，与全局 seq 跳号互不混淆。
-        """
-        n = sub.next_delivery
-        sub.next_delivery += 1
-        try:
-            sub.queue.put_nowait(DeliveredEvent(event=ev, delivery_seq=n))
-        except asyncio.QueueFull:
-            # K4：不再静默丢——累计计数 + WARNING（consumer 另可凭 delivery_seq 跳号
-            # 精确自检）。不阻塞 emit（慢/缺席 consumer 不得拖死主 actor，R4）。
-            self._events_dropped += 1
-            logger.warning("event queue full, drop event %s", ev.msg.kind)
-        self._maybe_warn_water(sub)
+        """把事件投递给单个订阅者：分配 per-subscriber delivery_seq（含丢弃烧号）→"""
+        self._events.deliver(sub, ev)
 
     def _maybe_warn_water(self, sub: _Subscriber) -> None:
-        """有界队列堆积告警：qsize 上穿高水位告一条 WARNING，回落到低水位以下才
-        重新武装（迟滞）；告警另受 ``event_warn_cooldown_sec`` 限频。无界队列不告警。
+        """有界队列堆积告警：qsize 上穿高水位告一条 WARNING，回落到低水位以下才"""
+        self._events.maybe_warn_water(sub)
 
-        ⚠️ 告警走 logger 而非 emit 事件——告警事件本身也会进所有队列，堆积时会
-        自我放大成告警风暴。
-        """
-        if sub.high_water is None:  # 无界队列：无容量百分比可言，不告警
-            return
-        qsize = sub.queue.qsize()
-        if qsize >= sub.high_water and not sub.warned:
-            now = self._now_factory()
-            if sub.last_warn is None or now - sub.last_warn >= self._event_warn_cooldown_sec:
-                logger.warning(
-                    "event queue high-water: %d/%d (subscriber lagging)",
-                    qsize,
-                    self._event_queue_size,
-                )
-                sub.last_warn = now
-            sub.warned = True
-        elif sub.low_water is not None and qsize <= sub.low_water and sub.warned:
-            sub.warned = False  # 回落到低水位以下 → 重新武装下次告警
 
     @property
     def events_dropped(self) -> int:
@@ -1852,137 +1794,22 @@ class AgentEngine:
     # Resume：续跑挂起的 turn（配对 resolutions → 补齐 history gap → 续采样）
     # -----------------------------------------------------------------
 
+    # -----------------------------------------------------------------
+    # 实现已下沉 engine_resume.py（Wave 4）。以下为薄委托：engine 是唯一白盒
+    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
+    # -----------------------------------------------------------------
+
     async def _handle_resume(self, sub: Submission, root_cancel: CancellationToken) -> None:
-        """续跑一个挂起的 thread：配对 resolutions → 补齐 history gap → 续采样。
-
-        步骤：
-          1. 在 self._history 找"活跃挂起"（最后一条 kind=='suspension' 且其 record_id
-             尚未被 resolved-marker 标记消费）。找不到 → SuspensionResolveRejected 返回。
-          2. SuspensionRecord.from_item 还原；SuspensionResolver().plan(record, resolutions)。
-             ResolveError → SuspensionResolveRejected(reason=str(e)) 返回（禁静默）。
-          3. 应用 plan：回填 function_call_output(form/data/deny)、执行 tool(permission allow)。
-          4. 落 resolved-marker（system_injection source='suspend_resolved'）标记消费（幂等）。
-          5. emit SuspensionResolved。
-          6. 非 abort → _build_and_run_runner 续采样；abort → 不续跑（turn 终止）。
-        """
-        assert isinstance(sub.op, Resume)
-        op = sub.op
-
-        # 子 thread resume：Resume.thread_id 指向 call_skill 派发的子 thread（≠ 根 thread）。
-        # 挂起记录落在子 thread，根 self._history 找不到 → 走专门的续跑链（先续跑子 thread
-        # 拿结果，再逐层回填父 call_skill 的 output，最终根 turn 续跑完成）。
-        if op.thread_id != self._thread_id:
-            await self._handle_child_resume(sub, op, root_cancel)
-            return
-
-        # 1. 找活跃挂起 record（扫 history：最后一条未被 resolved-marker 消费的 suspension）
-        record = self._find_active_suspension()
-        if record is None:
-            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
-                data={"reason": "no_active_suspension", "record_id": None, "detail": {}})))
-            return
-
-        # 1.5 在飞守卫:同 record 已有 Resume 在处理(marker 未落)→ 显式拒绝,
-        # 防双裁决(同 call_id 双 fco、双 marker、双续跑)
-        if record.record_id in self._resolving_records:
-            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
-                data={"reason": "resolve_in_flight",
-                      "record_id": record.record_id, "detail": {}})))
-            return
-        self._resolving_records.add(record.record_id)
-        try:
-            await self._handle_resume_resolved(sub, op, record, root_cancel)
-        finally:
-            self._resolving_records.discard(record.record_id)
+        """续跑一个挂起的 thread：配对 resolutions → 补齐 history gap → 续采样。"""
+        await self._resume.handle_resume(sub, root_cancel)
 
     async def _handle_resume_resolved(
         self, sub: Submission, op: Resume,
         record: SuspensionRecord, root_cancel: CancellationToken,
     ) -> None:
         """_handle_resume 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
-        # 1.6 到期哨兵与未核销 pending 求交(陈旧快照不重复回填);空 → 让位
-        resolutions = self._effective_resolutions(
-            record, list(self._history), op.resolutions)
-        if not resolutions:
-            return
-        # 2. 配对 + 计划（ResolveError 显式拒绝，不静默兜底）
-        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
-        try:
-            plan = SuspensionResolver().plan(record, resolutions)
-        except ResolveError as e:
-            await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
-                data={"reason": str(e), "record_id": record.record_id, "detail": {}})))
-            return
+        await self._resume.handle_resume_resolved(sub, op, record, root_cancel)
 
-        # 3. 应用 plan：补齐 history gap（挂起点的 function_call 缺 function_call_output）
-        import json
-        async with self._lock:
-            # 3a. form/data 直接回填 output（payload 即工具结果，JSON 序列化）
-            for call_id, payload in plan.direct_outputs.items():
-                out = function_call_output(
-                    call_id=call_id, output=json.dumps(payload, ensure_ascii=False),
-                    thread_id=self._thread_id, is_error=False)
-                self._history.append(out)
-                await self._store.append(out)
-            # 3b. deny / 到期 → error output(前缀按 pending reason 渲染)
-            for call_id, reason in plan.deny_outputs.items():
-                out = function_call_output(
-                    call_id=call_id,
-                    output=self._deny_output_text(record, call_id, reason),
-                    thread_id=self._thread_id, is_error=True)
-                self._history.append(out)
-                await self._store.append(out)
-        # 3c. permission allow → 真正执行 tool（复用 runtime，不绕 RwLock）
-        for call_id in plan.execute_tool_call_ids:
-            await self._execute_resumed_tool(call_id)
-
-        # 3.5 + 4. record 级结算判定(per-record 锁串行化并发 Resume)+ 落 marker:
-        # 仍有未核销 pending → 部分核销,不落 marker、不续跑(record 级 barrier)
-        async with self._settle_lock(record.record_id):
-            active = self._find_active_suspension()
-            if active is None or active.record_id != record.record_id:
-                # 并发 Resume 已抢先全量结算:补显式事件(消除观测空洞)
-                await self._emit(EventMsg(
-                    submission_id=sub.id, msg=SuspensionResolveRejected(data={
-                        "reason": "superseded_by_concurrent_settlement",
-                        "record_id": record.record_id, "detail": {}})))
-                return
-            remaining = [
-                p for p in self._unsettled_pendings(record, list(self._history))
-                if p.request_id not in resolutions]
-            if remaining:
-                await self._emit(EventMsg(
-                    submission_id=sub.id,
-                    msg=SuspensionPartiallyResolved(data={
-                        "record_id": record.record_id, "thread_id": self._thread_id,
-                        "resolved_request_ids": sorted(resolutions.keys()),
-                        "remaining_request_ids": sorted(
-                            p.request_id for p in remaining)})))
-                return
-            marker = system_injection(
-                text=f"suspend_resolved:{record.record_id}",
-                thread_id=self._thread_id, source="suspend_resolved")
-            async with self._lock:
-                self._history.append(marker)
-            await self._store.append(marker)
-
-        # 5. emit resolved
-        await self._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
-            data={"record_id": record.record_id, "request_ids": sorted(record.request_ids())})))
-
-        # 6. 续跑（abort 则不续；turn 已在挂起点终止，gap 已补齐即收尾）
-        auto_retries = self._apply_plan_session_effects(plan, record)
-        if plan.abort:
-            return
-        # Resume 续跑同样过 K2 闸门(resource-limit-retry-semantics):未经增额的
-        # 续跑在会话已触顶时不得静默烧 token——按 policy 再裁决(挂起 / 终态)
-        if await self._gate_session_tokens(sub.id):
-            return
-        turn_cancel = root_cancel.child(f"sub:{sub.id}")
-        self._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
-        await self._build_and_run_runner(
-            sub.id, turn_cancel, list(self._last_resolved or []),
-            auto_retry_count=auto_retries)
     # -----------------------------------------------------------------
     # 子 thread resume 续跑链 —— 实现已下沉 child_resume_chain.py（Wave 4）。
     # 以下全部是薄委托：engine 是唯一白盒寻址面，spawn_* 兄弟模块与测试按这些
