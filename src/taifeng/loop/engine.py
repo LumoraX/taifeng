@@ -28,8 +28,7 @@ from taifeng.instructions.types import (
     InstructionLayer,
     ResolvedInstruction,
 )
-from taifeng.llm.errors import LLMError, classify_failure, suggested_action_for
-from taifeng.llm.recovery import recommend_recovery
+from taifeng.llm.errors import LLMError
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
@@ -56,7 +55,6 @@ from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
 from taifeng.loop.audit_mailbox import (
     AuditedApplicationCheckpoint,
     AuditedSubmissionMailbox,
-    finalize_audited_mailbox,
     handoff_accepted_user_message,
     retire_started_audited_token,
 )
@@ -87,6 +85,8 @@ from taifeng.loop.event import Shutdown as ShutdownMsg
 from taifeng.loop.injection import injection_event
 from taifeng.loop import engine_ops
 from taifeng.loop.rewind import RewindCheckpoint, derive_rewind_log
+from taifeng.loop.engine_operations import EngineOperations
+from taifeng.loop.engine_lifecycle import EngineLifecycle
 from taifeng.loop.child_resume_chain import ChildResumeChain
 from taifeng.loop.suspension_ttl import SuspensionTtlScheduler
 from taifeng.loop.spawn_driver import SpawnDriver
@@ -280,6 +280,8 @@ class AgentEngine:
         self._ttl = SuspensionTtlScheduler(self)
         # call_skill 子链续跑协作器：无自有状态，运行态仍由本 engine 持有
         self._child_chain = ChildResumeChain(self)
+        self._lifecycle = EngineLifecycle(self)
+        self._ops = EngineOperations(self)
         # actor 派发出的 turn/resume/rewind 与 TTL 均属于 Engine 生命周期；
         # run() 任何退出路径必须取消并等待它们收敛，才能交还持久化 ownership。
         self._operation_tasks: set[asyncio.Task[None]] = set()
@@ -958,6 +960,11 @@ class AgentEngine:
     # suspension-ttl：挂起到期自动裁决（热武装 / 到期触发 / 冷重武装）
     # -----------------------------------------------------------------
 
+    # -----------------------------------------------------------------
+    # 实现已下沉 engine_operations.py（Wave 4）。以下为薄委托：engine 是唯一白盒
+    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
+    # -----------------------------------------------------------------
+
     def _start_operation(
         self,
         coroutine: Coroutine[Any, Any, None],
@@ -965,120 +972,28 @@ class AgentEngine:
         name: str,
         submission_id: str | None = None,
     ) -> asyncio.Task[None]:
-        """创建并登记 Engine-owned operation，终态总会检索异常。
-
-        ``submission_id`` 非 None 时包一层 ``_guarded_operation``：operation 以未捕获
-        异常退出也给该 submission 一个 ``turn_failed`` 终结事件并清理 ``_pending``
-        （ADR 0029 终结信号完整），否则订阅者只能永久等待、introspect 留幽灵 turn。
-        """
-        body = (
-            coroutine if submission_id is None
-            else self._guarded_operation(submission_id, coroutine)
-        )
-        task = asyncio.create_task(
-            body,
-            name=f"engine-operation:{self._session_id}:{name}",
-        )
-        self._operation_tasks.add(task)
-        task.add_done_callback(self._forget_operation)
-        return task
+        """创建并登记 Engine-owned operation，终态总会检索异常。"""
+        return self._ops.start_operation(coroutine, name=name, submission_id=submission_id)
 
     async def _guarded_operation(
         self, submission_id: str, coroutine: Coroutine[Any, Any, None],
     ) -> None:
-        """operation 崩溃 → 终结事件 + 清 _pending，再原样上抛（日志由 _forget_operation 记）。
-
-        取消（收敛路径）原样传播：finalize 会对仍在订阅的 submission 统一投
-        engine_shutdown 终结。
-        """
-        try:
-            await coroutine
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:
-            self._pending.pop(submission_id, None)
-            await self._emit_operation_terminal(submission_id, exc)
-            raise
+        """operation 崩溃 → 终结事件 + 清 _pending，再原样上抛（日志由 _forget_operation 记）。"""
+        await self._ops.guarded_operation(submission_id, coroutine)
 
     async def _emit_operation_terminal(
         self, submission_id: str, exc: BaseException | None, *, kind: str | None = None,
     ) -> None:
-        """给一个 submission 发 engine 层面的 ``turn_failed`` 终结事件。
-
-        exc 非 None → kind 取异常类名、failure_class 走 classify_failure；
-        exc None + kind（如 ``engine_shutdown`` / ``cancelled``）→ failure_class=cancelled。
-        """
-        if exc is not None:
-            failure_class, suggested_action = classify_failure(exc)
-            error_kind = type(exc).__name__
-            error_msg = str(exc) or error_kind
-        else:
-            failure_class = "cancelled"
-            suggested_action = suggested_action_for("cancelled")
-            error_kind = kind or "cancelled"
-            error_msg = error_kind
-        await self._emit(
-            EventMsg(
-                submission_id=submission_id,
-                msg=TurnFailed(
-                    data={
-                        "error": error_msg,
-                        "kind": error_kind,
-                        "failure_class": failure_class,
-                        "suggested_action": suggested_action,
-                        "recovery": recommend_recovery(failure_class).to_dict(),
-                        "request_id": None,
-                        "iterations": 0,
-                        "is_root": True,
-                    }
-                ),
-            )
-        )
+        """给一个 submission 发 engine 层面的 ``turn_failed`` 终结事件。"""
+        await self._ops.emit_operation_terminal(submission_id, exc, kind=kind)
 
     def _forget_operation(self, task: asyncio.Task[None]) -> None:
         """检索 operation 终态并释放 Engine 显式 ownership。"""
-        self._operation_tasks.discard(task)
-        if task.cancelled():
-            return
-        try:
-            task.result()
-        except BaseException as exc:  # noqa: BLE001
-            logger.error(
-                "engine operation task failed: %s",
-                task.get_name(),
-                exc_info=exc,
-            )
+        self._ops.forget_operation(task)
 
     async def _converge_operations(self) -> asyncio.CancelledError | None:
         """取消并等待所有 operation；actor 自身取消也不得截断收敛。"""
-        actor_cancellation: asyncio.CancelledError | None = None
-        while self._operation_tasks:
-            tasks = tuple(self._operation_tasks)
-            for task in tasks:
-                task.cancel()
-            waiter = asyncio.gather(*tasks, return_exceptions=True)
-            while not waiter.done():
-                try:
-                    await asyncio.shield(waiter)
-                except asyncio.CancelledError as exc:
-                    actor_cancellation = actor_cancellation or exc
-                    current = asyncio.current_task()
-                    if current is not None:
-                        current.uncancel()
-                    for task in tasks:
-                        task.cancel()
-            waiter.result()
-            # Python 3.13 对全 done futures 的 gather 可 eager 完成，不保证让
-            # _forget_operation callback 先运行；此处同步释放 ownership，避免
-            # 因 done task 仍留在 set 中形成无 await 的 busy loop。
-            for task in tasks:
-                self._operation_tasks.discard(task)
-        return actor_cancellation
-
-    # suspension-TTL 实现已下沉 suspension_ttl.py（Wave 4 模块切分）。
-    # 以下薄委托保留白盒寻址名：spawn_driver / 多个测试按 engine._arm_ttl_timer、
-    # engine._ttl_expire_after 调用，test_pool_operation_ownership_review 还对
-    # AgentEngine._rearm_ttl_timers_cold 做 monkeypatch.setattr。
+        return await self._ops.converge_operations()
 
     def _arm_ttl_timer(self, data: dict[str, Any]) -> None:
         """按 turn_suspended 事件武装到期定时器（实现见 SuspensionTtlScheduler.arm）。"""
@@ -1121,16 +1036,14 @@ class AgentEngine:
         self._ttl.cancel_all()
 
 
+    # -----------------------------------------------------------------
+    # 实现已下沉 engine_lifecycle.py（Wave 4）。以下为薄委托：engine 是唯一白盒
+    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
+    # -----------------------------------------------------------------
+
     async def _memory_session_end(self) -> None:
         """K3 teardown：shutdown 时调 memory_store.on_session_end。best-effort。"""
-        if self._memory_store is None:
-            return
-        try:
-            await self._memory_store.on_session_end(
-                thread_id=self._thread_id, items=list(self._history)
-            )
-        except Exception:
-            logger.exception("memory on_session_end failed (ignored)")
+        await self._lifecycle.memory_session_end()
 
     async def _finalize_run_lifecycle(
         self,
@@ -1139,53 +1052,11 @@ class AgentEngine:
         shutdown_requested: bool,
     ) -> None:
         """按原顺序收敛 actor、operation、持久化 flush 与订阅者终态。"""
-        self._running = False
-        if self._audit_state is not None:
-            self._audit_state.coordinator.cancel_session_root()
-            await finalize_audited_mailbox(
-                self._audit_state,
-                self._audited_mailbox,
-            )
-        cancel.cancel()
-        self._cancel_ttl_timers()
-        actor_cancellation = await self._converge_operations()
-        spawn_cancellation = await self._spawn.converge_owned_tasks()
-        actor_cancellation = actor_cancellation or spawn_cancellation
-        if shutdown_requested:
-            await self._memory_session_end()
-        # ADR 0029 终结信号完整：过滤订阅（按 submission_id 收事件）收不到全局
-        # shutdown（id 不匹配），必须逐个投 turn_failed{engine_shutdown}；队列里
-        # 尚未出队的 submission 同样终结，否则订阅者永久挂死。
-        await self._terminate_orphan_submissions()
-        # 通知所有 subscriber 退出：经统一投递路径，shutdown 也获全局 seq +
-        # per-subscriber delivery_seq（保持两个序号在退出事件上同样连续可自检）。
-        shutdown_ev = EventMsg(submission_id="*", msg=ShutdownMsg())
-        shutdown_ev.seq = self._seq
-        self._seq += 1
-        for subscriber in list(self._all_subs):
-            self._deliver(subscriber, shutdown_ev)
-        # 此后再来的过滤订阅直接拿到合成终结（见 subscribe_envelopes），不留竞态窗口
-        self._closed = True
-        if actor_cancellation is not None:
-            raise actor_cancellation
+        await self._lifecycle.finalize_run_lifecycle(cancel, shutdown_requested=shutdown_requested)
 
     async def _terminate_orphan_submissions(self) -> None:
-        """Shutdown 收尾：对仍在订阅的与队列残留的 submission 投 engine_shutdown 终结。
-
-        只发事件、**不动队列**：audit 模式的 durable accepted token 必须留在队列里
-        供复活的 actor 继续处理（application cancel 契约）；legacy Submission 随
-        engine 一起消亡，但本进程的订阅者仍需终结信号。
-        """
-        terminated: set[str] = set()
-        for sid in list(self._event_subs):
-            terminated.add(sid)
-            await self._emit_operation_terminal(sid, None, kind="engine_shutdown")
-        for sub in list(self._submissions._queue):  # noqa: SLF001 —— 只读遍历，不出队
-            if sub.id in terminated or isinstance(sub, AcceptedUserMessage):
-                continue
-            terminated.add(sub.id)
-            await self._emit_operation_terminal(sub.id, None, kind="engine_shutdown")
-        self._pending.clear()
+        """Shutdown 收尾：对仍在订阅的与队列残留的 submission 投 engine_shutdown 终结。"""
+        await self._lifecycle.terminate_orphan_submissions()
 
     # -----------------------------------------------------------------
     # Main loop
