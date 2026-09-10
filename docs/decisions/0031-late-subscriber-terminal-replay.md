@@ -73,5 +73,6 @@ engine 记住每个 submission 的**最后一条终结事件**，过滤订阅在
 - `tests/loop/test_late_subscriber_terminal.py`：9 个用例——已终态补投真实事件（含 data / seq 一致）、
   三种终结 kind 均记账、`delivery_seq` 从 0、未知 submission 仍等待、订阅早于 submit 行为不变、
   有界淘汰、`terminal_replay_size=0` 关闭。
-- 归因探针 `chore/flake-triage` 分支的 `test_probe_late_subscribe_after_terminal`（改前确定性失败）
-  现已通过。
+- 归因阶段另有一个一次性探针 `test_probe_late_subscribe_after_terminal`，改前确定性失败、改后通过。
+  它只为定位用，**未入库**（临时排查脚本不应进 CI 每轮跑）；其覆盖的行为已由上面那组正式用例
+  承接，探针分支已随本轮收尾删除。
