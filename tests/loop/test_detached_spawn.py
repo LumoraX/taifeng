@@ -1061,13 +1061,35 @@ async def test_cold_recovery_rebuilds_handles_and_barrier(skills_dir, threads_di
         model_client=client, compressors=[])
     engine = await pool.get_or_create(
         session_id="cold1", entry_skill_id="code-reviewer")
+
+    # 订阅事件：冷恢复读的是子 thread 的 `spawn_settled` 锚（`_persist_settled` 落盘），
+    # 而 `spawn_status` 只是**非阻塞的内存视图**——`_finalize_spawn` 先 `set_result(done)`
+    # 再 `await _persist_settled`，故只等状态位会在锚未落盘时就 release + 冷重载，
+    # 重建出来的状态不是 done。`spawn_completed` 在落盘**之后**才发，是唯一可靠的门。
+    events: list = []
+
+    async def watch():
+        async for ev in engine.subscribe_all():
+            events.append(ev)
+            if ev.msg.kind == "shutdown":
+                break
+
+    watch_task = asyncio.create_task(watch())
+    await asyncio.sleep(0)  # 让 subscribe_all 注册队列
+
     a = (await engine.spawn_skill(
         skill_id="style-checker", args={}, reason="x"))["handle_id"]
     b = (await engine.spawn_skill(
         skill_id="style-checker", args={}, reason="x"))["handle_id"]
-    assert await _wait(
-        lambda: engine.spawn_status([a, b]).get(a, {}).get("status") == "done"
-        and engine.spawn_status([b])[b]["status"] == "done")
+
+    def _settled(handle_id: str) -> bool:
+        return any(
+            ev.msg.kind == "spawn_completed"
+            and ev.msg.data.get("handle_id") == handle_id
+            for ev in events
+        )
+
+    assert await _wait(lambda: _settled(a) and _settled(b))
     parent_tid = engine.thread_id
 
     # 释放 engine(模拟冷态)——两 spawn 已 done → has_live_spawns()==False → 正常释放
@@ -1081,6 +1103,7 @@ async def test_cold_recovery_rebuilds_handles_and_barrier(skills_dir, threads_di
     st = engine2.spawn_status([a, b])
     assert st[a]["status"] == "done" and st[b]["status"] == "done"
     await pool.close()
+    watch_task.cancel()
 
 
 @pytest.mark.asyncio
