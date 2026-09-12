@@ -267,6 +267,39 @@ class TestEventMapping:
         total = _sum_counter(data, "taifeng.cache.breaks", reason="head_modified")
         assert total == 3
 
+    async def test_provider_retries_counter_by_reason_and_failure_class(
+        self,
+        sink: OtelTelemetrySink,
+        memory_meter_provider: tuple[MeterProvider, InMemoryMetricReader],
+    ) -> None:
+        """provider_retry 按 reason / failure_class 计入 taifeng.provider.retries（ADR 0039）。"""
+        _, reader = memory_meter_provider
+        for attempt in (1, 2):
+            await sink.handle(
+                _event(
+                    "sub-r",
+                    "provider_retry",
+                    {
+                        "reason": "transient_network", "iteration": 0, "attempt": attempt,
+                        "max_attempts": 3, "delay_seconds": 0.5,
+                        "failure_class": "provider_transport",
+                        "error_kind": "TransientNetworkError",
+                    },
+                )
+            )
+        # overflow 自愈同一事件、不同 reason，须分维度计数而非混在一起
+        await sink.handle(
+            _event("sub-r", "provider_retry", {"reason": "context_overflow", "iteration": 1})
+        )
+
+        data = reader.get_metrics_data()
+        assert _sum_counter(data, "taifeng.provider.retries", reason="transient_network") == 2
+        assert _sum_counter(
+            data, "taifeng.provider.retries", failure_class="provider_transport",
+        ) == 2
+        assert _sum_counter(data, "taifeng.provider.retries", reason="context_overflow") == 1
+        assert _sum_counter(data, "taifeng.provider.retries") == 3
+
     async def test_compaction_completed_with_cache_invalidated_also_increments_cache_breaks(
         self,
         sink: OtelTelemetrySink,

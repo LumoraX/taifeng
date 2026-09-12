@@ -15,10 +15,18 @@ turn 内一次 LLM 采样被 provider 以「上下文超长」（`ContextOverflo
 绕过各策略 `should_trigger`，以最高优先级策略（`_strategies[0]`，按 priority 倒序）直接 `compress`。无策略返回 None。存在理由：overflow 成因即本地估算偏低 → 各策略 `should_trigger` 必返回 None → `maybe_compress` 压不动，必须强制。
 
 ### `ProviderRetry`（`loop/event.py`，`kind="provider_retry"`）
+两类来源共用同一事件，按 `reason` 区分（ADR 0039）：
+
 | 字段 | 含义 |
 | --- | --- |
-| `data.reason` | 重试原因，当前取值 `context_overflow` |
-| `data.iteration` | 发生自愈的采样圈序号 |
+| `data.reason` | `context_overflow`（本契约的 overflow 自愈）或触发网络退避重试的 `LLMError.kind`（`transient_network` / `rate_limit` / `server_error` …，由 `RetryingModelClient` 发起） |
+| `data.iteration` | 发生自愈 / 重试的采样圈序号（1-based） |
+| `data.attempt` / `data.max_attempts` | **仅网络重试**：刚失败的 attempt 序号（1-based）与本次 `stream` 的上限 |
+| `data.delay_seconds` | **仅网络重试**：本次退避时长（退避算法与服务端 hint 取较大者）；事件在退避**之前** emit |
+| `data.failure_class` / `data.error_kind` | **仅网络重试**：稳定失败分类 / 异常类名 |
+| `data.transport_phase` / `data.retry_after_seconds` | **仅网络重试**：传输相位（`connect` / `stream`，仅 `TransientNetworkError`）/ 服务端 `retry_after` 提示秒数；无则 `null` |
+
+网络重试路径的行为契约见 [llm-client 活文档 §RetryingModelClient](../llm-client.md)；本契约下文只描述 overflow 自愈。
 
 ### `_maybe_compress(phase, force, bypass_trigger, allow_head) -> bool`（`loop/turn.py`）
 - `phase="overflow"`：`CompressionPhase` 取值；默认注入语义同 mid_turn（`DO_NOT_INJECT`，只动 `anchor+1` 起的 tail、保 cache anchor）。

@@ -11,13 +11,19 @@ audit 互斥是设计约束，不是缺陷（见 ADR 0037）。
 
 参照：codex ``codex-rs/core/src/client.rs::stream_max_retries``（退避与放弃判据）。
 差异：codex 在流未开始前重试，taifeng 用「零产出」作为等价且更宽的判据。
+
+可观测（R3，ADR 0039）：每次退避重试在睡眠**之前**把 :class:`RetryAttempt` 交给宿主注入的
+观察者（``set_retry_observer``），由 TurnRunner 上 ``provider_retry`` 事件；本模块只产纯数据，
+不依赖 loop 层事件类型，也不往 ``ResponseEvent`` 流里塞新 kind（金样形状不受重试次数影响）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from taifeng.llm.errors import LLMError
 from taifeng.llm.retry import RetryConfig, compute_backoff_delay
@@ -47,6 +53,37 @@ _CONTENT_KINDS = frozenset({
 _META_KINDS = frozenset({"created", "server_model", "rate_limits"})
 
 
+@dataclass(frozen=True)
+class RetryAttempt:
+    """一次即将退避重试的事实——供宿主上 R3 可观测总线（纯数据，不依赖 loop 层事件类型）。
+
+    Attributes:
+        attempt: 刚失败的 attempt 序号（1-based）。
+        max_attempts: 本次 ``stream`` 的 attempt 上限（``RetryConfig.max_attempts``）。
+        delay_seconds: 本次退避时长（退避算法与服务端 hint 取较大者）。
+        reason: 触发重试的 ``LLMError.kind``
+            （``transient_network`` / ``rate_limit`` / ``server_error`` …）。
+        failure_class: 该错误的稳定 ``failure_class``。
+        error_kind: 异常类名（与 ``FailureContext.error_kind`` 同义）。
+        transport_phase: ``TransientNetworkError`` 的传输相位（``connect`` / ``stream``）；
+            其他错误为 None。
+        retry_after_seconds: 服务端 ``retry_after`` 提示（秒）；无则 None。
+    """
+
+    attempt: int
+    max_attempts: int
+    delay_seconds: float
+    reason: str
+    failure_class: str
+    error_kind: str
+    transport_phase: str | None
+    retry_after_seconds: float | None
+
+
+# 重试观察者：宿主经 ``set_retry_observer`` 注入，每次退避前被 await 一次。
+RetryObserver = Callable[[RetryAttempt], Awaitable[None]]
+
+
 class _RetryingSession:
     """按 ``RetryConfig`` 重试底层 session 的 ``stream``。"""
 
@@ -63,6 +100,7 @@ class _RetryingSession:
         self._config = config
         self._cancel = cancel
         self._model = model
+        self._observer: RetryObserver | None = None
 
     async def __aenter__(self) -> _RetryingSession:
         return self
@@ -70,8 +108,38 @@ class _RetryingSession:
     async def __aexit__(self, *exc: object) -> None:
         return None
 
-    def _should_retry(self, exc: BaseException, *, produced: bool, attempt: int) -> bool:
-        """判定本次失败是否还能重试（三个独立闸门，任一不过即放弃）。"""
+    def set_retry_observer(self, observer: RetryObserver | None) -> None:
+        """注入重试观察者（可选协议，R3）。
+
+        宿主用 ``getattr(session, "set_retry_observer", None)`` 探测——非重试型 session
+        没有此方法即静默跳过，与 ``last_attempt_checkpoint`` 同一探测风格；透明包装器
+        （如台账录制 session）靠 ``__getattr__`` 转发即可接通。观察者在每次退避**之前**
+        被 await，事件因此先于等待出现在总线上（运维看到「正在退避」，不是事后补记）。
+        """
+        self._observer = observer
+
+    def _retry_attempt(self, exc: LLMError, attempt: int, delay: float) -> RetryAttempt:
+        """把一次已判定可重试的失败折成 ``RetryAttempt``（``_should_retry`` 通过后调用）。"""
+        hint = getattr(exc, "retry_after_seconds", None)
+        return RetryAttempt(
+            attempt=attempt + 1,
+            max_attempts=self._config.max_attempts,
+            delay_seconds=delay,
+            reason=exc.kind,
+            failure_class=exc.failure_class,
+            error_kind=type(exc).__name__,
+            transport_phase=getattr(exc, "transport_phase", None),
+            retry_after_seconds=float(hint) if isinstance(hint, (int, float)) else None,
+        )
+
+    def _should_retry(
+        self, exc: BaseException, *, produced: bool, attempt: int
+    ) -> TypeGuard[LLMError]:
+        """判定本次失败是否还能重试（三个独立闸门，任一不过即放弃）。
+
+        返回 True 蕴含 ``exc`` 是 ``LLMError``（闸门 2），故以 ``TypeGuard`` 表达——
+        调用方据此直接读 ``exc.kind`` / ``exc.failure_class``，无需二次 isinstance。
+        """
         # 闸门 1：已产出内容 —— 重发会让调用方收到重复文本 / 重复 tool call
         if produced:
             return False
@@ -119,6 +187,10 @@ class _RetryingSession:
                     "retrying model stream: attempt=%d kind=%s delay=%.2fs",
                     attempt + 1, getattr(exc, "kind", "unknown"), delay,
                 )
+                # R3：退避前先把重试事实交给观察者（宿主据此 emit provider_retry）——
+                # 只留 logger.info 等于事件总线上看不见任何一次网络重试（ADR 0039）
+                if self._observer is not None:
+                    await self._observer(self._retry_attempt(exc, attempt, delay))
                 await self._sleep_or_cancel(delay)
 
         # 循环只能经 return（成功）或 raise（放弃）退出；走到这里说明判据自相矛盾
@@ -148,6 +220,9 @@ class RetryingModelClient:
 
     注意：**不声明** ``OneNetworkAttemptModelClient``——一次 ``stream`` 可能发生
     多个网络 attempt，strict audit 模式会如实拒绝本装饰器（设计约束，见 ADR 0037）。
+
+    可观测：session 暴露 ``set_retry_observer``，TurnRunner 自动接入并把每次退避重试
+    上 ``provider_retry`` 事件（ADR 0039）；业务侧无需额外接线。
     """
 
     def __init__(self, inner: ModelClient, *, config: RetryConfig | None = None) -> None:

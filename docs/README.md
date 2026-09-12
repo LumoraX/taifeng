@@ -72,6 +72,7 @@ Later ADRs:
 21. [ADR 0021: Doom-loop detection](decisions/0021-doom-loop-detection.md): 识别工具调用的原地打转并注入提示，避免无进展的循环烧完预算。
 22. [ADR 0022: Reusable approval grants](decisions/0022-reusable-approval-grants.md): 一次人工批准可在其作用域内复用，避免同一操作反复弹审批。
 38. [ADR 0038: engine / turn 按职责切分为协作者模块](decisions/0038-loop-core-module-split.md): 切分手法按**内聚度**二分（内聚序列成协作者类、独立处理成模块函数），协作者不自持运行态；宿主是**唯一白盒寻址面**（薄委托 + 兄弟调用回弹，兼顾「打宿主属性」与「打模块级符号」两类 monkeypatch 注入点）；行为零变化的判据是「既有测试一行未改即全绿」。`engine.py` 2100 行与 `sample_once` 三段为两处具名红线例外，理由与上限均可核算。活文档 [loop-core-module-structure](architecture/capabilities/loop-core-module-structure.md)。
+39. [ADR 0039: 网络重试上事件总线——经 session 可选观察者，而非流内事件](decisions/0039-network-retry-observable.md): `RetryingModelClient` 此前每次退避只写 `logger.info`，事件总线上看不到任何一次网络重试（实测 3 次 attempt、0 条事件），R3 点名的 `provider_retry` 只服务 overflow 自愈。决策：复用 `ProviderRetry` 以 `reason` 区分来源；观察者经 session 可选协议 `set_retry_observer` 注入、宿主 `getattr` 探测（协议签名不动、透明包装靠 `__getattr__` 接通）；**不**往 `ResponseEvent` 流塞新 kind（金样形状会随重试次数漂移）；退避**之前** emit；OTel `taifeng.provider.retries` 落地。断路器与 `retryable_kinds` 两套真相另案。
 
 ### Fourth Pass: Gap Tracking
 

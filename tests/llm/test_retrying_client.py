@@ -156,3 +156,149 @@ def test_exported_from_package() -> None:
     import taifeng.llm as llm_pkg
 
     assert "RetryingModelClient" in llm_pkg.__all__
+
+
+# ───────────────────────── ADR 0039：重试可观测（观察者协议） ─────────────────────────
+
+
+class _CapturingObserver:
+    """记录每次退避重试事实的观察者。"""
+
+    def __init__(self) -> None:
+        self.seen: list[Any] = []
+
+    async def __call__(self, attempt: Any) -> None:
+        self.seen.append(attempt)
+
+
+async def _drain_observed(client: Any, observer: Any) -> list[Any]:
+    """接上观察者再 drain（模拟 TurnRunner 的 getattr 探测 + set_retry_observer）。"""
+    async with client.session(cancel=CancellationToken(name="t")) as s:
+        attach = getattr(s, "set_retry_observer", None)
+        assert callable(attach), "重试型 session 必须暴露 set_retry_observer"
+        attach(observer)
+        return [ev async for ev in s.stream(_req())]
+
+
+async def test_retry_observer_sees_each_backoff_with_facts() -> None:
+    """f) 两次零产出失败后成功 → 观察者恰收到 2 条，序号/原因/分类/相位/上限齐全。"""
+    from taifeng.llm.retrying import RetryAttempt, RetryingModelClient
+
+    inner = _ScriptedClient([
+        (TransientNetworkError("dns", transport_phase="connect"), False),
+        (TransientNetworkError("eof"), False),
+        (None, True),
+    ])
+    obs = _CapturingObserver()
+    events = await _drain_observed(RetryingModelClient(inner, config=_fast_config()), obs)
+
+    assert events[-1].kind == "completed" and inner.attempts == 3
+    assert [a.attempt for a in obs.seen] == [1, 2]
+    first, second = obs.seen
+    assert isinstance(first, RetryAttempt)
+    assert first.max_attempts == 3
+    assert first.reason == "transient_network"
+    assert first.failure_class == "provider_transport"
+    assert first.error_kind == "TransientNetworkError"
+    assert first.transport_phase == "connect"
+    assert second.transport_phase == "stream", "未显式分类的传输错默认 stream 相位"
+    assert first.retry_after_seconds is None
+    assert first.delay_seconds >= 0.0
+
+
+async def test_retry_observer_silent_when_no_retry_happens() -> None:
+    """g) 首发即成功 → 观察者一次都不被调用（无重试就无事件）。"""
+    from taifeng.llm.retrying import RetryingModelClient
+
+    obs = _CapturingObserver()
+    client = RetryingModelClient(_ScriptedClient([(None, True)]), config=_fast_config())
+    await _drain_observed(client, obs)
+    assert obs.seen == []
+
+
+async def test_retry_observer_not_called_when_content_produced() -> None:
+    """h) 已产出后失败 → 不重试，观察者也不得被调用（否则事件流谎报「重试中」）。"""
+    from taifeng.llm.retrying import RetryingModelClient
+
+    obs = _CapturingObserver()
+    with pytest.raises(TransientNetworkError):
+        await _drain_observed(
+            RetryingModelClient(
+                _ScriptedClient([(TransientNetworkError("late"), True)]), config=_fast_config(),
+            ),
+            obs,
+        )
+    assert obs.seen == []
+
+
+async def test_retry_observer_carries_server_hint() -> None:
+    """i) 限流带 retry_after → 观察者拿到 hint 原值，且退避不短于 hint。"""
+    from taifeng.llm.errors import RateLimitError
+    from taifeng.llm.retrying import RetryingModelClient
+
+    err = RateLimitError("slow down")
+    err.retry_after_seconds = 0.003
+    obs = _CapturingObserver()
+    await _drain_observed(
+        RetryingModelClient(_ScriptedClient([(err, False), (None, True)]), config=_fast_config()),
+        obs,
+    )
+    (only,) = obs.seen
+    assert only.reason == "rate_limit" and only.failure_class == "provider_rate_limit"
+    assert only.retry_after_seconds == 0.003
+    assert only.delay_seconds >= 0.003
+
+
+async def test_retry_observer_runs_before_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """j) 观察者在退避睡眠**之前**被调用：事件先于等待上总线，不是事后补记。"""
+    from taifeng.llm import retrying
+    from taifeng.llm.retrying import RetryingModelClient
+
+    order: list[str] = []
+
+    async def _fake_sleep(self: Any, delay: float) -> None:
+        order.append("sleep")
+
+    monkeypatch.setattr(retrying._RetryingSession, "_sleep_or_cancel", _fake_sleep)
+
+    class _Obs:
+        async def __call__(self, attempt: Any) -> None:
+            order.append(f"observe#{attempt.attempt}")
+
+    inner = _ScriptedClient([(TransientNetworkError("a"), False), (None, True)])
+    await _drain_observed(RetryingModelClient(inner, config=_fast_config()), _Obs())
+    assert order == ["observe#1", "sleep"]
+
+
+async def test_retry_observer_reachable_through_forwarding_wrapper() -> None:
+    """k) 透明包装 session（如台账录制 session 的 __getattr__ 转发）也能接上观察者。"""
+    from taifeng.llm.retrying import RetryingModelClient
+
+    class _Forwarding:
+        """只实现 stream + __getattr__ 转发的透明包装（模拟 _RecordingSession）。"""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        async def __aenter__(self) -> _Forwarding:
+            await self._inner.__aenter__()
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            await self._inner.__aexit__(*exc)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        async def stream(self, request: ApiRequest) -> AsyncIterator[Any]:
+            async for ev in self._inner.stream(request):
+                yield ev
+
+    inner = _ScriptedClient([(TransientNetworkError("a"), False), (None, True)])
+    base = RetryingModelClient(inner, config=_fast_config())
+    obs = _CapturingObserver()
+    async with _Forwarding(base.session(cancel=CancellationToken(name="t"))) as s:
+        s.set_retry_observer(obs)
+        events = [ev async for ev in s.stream(_req())]
+    assert events[-1].kind == "completed"
+    assert [a.attempt for a in obs.seen] == [1]

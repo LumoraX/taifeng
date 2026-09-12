@@ -219,7 +219,7 @@ class OtelTelemetrySink:
             "taifeng.telemetry.otel", _taifeng_pkg.__version__
         )
 
-        # 预建 2 个 counter；taifeng.provider.retries 暂搁待 ProviderRetry 事件落地
+        # 预建 counter（ProviderRetry 已落地：网络退避重试与 overflow 自愈共用 provider_retry）
         self._counter_compaction: Counter = meter.create_counter(
             "taifeng.compaction.attempts",
             description="次数：CompactionStarted 派发计数",
@@ -227,6 +227,10 @@ class OtelTelemetrySink:
         self._counter_cache_breaks: Counter = meter.create_counter(
             "taifeng.cache.breaks",
             description="次数：CacheBreakDetected / CompactionCompleted(cache_invalidated=True)",
+        )
+        self._counter_retries: Counter = meter.create_counter(
+            "taifeng.provider.retries",
+            description="次数：ProviderRetry，按 reason / failure_class 维度",
         )
         # G3：turn 失败按稳定 failure_class 维度计数（telemetry 聚合）
         self._counter_failures: Counter = meter.create_counter(
@@ -283,6 +287,8 @@ class OtelTelemetrySink:
             self._on_compaction_completed(submission_id, data)
         elif kind == "cache_break_detected":
             self._on_cache_break(submission_id, data)
+        elif kind == "provider_retry":
+            self._on_provider_retry(submission_id, data)
         else:
             self._on_generic_event(submission_id, kind, data)
 
@@ -422,6 +428,17 @@ class OtelTelemetrySink:
                 name="cache_break_detected",
                 attributes=_safe_attrs(data) | {"taifeng.submission_id": submission_id},
             )
+
+    def _on_provider_retry(self, submission_id: str, data: dict[str, Any]) -> None:
+        # 网络退避重试与 overflow 自愈共用事件：reason 区分来源，failure_class 供聚合看板
+        self._counter_retries.add(
+            1,
+            attributes={
+                "reason": str(data.get("reason", "unknown")),
+                "failure_class": str(data.get("failure_class", "unknown")),
+            },
+        )
+        self._on_generic_event(submission_id, "provider_retry", data)
 
     def _on_generic_event(
         self, submission_id: str, kind: str, data: dict[str, Any]

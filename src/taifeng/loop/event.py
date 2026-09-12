@@ -361,14 +361,23 @@ class CacheBreakDetected(_Msg):
 
 
 class ProviderRetry(_Msg):
-    """A1：provider 以「上下文超长」拒绝采样 → 触发有界自愈（强制压缩 + 重采样）。
+    """provider 采样失败后的**有界自愈 / 重试**动作（R3 关键路径事件）。
 
-    紧随其后会出现一对 phase=overflow 的 compaction_started / compaction_completed
-    （承载 compaction_attempted(trigger=context_overflow) 语义），以及重采样事件。
+    两类来源共用，按 ``reason`` 区分：
+
+    - ``reason="context_overflow"``（A1 reactive-compaction-recovery）：provider 以「上下文超长」
+      拒绝采样 → 强制压缩 + 重采样一次；紧随其后是一对 phase=overflow 的
+      compaction_started / compaction_completed
+      （承载 compaction_attempted(trigger=context_overflow) 语义）。
+    - ``reason ∈ RetryConfig.retryable_kinds``（``transient_network`` / ``rate_limit`` /
+      ``server_error`` …）：
+      ``RetryingModelClient`` 在零产出 attempt 失败后退避重试（ADR 0039）；事件在退避**之前** emit。
     """
 
     kind: Literal["provider_retry"] = "provider_retry"
-    """data = {"reason": str, "iteration": int}；reason 当前取值 context_overflow。"""
+    """data = {"reason": str, "iteration": int}；网络重试另带 {"attempt", "max_attempts",
+    "delay_seconds", "failure_class", "error_kind", "transport_phase", "retry_after_seconds"}
+    （字段含义见 ``llm/retrying.RetryAttempt``）。"""
 
 
 class LlmRequestRecorded(_Msg):

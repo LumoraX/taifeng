@@ -57,6 +57,8 @@ _KIND_TAG = {
     "pinned_state_reinjected": ("comp", _Colors.GRAY, "📌"),
     "budget_hint_injected": ("comp", _Colors.GRAY, "🪙"),
     "cache_break_detected": ("cach", _Colors.RED, "!"),
+    # provider 采样重试（黄色 ↻ —— 自愈中，非终态）：网络退避重试 / overflow 自愈共用
+    "provider_retry": ("llm ", _Colors.YELLOW, "↻"),
     # Permission gate 事件（红色 —— 表示拦截）
     "permission_prompt_timeout": ("perm", _Colors.RED, "⏱"),
     "skill_dispatch_hook_denied": ("hook", _Colors.RED, "✗"),
@@ -225,6 +227,16 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
             f"tool={data.get('tool')!r} consecutive={data.get('consecutive')} "
             f"threshold={data.get('threshold')}"
         )
+    elif ev.msg.kind == "provider_retry":
+        # 两类来源共用：网络重试带 attempt/backoff/failure_class；overflow 自愈只有 reason
+        if "attempt" in data:
+            parts.append(
+                f"{data.get('reason')} attempt {data.get('attempt')}/{data.get('max_attempts')} "
+                f"backoff={float(data.get('delay_seconds') or 0):.2f}s "
+                f"class={data.get('failure_class')}"
+            )
+        else:
+            parts.append(f"{data.get('reason')} iter={data.get('iteration')}")
     elif ev.msg.kind == "cache_break_detected":
         u = "unexpected" if data.get("unexpected") else "expected"
         parts.append(f"{u} drop={data.get('token_drop')} reason={data.get('reason')}")

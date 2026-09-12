@@ -545,6 +545,9 @@ RetryConfig(
 )
 ```
 
+- 每次退避重试在退避**之前** emit `provider_retry`（`reason` = 错误 kind，另带 `attempt` / `max_attempts` / `delay_seconds` / `failure_class` / `error_kind` / `transport_phase` / `retry_after_seconds`），OTel `taifeng.provider.retries` 按 `reason` / `failure_class` 计数——`TurnRunner` 自动接入，业务侧无需接线（ADR 0039）。
+- `retryable_kinds` 只匹配 `LLMError.kind`，与 `LLMError.retryable` 无关：`unreliable_finish`（网关错标的零产出 `content_filter`）默认**不在**集合内，需要时显式加入。
+
 ## 7.5 OtelSinkConfig（OTel / OTLP 出口，可选 extra）
 
 > 业务侧 `uv pip install -e ".[telemetry-otel]"` 启用；详见 [架构总览 §R4](architecture/overview.md#r4-可观测)。

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 import asyncio
@@ -32,6 +33,7 @@ from taifeng.tool.spec import ToolContext
 from typing import Any
 
 if TYPE_CHECKING:
+    from taifeng.llm.retrying import RetryAttempt
     from taifeng.loop.turn import TurnRunner
 
 
@@ -240,6 +242,24 @@ class TurnSample:
             iteration_history_len=iteration_history_len,
         )
 
+    async def _emit_provider_retry(self, iteration: int, attempt: RetryAttempt) -> None:
+        """网络层退避重试 → ``provider_retry``（与 overflow 自愈共用事件，靠 ``reason`` 区分）。"""
+        await self.__sample_owner._emit(
+            ProviderRetry(
+                data={
+                    "reason": attempt.reason,
+                    "iteration": iteration,
+                    "attempt": attempt.attempt,
+                    "max_attempts": attempt.max_attempts,
+                    "delay_seconds": attempt.delay_seconds,
+                    "failure_class": attempt.failure_class,
+                    "error_kind": attempt.error_kind,
+                    "transport_phase": attempt.transport_phase,
+                    "retry_after_seconds": attempt.retry_after_seconds,
+                }
+            )
+        )
+
     async def sample_once(self, iteration: int) -> tuple[str, bool]:
         """一次 LLM 采样 + 工具调度，返回 (本轮 assistant text, 是否有 tool call)。"""
 
@@ -254,6 +274,12 @@ class TurnSample:
         iteration_history_len = prep.iteration_history_len
 
         sess = model_session_for_turn(self.__sample_owner, iteration)
+        # R3 网络重试可观测（ADR 0039）：RetryingModelClient 的 session 暴露可选
+        # ``set_retry_observer``，每次退避重试即 emit ``provider_retry``（reason = 错误
+        # kind）。非重试型 session 无此方法 → 跳过；探测风格同下方 ``last_attempt_checkpoint``。
+        attach_retry_observer = getattr(sess, "set_retry_observer", None)
+        if callable(attach_retry_observer):
+            attach_retry_observer(partial(self._emit_provider_retry, iteration))
         assistant_text = ""
         # 取消时落 partial assistant 用（ADR 0029 / R5）：本轮已流出的文本
         self.__sample_owner._streamed_text = ""

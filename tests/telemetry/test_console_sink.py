@@ -35,3 +35,29 @@ def test_post_turn_hook_fired_has_dedicated_render() -> None:
     assert "post_turn_hook_fired {" not in line, "不应是 raw data dump"
     assert "completed" in line
     assert "hooks=1" in line
+
+
+def test_provider_retry_network_has_dedicated_render() -> None:
+    """provider_retry（网络退避重试）：专用 tag + reason/attempt/backoff/class，不落兜底。"""
+    from taifeng.loop.event import ProviderRetry
+
+    line = _line(ProviderRetry(data={
+        "reason": "transient_network", "iteration": 0, "attempt": 2, "max_attempts": 3,
+        "delay_seconds": 1.25, "failure_class": "provider_transport",
+        "error_kind": "TransientNetworkError", "transport_phase": "connect",
+        "retry_after_seconds": None,
+    }))
+    assert " evt " not in line, f"不应落 evt 兜底：{line}"
+    assert "provider_retry {" not in line, "不应是 raw data dump"
+    assert "transient_network attempt 2/3" in line
+    assert "backoff=1.25s" in line
+    assert "class=provider_transport" in line
+
+
+def test_provider_retry_overflow_shape_still_renders() -> None:
+    """provider_retry（overflow 自愈，无 attempt 字段）：沿用 reason + iter 简式，不崩。"""
+    from taifeng.loop.event import ProviderRetry
+
+    line = _line(ProviderRetry(data={"reason": "context_overflow", "iteration": 1}))
+    assert " evt " not in line
+    assert "context_overflow iter=1" in line
