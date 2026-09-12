@@ -11,7 +11,6 @@ from taifeng.llm.errors import (
     InvalidHistoryError,
     InvalidRequestError,
     InvalidResponseError,
-    TransientNetworkError,
 )
 from taifeng.llm.events import (
     ResponseEvent,
@@ -36,6 +35,7 @@ from taifeng.llm.providers._shared import (
     extract_usage_openai_family,
     iter_lines_with_cancel,
     parse_sse_data,
+    transport_error,
 )
 from taifeng.llm.providers.openai._shared import (
     OPENAI_DEFAULT_BASE_URL,
@@ -445,10 +445,10 @@ class OpenAIResponsesSession:
                         else:
                             for emitted in accumulator.preview(event):
                                 yield emitted
-            except httpx.TimeoutException as exc:
-                raise TransientNetworkError(f"timeout: {exc}") from exc
             except httpx.TransportError as exc:
-                raise TransientNetworkError(f"transport: {exc}") from exc
+                # 同 codex/openai_compat：一处 catch 覆盖超时与其余传输失败，
+                # 由 ``transport_error`` 统一判相位并剥离 URL。
+                raise transport_error(exc, provider="openai") from exc
         if not terminal_seen:
             raise InvalidResponseError("Responses stream ended without response.completed")
 

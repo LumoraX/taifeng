@@ -22,7 +22,6 @@ from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
     InvalidRequestError,
     InvalidResponseError,
-    TransientNetworkError,
 )
 from taifeng.llm.events import (
     ResponseEvent,
@@ -42,6 +41,7 @@ from taifeng.llm.providers._shared import (
     extract_request_id,
     extract_usage_gemini,
     parse_sse_data,
+    transport_error,
 )
 from taifeng.llm.types import ApiRequest, TokenUsage
 
@@ -301,15 +301,15 @@ class GeminiSession:
                             chunk, pending_tool_calls,
                         ):
                             yield ev
-            except httpx.TimeoutException as exc:
-                raise TransientNetworkError(f"gemini timeout: {exc}") from exc
             except httpx.TransportError as exc:
                 # 传输层失败统一归瞬时网络错。放宽到 TransportError 是为了覆盖
                 # ProtocolError —— 尤其 RemoteProtocolError（"Server disconnected
                 # without sending a response"，代理/网关流中途断连）。它不属
                 # NetworkError，此前会裸逃 → classify_failure 落 unknown 硬失败，
                 # 既不重试也不挂起恢复（与 openai_compat 同一处修复）。
-                raise TransientNetworkError(f"gemini transport: {exc}") from exc
+                # ``TimeoutException`` 亦属 ``TransportError``，一并由
+                # ``transport_error`` 判相位并剥离 URL。
+                raise transport_error(exc, provider="gemini") from exc
 
         # 流终止真相（llm-provider-native 契约）：没见过任何 finishReason 说明流被
         # 中途掐断，绝不能发 completed 把它伪造成「成功的空回复」。

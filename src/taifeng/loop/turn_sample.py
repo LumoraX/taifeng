@@ -263,7 +263,9 @@ class TurnSample:
         tool_calls: list[dict[str, Any]] = []
         normalized_items: list[dict[str, Any]] | None = None
         responses_completed = False
-        # retry 已由 provider 内 retry_async 兜底(≤3 次);走到这里的 LLMError 即重试耗尽。
+        # retry 由**外层** `RetryingModelClient` 兜底：只在本次 attempt **零产出**时
+        # 重发（已 yield 过内容再重发会重复投递，ADR 0037）；走到这里的 LLMError
+        # 即重试已耗尽或本就不可重试。
         # 可恢复 / 等外部介入类 → 转 SYSTEM_RETRY 挂起(等业务侧 resume 重跑同次 sample);
         # 确定性失败照旧上抛硬失败。CancelledError 走 asyncio 路径,不在此 except 内。
         try:

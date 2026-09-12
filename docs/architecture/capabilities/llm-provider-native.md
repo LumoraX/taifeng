@@ -215,24 +215,38 @@ SSE 事件 SHALL 按 Gemini `data: {...}\n\n` 单行格式解析：
 
 ### Requirement: 网络异常映射到 TransientNetworkError
 
-四家 native client SHALL 捕获 **`httpx.TransportError` 全族**并 raise `TransientNetworkError`，使其归入 `retryable_kinds`。放宽到 `TransportError` 而非只 catch `NetworkError` 是必需的：`RemoteProtocolError`（"Server disconnected without sending a response"，代理/网关流中途断连，本仓实测高发）属 `ProtocolError` ≠ `NetworkError`，只 catch 后者会让它裸逃到 `unknown` 硬失败（ADR 0037）。
+全部 httpx 直连 client（四家 native + codex / openai 两家 Responses）SHALL 捕获 **`httpx.TransportError` 全族**并 raise `TransientNetworkError`，使其归入 `retryable_kinds`。放宽到 `TransportError` 而非只 catch `NetworkError` 是必需的：`RemoteProtocolError`（"Server disconnected without sending a response"，代理/网关流中途断连，本仓实测高发）属 `ProtocolError` ≠ `NetworkError`，只 catch 后者会让它裸逃到 `unknown` 硬失败（ADR 0037）。
 
-| httpx 异常 | Taifeng 异常 |
-| --- | --- |
-| `httpx.ConnectError` | `TransientNetworkError` |
-| `httpx.ConnectTimeout` | `TransientNetworkError` |
-| `httpx.ReadTimeout` | `TransientNetworkError` |
-| `httpx.WriteTimeout` | `TransientNetworkError` |
-| `httpx.RemoteProtocolError` | `TransientNetworkError` |
-| `httpx.PoolTimeout` | `TransientNetworkError` |
+`TimeoutException` 本身即 `TransportError` 子类，故**一处 catch 覆盖全部传输失败**，不再为超时单列分支。归类统一走 `providers/_shared.py` 的 `transport_error()`，它同时落两件事：**判相位**与**剥 URL**。
+
+| httpx 异常 | Taifeng 异常 | `transport_phase` |
+| --- | --- | --- |
+| `httpx.ConnectError` | `TransientNetworkError` | `connect` |
+| `httpx.ConnectTimeout` | `TransientNetworkError` | `connect` |
+| `httpx.PoolTimeout` | `TransientNetworkError` | `connect` |
+| `httpx.ReadTimeout` | `TransientNetworkError` | `stream` |
+| `httpx.WriteTimeout` | `TransientNetworkError` | `stream` |
+| `httpx.ReadError` / `WriteError` | `TransientNetworkError` | `stream` |
+| `httpx.RemoteProtocolError` | `TransientNetworkError` | `stream` |
+| 其余 / 未知类型 | `TransientNetworkError` | `stream`（保守兜底） |
+
+相位按异常**类型**判定（参照 codex `is_connect()`），不看消息文本——文本随 httpx 版本与底层 OS error 漂移。`connect` 意味着连接建立阶段失败、**必然尚无内容产出**；`stream` 意味着可能已产出。相位当前只作**诊断维度**（区分「连不上」与「mid-stream 断流」），**尚未**用于分层退避预算；重试仍由外层 `RetryingModelClient` 按「本次 attempt 零产出」判定（ADR 0037）。两类相位均归 `provider_transport`，**不新增 FailureClass 桶**。
 
 #### Scenario: 连接拒绝归为 transient
 - **WHEN** httpx 抛 `ConnectError("Connection refused")`
-- **THEN** native client SHALL raise `TransientNetworkError`，且 `.kind == "transient_network"` 且 `.retryable == True`
+- **THEN** native client SHALL raise `TransientNetworkError`，且 `.kind == "transient_network"`、`.retryable == True`、`.transport_phase == "connect"`
 
 #### Scenario: 读超时归为 transient
 - **WHEN** httpx 抛 `ReadTimeout`
-- **THEN** native client SHALL raise `TransientNetworkError`，可被 `retry_async` 重试
+- **THEN** native client SHALL raise `TransientNetworkError`，`.transport_phase == "stream"`，可被外层 `RetryingModelClient` 在零产出时重试
+
+#### Scenario: 连接阶段失败标 connect 相位
+- **WHEN** httpx 抛 `ConnectError` / `ConnectTimeout` / `PoolTimeout`
+- **THEN** 归类结果 SHALL 带 `.transport_phase == "connect"`
+
+#### Scenario: 错误消息不得泄漏请求 URL
+- **WHEN** httpx 异常的 `str()` 含请求 URL（带代理地址 / query 参数）
+- **THEN** `TransientNetworkError` 的消息 SHALL 只含「provider 前缀 + 相位 + 异常类型名」，**不插值原始异常**（参照 codex `without_url`）
 
 ---
 

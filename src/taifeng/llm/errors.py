@@ -27,6 +27,11 @@ FailureClass = Literal[
     "unknown",  # 未分类
 ]
 
+# 传输失败相位：区分「连接建立失败」与「mid-stream 断流」。
+# 当前**只作诊断维度**（telemetry / 台账归因），尚未用于分层退避预算——
+# 重试由外层 RetryingModelClient 按「本次 attempt 零产出」判定（ADR 0037）。
+TransportPhase = Literal["connect", "stream"]
+
 # 每个 failure_class 的人类可读处置建议（telemetry / HITL UI 展示用）。
 _SUGGESTED_ACTION: dict[FailureClass, str] = {
     "context_window": "压缩或精简上下文后重试，或开新 thread",
@@ -78,9 +83,39 @@ class RateLimitError(LLMError):
 
 
 class TransientNetworkError(LLMError):
+    """网络/传输层瞬时错误。
+
+    ``transport_phase`` 区分两类失败：
+
+    - ``connect``：首 token 前连接建立失败（连不上 / DNS / TLS / 连接超时），
+      **必然尚无内容产出**，重发无重复投递风险。
+    - ``stream``：已开始接收后 mid-stream 断流，可能已产出过内容。
+
+    默认 ``stream``（保守：未显式分类时按「已开始」对待，不误得 connect 的
+    「必然零产出」假设）。provider 依 httpx 异常**类型**在构造时判定相位，
+    统一走 ``providers/_shared.transport_error``；错误消息不得包含请求 URL。
+
+    相位当前**只作诊断维度**，不改变重试行为——重试仍由外层
+    ``RetryingModelClient`` 按「本次 attempt 零产出」判定（ADR 0037）。
+    """
+
     retryable = True
     kind = "transient_network"
     failure_class: FailureClass = "provider_transport"
+    transport_phase: TransportPhase = "stream"
+
+    def __init__(
+        self, message: str, *, transport_phase: TransportPhase = "stream"
+    ) -> None:
+        """构造瞬时网络错误。
+
+        Args:
+            message: 错误描述（**禁止包含 URL / provider 密钥**，防日志泄漏）。
+            transport_phase: 传输失败相位，``connect`` 或 ``stream``，默认 ``stream``
+                （保守兜底）。
+        """
+        super().__init__(message)
+        self.transport_phase = transport_phase
 
 
 class ServerError(LLMError):

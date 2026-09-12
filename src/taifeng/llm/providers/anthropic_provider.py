@@ -25,7 +25,6 @@ from taifeng.llm.errors import (
     InvalidRequestError,
     InvalidResponseError,
     LLMError,
-    TransientNetworkError,
 )
 from taifeng.llm.events import (
     ResponseEvent,
@@ -45,6 +44,7 @@ from taifeng.llm.providers._shared import (
     extract_request_id,
     extract_usage_anthropic,
     parse_sse_event,
+    transport_error,
 )
 from taifeng.llm.types import ApiRequest, TokenUsage
 
@@ -291,12 +291,12 @@ class AnthropicSession:
                             event_buffer, tool_calls_acc, block_types,
                         ):
                             yield ev
-            except httpx.TimeoutException as exc:
-                raise TransientNetworkError(f"anthropic timeout: {exc}") from exc
             except httpx.TransportError as exc:
                 # 同 openai_compat / gemini：放宽到 TransportError 以覆盖
-                # RemoteProtocolError（网关中途断连），避免裸逃成 unknown 硬失败。
-                raise TransientNetworkError(f"anthropic transport: {exc}") from exc
+                # RemoteProtocolError（网关中途断连），避免裸逃成 unknown 硬失败；
+                # ``TimeoutException`` 亦属其子类，一并由 ``transport_error``
+                # 判相位并剥离 URL。
+                raise transport_error(exc, provider="anthropic") from exc
 
         # 流终止真相（llm-provider-native 契约）：Anthropic 以 message_stop 收束，
         # 没见到即流被中途掐断，不得伪造成功。

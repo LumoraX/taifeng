@@ -10,7 +10,6 @@ from taifeng.llm.errors import (
     ContentFilterError,
     InvalidRequestError,
     InvalidResponseError,
-    TransientNetworkError,
 )
 from taifeng.llm.events import (
     ResponseEvent,
@@ -28,6 +27,7 @@ from taifeng.llm.providers._shared import (
     extract_rate_limit_snapshot,
     extract_request_id,
     iter_lines_with_cancel,
+    transport_error,
 )
 from taifeng.llm.providers.codex.accumulator import (
     CodexResponsesAccumulator,
@@ -159,10 +159,11 @@ class CodexResponsesSession:
                             raise
                         for preview in previews:
                             yield preview
-            except httpx.TimeoutException as exc:
-                raise TransientNetworkError(f"timeout: {exc}") from exc
             except httpx.TransportError as exc:
-                raise TransientNetworkError(f"transport: {exc}") from exc
+                # ``TimeoutException`` 亦属 ``TransportError``，故一处 catch 覆盖全部
+                # 传输失败；由 ``transport_error`` 统一判 connect / stream 相位，
+                # 并保证消息不含请求 URL（防日志泄漏）。
+                raise transport_error(exc, provider="codex") from exc
         try:
             terminal = accumulator.finalize()
         except InvalidResponseError as exc:

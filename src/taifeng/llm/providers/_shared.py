@@ -34,6 +34,7 @@ from taifeng.llm.errors import (
     RateLimitError,
     ServerError,
     TransientNetworkError,
+    TransportPhase,
     UnsupportedModalityError,
 )
 from taifeng.llm.types import (
@@ -336,6 +337,52 @@ def classify_responses_stream_failure(event: dict[str, Any]) -> LLMError:
     if any(kw in text for kw in _CONTENT_FILTER_KEYWORDS):
         return ContentFilterError(detail)
     return ServerError(detail)
+
+
+def transport_phase_of(exc: BaseException) -> TransportPhase:
+    """把 httpx 传输异常判为 ``connect`` / ``stream`` 相位。
+
+    按异常**类型**判定（参照 codex ``is_connect()``），不看消息文本——消息文本随
+    httpx 版本与底层 OS error 变化，拿来判相位不稳定。
+
+    Args:
+        exc: httpx 抛出的传输层异常（``TransportError`` 家族，含 ``TimeoutException``）。
+
+    Returns:
+        ``connect``：连接建立阶段失败（连不上 / 连接超时 / 连接池取连接超时），
+        此时必然尚无内容产出；``stream``：其余（读写超时、读写错误、协议错误，
+        尤其 mid-stream 的 ``RemoteProtocolError``）。未知类型保守归 ``stream``。
+    """
+    import httpx  # 惰性 import：与各 provider ``stream()`` 内的用法保持一致
+
+    if isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout | httpx.PoolTimeout):
+        return "connect"
+    return "stream"
+
+
+def transport_error(exc: BaseException, *, provider: str = "") -> TransientNetworkError:
+    """把 httpx 传输异常统一归为带相位的 ``TransientNetworkError``。
+
+    五家 provider 的 ``stream()`` 共用本函数，保证「相位判定 + 消息形状」一致。
+
+    **消息只取异常类型名，绝不插值原始异常**：httpx 异常的 ``str()`` 可能带上请求
+    URL（含代理地址 / query 参数），进日志即泄漏（参照 codex ``without_url``）。
+    诊断所需的区分度由「相位 + 类型名」提供，如 ``(stream): RemoteProtocolError``。
+
+    Args:
+        exc: 捕获到的 httpx 传输层异常。
+        provider: provider 名前缀，用于在多 provider 日志里辨识来源；空则不加前缀。
+
+    Returns:
+        已带 ``transport_phase`` 的 ``TransientNetworkError``（``retryable=True``，
+        ``failure_class=provider_transport``，不新增 FailureClass 桶）。
+    """
+    phase = transport_phase_of(exc)
+    prefix = f"{provider} " if provider else ""
+    return TransientNetworkError(
+        f"{prefix}transport error ({phase}): {type(exc).__name__}",
+        transport_phase=phase,
+    )
 
 
 def classify_http_error(status: int, body: str, *, provider: str = "openai") -> LLMError:

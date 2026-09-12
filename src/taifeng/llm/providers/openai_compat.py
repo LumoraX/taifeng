@@ -21,7 +21,6 @@ from taifeng.llm.errors import (
     InvalidRequestError,
     InvalidResponseError,
     LLMError,
-    TransientNetworkError,
     UnreliableFinishError,
 )
 from taifeng.llm.events import (
@@ -45,6 +44,7 @@ from taifeng.llm.providers._shared import (
     extract_request_id,
     extract_usage_openai_family,
     iter_lines_with_cancel,
+    transport_error,
 )
 from taifeng.llm.types import ApiRequest, TokenUsage
 
@@ -223,17 +223,20 @@ class OpenAICompatSession:
                             yield ev
                         if self._last_finish_reason is not None:
                             terminal_seen = True
-            except httpx.TimeoutException as e:
-                raise TransientNetworkError(f"timeout: {e}") from e
             except httpx.TransportError as e:
-                # 传输层失败统一归瞬时网络错（可重试 / 可挂起恢复）。涵盖 ``NetworkError``
-                # （连接/读写/关闭）**与 ``ProtocolError``**——尤其 ``RemoteProtocolError``
-                # （“Server disconnected without sending a response”，代理/网关流中途断连，
-                # 本仓库实测高发）。此前只 catch ``NetworkError``，而 RemoteProtocolError 属
-                # ``ProtocolError``（≠ NetworkError），会裸逃 → classify_failure 落到 unknown
-                # 硬失败；归到 TransientNetworkError 后 kind=transient_network → retry_async
-                # 退避重试命中，且 retryable=True 触发 turn SYSTEM_RETRY 挂起恢复。
-                raise TransientNetworkError(f"transport: {e}") from e
+                # 传输层失败统一归瞬时网络错（可重试 / 可挂起恢复）。``TimeoutException``
+                # 亦是 ``TransportError`` 子类，故一处 catch 覆盖全部传输失败，由
+                # ``transport_error`` 判 connect / stream 相位。放宽到 ``TransportError``
+                # 是必需的：除 ``NetworkError``（连接/读写/关闭）外还要覆盖
+                # ``ProtocolError``——尤其 ``RemoteProtocolError``（“Server disconnected
+                # without sending a response”，代理/网关流中途断连，本仓实测高发，
+                # 归 stream 相位），它不属 NetworkError，只 catch 后者会让它裸逃成
+                # unknown 硬失败。归类后由外层 ``RetryingModelClient`` 在**本次 attempt
+                # 零产出**时有界重试（ADR 0037），耗尽再回落既有终态处置（legacy
+                # SUSPEND / audit TERMINAL）；相位当前只作诊断维度，不参与退避预算。
+                # 消息只取异常类型名、**不插值原始 e**（其 str 可能含请求 URL，
+                # 防日志泄漏，参照 codex without_url）。
+                raise transport_error(e) from e
 
         if not terminal_seen:
             raise InvalidResponseError(
