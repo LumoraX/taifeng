@@ -64,7 +64,21 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "ASYNC", "S", "B", "C4", "RET", "SIM", "TCH"]
-ignore = ["S101"]  # allow assert in tests
+# S101(裸 assert)全局放行。原注释写的是「allow assert in tests」——不准确:真正
+# 依赖它的是 src/,那里 68 处里 66 处是 mypy strict 要求的类型收窄
+# (assert x is not None / assert isinstance(...)),断的是内部不变量而非外部输入,
+# 被 python -O 剥掉也只是让同一处改抛 AttributeError/TypeError;另 2 处在 sim
+# conformance server(测试基建,只是打包在 src/ 内)。改写成 if-raise 只会增加
+# 永不执行的分支,故保持放行。**外部输入校验一律走 LLMError/DispatchVerdict,不用 assert。**
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+# S108(硬编码 /tmp):tests/ 里的 /tmp 全是**占位字符串**,不落盘 ——
+# SkillDefinition.body_path(body 已内联)、ScriptDescriptor.path(构造即 raise 的
+# 校验用例)、PermissionRule.target_pattern(纯 glob 字符串比较)。
+# 唯一真落盘的那处(shell 注入用例的攻击落点)已改用 tmp_path fixture。
+# src/ examples/ scripts/ 不放行 —— 生产代码硬编码 /tmp 是真隐患(符号链接攻击)。
+"tests/**" = ["S108"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

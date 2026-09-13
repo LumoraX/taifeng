@@ -47,10 +47,13 @@ jobs:
           pytest tests/ -q
 
   lint:
-    # 只卡 F 类(未用导入 / 重名覆盖 / 未用变量 / 未定义名)——零风格意见、全是真信号。
-    # 其余规则暂不入闸:E501/TC/I 共 300+ 条既有欠账,一次性清会跟并发开发大面积冲突,
-    # 要清得单独开切片。F 类已于本次全仓清零,加闸是为了防止再长回来。
-    name: 静态检查 (ruff F 类)
+    # 只卡两类,零风格意见、全是真信号:
+    #   F    —— 未用导入 / 重名覆盖 / 未用变量 / 未定义名
+    #   S108 —— 硬编码 /tmp(生产代码里是符号链接攻击面;tests/ 的占位字符串已按
+    #           目录放行,见 pyproject 的 per-file-ignores)
+    # 其余暂不入闸:E501/TC/I 共 400+ 条既有欠账,一次性清会跟并发开发大面积冲突,
+    # 要清得单独开切片。两类均已全仓清零,加闸是为了防止再长回来。
+    name: 静态检查 (ruff F + S108)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -60,8 +63,8 @@ jobs:
       - name: 安装 uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
-      - name: ruff F 类必须零错
-        run: uv run --frozen --extra dev ruff check --select F src tests examples scripts
+      - name: ruff F + S108 必须零错
+        run: uv run --frozen --extra dev ruff check --select F,S108 src tests examples scripts
 
   examples:
     name: examples 冒烟

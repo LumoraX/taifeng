@@ -164,14 +164,16 @@ async def test_shell_args_no_shell_injection(tmp_path: Path) -> None:
         script,
         args_schema={"type": "object", "properties": {"payload": {"type": "string"}}},
     )
+    # 注入落点放进 tmp_path:沙箱一旦回归,痕迹留在 pytest 临时目录而不是真 /tmp
+    # (后者不会被清理,且多进程/多机并发跑会互撞)。payload 仍是 `;` + 命令,陷阱不变。
+    pwn_marker = tmp_path / "pwn"
     inv = ScriptInvocation(
         descriptor=descriptor,
-        args={"payload": "; touch /tmp/pwn-{}".format(os.getpid())},
+        args={"payload": f"; touch {pwn_marker}"},
         cancel=CancellationToken(),
     )
     result = await ShellScriptExecutor().execute(inv)
     assert "; touch" in result.stdout
-    pwn_marker = Path(f"/tmp/pwn-{os.getpid()}")
     assert not pwn_marker.exists(), "shell injection executed!"
 
 
