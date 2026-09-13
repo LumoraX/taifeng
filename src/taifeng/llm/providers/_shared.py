@@ -298,7 +298,11 @@ def classify_responses_stream_failure(event: dict[str, Any]) -> LLMError:
             # 输出被上限截断：非畸形、非瞬时。归 context_window 桶 —— 其恢复配方
             # （压缩后重试一次）正是这里有意义的动作，且 turn 侧有界自愈只跑一次。
             return ContextOverflowError(detail)
-        return InvalidResponseError(detail)
+        # 集合外 / 缺失的 reason：与认不出的 error code 同一默认——按 provider 侧瞬时故障
+        # 处置（可重试：退避重试 → 仍败才挂起等人裁决），而不是判协议违规把 turn 打死。
+        # 官方枚举会演进、网关会自造值，新值第一次出现时内核不该先死给你看；原文 reason
+        # 仍在 detail 里供排查（ADR 0040 部分推翻 ADR 0033 的闭集条款）。
+        return ServerError(detail)
 
     if kind == "response.failed":
         response = event.get("response")

@@ -6,7 +6,8 @@
   ``param: str|null`` / ``sequence_number: int``
 - ``ResponseError``（``response.failed`` 的 ``response.error``）：``code`` + ``message``，
   非 null 时两者必填
-- ``incomplete_details.reason``：**闭集** ``content_filter`` | ``max_output_tokens``
+- ``incomplete_details.reason``：官方枚举 ``content_filter`` | ``max_output_tokens``；
+  集合外 / 缺失的值按可重试默认处置，不判协议违规（ADR 0040）
 
 旧实现把这三种一律塌缩成 ``InvalidResponseError``（不可重试 / invalid_request），
 既丢掉 provider 原文，又把瞬时故障伪装成确定性客户端错误。
@@ -22,7 +23,6 @@ from taifeng.llm.errors import (
     AuthenticationError,
     ContentFilterError,
     ContextOverflowError,
-    InvalidResponseError,
     LLMError,
     RateLimitError,
     ServerError,
@@ -160,7 +160,7 @@ def test_response_failed_with_null_error_is_still_typed() -> None:
     assert "<no message>" in str(exc)
 
 
-# --- response.incomplete：闭集 ------------------------------------------------
+# --- response.incomplete：已知值各归其位，未知值走可重试默认 --------------------
 
 
 def test_incomplete_content_filter_maps_to_content_filter() -> None:
@@ -178,10 +178,18 @@ def test_incomplete_max_output_tokens_maps_to_window_class() -> None:
 
 
 @pytest.mark.parametrize("reason", ["something_new", None, 42])
-def test_incomplete_reason_outside_closed_enum_is_protocol_violation(reason: Any) -> None:
-    """reason 是闭集；集合外的值属协议违规，仍归 invalid_response。"""
+def test_incomplete_reason_outside_known_enum_defaults_to_retryable(reason: Any) -> None:
+    """集合外 / 缺失的 reason → ServerError（可重试），与认不出的 error code 同一默认（ADR 0040）。
+
+    改动前判 InvalidResponseError（retryable=False → 保守策略下 turn 直接判死）：官方一旦新增
+    reason，内核第一反应是把 turn 打死。这与 ADR 0033 自己对 code「持续演进、硬编码必然漏」
+    的论证矛盾，也违反「只对官方要求且驱动决策的字段报错，未知的放行」的规矩。
+    """
     exc = classify_responses_stream_failure(_incomplete_event(reason))
-    assert isinstance(exc, InvalidResponseError)
+    assert isinstance(exc, ServerError)
+    assert exc.retryable is True
+    assert exc.failure_class == "provider_internal"
+    assert "response incomplete" in str(exc), "原文语境须留在异常消息里供排查"
 
 
 # --- 端到端：经 codex 累加器抛出的就是归一后的类型 ---------------------------

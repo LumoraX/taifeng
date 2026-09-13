@@ -182,8 +182,9 @@ payload 规则：
 - `response.failed`、`response.incomplete` 与 `error` 是失败终态，且 SHALL 按官方字段**归一为 typed
   `LLMError`**，不得一律塌缩成 `InvalidResponseError`（ADR 0033）：`error` 事件读 `code`/`message`/`param`；
   `response.failed` 读 `response.error.{code,message}`；`response.incomplete` 读
-  `incomplete_details.reason`（闭集 `content_filter` | `max_output_tokens`，前者归内容拦截、后者归
-  context_window 桶，集合外的值才算协议违规）。无法识别 code 的 `error` / `response.failed` SHALL 归
+  `incomplete_details.reason`（`content_filter` 归内容拦截、`max_output_tokens` 归 context_window 桶；
+  集合外或缺失的 reason SHALL 与认不出的 code 同一默认归 `ServerError` 可重试，不判协议违规——ADR 0040）。
+  无法识别 code 的 `error` / `response.failed` SHALL 归
   `ServerError`（可重试）——官方对流内 error 的描述即「internal server error or a timeout」。异常文本
   SHALL 携带 provider 原始 code / param / message。
 - 提前 EOF、重复 completed、completed 前缺少 done、或 completed 后 EOF 前出现任何新的**协议**事件均须
