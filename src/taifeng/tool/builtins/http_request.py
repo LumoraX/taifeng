@@ -67,10 +67,12 @@ HTTP_REQUEST_SCHEMA: dict[str, Any] = {
 }
 
 
-def _validate_url(url: Any) -> str | None:
-    """校验 URL 是否合法 http/https。返回拒绝原因，None 表示通过。"""
-    if not isinstance(url, str) or not url:
-        return "url required and must be string"
+def _validate_url(url: str) -> str | None:
+    """校验 URL 是否合法 http/https。返回拒绝原因，None 表示通过。
+
+    入参已是 str —— 「是不是字符串」的判断留在调用点做,这样类型收窄对
+    检查器可见;放在本函数内则调用点拿到的仍是 Any|None,后续传参全是盲区。
+    """
     try:
         parsed = urlparse(url)
     except ValueError:
@@ -152,6 +154,9 @@ def make_http_request_tool(
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         # ---- step 1: 入参校验 ----
         url = args.get("url")
+        if not isinstance(url, str) or not url:
+            return ToolResult.error(
+                "bad_args: url required and must be string", reason="bad_args")
         err = _validate_url(url)
         if err is not None:
             return ToolResult.error(f"bad_args: {err}", reason="bad_args")

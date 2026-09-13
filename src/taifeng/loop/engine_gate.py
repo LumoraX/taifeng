@@ -63,7 +63,11 @@ class EngineGate:
                     "waiting_on": self._engine._root_gate_owner,
                 }),
             ))
-        acquire = asyncio.ensure_future(self._engine._root_gate.acquire())
+        # 先把协程标成返回 bool 再 ensure_future:asyncio.Lock.acquire() 被标注为
+        # 返回 Literal[True],而 Future 对类型参数**不变**,Task[Literal[True]] 不能
+        # 赋给 Future[bool]。在源头收成 bool 比把下游签名放宽成 Any 更不伤类型信息。
+        acquire_coro: Coroutine[Any, Any, bool] = self._engine._root_gate.acquire()
+        acquire = asyncio.ensure_future(acquire_coro)
         waiter = asyncio.ensure_future(cancel.wait_cancelled())
         try:
             await asyncio.wait({acquire, waiter}, return_when=asyncio.FIRST_COMPLETED)

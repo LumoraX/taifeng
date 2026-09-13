@@ -9,6 +9,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from contextlib import suppress
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.budget import ContextBudget
@@ -119,9 +120,11 @@ logger = logging.getLogger(__name__)
 # 此处原样再导出，`from taifeng.loop.engine import DeliveredEvent` 的既有写法不变。
 from taifeng.loop.engine_types import (  # noqa: E402
     _TERMINAL_KINDS,
-    DeliveredEvent,
     _PendingTurn,
     _Subscriber,
+)
+from taifeng.loop.engine_types import (  # noqa: E402
+    DeliveredEvent as DeliveredEvent,  # `as` 同名 = 显式再导出,满足 no_implicit_reexport
 )
 
 
@@ -1128,9 +1131,7 @@ class AgentEngine:
                     self._start_operation(
                         self._run_gated_op(
                             sub.id, cancel,
-                            lambda tok, sid=sub.id, op=op_compact: self._run_compact_now(
-                                sid, op, tok,
-                            ),
+                            partial(self._run_compact_now, sub.id, op_compact),
                         ),
                         name=f"compact:{sub.id}",
                         submission_id=sub.id,
@@ -1141,9 +1142,11 @@ class AgentEngine:
                     self._start_operation(
                         self._run_gated_op(
                             sub.id, cancel,
-                            lambda _tok, sid=sub.id, n=num_turns: engine_ops.handle_rollback(
-                                self,
-                                sid, n,
+                            # 这条不能用 partial:handle_rollback 不接收 token,
+                            # 而 run 的签名必带一个 —— lambda 在此是"丢弃末位参数"的
+                            # 适配器。默认参数绑定会让 mypy 推不出 lambda 类型,故 ignore。
+                            lambda _tok, sid=sub.id, n=num_turns: (  # type: ignore[misc]
+                                engine_ops.handle_rollback(self, sid, n)
                             ),
                         ),
                         name=f"rollback:{sub.id}",
@@ -1171,7 +1174,7 @@ class AgentEngine:
                     body = (
                         self._run_gated_op(
                             sub.id, cancel,
-                            lambda tok, s_=rewind_sub: engine_ops.handle_rewind(self, s_, tok),
+                            partial(engine_ops.handle_rewind, self, rewind_sub),
                         )
                         if is_root_rewind
                         else engine_ops.handle_rewind(self, sub, cancel)
@@ -1202,7 +1205,7 @@ class AgentEngine:
                     self._start_operation(
                         self._run_gated_op(
                             sub.id, cancel,
-                            lambda tok, s_=resume_sub: self._handle_resume(s_, tok),
+                            partial(self._handle_resume, resume_sub),
                         ),
                         name=f"resume:{sub.id}",
                         submission_id=sub.id,

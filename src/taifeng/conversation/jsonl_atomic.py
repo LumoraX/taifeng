@@ -68,7 +68,9 @@ def _lock_exclusive(handle: Any) -> None:
             handle.write(b"\0")
             handle.flush()
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        # 下面 ignore 的原因:msvcrt 只在 Windows 存在,mypy 跑在 POSIX 上看不到它的
+        # 属性。os.name == "nt" 的分支守卫是对的,这是平台假阳不是缺陷。
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
         return
     import fcntl
 
@@ -82,7 +84,8 @@ def _unlock_and_close(handle: Any) -> None:
             import msvcrt
 
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            # 同上:POSIX 上 mypy 看不到 msvcrt 属性,平台假阳
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
         else:
             import fcntl
 
@@ -198,7 +201,11 @@ def _active_batch_from_frame(data: dict[str, Any]) -> _ActiveBatch | None:
     batch_id = data.get("batch_id")
     digest = data.get("digest")
     raw_ids = data.get("item_ids")
-    if not all(isinstance(value, str) and value for value in (frame_id, batch_id, digest)):
+    # 逐个判而不用 all(... for ...):推导式无法让类型检查器收窄**单个**变量,
+    # 写成推导式则下面三处传参在检查器眼里仍是 Any|None,等于白校验。
+    if not (isinstance(frame_id, str) and frame_id
+            and isinstance(batch_id, str) and batch_id
+            and isinstance(digest, str) and digest):
         return None
     if not isinstance(raw_ids, list) or not raw_ids or not all(
         isinstance(item_id, str) and item_id for item_id in raw_ids
