@@ -26,6 +26,7 @@ from taifeng.instructions.types import (
     ResolvedInstruction,
 )
 from taifeng.llm.errors import LLMError
+from taifeng.llm.retrying import with_default_retry
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
@@ -104,6 +105,7 @@ if TYPE_CHECKING:
     from taifeng.context.compressor import CompressionOrchestrator
     from taifeng.conversation.store import MessageStore
     from taifeng.llm.client import ModelClient
+    from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
     from taifeng.skill.definition import SkillDefinition
@@ -155,6 +157,8 @@ class AgentEngine:
         failure_suspend_ttl_seconds: int | None = None,
         failure_suspend_max_auto_retries: int | None = None,
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
+        auto_retry: bool = True,
+        retry_config: RetryConfig | None = None,
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         reasoning_passback: bool = True,
@@ -199,7 +203,10 @@ class AgentEngine:
         self._entry_skill = entry_skill
         self._snapshot = skill_snapshot
         self._tool_runtime = tool_runtime
-        self._model_client = model_client
+        # ADR 0041：默认套有界重试（幂等；strict audit 适配器 / 已套过 / auto_retry=False 原样）
+        self._model_client = with_default_retry(
+            model_client, config=retry_config, enabled=auto_retry,
+        )
         from taifeng.llm.image_input import DISABLED_IMAGE_POLICY
 
         self._image_input_policy = image_input_policy or DISABLED_IMAGE_POLICY

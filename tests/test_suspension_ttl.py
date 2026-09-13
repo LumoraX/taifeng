@@ -321,6 +321,7 @@ async def test_kernel_system_retry_expire_auto_retries(ask_skills, threads_dir):
     client = _FlakyOnce(routes={"ASK_MARK": [SimTurn(text="RECOVERED")]})
     pool = await taifeng.EnginePool.create(
         skills_dir=ask_skills, threads_dir=threads_dir, model_client=client,
+        auto_retry=False,  # 用例前提是「重试已耗尽」：ADR 0041 默认自动重试会吞掉剧本的一次性故障
         compressors=[],
         failure_suspend_ttl_seconds=60,
         failure_suspend_on_expire="retry",

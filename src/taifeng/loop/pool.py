@@ -30,6 +30,7 @@ from taifeng.llm.image_input import (
     ImageInputPolicy,
     InputCostEstimator,
 )
+from taifeng.llm.retrying import with_default_retry
 from taifeng.loop.audit_bootstrap import (
     AuditStoreBinding,
     ensure_legacy_resume_allowed,
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from taifeng.llm.client import ModelClient
+    from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.skill.watcher import SkillFileWatcher
     from taifeng.telemetry.sink import TelemetrySink
@@ -308,6 +310,8 @@ class EnginePool:
         failure_suspend_ttl_seconds: int | None = None,
         failure_suspend_max_auto_retries: int | None = None,
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
+        auto_retry: bool = True,
+        retry_config: RetryConfig | None = None,
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         reasoning_passback: bool = True,
@@ -341,7 +345,12 @@ class EnginePool:
         input_cost_estimator: InputCostEstimator | None = None,
     ) -> None:
         self._registry = skill_registry
-        self._model_client = model_client
+        # ADR 0041：池级默认套有界重试，recall / verifier / 引擎共用同一包装（幂等）
+        self._model_client = with_default_retry(
+            model_client, config=retry_config, enabled=auto_retry,
+        )
+        self._auto_retry = auto_retry
+        self._retry_config = retry_config
         self._image_input_policy = image_input_policy or DISABLED_IMAGE_POLICY
         self._input_cost_estimator = input_cost_estimator
         self._store = store
@@ -529,6 +538,8 @@ class EnginePool:
         failure_suspend_ttl_seconds: int | None = None,
         failure_suspend_max_auto_retries: int | None = None,
         failure_suspend_on_expire: Literal["abort", "retry"] = "abort",
+        auto_retry: bool = True,
+        retry_config: RetryConfig | None = None,
         now_factory: Any = None,
         max_parallel_tool_calls: int = 1,
         reasoning_passback: bool = True,
@@ -589,6 +600,8 @@ class EnginePool:
             raise ValueError("必须提供 storage_dir 或 threads_dir 之一")
 
         registry = await FilesystemSkillRegistry.load(skills_dir)
+        # ADR 0041：在压缩器 / recall 构建之前包装，让池内所有 LLM 侧调用同享默认重试
+        model_client = with_default_retry(model_client, config=retry_config, enabled=auto_retry)
 
         store: MessageStore | None = None
         hook_runner: HookRunner | None = None
@@ -656,6 +669,8 @@ class EnginePool:
                 failure_suspend_ttl_seconds=failure_suspend_ttl_seconds,
                 failure_suspend_max_auto_retries=failure_suspend_max_auto_retries,
                 failure_suspend_on_expire=failure_suspend_on_expire,
+                auto_retry=auto_retry,
+                retry_config=retry_config,
                 now_factory=now_factory,
                 max_parallel_tool_calls=max_parallel_tool_calls,
                 reasoning_passback=reasoning_passback,

@@ -19,7 +19,14 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class RetryConfig:
-    """重试策略配置。"""
+    """重试策略配置。
+
+    ``retryable_kinds`` 是显式白名单，匹配 ``LLMError.kind``。默认四类均满足「零产出即可安全重发」：
+    限流 / 瞬时网络 / provider 5xx，以及 ``unreliable_finish``——接入方声明端点
+    ``trust_finish_reason=False`` 时，网关错标成 ``content_filter`` 的零产出终止（实测多为上游瞬时
+    抖动，重跑即过）。此前它
+    ``retryable=True`` 却不在默认集合，形成两套「可重试」真相（ADR 0039 记录、ADR 0041 并入）。
+    """
 
     max_attempts: int = 3
     min_delay_ms: int = 500
@@ -28,7 +35,9 @@ class RetryConfig:
     jitter: float = 0.2
     respect_server_hint: bool = True
     retryable_kinds: frozenset[str] = field(
-        default_factory=lambda: frozenset({"rate_limit", "transient_network", "server_error"})
+        default_factory=lambda: frozenset(
+            {"rate_limit", "transient_network", "server_error", "unreliable_finish"}
+        )
     )
 
 

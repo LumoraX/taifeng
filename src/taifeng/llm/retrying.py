@@ -234,6 +234,15 @@ class RetryingModelClient:
         """被包装的原始 client（业务侧取 provider 专属属性用）。"""
         return self._inner
 
+    @property
+    def bounded_retry(self) -> RetryConfig:
+        """本装饰器的重试配置——同时是「已套有界重试」的探测标记（ADR 0041）。
+
+        引擎默认包装前 ``getattr(client, "bounded_retry", None)`` 探测：非 None 即已套，跳过
+        （防双层包装把 attempt 上限乘起来）。透明包装器靠 ``__getattr__`` 转发即可穿透。
+        """
+        return self._config
+
     def session(
         self, *, cancel: CancellationToken, model: str | None = None,
     ) -> ModelClientSession:
@@ -247,3 +256,27 @@ class RetryingModelClient:
         """未知属性转发到 inner —— 保留 ``capabilities`` / ``record_cache_read``
         等可选协议（内核用 getattr 探测，装饰器不该把它们挡掉）。"""
         return getattr(self._inner, name)
+
+
+def with_default_retry(
+    client: ModelClient, *, config: RetryConfig | None = None, enabled: bool = True,
+) -> ModelClient:
+    """内核默认套有界重试的唯一入口（ADR 0041）；幂等，三种情况原样返回：
+
+    - ``enabled=False``：接入方显式关闭（业务自管重试，或测试复现「重试已耗尽」）；
+    - 已套过（``bounded_retry`` 标记，穿透 ``__getattr__`` 转发包装）：防双层包装；
+    - strict audit 的 ``AttemptObservableModelClient``：一次 ``stream`` 恰一个 attempt 是它的契约
+      （ADR 0037），套重试会破坏 checkpoint lineage——audit 与自动重试互斥，audit 优先。
+
+    ``AgentEngine`` / ``AgentEnginePool`` / ``EnginePool.create`` 三处都经此包装，重复经过无副作用。
+    """
+    if not enabled:
+        return client
+    if getattr(client, "bounded_retry", None) is not None:
+        return client
+    # 局部导入：llm/audit 经 conversation.journal 反向依赖 llm.errors，模块顶导入会成环
+    from taifeng.llm.audit import AttemptObservableModelClient
+
+    if isinstance(client, AttemptObservableModelClient):
+        return client
+    return RetryingModelClient(client, config=config)

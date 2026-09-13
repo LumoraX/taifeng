@@ -19,6 +19,7 @@
 | **`denial_breaker_config`** | `None` | turn 内连续拒绝断路器（`DenialBreakerConfig{max_consecutive_denials, max_recent_denials, window_size}`）。None=不启用零变化；越阈值 emit `denial_circuit_open` + turn 以同名 end_reason 提前终止。详见 [capabilities/turn-resource-guards.md](architecture/capabilities/turn-resource-guards.md) | codex `guardian` 断路器 |
 | **`doom_loop_config`** | `None` | turn 内重复同 `(tool,args)` 成功调用空转的先警后断守卫（`DoomLoopConfig{max_consecutive_repeats}`）。None=不启用零变化；连续 N 次同签名 → 注中性事实 + emit `doom_loop_warned`，警后到 2N → emit `doom_loop_circuit_open` + 以同名 end_reason 终止。详见 [capabilities/turn-resource-guards.md](architecture/capabilities/turn-resource-guards.md) | opencode 重复调用检测（ADR 0021） |
 | **`failure_policy`** | `None` | `FailureDispositionPolicy`；失败处置裁决（挂起 vs 终态）。`None` = 内置 `ConservativeFailurePolicy`（可恢复 LLM 错误挂起、其余终态——历史行为零变化）；注入 `SuspendByDefaultPolicy` 后一切失败（含确定性 LLM 失败与三类护栏触顶）转挂起等 Resume 裁决（护栏触顶以 `RESOURCE_LIMIT` reason 落挂起，retry=重建续跑/abort=终态）。**仅适合有人值守或有自动决策器的部署**。详见 [capabilities/suspend-resume.md](architecture/capabilities/suspend-resume.md) | — |
+| **`auto_retry`** / **`retry_config`** | `True` / `None` | **内核默认套有界重试**（ADR 0041）：`AgentEngine` / `AgentEnginePool` / `EnginePool.create` 三处经 `with_default_retry` 把 `model_client` 包成 `RetryingModelClient`——幂等：已套过（`bounded_retry` 标记，台账录制等 `__getattr__` 透明包装可穿透）/ strict audit 适配器 / `auto_retry=False` 均原样。`retry_config=None` → `RetryConfig()`（3 次、500ms 起指数退避封顶 30s、尊重服务端 hint、四类零产出可重试 kind，见 §7）；`auto_retry=False` 关闭（业务自管重试，或测试复现「重试已耗尽」）。池级包装同时覆盖压缩摘要 / skill recall 的 LLM 侧调用；每次重试 emit `provider_retry`（ADR 0039） | — |
 | **`failure_suspend_max_auto_retries`** | `None` | TTL 自动 retry 的谱系上限（resource-limit-retry-semantics）：同一失败谱系经 N 次「到期自动 retry → 再失败再挂起」后,下次到期强制 abort 并在 `suspension_expired.data` 标注 `auto_retry_exhausted: true`。None = 不限——**配 `on_expire="retry"` 时强烈建议设置**,否则确定性失败会无界自动循环烧钱。人工 Resume 不计数 | — |
 | **`failure_suspend_ttl_seconds`** / **`failure_suspend_on_expire`** | `None` / `"abort"` | 内核自产挂起（SYSTEM_RETRY / RESOURCE_LIMIT）的存活期与到期动作（suspension-ttl）。None = 永不过期；无人值守部署配 ttl + `"retry"` 实现「限流/触顶到期自动续跑」。业务挂起的 ttl 在 `make_request_user_input_tool(ttl_seconds=...)` 工厂声明（DATA 到期恒 abort）。详见 [capabilities/suspend-resume.md](architecture/capabilities/suspend-resume.md) §挂起存活期 | — |
 | **`now_factory`** | `time.time` | 壁钟工厂（TTL 到期计算用）；测试注入固定时钟可让到期立即触发 | — |
@@ -541,12 +542,15 @@ RetryConfig(
     backoff_multiplier=2.0,
     jitter=0.2,
     respect_server_hint=True,
-    retryable_kinds=frozenset({"rate_limit", "transient_network", "server_error"}),
+    retryable_kinds=frozenset(
+        {"rate_limit", "transient_network", "server_error", "unreliable_finish"}
+    ),
 )
 ```
 
 - 每次退避重试在退避**之前** emit `provider_retry`（`reason` = 错误 kind，另带 `attempt` / `max_attempts` / `delay_seconds` / `failure_class` / `error_kind` / `transport_phase` / `retry_after_seconds`），OTel `taifeng.provider.retries` 按 `reason` / `failure_class` 计数——`TurnRunner` 自动接入，业务侧无需接线（ADR 0039）。
-- `retryable_kinds` 只匹配 `LLMError.kind`，与 `LLMError.retryable` 无关：`unreliable_finish`（网关错标的零产出 `content_filter`）默认**不在**集合内，需要时显式加入。
+- `retryable_kinds` 是显式白名单，只匹配 `LLMError.kind`；`unreliable_finish`（接入方声明 `trust_finish_reason=False` 时网关错标的零产出 `content_filter`）已并入默认集合（ADR 0041）。
+- **无需手工套**：引擎 / 池默认已包装（上表 `auto_retry` / `retry_config`）；显式 `RetryingModelClient(client, config=...)` 仍可用，引擎探测到已套即沿用你的配置。
 
 ## 7.5 OtelSinkConfig（OTel / OTLP 出口，可选 extra）
 

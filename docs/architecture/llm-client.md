@@ -223,12 +223,14 @@ from taifeng.llm import RetryConfig, RetryingModelClient
 client = RetryingModelClient(native_client, config=RetryConfig(max_attempts=3))
 ```
 
+**默认开启（ADR 0041）**：`AgentEngine` / `AgentEnginePool` / `EnginePool.create` 经 `with_default_retry` 自动包装，接入方零改动即得；`retry_config=` 注入策略、`auto_retry=False` 关闭。幂等三规则：已套过（`bounded_retry` 标记，台账录制等 `__getattr__` 透明包装可穿透）、strict audit 的 `AttemptObservableModelClient`、显式关闭，均原样返回——所以显式套仍可用，且与 audit 的互斥无需接入方记住。
+
 - **零产出才重试**：任一 `text_delta` / `reasoning_delta` / `tool_call_delta` / `tool_call_done` / `structured_output` / `normalized_output` 已 yield 即置位；置位后失败直接抛。这是正确性基石。
 - 元信息事件（`created` / `server_model` / `rate_limits`）只投递一次，重试不重发。
 - 退避走 `wait_cancelled` 竞速而非裸 `sleep`（限流 hint 可达数十秒，`CancelTurn` 必须立即生效，R4）；两条重试路径共用 `compute_backoff_delay`。
 - **与 strict audit 互斥**：它一次 `stream` 可发生多个网络 attempt，故**刻意不声明** `OneNetworkAttemptModelClient`；strict audit 模式会如实拒绝它（ADR 0037）。需要 attempt 观测时构造 native client（`build_model_client(retry=False)`）。
 - **每次退避重试可观测（R3，ADR 0039）**：session 暴露可选协议 `set_retry_observer(observer)`，`TurnRunner` 创建 session 后 `getattr` 探测并自动接入——每次退避**之前** emit `provider_retry`（`reason` = 触发重试的 `LLMError.kind`，另带 `attempt` / `max_attempts` / `delay_seconds` / `failure_class` / `error_kind` / `transport_phase` / `retry_after_seconds`），console 专用渲染 `llm ↻`，OTel counter `taifeng.provider.retries`（按 `reason` / `failure_class`）。`llm/` 层只产纯数据 `RetryAttempt`，EventMsg 化在 `loop/turn_sample.py`；**不**往 `ResponseEvent` 流塞新 kind（金样形状不受重试次数影响）。业务侧零接线。
-- **`retryable_kinds` 与 `LLMError.retryable` 是两套真相**：装饰器只看前者。`UnreliableFinishError.retryable=True` 但其 kind `unreliable_finish` 不在默认集合——接入方声明 `trust_finish_reason=False` 时若希望网关错标的瞬时抖动被自动重试，须 `RetryConfig(retryable_kinds=RetryConfig().retryable_kinds | {"unreliable_finish"})` 显式加入。
+- **`retryable_kinds` 是显式白名单**（只看 `LLMError.kind`，不读 `LLMError.retryable`——让「哪些 kind 会自动重发」在配置里一眼可见）；默认 `{rate_limit, transient_network, server_error, unreliable_finish}`，最后一类是接入方声明 `trust_finish_reason=False` 时网关错标的零产出终止（ADR 0041 并入）。
 
 `retry_async` 保留为业务侧**非流式**重试的公共工具（如自定义的一次性 provider 调用）。
 

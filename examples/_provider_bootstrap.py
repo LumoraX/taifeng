@@ -259,8 +259,10 @@ def build_model_client(
 
     ``retry=True``（默认）在 native client 外套一层 ``RetryingModelClient``：
     限流 / 瞬时网络 / provider 5xx 在**零产出**时退避重试，避免一次网关抖动就
-    把整个 turn 推进 SYSTEM_RETRY 挂起。需要 strict audit 的 attempt 观测时传
-    ``retry=False``（装饰器刻意不声明 OneNetworkAttemptModelClient，见 ADR 0037）。
+    把整个 turn 推进 SYSTEM_RETRY 挂起。引擎 / 池自 ADR 0041 起已默认包装（幂等，
+    探测到已套即沿用），此处显式套保留给不经引擎的直连脚本；需要 strict audit 的
+    attempt 观测时传 ``retry=False``（装饰器刻意不声明 OneNetworkAttemptModelClient，
+    见 ADR 0037；引擎对 audit 适配器也会自动跳过包装）。
     """
     provider, protocol, api_key, model, base_url = resolve_bootstrap_env()
 

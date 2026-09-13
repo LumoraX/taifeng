@@ -223,6 +223,8 @@ async def create_started_pool_engine(
             failure_suspend_ttl_seconds=pool._failure_suspend_ttl_seconds,  # noqa: SLF001
             failure_suspend_max_auto_retries=pool._failure_suspend_max_auto_retries,  # noqa: SLF001
             failure_suspend_on_expire=pool._failure_suspend_on_expire,  # noqa: SLF001
+            auto_retry=pool._auto_retry,  # noqa: SLF001
+            retry_config=pool._retry_config,  # noqa: SLF001
             now_factory=pool._now_factory,  # noqa: SLF001
             max_parallel_tool_calls=pool._max_parallel_tool_calls,  # noqa: SLF001
             reasoning_passback=pool._reasoning_passback,  # noqa: SLF001

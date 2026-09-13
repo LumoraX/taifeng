@@ -423,6 +423,7 @@ max_call_depth: 2
         skills_dir=skills_dir,
         threads_dir=threads_dir,
         model_client=raising_client,
+        auto_retry=False,  # 用例前提是「重试已耗尽」：ADR 0041 默认自动重试会吞掉剧本的一次性故障
         compressors=[],
     )
     engine = await pool.get_or_create(
@@ -918,6 +919,7 @@ max_call_depth: 2
         skills_dir=skills_dir,
         threads_dir=threads_dir,
         model_client=client,
+        auto_retry=False,  # 用例前提是「重试已耗尽」：ADR 0041 默认自动重试会吞掉剧本的一次性故障
         compressors=[],
     )
     engine = await pool.get_or_create(

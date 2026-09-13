@@ -39,7 +39,7 @@ from taifeng.llm.providers.codex import CodexResponsesClient
 from taifeng.llm.providers.openai import OpenAIChatClient, OpenAIResponsesClient
 from taifeng.llm.recovery import RecoveryPlan, RecoveryStep, recommend_recovery
 from taifeng.llm.retry import RetryConfig, compute_backoff_delay, retry_async
-from taifeng.llm.retrying import RetryAttempt, RetryingModelClient
+from taifeng.llm.retrying import RetryAttempt, RetryingModelClient, with_default_retry
 from taifeng.llm.types import (
     ApiFunctionCallItem,
     ApiFunctionCallOutputItem,
@@ -110,6 +110,7 @@ __all__ = [
     "retry_async",
     "RetryAttempt",
     "RetryingModelClient",
+    "with_default_retry",
     "compute_backoff_delay",
     "suggested_action_for",
 ]
