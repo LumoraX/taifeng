@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from typing import TYPE_CHECKING
 
-from taifeng.llm.types import ToolSpecRef
-from taifeng.tool.spec import ToolSpec
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+
+    from taifeng.llm.types import ToolSpecRef
+    from taifeng.tool.spec import ToolSpec
 
 
 class DuplicateToolError(ValueError):

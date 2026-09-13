@@ -11,8 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -25,6 +24,9 @@ from taifeng.mcp.server import (
     McpStdioServer,
 )
 from tests.conftest import GUARD_TIMEOUT_SECONDS, guard_ticks
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # --------------------------------------------------------------------
 # Fixtures

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -16,6 +16,9 @@ from taifeng.loop.submission import (
     UpdateBudget,
 )
 from tests.conftest import wait_for_condition
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.asyncio

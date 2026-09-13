@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from taifeng.llm.errors import (
@@ -15,6 +17,12 @@ from taifeng.llm.errors import (
     TransientNetworkError,
     classify_failure,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from taifeng.llm.types import ApiRequest
+    from taifeng.loop.event import EventMsg
 
 
 @pytest.mark.parametrize(
@@ -61,13 +69,10 @@ async def test_turn_failed_event_carries_failure_class(skills_dir) -> None:
     用 InvalidRequestError(不可恢复)走硬失败路径:Task 8 起,可恢复错误
     (限流 / 鉴权等)改转 SYSTEM_RETRY 挂起,不再硬失败;确定性失败照旧 TurnFailed。
     """
-    from collections.abc import AsyncIterator
 
     from taifeng.context.budget import ContextBudget
     from taifeng.conversation.models import user_message
-    from taifeng.llm.types import ApiRequest
     from taifeng.loop.cancellation import CancellationToken
-    from taifeng.loop.event import EventMsg
     from taifeng.loop.turn import TurnRunner
     from taifeng.skill.dispatch import DispatchPolicy
     from taifeng.skill.registry import FilesystemSkillRegistry

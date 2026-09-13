@@ -12,11 +12,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.skill.recall import KeywordSkillRecall, SkillRecall
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write_entry_with_children(

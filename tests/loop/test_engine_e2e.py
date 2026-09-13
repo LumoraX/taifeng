@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -11,6 +11,9 @@ import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from tests.conftest import GUARD_TIMEOUT_SECONDS
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.asyncio

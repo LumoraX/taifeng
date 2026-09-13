@@ -17,17 +17,17 @@ from typing import TYPE_CHECKING, Any
 from taifeng.context.budget import ContextBudget
 from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
 from taifeng.conversation.reconstruct import reconstruct_logical_history
-from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import EngineLog, EventMsg
 from taifeng.loop.rewind import derive_rewind_log
-from taifeng.loop.submission import CompactNow
 from taifeng.loop.tool_batch import parse_tool_arguments
 from taifeng.loop.turn import TurnRunner
 from taifeng.suspend.record import SuspensionRecord
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
+    from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
+    from taifeng.loop.submission import CompactNow
 
 
 class SuspensionAccess:

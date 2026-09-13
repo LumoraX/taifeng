@@ -12,10 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from taifeng.skill.definition import SkillDefinition
-
 if TYPE_CHECKING:
     from taifeng.llm.client import ModelCapabilities
+    from taifeng.skill.definition import SkillDefinition
 
 
 @dataclass(frozen=True)

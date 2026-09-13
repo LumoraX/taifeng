@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -24,7 +24,11 @@ from taifeng.conversation import (
     user_message,
 )
 from taifeng.conversation.hook_runner import HookRunner
-from taifeng.loop.event import EventMsg
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from taifeng.loop.event import EventMsg
 
 
 class _SpyHook:

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from taifeng.loop.event import EventMsg
+if TYPE_CHECKING:
+    from taifeng.loop.event import EventMsg
 
 
 @runtime_checkable

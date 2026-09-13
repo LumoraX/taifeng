@@ -6,8 +6,7 @@ offload / surgical_trim 都是**就地改写 payload、不删条目**,处理孤�
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from taifeng.context.budget import ContextBudget
 from taifeng.context.compressor import CompressionContext
@@ -21,6 +20,9 @@ from taifeng.conversation.models import (
     function_call_output,
     user_message,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 TID = "t-orphan"
 DNI = InitialContextInjection.DO_NOT_INJECT

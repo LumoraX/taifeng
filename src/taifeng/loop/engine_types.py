@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from taifeng.conversation.models import ResponseItem
-from taifeng.loop.cancellation import CancellationToken
-from taifeng.loop.event import EventMsg
+if TYPE_CHECKING:
+    from taifeng.conversation.models import ResponseItem
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.loop.event import EventMsg
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -22,6 +21,8 @@ pytest.importorskip(
     "opentelemetry.sdk",
     reason="需要可选 extra: uv pip install -e '.[telemetry-otel]'",
 )
+
+from typing import TYPE_CHECKING
 
 from opentelemetry.sdk.metrics import MeterProvider  # noqa: E402
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader  # noqa: E402
@@ -39,6 +40,9 @@ from taifeng.telemetry.otel_sink import (
     OtelTelemetrySink,
     _safe_attrs,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # ============ fixtures ============
 

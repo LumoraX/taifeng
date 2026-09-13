@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
     from opentelemetry.trace import Span
 
+    from taifeng.loop.event import EventMsg
+
 # OTel 包按 optional extra 提供；未装时构造时报错，而非 import 时报错
 try:
     from opentelemetry import metrics as _otel_metrics  # noqa: F401
@@ -54,7 +56,6 @@ except ImportError as exc:  # pragma: no cover - 仅在未装 extra 时触发
     _OTEL_AVAILABLE = False
     _OTEL_IMPORT_ERROR = exc
 
-from taifeng.loop.event import EventMsg
 
 _log = logging.getLogger(__name__)
 

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from taifeng.skill import FilesystemSkillRegistry, SkillFileWatcher
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 ATOMIC = """---
 name: skill-a

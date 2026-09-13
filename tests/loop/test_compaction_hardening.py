@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -13,7 +13,6 @@ from taifeng.context.compressor import (
     CompressionResult,
     CompressionTrigger,
 )
-from taifeng.context.injection import InitialContextInjection
 from taifeng.conversation.models import (
     function_call,
     function_call_output,
@@ -21,12 +20,17 @@ from taifeng.conversation.models import (
 )
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.cancellation import CancellationToken
-from taifeng.loop.event import EventMsg
 from taifeng.loop.turn import TurnRunner, _history_orphan_call_ids
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.skill.registry import FilesystemSkillRegistry
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from taifeng.context.injection import InitialContextInjection
+    from taifeng.loop.event import EventMsg
 
 
 class _FakeStore:

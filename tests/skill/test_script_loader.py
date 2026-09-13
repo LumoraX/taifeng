@@ -10,12 +10,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from taifeng.skill.definition import SkillValidationError
 from taifeng.skill.loader import load_skills_from_dir
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write_skill_md(skill_dir: Path, frontmatter: str, body: str = "body") -> None:

@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from taifeng.conversation.models import function_call_output, system_injection
-from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EventMsg,
@@ -21,10 +20,11 @@ from taifeng.loop.event import (
     SuspensionResolveRejected,
 )
 from taifeng.loop.submission import Resume, Submission
-from taifeng.suspend.record import SuspensionRecord
 
 if TYPE_CHECKING:
+    from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
+    from taifeng.suspend.record import SuspensionRecord
 
 
 class EngineResume:

@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -28,6 +27,9 @@ from taifeng.llm.providers.gemini_provider import (
 )
 from taifeng.llm.types import ApiMessage, ApiRequest, ToolSpecRef
 from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ============================================================
 # helpers —— 构造 SSE 流（Gemini 单行 data:）

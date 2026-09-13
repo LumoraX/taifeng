@@ -53,11 +53,11 @@ from taifeng.loop.turn_helpers import (
     _sha1_short,
 )
 from taifeng.suspend.signal import SuspendSignal
-from taifeng.tool.spec import ToolContext
 
 if TYPE_CHECKING:
     from taifeng.llm.retrying import RetryAttempt
     from taifeng.loop.turn import TurnRunner
+    from taifeng.tool.spec import ToolContext
 
 
 @dataclass(frozen=True)

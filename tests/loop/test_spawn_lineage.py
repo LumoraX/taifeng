@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -19,6 +19,9 @@ from taifeng.skill.registry import FilesystemSkillRegistry
 from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
 from taifeng.tool.spec import ToolContext
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class _RecStore:

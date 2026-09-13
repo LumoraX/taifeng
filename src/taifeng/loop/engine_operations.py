@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.errors import classify_failure, suggested_action_for
@@ -19,6 +18,8 @@ from taifeng.llm.recovery import recommend_recovery
 from taifeng.loop.event import EventMsg, TurnFailed
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from taifeng.loop.engine import AgentEngine
 
 logger = logging.getLogger(__name__)

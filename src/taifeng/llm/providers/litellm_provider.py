@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.client import ModelClient
 from taifeng.llm.errors import (
@@ -35,7 +34,11 @@ from taifeng.llm.events import (
     tool_call_done,
 )
 from taifeng.llm.types import ApiRequest, TokenUsage
-from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from taifeng.loop.cancellation import CancellationToken
 
 
 def _classify_litellm_error(exc: Exception) -> LLMError:

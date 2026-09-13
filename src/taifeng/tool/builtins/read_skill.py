@@ -5,10 +5,12 @@ ToolContext.extras 必须含 ``skill_snapshot``。
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from taifeng.skill.registry import SkillSnapshot
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+if TYPE_CHECKING:
+    from taifeng.skill.registry import SkillSnapshot
 
 
 async def _read_skill_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:

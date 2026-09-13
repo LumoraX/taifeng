@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from taifeng.loop.engine import AgentEngine
-from taifeng.loop.event import EventMsg
+if TYPE_CHECKING:
+    from taifeng.loop.engine import AgentEngine
+    from taifeng.loop.event import EventMsg
 
 
 class JsonlSink:

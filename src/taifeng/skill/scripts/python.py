@@ -10,11 +10,15 @@ process group kill / 输出截断 / cancel 传播 / timeout 强制），仅替�
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from taifeng.skill.scripts.executor import ScriptExecutor
 from taifeng.skill.scripts.shell import ShellScriptExecutor
-from taifeng.skill.scripts.types import ScriptInvocation
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from taifeng.skill.scripts.executor import ScriptExecutor
+    from taifeng.skill.scripts.types import ScriptInvocation
 
 
 class PythonScriptExecutor(ShellScriptExecutor):

@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from taifeng.skill.orchestration import OrchestrationSpec
     from taifeng.skill.scripts.types import ScriptDescriptor
 

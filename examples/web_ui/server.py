@@ -48,11 +48,10 @@ import logging
 import os
 import sys
 import uuid
-from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -70,7 +69,6 @@ except ImportError as e:
 import taifeng
 from taifeng.context.budget import ContextBudget
 from taifeng.context.strategies.sliding import SlidingWindowStrategy
-from taifeng.llm.client import ModelClient
 from taifeng.permission import (
     CallbackPrompter,
     PermissionDecision,
@@ -108,6 +106,11 @@ from hooks_showcase.hooks_lib import build_showcase_hook_runner  # noqa: E402
 
 # mcp_showcase demo 的 MCP client 接线（spawn 外部 MCP server + 注册其工具）
 from mcp_showcase.mcp_lib import connect_showcase_mcp  # noqa: E402
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from taifeng.llm.client import ModelClient
 
 logging.basicConfig(
     level=logging.INFO,

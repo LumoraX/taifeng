@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
-from typing import Any, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 import yaml
 
@@ -30,6 +29,9 @@ from taifeng.skill.scripts.types import (
     ScriptDescriptor,
     ScriptLanguage,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

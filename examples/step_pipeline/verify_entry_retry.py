@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from pipeline import Pipeline  # noqa: E402  —— 同目录模块（脚本直跑）
 
@@ -26,10 +25,6 @@ import taifeng
 from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.skill.loader import load_skills_from_dir
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
-
-if TYPE_CHECKING:
-
-    pass
 
 # ── 1. 在临时目录写 4 个 skill：1 个编排 main + 3 个步骤（双重身份）──────────
 _ORCH = """---

@@ -73,8 +73,8 @@ PYTHONPATH=src uv run python -m taifeng skill validate <skills_dir>
 PYTHONPATH=src uv run python -m taifeng engine demo <skills_dir> <entry_id> -m "..."
 
 # Lint / 类型检查（pyproject.toml 已配 ruff + mypy strict）
-# 门禁只卡 F 类 + S108（均已全仓清零）；全量 ruff 尚有 400+ 条既有欠账（E501/TC/I 为主），别被吓到
-uv run ruff check --select F,S108 src tests examples scripts  # ← 门禁跑的就是这条
+# 门禁卡 F + S108 + I + TC（均已全仓清零）；全量 ruff 尚有 199 条既有欠账（E501 为主），别被吓到
+uv run ruff check --select F,S108,I,TC src tests examples scripts  # ← 门禁跑的就是这条
 uv run ruff check src/ tests/                             # 全量（含既有欠账）
 # mypy 必须带上可选 extra，否则 opentelemetry 未安装会报 12 条 import-not-found 假阳
 uv run --extra dev --extra litellm --extra telemetry-otel mypy src/
@@ -91,7 +91,7 @@ uv run --extra dev --extra litellm --extra telemetry-otel mypy src/
 
 CI 门禁（`.github/workflows/ci.yml`，push main / 每个 PR 自动跑）会做同样三件事：
 Python 3.12+3.13 全量 `pytest tests/`、`scripts/verify_examples.py` 的 examples 冒烟、
-`ruff check --select F,S108 src tests examples scripts`。本地跑这三条就等于预跑了门禁。**门禁不跑真实 LLM**——真实回归仍是
+`ruff check --select F,S108,I,TC src tests examples scripts`。本地跑这三条就等于预跑了门禁。**门禁不跑真实 LLM**——真实回归仍是
 人工跑 `examples/real_llm/capability_matrix.py` 并提交台账（见「测试约束」）。
 
 ## 多 Session 并发协作

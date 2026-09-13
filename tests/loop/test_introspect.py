@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.asyncio

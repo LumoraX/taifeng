@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json as _json
-from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -28,6 +28,9 @@ from taifeng.skill.verify import (
     SkillVerifyParseError,
     VerifiedCandidate,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 # ----------------------------------------------------------------------------
 # 测试夹具：候选池 + get_body 工厂 + SimClient 工厂

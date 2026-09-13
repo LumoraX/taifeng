@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from taifeng.loop import CancellationToken
 from taifeng.skill.scripts.python import PythonScriptExecutor
 from taifeng.skill.scripts.types import ScriptDescriptor, ScriptInvocation
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write_script(path: Path, content: str) -> None:

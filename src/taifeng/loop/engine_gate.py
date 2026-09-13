@@ -11,14 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import user_message
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext, ResolvedInstruction
 from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
-from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EventMsg,
@@ -31,6 +29,9 @@ from taifeng.loop.event import (
 from taifeng.loop.submission import Submission, UserMessage
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
 
 

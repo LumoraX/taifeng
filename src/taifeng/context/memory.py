@@ -34,10 +34,12 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from taifeng.conversation.models import ResponseItem
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from taifeng.conversation.models import ResponseItem
 
 logger = logging.getLogger(__name__)
 

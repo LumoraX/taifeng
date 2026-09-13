@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.skill.recall import RecallEntry, SkillCandidate, SkillRecall
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def test_skill_candidate_is_frozen() -> None:

@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from taifeng.conversation.models import ResponseItem, ThreadMetadata
 from taifeng.conversation.protocols import IndexHook
 from taifeng.loop.event import (
     EventMsg,
@@ -22,6 +21,7 @@ from taifeng.loop.event import (
 )
 
 if TYPE_CHECKING:
+    from taifeng.conversation.models import ResponseItem, ThreadMetadata
     from taifeng.telemetry.sink import TelemetrySink
 
 

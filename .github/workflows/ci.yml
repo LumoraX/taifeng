@@ -47,13 +47,15 @@ jobs:
           pytest tests/ -q
 
   lint:
-    # 只卡两类,零风格意见、全是真信号:
+    # 卡四类,零风格意见、全是真信号或可机械判定:
     #   F    —— 未用导入 / 重名覆盖 / 未用变量 / 未定义名
-    #   S108 —— 硬编码 /tmp(生产代码里是符号链接攻击面;tests/ 的占位字符串已按
-    #           目录放行,见 pyproject 的 per-file-ignores)
-    # 其余暂不入闸:E501/TC/I 共 400+ 条既有欠账,一次性清会跟并发开发大面积冲突,
-    # 要清得单独开切片。两类均已全仓清零,加闸是为了防止再长回来。
-    name: 静态检查 (ruff F + S108)
+    #   S108 —— 硬编码 /tmp(生产代码里是符号链接攻击面;tests/ 的占位字符串按目录放行)
+    #   I    —— 导入排序
+    #   TC   —— 仅类型用的 import 应进 TYPE_CHECKING(省导入开销、断循环依赖)
+    # I 与 TC **必须同时入闸**:TC 挪动会重建 import 块从而制造 I001,单独卡任一条
+    # 都会被另一条反弹(实测 TC 修完 I001 从 0 弹到 105)。
+    # 仍不入闸的:E501 125 条等,需逐行人工断行,单独开切片。四类均已全仓清零。
+    name: 静态检查 (ruff F + S108 + I + TC)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -63,8 +65,8 @@ jobs:
       - name: 安装 uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
-      - name: ruff F + S108 必须零错
-        run: uv run --frozen --extra dev ruff check --select F,S108 src tests examples scripts
+      - name: ruff F + S108 + I + TC 必须零错
+        run: uv run --frozen --extra dev ruff check --select F,S108,I,TC src tests examples scripts
 
   examples:
     name: examples 冒烟

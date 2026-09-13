@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from taifeng.skill.registry import FilesystemSkillRegistry, SkillSnapshot
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
+
+    from taifeng.skill.registry import FilesystemSkillRegistry, SkillSnapshot
 
 logger = logging.getLogger(__name__)
 

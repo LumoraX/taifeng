@@ -14,10 +14,10 @@ import logging
 from typing import TYPE_CHECKING
 
 from taifeng.loop.engine_types import _TERMINAL_KINDS, DeliveredEvent, _Subscriber
-from taifeng.loop.event import EventMsg
 
 if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine
+    from taifeng.loop.event import EventMsg
 
 logger = logging.getLogger(__name__)
 

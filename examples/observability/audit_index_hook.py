@@ -15,11 +15,14 @@ import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import taifeng
-from taifeng.conversation import ResponseItem, ThreadMetadata
 from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
+
+if TYPE_CHECKING:
+    from taifeng.conversation import ResponseItem, ThreadMetadata
 
 # ====================================================================
 # 业务侧 IndexHook 实现

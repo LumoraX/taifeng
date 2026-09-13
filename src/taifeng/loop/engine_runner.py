@@ -11,21 +11,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from taifeng.instructions.types import ResolvedInstruction
 from taifeng.loop.audit_history import (
     AuditedHistoryConflictError,
     audited_history_conflict_failure,
     merge_audited_history,
 )
-from taifeng.loop.cancellation import CancellationToken
-from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import EventMsg, PostTurnHookFired
 from taifeng.loop.injection import injection_event
 from taifeng.loop.rewind import derive_rewind_log
-from taifeng.loop.turn import TurnOutcome, TurnRunner
 
 if TYPE_CHECKING:
+    from taifeng.instructions.types import ResolvedInstruction
+    from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
+    from taifeng.loop.engine_types import _PendingTurn
+    from taifeng.loop.turn import TurnOutcome, TurnRunner
 
 
 class EngineRunner:

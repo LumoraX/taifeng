@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from taifeng.suspend.signal import SuspendSignal
-from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+if TYPE_CHECKING:
+    from taifeng.tool.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 

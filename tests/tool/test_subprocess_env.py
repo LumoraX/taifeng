@@ -7,9 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-import pytest
+from typing import TYPE_CHECKING, Any
 
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.permission import PermissionPolicy
@@ -20,6 +18,9 @@ from taifeng.tool.builtins.background import (
 )
 from taifeng.tool.builtins.shell import make_shell_exec_tool
 from taifeng.tool.spec import ToolContext
+
+if TYPE_CHECKING:
+    import pytest
 
 _SECRET = "LLM_BOOTSTRAP_API_KEY"
 _DUMP = "/usr/bin/env"  # 绝对路径:显式 env 场景下子进程没有 PATH

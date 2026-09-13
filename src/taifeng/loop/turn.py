@@ -12,16 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from taifeng.context.budget import (
-    ContextBudget,
-)
 from taifeng.context.cache_stats import PromptCacheStats
-from taifeng.context.compressor import (
-    CompressionOrchestrator,
-)
-from taifeng.conversation.models import (
-    ResponseItem,
-)
 from taifeng.llm.errors import (
     LLMError,
     classify_failure,
@@ -33,7 +24,6 @@ from taifeng.llm.image_input import (
 )
 from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
-from taifeng.loop.audit_skill import AuditedSkillDispatch
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
 from taifeng.loop.event import (
@@ -43,9 +33,6 @@ from taifeng.loop.event import (
     TurnFailed,
     TurnStarted,
     TurnSuspended,
-)
-from taifeng.loop.failure_policy import (
-    FailureDispositionPolicy,
 )
 from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.rewind import RewindLog
@@ -58,18 +45,31 @@ from taifeng.loop.turn_sample import TurnSample
 from taifeng.loop.turn_tooling import TurnTooling
 from taifeng.skill.dispatch import CallStack, DispatchPolicy
 from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获，不可放 TYPE_CHECKING
-from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
+    from taifeng.context.budget import (
+        ContextBudget,
+    )
+    from taifeng.context.compressor import (
+        CompressionOrchestrator,
+    )
     from taifeng.context.pinned_state import PinnedStateRegistry
+    from taifeng.conversation.models import (
+        ResponseItem,
+    )
     from taifeng.conversation.store import MessageStore
     from taifeng.llm.client import ModelClient
     from taifeng.loop.audit_bootstrap import AuditedSessionState
+    from taifeng.loop.audit_skill import AuditedSkillDispatch
     from taifeng.loop.cancellation import CancellationToken
+    from taifeng.loop.failure_policy import (
+        FailureDispositionPolicy,
+    )
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.eligibility import RuntimeCapabilities
     from taifeng.skill.registry import SkillSnapshot
     from taifeng.tool.runtime import ToolCallRuntime
+    from taifeng.tool.spec import ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 

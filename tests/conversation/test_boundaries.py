@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
 import pytest
@@ -24,6 +24,9 @@ from taifeng.conversation import (
     user_message,
 )
 from taifeng.conversation.hook_runner import HookRunner
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # -----------------------------------------------------------------
 # 1. limit 越界

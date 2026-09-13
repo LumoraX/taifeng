@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -20,6 +20,9 @@ from taifeng.tool.builtins import (
     make_shell_exec_tool,
 )
 from taifeng.tool.spec import ToolContext
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _ctx() -> ToolContext:

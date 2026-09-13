@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
 import pytest
@@ -24,7 +24,11 @@ from taifeng.conversation import (
     iter_thread_files,
     user_message,
 )
-from taifeng.loop.event import EventMsg
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from taifeng.loop.event import EventMsg
 
 
 class _RecordingSink:

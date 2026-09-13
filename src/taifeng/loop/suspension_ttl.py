@@ -17,10 +17,10 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.loop.event import EventMsg, SuspensionExpired
 from taifeng.loop.submission import Resume
-from taifeng.suspend.record import SuspensionRecord
 
 if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine
+    from taifeng.suspend.record import SuspensionRecord
 
 logger = logging.getLogger(__name__)
 

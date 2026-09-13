@@ -72,6 +72,12 @@ select = ["E", "F", "W", "I", "N", "UP", "ASYNC", "S", "B", "C4", "RET", "SIM", 
 # 永不执行的分支,故保持放行。**外部输入校验一律走 LLMError/DispatchVerdict,不用 assert。**
 ignore = ["S101"]
 
+[tool.ruff.lint.flake8-type-checking]
+# 告诉 ruff:继承 pydantic.BaseModel 的类,其注解在**运行时**被解析
+# (pydantic 建模型时就要拿到真类型),这些 import 不能挪进 TYPE_CHECKING。
+# 不配这条,TC001/TC003 会把它们判成"仅类型用"并建议挪走 —— 挪了就是运行时炸。
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
 [tool.ruff.lint.per-file-ignores]
 # S108(硬编码 /tmp):tests/ 里的 /tmp 全是**占位字符串**,不落盘 ——
 # SkillDefinition.body_path(body 已内联)、ScriptDescriptor.path(构造即 raise 的

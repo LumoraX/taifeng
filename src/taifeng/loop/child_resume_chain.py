@@ -22,7 +22,6 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
-from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EventMsg,
@@ -30,15 +29,16 @@ from taifeng.loop.event import (
     SuspensionResolved,
     SuspensionResolveRejected,
 )
-from taifeng.loop.submission import Resume, Submission
 from taifeng.loop.tool_batch import parse_tool_arguments
 from taifeng.loop.turn import TurnRunner
-from taifeng.suspend.record import SuspensionRecord
 from taifeng.suspend.resolver import CHAIN_CANCELLED_RESULT
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
+    from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
+    from taifeng.loop.submission import Resume, Submission
+    from taifeng.suspend.record import SuspensionRecord
 
 logger = logging.getLogger(__name__)
 

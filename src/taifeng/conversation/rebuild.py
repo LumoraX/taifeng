@@ -22,11 +22,11 @@ import time
 from typing import TYPE_CHECKING
 
 from taifeng.conversation.models import RebuildReport, ThreadMetadata
-from taifeng.conversation.protocols import ThreadDirectory
 from taifeng.conversation.transcript import JsonlMessageWriter, iter_thread_files
 from taifeng.loop.event import EventMsg, RebuildSkippedCorrupt
 
 if TYPE_CHECKING:
+    from taifeng.conversation.protocols import ThreadDirectory
     from taifeng.telemetry.sink import TelemetrySink
 
 

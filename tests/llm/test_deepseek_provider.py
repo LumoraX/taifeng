@@ -14,8 +14,7 @@ OpenAICompatClient 薄子类」全部 6 个 Scenario：
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -24,6 +23,9 @@ from taifeng.llm.providers.deepseek_provider import DeepSeekClient
 from taifeng.llm.providers.openai_compat import OpenAICompatClient, OpenAICompatSession
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ============================================================
 # helpers

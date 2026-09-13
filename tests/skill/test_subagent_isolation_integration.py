@@ -11,14 +11,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.cancellation import CancellationToken
-from taifeng.loop.event import EventMsg
 from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.permission.types import PermissionPolicy
 from taifeng.skill.definition import SkillDefinition
@@ -27,6 +26,9 @@ from taifeng.skill.dispatch import (
     _SubagentAutoDecisionPolicy,
 )
 from taifeng.tool.spec import ToolContext
+
+if TYPE_CHECKING:
+    from taifeng.loop.event import EventMsg
 
 
 def _make_skill(skill_id: str, *, entry: bool = False) -> SkillDefinition:

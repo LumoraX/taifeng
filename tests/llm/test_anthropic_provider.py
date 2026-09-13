@@ -9,8 +9,7 @@ messages API」全部 4 个 Scenario + 错误路径。
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -29,6 +28,9 @@ from taifeng.llm.providers.anthropic_provider import (
 )
 from taifeng.llm.types import ApiMessage, ApiRequest, CacheBreakpoint, ToolSpecRef
 from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ============================================================
 # helpers —— 构造 SSE 响应字符串

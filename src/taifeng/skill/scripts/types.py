@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from taifeng.loop.cancellation import CancellationToken
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from taifeng.loop.cancellation import CancellationToken
 
 # === 默认值 ===
 DEFAULT_TIMEOUT_SECONDS: float = 60.0

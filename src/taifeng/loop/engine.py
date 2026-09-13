@@ -55,7 +55,6 @@ from taifeng.loop.audit_mailbox import (
 from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shutdown
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.audit_support import _await_owned as audit_await_owned
-from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.child_resume_chain import ChildResumeChain
 from taifeng.loop.engine_events import EngineEvents
 from taifeng.loop.engine_gate import EngineGate
@@ -97,7 +96,6 @@ from taifeng.loop.suspension_access import SuspensionAccess
 from taifeng.loop.suspension_ttl import SuspensionTtlScheduler
 from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.skill.dispatch import DispatchPolicy
-from taifeng.suspend.record import SuspensionRecord
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -107,9 +105,11 @@ if TYPE_CHECKING:
     from taifeng.llm.client import ModelClient
     from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
+    from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.registry import SkillSnapshot
+    from taifeng.suspend.record import SuspensionRecord
     from taifeng.tool.runtime import ToolCallRuntime
 
 logger = logging.getLogger(__name__)

@@ -6,10 +6,12 @@ src 内不假设宿主进程具备执行能力（参见 ADR 0009）。
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from taifeng.llm.errors import LLMError
-from taifeng.skill.scripts.types import ScriptDescriptor, ScriptInvocation, ScriptResult
+
+if TYPE_CHECKING:
+    from taifeng.skill.scripts.types import ScriptDescriptor, ScriptInvocation, ScriptResult
 
 
 class ScriptExecutionError(LLMError):

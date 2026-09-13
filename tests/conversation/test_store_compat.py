@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -14,6 +14,9 @@ from taifeng.conversation import (
     MessageStore,
     user_message,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_jsonl_message_store_satisfies_legacy_protocol(tmp_path: Path) -> None:

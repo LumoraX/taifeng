@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import sys
 import textwrap
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from taifeng.mcp import McpStdioClient, register_mcp_tools_async
 from taifeng.tool.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 FAKE_MCP_SERVER = r"""
 import json

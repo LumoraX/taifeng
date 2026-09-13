@@ -9,12 +9,15 @@
 
 from __future__ import annotations
 
-import pytest
+from typing import TYPE_CHECKING
 
 from taifeng.permission import (
     PermissionRequest,
     PermissionRule,
 )
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _req_tool(cmd: str, *, target: str = "shell_exec") -> PermissionRequest:

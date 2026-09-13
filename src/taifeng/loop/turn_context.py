@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING
 
 from taifeng.context.budget import estimate_history_tokens
 from taifeng.context.budget_hint import evaluate_budget_hint, render_budget_hint
-from taifeng.conversation.models import ResponseItem
 from taifeng.loop.event import BudgetHintInjected, EngineLog, PinnedStateReinjected
 from taifeng.loop.turn_helpers import _latest_user_text
 
 if TYPE_CHECKING:
+    from taifeng.conversation.models import ResponseItem
     from taifeng.loop.turn import TurnRunner
 
 logger = logging.getLogger(__name__)

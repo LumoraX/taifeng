@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
-from taifeng.context.budget import ContextBudget
-from taifeng.context.injection import InitialContextInjection
-from taifeng.conversation.models import ResponseItem
+if TYPE_CHECKING:
+    from taifeng.context.budget import ContextBudget
+    from taifeng.context.injection import InitialContextInjection
+    from taifeng.conversation.models import ResponseItem
 
 CompressionPhase = Literal["pre_turn", "mid_turn", "manual", "overflow"]
 

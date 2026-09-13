@@ -16,8 +16,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -32,6 +31,9 @@ from taifeng.llm.providers.gemini_provider import GeminiSession, _to_gemini_cont
 from taifeng.llm.providers.litellm_provider import LiteLLMSession
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ───────────────────────── helpers ─────────────────────────
 

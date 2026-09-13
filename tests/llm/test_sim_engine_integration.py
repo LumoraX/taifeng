@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -36,6 +35,7 @@ from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from pathlib import Path
 
     from taifeng.llm.events import ResponseEvent
     from taifeng.llm.types import ApiRequest

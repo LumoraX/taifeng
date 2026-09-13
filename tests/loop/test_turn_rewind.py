@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -18,6 +18,9 @@ import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.loop.submission import Rewind, Submission
 from tests.conftest import wait_for_condition
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _is_root_end(ev: object) -> bool:

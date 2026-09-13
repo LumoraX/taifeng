@@ -14,13 +14,16 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from pathlib import Path
-
-import pytest
+from typing import TYPE_CHECKING
 
 from taifeng.loop import CancellationToken
 from taifeng.skill.scripts.shell import ShellScriptExecutor
 from taifeng.skill.scripts.types import ScriptDescriptor, ScriptInvocation
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 
 def _write_executable(path: Path, content: str) -> None:

@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -19,6 +19,9 @@ from taifeng.hooks import HookDecision, HookRegistry, HookRunner
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import CompactNow
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # --------------------------------------------------------------------
 # 公共辅助

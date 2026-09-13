@@ -13,8 +13,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -24,6 +23,9 @@ from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.permission.types import PermissionPolicy
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass

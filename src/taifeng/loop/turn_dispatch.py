@@ -18,12 +18,12 @@ from taifeng.loop.event import (
     SkillSpawnRejected,
     SubagentPolicyOverridden,
 )
-from taifeng.skill.definition import SkillDefinition
-from taifeng.skill.dispatch import CallStack
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
     from taifeng.loop.turn import TurnRunner
+    from taifeng.skill.definition import SkillDefinition
+    from taifeng.skill.dispatch import CallStack
 
 
 class TurnDispatch:

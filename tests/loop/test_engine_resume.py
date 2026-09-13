@@ -8,13 +8,16 @@ history 恢复 + ThreadResumed 事件 + thread_id 一致 + cache_anchor 重置�
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 import taifeng
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 async def _run_first_session(

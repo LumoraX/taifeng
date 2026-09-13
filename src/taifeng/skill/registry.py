@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.loader import compute_reachable_graph, load_skills_from_dir
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterable
+
+    from taifeng.skill.definition import SkillDefinition
 
 logger = logging.getLogger(__name__)
 

@@ -15,13 +15,12 @@ fork-bomb 真窟窿。本模块提供两道闸：
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
 
 
 class SpawnLimitError(Exception):

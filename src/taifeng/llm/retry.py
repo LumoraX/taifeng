@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from taifeng.llm.errors import LLMError, RateLimitError
-from taifeng.loop.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from taifeng.loop.cancellation import CancellationToken
 
 T = TypeVar("T")
 
