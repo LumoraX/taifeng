@@ -89,6 +89,8 @@ MsgKind = Literal[
     "peer_agent_woken",
     "peer_wait_started",
     "peer_wait_resolved",
+    "peer_wait_any_started",
+    "peer_wait_any_resolved",
     "denial_circuit_open",
     "doom_loop_warned",
     "doom_loop_circuit_open",
