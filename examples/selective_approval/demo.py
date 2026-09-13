@@ -345,6 +345,5 @@ async def main() -> int:
 # permission.types 内部，跨包 import 在 CLI demo 不值得拉进来）
 from typing import Any  # noqa: E402
 
-
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))

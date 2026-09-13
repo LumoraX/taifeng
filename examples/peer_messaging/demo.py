@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.loop.submission import SendToPeer
 from taifeng.tool.builtins.send_message import make_send_message_tool
 from taifeng.tool.builtins.spawn_skill import make_spawn_skill_tool

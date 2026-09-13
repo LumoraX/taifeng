@@ -25,7 +25,6 @@ from taifeng.conversation import (
 )
 from taifeng.conversation.hook_runner import HookRunner
 
-
 # -----------------------------------------------------------------
 # 1. limit 越界
 # -----------------------------------------------------------------
@@ -57,8 +56,8 @@ async def test_limit_validation_zero_and_too_large(tmp_path: Path) -> None:
 async def test_null_directory_no_file_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """NullThreadDirectory 调任意方法 SHALL 不触达文件系统 / 不打开 sqlite 连接。"""
 
-    import sqlite3
     import builtins
+    import sqlite3
 
     open_calls = 0
     sqlite_calls = 0

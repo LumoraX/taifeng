@@ -35,7 +35,6 @@ from taifeng.hooks import (  # noqa: E402
 )
 from taifeng.telemetry import attach_console_sink  # noqa: E402
 
-
 SKILL = """---
 name: style-checker
 description: 代码风格规则

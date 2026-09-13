@@ -8,29 +8,52 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-import asyncio
 from taifeng.context.budget import estimate_history_bytes
 from taifeng.conversation.models import assistant_message, function_call, reasoning
 from taifeng.conversation.store import AtomicBatchMessageStore
 from taifeng.llm.client import model_capabilities
-from taifeng.llm.errors import InvalidResponseError, LLMError, RequestTooLargeError, UnsupportedPersistenceCapabilityError
+from taifeng.llm.errors import (
+    InvalidResponseError,
+    LLMError,
+    RequestTooLargeError,
+    UnsupportedPersistenceCapabilityError,
+)
 from taifeng.llm.image_input import redact_sensitive_request_data
 from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
-from taifeng.loop.audit_llm import commit_audited_llm_response, model_session_for_turn, record_model_cache_read
+from taifeng.loop.audit_llm import (
+    commit_audited_llm_response,
+    model_session_for_turn,
+    record_model_cache_read,
+)
 from taifeng.loop.audit_tool import audited_tool_batch
-from taifeng.loop.event import AssistantReasoning, AssistantText, CacheBreakDetected, ContextBudgetExceeded, LlmRequestRecorded, ProviderRetry, RewindCheckpointRecorded, ToolBatchDispatched, ToolCallStarted
+from taifeng.loop.event import (
+    AssistantReasoning,
+    AssistantText,
+    CacheBreakDetected,
+    ContextBudgetExceeded,
+    LlmRequestRecorded,
+    ProviderRetry,
+    RewindCheckpointRecorded,
+    ToolBatchDispatched,
+    ToolCallStarted,
+)
 from taifeng.loop.failure_policy import DEFAULT_FAILURE_POLICY, FailureDisposition
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.rewind import count_turns
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
-from taifeng.loop.turn_helpers import _llm_failure_context, _responses_conversation_items, _responses_sample_id, _sha1_short
+from taifeng.loop.turn_helpers import (
+    _llm_failure_context,
+    _responses_conversation_items,
+    _responses_sample_id,
+    _sha1_short,
+)
 from taifeng.suspend.signal import SuspendSignal
 from taifeng.tool.spec import ToolContext
-from typing import Any
 
 if TYPE_CHECKING:
     from taifeng.llm.retrying import RetryAttempt

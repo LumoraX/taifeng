@@ -33,7 +33,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.telemetry import attach_console_sink
 
 SKILLS_DIR = Path(__file__).parent / "skills"

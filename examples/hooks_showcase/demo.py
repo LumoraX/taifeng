@@ -38,7 +38,7 @@ from pathlib import Path
 from hooks_lib import build_showcase_hook_runner
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.telemetry import attach_console_sink
 
 SKILLS_DIR = Path(__file__).parent / "skills"

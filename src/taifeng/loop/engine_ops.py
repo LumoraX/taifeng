@@ -16,16 +16,16 @@ from taifeng.context.budget import ContextBudget
 from taifeng.conversation.models import function_call, system_injection
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext
+from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EngineLog,
     EventMsg,
-    InstructionUpdateRejected,
     InstructionUpdated,
+    InstructionUpdateRejected,
     RewindRejected,
     RewindTableRebuilt,
     TurnRewound,
 )
-from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.rewind import count_turns
 from taifeng.loop.submission import Rewind, Submission, UpdateBudget, UpdateInstructions
 

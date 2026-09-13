@@ -35,7 +35,7 @@ import tempfile
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.loop.submission import Resume
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 from taifeng.tool.builtins.spawn_skill import (

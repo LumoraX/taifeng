@@ -11,7 +11,6 @@ import pytest
 from taifeng.mcp import McpStdioClient, register_mcp_tools_async
 from taifeng.tool.registry import ToolRegistry
 
-
 FAKE_MCP_SERVER = r"""
 import json
 import sys
@@ -149,8 +148,8 @@ async def test_register_mcp_tools_async(fake_server: Path) -> None:
         assert "mcp_fs_uppercase" in registry
 
         # 调用一下
-        from taifeng.tool.spec import ToolContext
         from taifeng.loop.cancellation import CancellationToken
+        from taifeng.tool.spec import ToolContext
         spec = registry.get("mcp_fs_uppercase")
         assert spec is not None
         result = await spec.handler(

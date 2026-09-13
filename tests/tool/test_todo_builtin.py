@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import taifeng
 from taifeng.context.pinned_state import PinnedStateSource
 from taifeng.context.strategies import HandoffCompactionStrategy
-from taifeng.llm.providers.sim import SimClient, SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimClient, SimTurn
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import CompactNow
 from taifeng.tool.builtins.todo import TodoStore, make_todo_write_tool

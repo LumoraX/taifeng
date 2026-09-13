@@ -30,7 +30,6 @@ from taifeng.skill.registry import SkillSnapshot
 from taifeng.tool.builtins import make_search_skills_tool
 from taifeng.tool.spec import ToolContext
 
-
 # ====================================================================
 # fixtures
 # ====================================================================

@@ -21,7 +21,6 @@ from taifeng.conversation import ResponseItem, ThreadMetadata
 from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 
-
 # ====================================================================
 # 业务侧 IndexHook 实现
 # ====================================================================

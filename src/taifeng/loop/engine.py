@@ -27,6 +27,7 @@ from taifeng.instructions.types import (
 )
 from taifeng.llm.errors import LLMError
 from taifeng.llm.retrying import with_default_retry
+from taifeng.loop import engine_ops
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
@@ -55,6 +56,13 @@ from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shut
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.audit_support import _await_owned as audit_await_owned
 from taifeng.loop.cancellation import CancellationToken
+from taifeng.loop.child_resume_chain import ChildResumeChain
+from taifeng.loop.engine_events import EngineEvents
+from taifeng.loop.engine_gate import EngineGate
+from taifeng.loop.engine_lifecycle import EngineLifecycle
+from taifeng.loop.engine_operations import EngineOperations
+from taifeng.loop.engine_resume import EngineResume
+from taifeng.loop.engine_runner import EngineRunner
 from taifeng.loop.event import (
     EngineLog,
     EventMsg,
@@ -66,17 +74,7 @@ from taifeng.loop.event import (
     UserInputInjected,
 )
 from taifeng.loop.event import Shutdown as ShutdownMsg
-from taifeng.loop import engine_ops
 from taifeng.loop.rewind import RewindCheckpoint, derive_rewind_log
-from taifeng.loop.engine_operations import EngineOperations
-from taifeng.loop.engine_lifecycle import EngineLifecycle
-from taifeng.loop.engine_runner import EngineRunner
-from taifeng.loop.engine_gate import EngineGate
-from taifeng.loop.engine_resume import EngineResume
-from taifeng.loop.engine_events import EngineEvents
-from taifeng.loop.child_resume_chain import ChildResumeChain
-from taifeng.loop.suspension_access import SuspensionAccess
-from taifeng.loop.suspension_ttl import SuspensionTtlScheduler
 from taifeng.loop.spawn_driver import SpawnDriver
 from taifeng.loop.submission import (
     CancelTurn,
@@ -95,6 +93,8 @@ from taifeng.loop.submission import (
     UpdateInstructions,
     UserMessage,
 )
+from taifeng.loop.suspension_access import SuspensionAccess
+from taifeng.loop.suspension_ttl import SuspensionTtlScheduler
 from taifeng.loop.turn import TurnOutcome, TurnRunner
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.suspend.record import SuspensionRecord
@@ -118,11 +118,12 @@ logger = logging.getLogger(__name__)
 # 进程内类型已下沉 engine_types.py（Wave 4 模块切分）。DeliveredEvent 是公共 API，
 # 此处原样再导出，`from taifeng.loop.engine import DeliveredEvent` 的既有写法不变。
 from taifeng.loop.engine_types import (  # noqa: E402
-    _PendingTurn,
-    _Subscriber,
     _TERMINAL_KINDS,
     DeliveredEvent,
+    _PendingTurn,
+    _Subscriber,
 )
+
 
 class AgentEngine:
     """主 actor。

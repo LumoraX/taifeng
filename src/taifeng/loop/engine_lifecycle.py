@@ -9,13 +9,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
-import logging
 from taifeng.loop.audit_admission import AcceptedUserMessage
 from taifeng.loop.audit_mailbox import finalize_audited_mailbox
 from taifeng.loop.cancellation import CancellationToken
-from taifeng.loop.event import EventMsg, Shutdown as ShutdownMsg
+from taifeng.loop.event import EventMsg
+from taifeng.loop.event import Shutdown as ShutdownMsg
 
 if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine

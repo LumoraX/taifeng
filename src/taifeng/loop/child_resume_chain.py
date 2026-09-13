@@ -27,8 +27,8 @@ from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EventMsg,
     SuspensionPartiallyResolved,
-    SuspensionResolveRejected,
     SuspensionResolved,
+    SuspensionResolveRejected,
 )
 from taifeng.loop.submission import Resume, Submission
 from taifeng.loop.tool_batch import parse_tool_arguments

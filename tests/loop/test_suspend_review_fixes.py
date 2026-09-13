@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.loop.submission import Resume
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition

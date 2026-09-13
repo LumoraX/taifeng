@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 import httpx
 
 from taifeng.llm.providers import SimClient
-from taifeng.llm.providers.sim import SimTurn
 from taifeng.llm.providers.openai_compat import OpenAICompatClient, OpenAICompatSession
+from taifeng.llm.providers.sim import SimTurn
 from taifeng.llm.types import (
     ApiMessage,
     ApiRequest,

@@ -22,7 +22,6 @@ from taifeng.mcp.server import (
 )
 from tests.conftest import GUARD_TIMEOUT_SECONDS, guard_ticks, wait_for_condition
 
-
 # --------------------------------------------------------------------
 # Fixtures: fake bidirectional pipe（in-memory stdin / stdout）
 # --------------------------------------------------------------------

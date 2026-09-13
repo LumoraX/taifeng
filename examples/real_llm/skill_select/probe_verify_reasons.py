@@ -34,12 +34,12 @@ from _provider_bootstrap import (  # noqa: E402
 
 load_dotenv_files()
 
+# 复用对抗 bench 的 skill 定义与树生成（同源，保证 body = 同一份「输入要求」富文本）
+import importlib.util  # noqa: E402
+
 from taifeng.loop.cancellation import CancellationToken  # noqa: E402
 from taifeng.skill.recall import SkillCandidate  # noqa: E402
 from taifeng.skill.verify import LlmSkillVerifier  # noqa: E402
-
-# 复用对抗 bench 的 skill 定义与树生成（同源，保证 body = 同一份「输入要求」富文本）
-import importlib.util  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location(
     "bvv", str(HERE / "bench_verify_value.py")

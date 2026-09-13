@@ -46,14 +46,14 @@ from _provider_bootstrap import (  # noqa: E402
 
 load_dotenv_files()
 
+# 与 bench.py 一致的领域归类 + 叶子渲染（复用同目录 build_skills，避免重复实现）
+from build_skills import _leaf_md, _load_entries  # noqa: E402
+
 import taifeng  # noqa: E402
 from taifeng.context.budget import ContextBudget  # noqa: E402
 from taifeng.permission.policy import PermissionPolicy  # noqa: E402
 from taifeng.skill.recall import KeywordSkillRecall  # noqa: E402
 from taifeng.skill.verify import LlmSkillVerifier  # noqa: E402
-
-# 与 bench.py 一致的领域归类 + 叶子渲染（复用同目录 build_skills，避免重复实现）
-from build_skills import _leaf_md, _load_entries  # noqa: E402
 
 # deferred 召回版 router 指令体：不再说「立即 call_skill」，而是「先搜后调」。
 # 注意 frontmatter **不声明** exposure.child_recall（保持 auto），deferred 由

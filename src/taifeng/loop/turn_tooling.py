@@ -8,19 +8,23 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import asyncio
 import json
 import logging
+from typing import TYPE_CHECKING, Any
+
 from taifeng.conversation.models import ResponseItem, function_call_output
-from taifeng.llm.errors import AttachmentTooLargeError, ImageCountExceededError, InvalidImageError, UnsupportedModalityError
+from taifeng.llm.errors import (
+    AttachmentTooLargeError,
+    ImageCountExceededError,
+    InvalidImageError,
+    UnsupportedModalityError,
+)
 from taifeng.llm.image_input import admit_tool_attachments
 from taifeng.loop.event import DenialCircuitOpen, DoomLoopCircuitOpen, DoomLoopWarned
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
 from taifeng.loop.turn_helpers import _latest_user_text
 from taifeng.tool.spec import ToolContext, ToolResult
-from typing import Any
 
 if TYPE_CHECKING:
     from taifeng.loop.turn import TurnRunner

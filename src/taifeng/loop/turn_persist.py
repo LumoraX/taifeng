@@ -8,12 +8,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import assistant_message
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.injection import injection_event
-from typing import Any
 
 if TYPE_CHECKING:
     from taifeng.loop.turn import TurnRunner

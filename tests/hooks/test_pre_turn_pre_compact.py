@@ -20,7 +20,6 @@ from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import CompactNow
 
-
 # --------------------------------------------------------------------
 # 公共辅助
 # --------------------------------------------------------------------

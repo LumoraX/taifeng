@@ -17,7 +17,6 @@ from taifeng.permission.types import (
 )
 from taifeng.skill.dispatch import DispatchPolicy, _SubagentAutoDecisionPolicy
 
-
 # --------------------------------------------------------------------
 # DispatchPolicy 字段
 # --------------------------------------------------------------------

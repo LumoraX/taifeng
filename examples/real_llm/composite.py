@@ -37,7 +37,6 @@ load_dotenv_files()
 import taifeng  # noqa: E402
 from taifeng.telemetry import attach_console_sink  # noqa: E402
 
-
 CODE_REVIEW = """---
 name: code-review
 description: 代码审查专家 —— 聚焦正确性 / 安全性 / 可读性

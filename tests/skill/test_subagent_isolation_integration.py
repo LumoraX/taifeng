@@ -16,10 +16,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from taifeng.llm.types import TokenUsage
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.event import EventMsg
 from taifeng.loop.turn import TurnOutcome, TurnRunner
-from taifeng.llm.types import TokenUsage
 from taifeng.permission.types import PermissionPolicy
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import (

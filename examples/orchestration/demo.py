@@ -31,7 +31,7 @@ import asyncio
 from pathlib import Path
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.telemetry import attach_console_sink
 
 # 本 demo 的 skill 包目录（与 web_ui demo 复用同一份 skills）

@@ -9,11 +9,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import asyncio
 import logging
-from taifeng.loop.engine_types import DeliveredEvent, _Subscriber, _TERMINAL_KINDS
+from typing import TYPE_CHECKING
+
+from taifeng.loop.engine_types import _TERMINAL_KINDS, DeliveredEvent, _Subscriber
 from taifeng.loop.event import EventMsg
 
 if TYPE_CHECKING:

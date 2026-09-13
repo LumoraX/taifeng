@@ -23,7 +23,6 @@ from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.telemetry import attach_console_sink
 
-
 ATOMIC = """---
 name: style-checker
 description: 代码风格规则

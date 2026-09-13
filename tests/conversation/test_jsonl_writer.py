@@ -12,10 +12,11 @@
 
 from __future__ import annotations
 
-import anyio
 import json
-import pytest
 from pathlib import Path
+
+import anyio
+import pytest
 
 from taifeng.conversation import (
     JsonlMessageWriter,

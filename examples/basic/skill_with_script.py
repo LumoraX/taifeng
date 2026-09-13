@@ -25,7 +25,6 @@ from taifeng.skill.scripts.python import PythonScriptExecutor
 from taifeng.skill.scripts.shell import ShellScriptExecutor
 from taifeng.telemetry import attach_console_sink
 
-
 HELPER_SKILL_MD = """---
 name: helper
 description: 辅助 skill（占位）

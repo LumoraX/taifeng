@@ -9,20 +9,26 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import asyncio
 import contextlib
 from collections.abc import Callable, Coroutine
+from typing import TYPE_CHECKING, Any
+
 from taifeng.conversation.models import user_message
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext, ResolvedInstruction
 from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine_types import _PendingTurn
-from taifeng.loop.event import EventMsg, PreTurnHookDenied, ResourceLimitExceeded, SubmissionQueued, TurnFailed, TurnSuspended
+from taifeng.loop.event import (
+    EventMsg,
+    PreTurnHookDenied,
+    ResourceLimitExceeded,
+    SubmissionQueued,
+    TurnFailed,
+    TurnSuspended,
+)
 from taifeng.loop.submission import Submission, UserMessage
-from typing import Any
 
 if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine

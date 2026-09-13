@@ -71,7 +71,6 @@ import taifeng
 from taifeng.context.budget import ContextBudget
 from taifeng.context.strategies.sliding import SlidingWindowStrategy
 from taifeng.llm.client import ModelClient
-from taifeng.telemetry.console import attach_console_sink
 from taifeng.permission import (
     CallbackPrompter,
     PermissionDecision,
@@ -81,6 +80,7 @@ from taifeng.permission import (
 )
 from taifeng.skill.scripts.python import PythonScriptExecutor
 from taifeng.skill.scripts.shell import ShellScriptExecutor
+from taifeng.telemetry.console import attach_console_sink
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 from taifeng.tool.builtins.spawn_skill import (
     make_await_skills_tool,
@@ -102,8 +102,10 @@ from _provider_bootstrap import (  # noqa: E402
     build_model_client,
     load_dotenv_files,
 )
+
 # hooks_showcase demo 的业务钩子工厂（与该 demo 的 standalone demo.py 共用同一实现）
 from hooks_showcase.hooks_lib import build_showcase_hook_runner  # noqa: E402
+
 # mcp_showcase demo 的 MCP client 接线（spawn 外部 MCP server + 注册其工具）
 from mcp_showcase.mcp_lib import connect_showcase_mcp  # noqa: E402
 

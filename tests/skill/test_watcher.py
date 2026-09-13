@@ -9,7 +9,6 @@ import pytest
 
 from taifeng.skill import FilesystemSkillRegistry, SkillFileWatcher
 
-
 ATOMIC = """---
 name: skill-a
 description: x

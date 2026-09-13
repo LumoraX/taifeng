@@ -14,6 +14,8 @@ hook 自身异常也不影响主流程；只发 telemetry。详见 spec
 """
 
 from taifeng.hooks.types import (
+    SCRIPT_OUTPUT_PREVIEW_LIMIT,
+    SKILL_OUTPUT_PREVIEW_LIMIT,
     HookContext,
     HookDecision,
     HookHandler,
@@ -29,8 +31,6 @@ from taifeng.hooks.types import (
     PreSkillDispatchHook,
     PreToolUseHook,
     PreTurnHook,
-    SCRIPT_OUTPUT_PREVIEW_LIMIT,
-    SKILL_OUTPUT_PREVIEW_LIMIT,
 )
 
 __all__ = [

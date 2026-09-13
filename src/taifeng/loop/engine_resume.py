@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING
 from taifeng.conversation.models import function_call_output, system_injection
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine_types import _PendingTurn
-from taifeng.loop.event import EventMsg, SuspensionPartiallyResolved, SuspensionResolveRejected, SuspensionResolved
+from taifeng.loop.event import (
+    EventMsg,
+    SuspensionPartiallyResolved,
+    SuspensionResolved,
+    SuspensionResolveRejected,
+)
 from taifeng.loop.submission import Resume, Submission
 from taifeng.suspend.record import SuspensionRecord
 

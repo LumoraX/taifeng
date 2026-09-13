@@ -8,9 +8,9 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
-import logging
 from taifeng.context.budget import estimate_history_tokens
 from taifeng.context.budget_hint import evaluate_budget_hint, render_budget_hint
 from taifeng.conversation.models import ResponseItem

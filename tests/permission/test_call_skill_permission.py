@@ -35,7 +35,6 @@ from taifeng.skill.registry import SkillSnapshot
 from taifeng.tool.builtins import make_call_skill_tool
 from taifeng.tool.spec import ToolContext, ToolResult
 
-
 # ====================================================================
 # 测试 fixtures —— 手工构造 skills / snapshot / 假 dispatcher
 # ====================================================================

@@ -14,7 +14,6 @@ from taifeng.mcp.prompter import McpPrompter
 from taifeng.mcp.server import McpServerInitiatedRequestError
 from taifeng.permission.types import PermissionRequest
 
-
 # --------------------------------------------------------------------
 # 假 server：用 stub 替代真实 McpStdioServer.server_initiated_request
 # --------------------------------------------------------------------

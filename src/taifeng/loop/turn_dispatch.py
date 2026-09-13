@@ -8,17 +8,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import json
+from typing import TYPE_CHECKING, Any
+
 from taifeng.loop.audit_skill import AuditedSkillDispatch
-from taifeng.loop.event import SkillReturned, SubagentPolicyOverridden
+from taifeng.loop.event import (
+    SkillDispatched,
+    SkillReturned,
+    SkillSpawnRejected,
+    SubagentPolicyOverridden,
+)
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.dispatch import CallStack
 from taifeng.tool.spec import ToolContext, ToolResult
-from typing import Any
-
-from taifeng.loop.event import SkillDispatched, SkillSpawnRejected
 
 if TYPE_CHECKING:
     from taifeng.loop.turn import TurnRunner

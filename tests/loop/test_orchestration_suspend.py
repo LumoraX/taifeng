@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import taifeng
-from taifeng.llm.providers.sim import SimTurn, RoutingSimClient
+from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.loop.submission import Resume
 from taifeng.suspend.reason import SuspendReason
 from taifeng.suspend.record import SuspensionRecord

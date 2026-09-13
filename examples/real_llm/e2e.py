@@ -41,7 +41,6 @@ load_dotenv_files()
 import taifeng  # noqa: E402
 from taifeng.telemetry import attach_console_sink  # noqa: E402
 
-
 ATOMIC = """---
 name: style-checker
 description: 代码风格规则集

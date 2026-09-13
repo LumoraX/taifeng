@@ -10,7 +10,6 @@ from taifeng.llm.providers import OpenAICompatClient, OpenAICompatSession
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
 
-
 SSE_RESPONSE = (
     b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
     b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'

@@ -195,10 +195,10 @@ def test_is_skill_eligible(tmp_path: Path) -> None:
 
 
 def test_render_prompt_hides_model_invocable_false(tmp_path: Path) -> None:
+    import anyio
+
     from taifeng.loop.prompt import render_system_prompt
     from taifeng.skill.registry import FilesystemSkillRegistry
-
-    import anyio
 
     async def _load() -> object:
         reg = await FilesystemSkillRegistry.load(_write_skills(tmp_path))
@@ -218,10 +218,10 @@ def test_render_prompt_hides_model_invocable_false(tmp_path: Path) -> None:
 
 
 def test_render_prompt_filters_ineligible_with_caps(tmp_path: Path) -> None:
+    import anyio
+
     from taifeng.loop.prompt import render_system_prompt
     from taifeng.skill.registry import FilesystemSkillRegistry
-
-    import anyio
 
     reg = anyio.run(
         lambda: FilesystemSkillRegistry.load(_write_skills(tmp_path))
@@ -353,10 +353,10 @@ def test_render_prompt_inline_lists_children_when_below_threshold(
 
     且必须与「改 helper 前」逐字一致：``- `id`: desc`` 形式。
     """
+    import anyio
+
     from taifeng.loop.prompt import render_system_prompt
     from taifeng.skill.registry import FilesystemSkillRegistry
-
-    import anyio
 
     reg = anyio.run(
         lambda: FilesystemSkillRegistry.load(_write_skills(tmp_path))
@@ -379,10 +379,10 @@ def test_render_prompt_deferred_hides_children_with_search_hint(
     tmp_path: Path,
 ) -> None:
     """auto entry + 可见 child 数 > threshold → prompt 不列 child，含 search 提示。"""
+    import anyio
+
     from taifeng.loop.prompt import render_system_prompt
     from taifeng.skill.registry import FilesystemSkillRegistry
-
-    import anyio
 
     reg = anyio.run(
         lambda: FilesystemSkillRegistry.load(_write_skills(tmp_path))
@@ -407,10 +407,10 @@ def test_render_prompt_deferred_hides_children_with_search_hint(
 
 def test_render_prompt_deferred_override_small_entry(tmp_path: Path) -> None:
     """frontmatter child_recall: deferred 的小 entry（child < threshold）也走 deferred。"""
+    import anyio
+
     from taifeng.loop.prompt import render_system_prompt
     from taifeng.skill.registry import FilesystemSkillRegistry
-
-    import anyio
 
     _DEFERRED_ENTRY = """---
 name: deferred-entry

@@ -20,7 +20,6 @@ from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.telemetry import attach_console_sink
 
-
 CODE_REVIEW_SKILL = """---
 name: code-review
 description: 代码审查与改进建议
