@@ -7,6 +7,8 @@ streamGenerateContent SSE」全部 4 个 Scenario + 错误路径。
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +20,7 @@ from taifeng.llm.errors import (
     RateLimitError,
     ServerError,
     TransientNetworkError,
+    UnsupportedModalityError,
 )
 from taifeng.llm.providers.gemini_provider import (
     GeminiClient,
@@ -25,7 +28,7 @@ from taifeng.llm.providers.gemini_provider import (
     _to_gemini_contents,
     _to_gemini_tools,
 )
-from taifeng.llm.types import ApiMessage, ApiRequest, ToolSpecRef
+from taifeng.llm.types import ApiMessage, ApiRequest, ImagePart, TextPart, ToolSpecRef
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
@@ -460,3 +463,83 @@ def test_nonempty_api_key_query_mode_appends_key() -> None:
         cancel=CancellationToken(), auth_via="query",
     )
     assert "&key=sk-gem" in sess._build_url("gemini-2.0-flash")
+
+
+# ============================================================
+# list 形态 content 的序列化
+# 回归:gemini 此前漏调 assert_text_only_request,且对 list content 裸 extend,
+# 把 pydantic 模型塞进请求体,经 httpx `json=` 发出时 TypeError。
+# 契约:本 provider 未声明 image 输入能力 → 图片须在序列化前被拒;纯文本 list 须映射。
+# ============================================================
+
+
+def _image_part() -> ImagePart:
+    """构造一个字段自洽的 canonical ImagePart（sha256 按真实字节算）。"""
+    raw = b"\x89PNG\r\n\x1a\n" + b"x" * 32
+    return ImagePart(
+        media_type="image/png",
+        base64_data=base64.b64encode(raw).decode(),
+        size=len(raw),
+        sha256=hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _session() -> GeminiSession:
+    """构造一个只用于组 payload 的 session(不发请求)。"""
+    return GeminiSession(
+        api_key="sk-gem",
+        model="gemini-test",
+        base_url="https://generativelanguage.googleapis.com",
+        cancel=CancellationToken(),
+    )
+
+
+def test_gemini_text_part_list_is_mapped_to_wire_shape() -> None:
+    """纯文本 list content 必须映射成 {text},而不是原样塞 TextPart 模型对象。"""
+    req = ApiRequest(
+        model="gemini-test",
+        messages=[ApiMessage(role="user", content=[TextPart(text="甲"), TextPart(text="乙")])],
+    )
+    payload = _session()._build_payload(req)
+
+    assert payload["contents"][0]["parts"] == [{"text": "甲"}, {"text": "乙"}]
+    # 真正的判据:整个 payload 必须能被 httpx 的 json= 序列化出去
+    json.dumps(payload)
+
+
+def test_gemini_tool_message_with_list_content_is_serializable() -> None:
+    """tool 角色的纯文本 list content 同样要映射 —— 这条路径以前也是裸 extend。"""
+    req = ApiRequest(
+        model="gemini-test",
+        messages=[
+            ApiMessage(role="tool", tool_call_id="c1", content=[TextPart(text="工具结果")]),
+        ],
+    )
+    payload = _session()._build_payload(req)
+
+    # 只断言本次修的东西:可序列化 + 文本送达。**不**断言 parts 的外层结构 ——
+    # tool 结果按 Gemini 协议是否该包 functionResponse 是另一个语义问题,不在此钉死。
+    json.dumps(payload)
+    assert {"text": "工具结果"} in payload["contents"][0]["parts"]
+
+
+def test_gemini_image_input_is_rejected_before_serialization() -> None:
+    """未声明 image 输入能力:图片必须在组 payload 时被显式拒掉,而不是泄漏进 JSON encoder。"""
+    req = ApiRequest(
+        model="gemini-test",
+        messages=[ApiMessage(role="user", content=[TextPart(text="看图"), _image_part()])],
+    )
+    with pytest.raises(UnsupportedModalityError):
+        _session()._build_payload(req)
+
+
+def test_gemini_parts_rejects_image_even_when_called_directly() -> None:
+    """helper 被直接调用时遇图也必须抛 UnsupportedModalityError,不能悄悄丢图。
+
+    正常路径下 _build_payload 的门控先拒,helper 里这行 raise 走不到 —— 正因为走不到,
+    曾有一次漏了 import 而测试全绿(只有 lint 的 F821 抓到)。这条用例专门覆盖它。
+    """
+    from taifeng.llm.providers.gemini_provider import _gemini_parts
+
+    with pytest.raises(UnsupportedModalityError):
+        _gemini_parts([TextPart(text="a"), _image_part()])

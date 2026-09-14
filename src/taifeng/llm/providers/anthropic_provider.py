@@ -25,6 +25,7 @@ from taifeng.llm.errors import (
     InvalidRequestError,
     InvalidResponseError,
     LLMError,
+    UnsupportedModalityError,
 )
 from taifeng.llm.events import (
     ResponseEvent,
@@ -39,6 +40,7 @@ from taifeng.llm.events import (
     tool_call_done,
 )
 from taifeng.llm.providers._shared import (
+    assert_text_only_request,
     classify_http_error,
     extract_rate_limit_snapshot,
     extract_request_id,
@@ -46,7 +48,7 @@ from taifeng.llm.providers._shared import (
     parse_sse_event,
     transport_error,
 )
-from taifeng.llm.types import ApiRequest, TokenUsage
+from taifeng.llm.types import ApiRequest, ImagePart, TextPart, TokenUsage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -57,6 +59,37 @@ if TYPE_CHECKING:
 _DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 # Anthropic messages.create 必填 max_tokens，给一个稳妥兜底
 _DEFAULT_MAX_TOKENS = 4096
+
+
+
+def _anthropic_blocks(content: list[TextPart | ImagePart]) -> list[dict[str, Any]]:
+    """把纯文本 parts 映射为 Anthropic text block(``{type: text, text}``)。
+
+    参照 ``openai/_shared.py`` 的 part 映射范式,差异:本 provider **未声明 image
+    输入能力**(见 capabilities/tool-image-attachment.md「另立」),故只映射文本;
+    图片由 ``_build_payload`` 开头的 ``assert_text_only_request`` 在序列化前拒掉。
+
+    此前调用点是裸 ``content_blocks.extend(msg.content)``,注释称「业务侧直接传
+    Anthropic 形状 → 透传」—— 与类型声明矛盾:``PartContent`` 是
+    ``str | list[TextPart | ImagePart]``,裸 dict 根本不合法,不存在透传路径。
+
+    Args:
+        content: 核心层 ``PartContent`` 的 list 形态。
+
+    Returns:
+        可 JSON 序列化的 Anthropic block 列表;空文本项丢弃。
+
+    Raises:
+        UnsupportedModalityError: 含 ImagePart。正常路径已被门控先拒;这里再拒一次,
+            保证直接调用本函数也不会悄悄丢图(禁止 silent fallback)。
+    """
+    mapped: list[dict[str, Any]] = []
+    for part in content:
+        if isinstance(part, ImagePart):
+            raise UnsupportedModalityError("image input is not supported by this client")
+        if part.text:
+            mapped.append({"type": "text", "text": part.text})
+    return mapped
 
 
 def _to_anthropic_messages(
@@ -111,8 +144,9 @@ def _to_anthropic_messages(
                         {"type": "text", "text": msg.content},
                     )
             elif isinstance(msg.content, list):
-                # 已是 block list（业务侧直接传 Anthropic 形状）→ 透传
-                content_blocks.extend(msg.content)
+                # 逐 part 映射成 Anthropic block(类型只允许 TextPart / ImagePart,
+                # 不存在"业务侧直接传 Anthropic 形状"的透传路径)
+                content_blocks.extend(_anthropic_blocks(msg.content))
 
             # assistant 的 tool_calls → tool_use blocks
             if msg.role == "assistant" and msg.tool_calls:
@@ -204,6 +238,8 @@ class AnthropicSession:
         pass
 
     def _build_payload(self, request: ApiRequest) -> dict[str, Any]:
+        # 与 openai_compat 同一道门控:未声明 image 输入能力,序列化前显式拒图
+        assert_text_only_request(request)
         cache_indexes = {bp.index for bp in request.cache_breakpoints}
         system_str, messages = _to_anthropic_messages(
             request, cache_indexes=cache_indexes,

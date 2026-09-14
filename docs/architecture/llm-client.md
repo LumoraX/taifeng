@@ -156,6 +156,11 @@ OpenAI 不再由一个“兼容客户端”猜协议。业务按 endpoint 显式
 | `OpenAIResponsesClient` | `/v1/responses` | `input_image.image_url = data:<mime>;base64,...` | JSONL 中的 ordered items + encrypted reasoning state |
 | `OpenAICompatClient` | 兼容 `/chat/completions` | 不支持，网络前拒绝 | 原 text-only 行为不变 |
 
+原生 `GeminiClient` / `AnthropicClient` 同样是 **text-only**：与 `OpenAICompatClient` 走同一道
+`assert_text_only_request` 门控，含 `ImagePart` 的请求在组 payload 时即抛 `UnsupportedModalityError`，
+不会让 pydantic part 泄漏进 JSON encoder；纯文本 `list[TextPart]` content 映射为各自 wire 形状
+（Gemini `{text}`、Anthropic `{type: "text", text}`），空文本项丢弃。二者的图片输入能力**未声明**，另立。
+
 `CodexResponsesClient` 是显式 `provider=codex, protocol=responses` 的独立客户端，不属于 OpenAI
 兼容分支，也不提供 Chat fallback。它要求业务提供合法 API-root `base_url`，endpoint 固定由
 `<base_url>/responses` 得到；`system_prompt` 过滤空字符串后逐字节用 `\n\n` 连接为顶层

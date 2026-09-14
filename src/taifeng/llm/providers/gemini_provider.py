@@ -22,6 +22,7 @@ from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
     InvalidRequestError,
     InvalidResponseError,
+    UnsupportedModalityError,
 )
 from taifeng.llm.events import (
     ResponseEvent,
@@ -35,6 +36,7 @@ from taifeng.llm.events import (
     tool_call_done,
 )
 from taifeng.llm.providers._shared import (
+    assert_text_only_request,
     classify_abnormal_finish,
     classify_http_error,
     extract_rate_limit_snapshot,
@@ -43,7 +45,7 @@ from taifeng.llm.providers._shared import (
     parse_sse_data,
     transport_error,
 )
-from taifeng.llm.types import ApiRequest, TokenUsage
+from taifeng.llm.types import ApiRequest, ImagePart, TextPart, TokenUsage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -57,6 +59,37 @@ _ROLE_MAP = {
     "tool": "function",
     "system": "user",  # system 已合并到 systemInstruction；保险兜底
 }
+
+
+
+def _gemini_parts(content: list[TextPart | ImagePart]) -> list[dict[str, Any]]:
+    """把纯文本 parts 映射为 Gemini ``parts``(``{text}``)。
+
+    参照 ``openai/_shared.py`` 的 part 映射范式,差异:本 provider **未声明 image
+    输入能力**,故只映射文本;图片由 ``_build_payload`` 开头的
+    ``assert_text_only_request`` 在序列化前拒掉(与 openai_compat 同一道门控)。
+
+    此前两处调用点是裸 ``parts.extend(msg.content)``,且 ``_build_payload`` 漏调
+    门控 —— 把 pydantic 模型对象原样塞进请求体,经 httpx ``json=`` 发出时
+    ``TypeError: Object of type TextPart is not JSON serializable``。
+
+    Args:
+        content: 核心层 ``PartContent`` 的 list 形态。
+
+    Returns:
+        可 JSON 序列化的 Gemini part 列表;空文本项丢弃(不承载信息,白占数组槽位)。
+
+    Raises:
+        UnsupportedModalityError: 含 ImagePart。正常路径已被门控先拒;这里再拒一次,
+            保证直接调用本函数也不会**悄悄丢图**(禁止 silent fallback)。
+    """
+    mapped: list[dict[str, Any]] = []
+    for part in content:
+        if isinstance(part, ImagePart):
+            raise UnsupportedModalityError("image input is not supported by this client")
+        if part.text:
+            mapped.append({"text": part.text})
+    return mapped
 
 
 def _to_gemini_contents(
@@ -110,7 +143,7 @@ def _to_gemini_contents(
                 str(msg.tool_call_id or ""), msg.tool_call_id or "",
             )
             if isinstance(msg.content, list):
-                parts.extend(msg.content)
+                parts.extend(_gemini_parts(msg.content))
             else:
                 raw = (
                     msg.content
@@ -130,7 +163,7 @@ def _to_gemini_contents(
                 if msg.content:
                     parts.append({"text": msg.content})
             elif isinstance(msg.content, list):
-                parts.extend(msg.content)
+                parts.extend(_gemini_parts(msg.content))
 
             # assistant.tool_calls → functionCall
             if msg.role == "assistant" and msg.tool_calls:
@@ -220,6 +253,9 @@ class GeminiSession:
         pass
 
     def _build_payload(self, request: ApiRequest) -> dict[str, Any]:
+        # 与 openai_compat 同一道门控:本 provider 只消费兼容 messages view、未声明
+        # image 输入能力,序列化前显式拒图,避免 pydantic part 泄漏进 JSON encoder
+        assert_text_only_request(request)
         system_instruction, contents = _to_gemini_contents(request)
         payload: dict[str, Any] = {"contents": contents}
         if system_instruction is not None:

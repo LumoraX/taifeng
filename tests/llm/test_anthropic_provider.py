@@ -8,6 +8,8 @@ messages API」全部 4 个 Scenario + 错误路径。
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +21,7 @@ from taifeng.llm.errors import (
     RateLimitError,
     ServerError,
     TransientNetworkError,
+    UnsupportedModalityError,
 )
 from taifeng.llm.providers.anthropic_provider import (
     AnthropicClient,
@@ -26,7 +29,14 @@ from taifeng.llm.providers.anthropic_provider import (
     _to_anthropic_messages,
     _to_anthropic_tools,
 )
-from taifeng.llm.types import ApiMessage, ApiRequest, CacheBreakpoint, ToolSpecRef
+from taifeng.llm.types import (
+    ApiMessage,
+    ApiRequest,
+    CacheBreakpoint,
+    ImagePart,
+    TextPart,
+    ToolSpecRef,
+)
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
@@ -533,3 +543,70 @@ def test_nonempty_api_key_sets_x_api_key_header() -> None:
         base_url="https://api.anthropic.com", cancel=CancellationToken(),
     )
     assert sess._headers["x-api-key"] == "sk-ant-test"
+
+
+# ============================================================
+# list 形态 content 的序列化
+# 回归:anthropic 此前漏调 assert_text_only_request,且对 list content 裸 extend
+# (注释称"业务侧直接传 Anthropic 形状→透传",与 PartContent 声明矛盾)。
+# 契约:本 provider 未声明 image 输入能力(见 capabilities/tool-image-attachment.md)
+# → 图片须在序列化前被拒;纯文本 list 须映射。
+# ============================================================
+
+
+def _image_part() -> ImagePart:
+    """构造一个字段自洽的 canonical ImagePart（sha256 按真实字节算）。"""
+    raw = b"\x89PNG\r\n\x1a\n" + b"y" * 32
+    return ImagePart(
+        media_type="image/png",
+        base64_data=base64.b64encode(raw).decode(),
+        size=len(raw),
+        sha256=hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _payload_session() -> AnthropicSession:
+    """构造一个只用于组 payload 的 session(不发请求)。"""
+    return AnthropicSession(
+        api_key="sk-ant",
+        model="claude-x",
+        base_url="https://api.anthropic.com",
+        cancel=CancellationToken(),
+    )
+
+
+def test_anthropic_text_part_list_is_mapped_to_blocks() -> None:
+    """纯文本 list content 必须映射成 text block,而不是原样塞 TextPart 模型对象。"""
+    req = ApiRequest(
+        model="claude-x",
+        messages=[ApiMessage(role="user", content=[TextPart(text="甲"), TextPart(text="乙")])],
+    )
+    payload = _payload_session()._build_payload(req)
+
+    assert payload["messages"][0]["content"] == [
+        {"type": "text", "text": "甲"},
+        {"type": "text", "text": "乙"},
+    ]
+    json.dumps(payload)
+
+
+def test_anthropic_image_input_is_rejected_before_serialization() -> None:
+    """未声明 image 输入能力:图片必须在组 payload 时被显式拒掉。"""
+    req = ApiRequest(
+        model="claude-x",
+        messages=[ApiMessage(role="user", content=[TextPart(text="看图"), _image_part()])],
+    )
+    with pytest.raises(UnsupportedModalityError):
+        _payload_session()._build_payload(req)
+
+
+def test_anthropic_blocks_rejects_image_even_when_called_directly() -> None:
+    """helper 被直接调用时遇图也必须抛 UnsupportedModalityError,不能悄悄丢图。
+
+    正常路径下 _build_payload 的门控先拒,helper 里这行 raise 走不到 —— 正因为走不到,
+    曾有一次漏了 import 而测试全绿(只有 lint 的 F821 抓到)。这条用例专门覆盖它。
+    """
+    from taifeng.llm.providers.anthropic_provider import _anthropic_blocks
+
+    with pytest.raises(UnsupportedModalityError):
+        _anthropic_blocks([TextPart(text="a"), _image_part()])

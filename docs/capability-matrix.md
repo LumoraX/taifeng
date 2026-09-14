@@ -213,7 +213,7 @@ Runtime ops are submitted with `engine.submit(...)`.
 
 All exported symbols are listed in [`src/taifeng/__init__.py`](../src/taifeng/__init__.py) under `__all__`.
 
-图片接入的稳定根包符号为 `ImageAttachmentV1`、`ImageInputPolicy`、`TextPart`、`ImagePart`、`OpenAIChatClient`、`OpenAIResponsesClient` 和 `CodexResponsesClient`。`OpenAICompatClient` 的原导入路径保持不变且仍是 text-only。
+图片接入的稳定根包符号为 `ImageAttachmentV1`、`ImageInputPolicy`、`TextPart`、`ImagePart`、`OpenAIChatClient`、`OpenAIResponsesClient` 和 `CodexResponsesClient`。`OpenAICompatClient` 的原导入路径保持不变且仍是 text-only；原生 `GeminiClient` / `AnthropicClient` 同为 text-only，含图片的请求在序列化前抛 `UnsupportedModalityError`。
 
 ---
 
