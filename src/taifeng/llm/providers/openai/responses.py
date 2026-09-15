@@ -180,7 +180,8 @@ class ResponsesAttemptAccumulator:
         self, event: dict[str, Any], index: int
     ) -> list[ResponseEvent]:
         """arguments/item done 任一路径最多发布一次 tool_call_done。"""
-        raw = event.get("item") if isinstance(event.get("item"), dict) else {}
+        item = event.get("item")
+        raw: dict[str, Any] = item if isinstance(item, dict) else {}
         added = {**self._added.get(index, {}), **raw}
         call_id = str(added.get("call_id", ""))
         name = str(added.get("name", ""))

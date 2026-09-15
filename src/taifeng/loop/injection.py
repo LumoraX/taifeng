@@ -13,7 +13,6 @@ from taifeng.loop.event import SystemMessageInjected, UserInputInjected
 
 if TYPE_CHECKING:
     from taifeng.conversation.models import ResponseItem
-    from taifeng.loop.event import _Msg
 
 # 注入事件里文本预览的截断长度
 _PREVIEW_LEN = 80
@@ -25,7 +24,7 @@ def injection_event(
     *,
     delivered: bool,
     reason: str | None = None,
-) -> _Msg:
+) -> UserInputInjected | SystemMessageInjected:
     """按注入项的 kind 构造对应事件。
 
     Args:

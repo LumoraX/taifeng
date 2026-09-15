@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 from typing import TYPE_CHECKING
 
 import anyio
@@ -27,8 +29,9 @@ from taifeng.llm.audit import (
     ModelAttemptOutcome,
     ModelAttemptRequest,
 )
+from taifeng.llm.audit_redaction import project_attempt_request
 from taifeng.llm.providers.sim import RoutingSimClient, SimClient, SimTurn
-from taifeng.llm.types import ApiMessage, ApiRequest
+from taifeng.llm.types import ApiMessage, ApiRequest, ImagePart, TextPart
 from taifeng.loop.audit import SessionAuditCoordinator
 from taifeng.loop.audit_bootstrap import AuditedSessionState
 from taifeng.loop.audit_llm import (
@@ -296,6 +299,54 @@ async def _consume(
     async with session as entered:
         async for _ in entered.stream(_api_request()):
             pass
+
+
+@pytest.mark.anyio
+async def test_request_record_preserves_redaction_manifest(
+    tmp_path: Path,
+) -> None:
+    """含图片的请求落盘后，redaction manifest 与安全投影逐条一致、图片正文不入 Journal。"""
+    state, core = await _state(tmp_path)
+    observer = _observer(state)
+    image_bytes = b"image-body"
+    image_body = base64.b64encode(image_bytes).decode("ascii")
+    request = ApiRequest(
+        model="model-a",
+        messages=[
+            ApiMessage(
+                role="user",
+                content=[
+                    TextPart(text="inspect"),
+                    ImagePart(
+                        media_type="image/png",
+                        base64_data=image_body,
+                        size=len(image_bytes),
+                        sha256=hashlib.sha256(image_bytes).hexdigest(),
+                    ),
+                ],
+            )
+        ],
+    )
+    projection = project_attempt_request("provider-a", "model-a", request)
+    assert projection.redactions, "前置条件：图片必须产生至少一条 redaction"
+
+    await observer.before_attempt(
+        ModelAttemptRequest(
+            provider="provider-a",
+            model="model-a",
+            api_request=projection.api_request_safe,
+            redactions=projection.redactions,
+            canonical_attempt_sha256=projection.canonical_attempt_sha256,
+        )
+    )
+    committed = [envelope async for envelope in core.load("session_1")]
+    record = committed[-1]
+
+    assert record.record_type == "llm_request_committed"
+    assert record.payload["redactions"] == [
+        {"path": entry.path, "kind": entry.kind} for entry in projection.redactions
+    ]
+    assert image_body not in str(record.payload)
 
 
 @pytest.mark.anyio

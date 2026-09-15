@@ -17,6 +17,7 @@ from taifeng.conversation.journal.canonical import canonical_bytes, validate_jso
 from taifeng.conversation.journal.errors import NonCanonicalValueError
 from taifeng.conversation.journal.records import (
     LlmStatus,
+    RedactionEntryV1,
     StableErrorV1,
     stable_error,
 )
@@ -99,10 +100,10 @@ class ModelAttemptRequest:
         assert isinstance(value, dict)
         return value
 
-    def redactions_list(self) -> list[dict[str, str]]:
-        """返回按 RFC 6901 path 排序的 manifest 副本。"""
+    def redactions_list(self) -> list[RedactionEntryV1]:
+        """返回按 RFC 6901 path 排序的 manifest 副本（durable DTO 形状）。"""
         return [
-            {"path": entry.path, "kind": entry.kind}
+            RedactionEntryV1(path=entry.path, kind=entry.kind)
             for entry in self.redactions
         ]
 
@@ -270,11 +271,15 @@ def _normalized_items(
         if len(terminal) != 1:
             raise ValueError("attempt emitted duplicate normalized output")
         normalized = validate_json_value(terminal[0].data.get("items"))
-        if not isinstance(normalized, list) or not all(
-            isinstance(item, dict) for item in normalized
-        ):
+        if not isinstance(normalized, list):
             raise NonCanonicalValueError("normalized output must contain JSON objects")
-        return tuple(normalized)
+        # 逐项 isinstance 才能把 JsonValue 收窄成 dict；all(...) 生成器收窄不到元素
+        objects: list[Mapping[str, object]] = []
+        for normalized_item in normalized:
+            if not isinstance(normalized_item, dict):
+                raise NonCanonicalValueError("normalized output must contain JSON objects")
+            objects.append(normalized_item)
+        return tuple(objects)
     items: list[dict[str, object]] = []
     positions: dict[tuple[str, str], int] = {}
     for event in events:

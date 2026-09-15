@@ -93,7 +93,9 @@ class EngineLifecycle:
         for sid in list(self._engine._event_subs):
             terminated.add(sid)
             await self._engine._emit_operation_terminal(sid, None, kind="engine_shutdown")
-        for sub in list(self._engine._submissions._queue):  # noqa: SLF001 —— 只读遍历，不出队
+        # asyncio.Queue 没有公开的 peek 接口，只能读私有 _queue 做只读遍历（不出队）；
+        # typeshed 不声明该属性，故 ignore attr-defined
+        for sub in list(self._engine._submissions._queue):  # type: ignore[attr-defined]  # noqa: SLF001
             if sub.id in terminated or isinstance(sub, AcceptedUserMessage):
                 continue
             terminated.add(sub.id)

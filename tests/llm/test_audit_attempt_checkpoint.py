@@ -88,6 +88,26 @@ def test_audit_prefers_terminal_responses_normalized_output() -> None:
     assert _normalized_items([normalized_output(terminal)]) == tuple(terminal)
 
 
+@pytest.mark.parametrize(
+    "items",
+    [
+        {"type": "message"},
+        [{"type": "message"}, "not-an-object"],
+    ],
+    ids=["items_not_list", "list_contains_non_object"],
+)
+def test_audit_rejects_normalized_output_without_json_objects(items: object) -> None:
+    """terminal items 不是 JSON object 列表时必须拒绝，不能静默截断或透传。"""
+    from taifeng.conversation.journal.errors import NonCanonicalValueError
+    from taifeng.llm.audit import _normalized_items
+    from taifeng.llm.events import ResponseEvent
+
+    event = ResponseEvent(kind="normalized_output", data={"items": items})
+
+    with pytest.raises(NonCanonicalValueError, match="must contain JSON objects"):
+        _normalized_items([event])
+
+
 class _CompletedSession:
     """先完整产出 provider events，再标记底层 stream 已结束。"""
 

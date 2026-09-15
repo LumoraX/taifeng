@@ -315,7 +315,7 @@ class _InvalidAcceptedUserMessageError(Exception):
 
 def _conversation_attachment_data(attachment: AttachmentV1) -> dict[str, object]:
     """把 Journal 嵌套 payload 投影为 conversation canonical attachment。"""
-    data = dict(model_canonical_data(attachment))
+    data: dict[str, object] = dict(model_canonical_data(attachment))
     data.pop("payload_version", None)
     return data
 
