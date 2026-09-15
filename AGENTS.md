@@ -60,7 +60,7 @@
 - 新模块必须有 `tests/test_<module>.py`
   - 唯一例外：**纯搬迁**抽出的模块（行为零变化、既有测试一行未改即全绿）由原有测试覆盖，不另起测试文件——为搬迁再造一份同义测试只会重复断言，不增加检出能力。
 - LLM 调用走 `SimClient`（conformance 模拟器）—— 不能在 CI 里调真实 API
-- **CI 门禁**（`.github/workflows/ci.yml`，push main / 每个 PR 自动触发）：三个 job —— Python 3.12+3.13 全量 `pytest tests/`、`scripts/verify_examples.py` 的 examples 冒烟、`ruff check --select F,S108,I,TC` 静态检查。本地跑这三条 = 预跑门禁。**卡 ruff F + S108 + I + TC**（未用导入 / 重名覆盖 / 未用变量 / 未定义名 / 生产代码硬编码 /tmp / 导入排序 / 仅类型 import 进 TYPE_CHECKING）；I 与 TC 必须同时卡，单卡一条会被另一条反弹。仍不入闸的 E501 等 199 条需逐行人工断行，单独开切片。门禁只跑 sim，真实回归仍走下面的台账红线
+- **CI 门禁**（`.github/workflows/ci.yml`，push main / 每个 PR 自动触发）：三个 job —— Python 3.12+3.13 全量 `pytest tests/`、`scripts/verify_examples.py` 的 examples 冒烟、`ruff check --select F,S108,I,TC` + `mypy src/`（strict）静态检查。本地跑这三条 = 预跑门禁。**卡 ruff F + S108 + I + TC**（未用导入 / 重名覆盖 / 未用变量 / 未定义名 / 生产代码硬编码 /tmp / 导入排序 / 仅类型 import 进 TYPE_CHECKING）；I 与 TC 必须同时卡，单卡一条会被另一条反弹。**mypy strict 全仓零错**，须带 `--extra litellm --extra telemetry-otel`，否则报 import-not-found 假阳。仍不入闸的 ruff E501 等 197 条需逐行人工断行，单独开切片。门禁只跑 sim，真实回归仍走下面的台账红线
 - **真实回归红线**：凡变更基础层（`src/taifeng/{llm,loop,context,conversation}/`），合入前必须全量跑 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 并提交更新后的 `docs/real-llm-ledger.{json,md}`；台账 commit 落后于基础层变更 → 不得标 task 完成 / openspec archive。烧 key 前可先 `examples/real_llm/selfcheck.py`（sim 干跑，零消耗）
 - **能力登记红线**：新增 / 修改 LLM 策略类能力必须同步登记 `docs/capability-matrix.md`（含「真实 LLM 验证」列），与「architecture 未同步 → PR 不合并」同级
 - 文件 IO 走 `tmp_path` fixture
