@@ -2106,7 +2106,7 @@ wheels = [
 
 [[package]]
 name = "taifeng"
-version = "2026.9.14.20"
+version = "2026.9.17.23"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
