@@ -552,6 +552,22 @@ RetryConfig(
 - `retryable_kinds` 是显式白名单，只匹配 `LLMError.kind`；`unreliable_finish`（接入方声明 `trust_finish_reason=False` 时网关错标的零产出 `content_filter`）已并入默认集合（ADR 0041）。
 - **无需手工套**：引擎 / 池默认已包装（上表 `auto_retry` / `retry_config`）；显式 `RetryingModelClient(client, config=...)` 仍可用，引擎探测到已套即沿用你的配置。
 
+## 7.6 BreakerConfig（provider 断路器，默认不套）
+
+> 业务侧显式包装才生效：`CircuitBreakingModelClient(client, config=BreakerConfig(...))`，再把它作为 `model_client=` 传给 `EnginePool.create`。**内核不默认套**——阈值与上游形态强相关（ADR 0042）。
+
+| 字段 | 类型 | 默认 | 语义 |
+|---|---|---|---|
+| `trip_after` | `int` | `3` | 连续多少次「重试耗尽后的最终失败」跳闸。配 `max_attempts=3` ⇒ 跳闸前最多烧 9 次 attempt |
+| `cooldown_seconds` | `float` | `30.0` | 首次跳闸后的冷却时长；期间 `stream` 不触网，直接抛 `CircuitOpenError` |
+| `cooldown_multiplier` | `float` | `2.0` | 半开探测再失败时冷却的增长倍数 |
+| `max_cooldown_seconds` | `float` | `300.0` | 冷却上限，防止长故障把冷却放大到不可恢复 |
+
+- 构造参数另有 `retry_config`（inner 未套重试时自动补的策略）与 `clock`（默认 `time.monotonic`，测试注入假时钟用）。
+- 三态转换 emit `provider_circuit_opened` / `provider_circuit_half_open` / `provider_circuit_closed`，OTel counter `taifeng.provider.circuit_transitions`（按 `to_state` / `failure_class`）——`TurnRunner` 自动接入，业务侧无需接线。
+- `circuit_open` 是 `retryable=True` 的 `LLMError` ⇒ 保守策略落 SUSPEND；配 `failure_suspend_ttl_seconds` + `on_expire="retry"` 时，到期自动 retry 打在 open 态上不触网、成本≈0，再配 `failure_suspend_max_auto_retries` 即有界。
+- 详见 [capabilities/provider-circuit-breaker.md](architecture/capabilities/provider-circuit-breaker.md)。
+
 ## 7.5 OtelSinkConfig（OTel / OTLP 出口，可选 extra）
 
 > 业务侧 `uv pip install -e ".[telemetry-otel]"` 启用；详见 [架构总览 §R4](architecture/overview.md#r4-可观测)。

@@ -37,6 +37,7 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | [telemetry-otel](telemetry-otel.md) | `OtelSinkConfig`, `OtelTelemetrySink`, EventMsg-to-OTel mapping, PII filtering, counters, and fire-and-forget export |
 | [turn-rewind](turn-rewind.md) | Addressable intra-turn nodes, `Rewind` op, `RewindCheckpoint`, `rewind_nodes()`, event classes, rejection paths, R2 expectations, and R5 append-only behavior |
 | [detached-spawn](detached-spawn.md) | Detached spawn, join barriers, independent child HITL, keepalive refcounts, `kill_spawn`, cold recovery rebuild, spawn/join events, and LLM-facing tools |
+| [provider-circuit-breaker](provider-circuit-breaker.md) | 跨 turn 的 provider 健康度：`BreakerConfig` / `CircuitState` / `CircuitTransition`、只计最终结局的计数规则、open 态快速失败（`CircuitOpenError`）、半开单探测、三态事件与 OTel counter，以及作用域与误跳闸边界 |
 | [reactive-compaction-recovery](reactive-compaction-recovery.md) | Bounded overflow recovery, forced compression, provider retry events, fallback behavior, cache awareness, and cancellation constraints |
 | [compaction-surgical-trim](compaction-surgical-trim.md) | Surgical trim passes, pair-safe output rewriting, cache-TTL triggers, glob deny precedence, `CompressionResult.detail`, and idempotent placeholders |
 | [loop-core-module-structure](loop-core-module-structure.md) | engine / turn 的模块边界、协作者按内聚度二分、宿主作为唯一白盒寻址面（含两类 monkeypatch 注入点）、行为零变化判据，以及两处具名红线例外 |

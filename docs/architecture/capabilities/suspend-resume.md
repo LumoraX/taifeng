@@ -5,7 +5,7 @@
 通用**挂起 / resume 原语**（业务无关）：一个 turn 可在任意点产出"挂起"作为**正常结局**（而非阻塞协程驻留内存），随后释放实例；业务侧之后凭 `thread_id` + `resolutions` 提交 `Resume` Op 续跑。覆盖两大类挂起：
 
 - **人类输入类**：权限审批（`permission`）、表单填写（`form`）、外部数据（`data`）。
-- **系统态类**：LLM 限流 / 配额 / 余额 / key 鉴权失败 / 可恢复网络错（`system_retry`），自动 retry 耗尽后转挂起。
+- **系统态类**：LLM 限流 / 配额 / 余额 / key 鉴权失败 / 可恢复网络错（`system_retry`），自动 retry 耗尽后转挂起。套了 provider 断路器时，`open` 态的快速失败（`CircuitOpenError`，`kind=circuit_open`）同归此类——`detail.kind` 可据此区分「上游整体降级」与「本次调用失败」（ADR 0042）。
 
 决策记录：[ADR 0012](../../decisions/0012-suspend-resume-primitive.md)。
 

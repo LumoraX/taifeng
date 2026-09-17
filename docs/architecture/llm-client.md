@@ -245,6 +245,26 @@ client = RetryingModelClient(native_client, config=RetryConfig(max_attempts=3))
 - `context_overflow` —— 必须先压缩，重试是死循环
 - `cancelled` —— 取消是用户意图
 
+#### 接线：`CircuitBreakingModelClient`（跨 turn 的上游健康度）
+
+重试管「这次抖了一下」，断路器管「这个 endpoint 整体挂了」。没有它时，上游持续故障下每个 turn 各自烧满 `max_attempts` + 退避再挂起，N 路并发 = 3N 次注定失败的请求（ADR 0042）。
+
+```python
+from taifeng.llm import BreakerConfig, CircuitBreakingModelClient
+
+client = CircuitBreakingModelClient(
+    native_client, config=BreakerConfig(trip_after=3, cooldown_seconds=30.0),
+)
+```
+
+- **默认不套**（与重试相反）：阈值与「上游是什么」强相关，共享中转 / 自建 vLLM / 多 endpoint 轮询的合理值差一个数量级 ⇒ 业务侧显式包装才生效，既有部署零行为变化。
+- **只计最终结局**：构造时对 inner 调 `with_default_retry`（幂等），保证断路器叠在重试层**外**。否则接入方传裸 client 时，引擎侧默认重试会包在断路器外层，`trip_after` 就从「3 次最终失败」悄悄变成「3 次 attempt 失败」。断路器转发出的 `bounded_retry` 标记让引擎跳过外层包装。
+- **计入规则**：可重试类 `LLMError` 计数；不可重试类（鉴权 / 请求非法）、`CancelledError`、非 `LLMError` 均不计——判据用 `LLMError.retryable`（「是否瞬时」）而非 `retryable_kinds`（「值不值得立刻重发」）。
+- **三态**：`closed → open`（连续 `trip_after` 次失败）→ 冷却到期 `half_open`（只放行 1 个探测，其余并发继续快速失败）→ 探测成功 `closed` / 失败回 `open` 且冷却 `×multiplier` 封顶。
+- **open 态不触网**：抛 `CircuitOpenError`（`kind="circuit_open"`、`retryable=True`、`failure_class` 继承病根、带剩余冷却 `retry_after_seconds`）→ 保守策略落 SUSPEND，业务侧可据此说「N 秒后自动恢复」。它**不在** `retryable_kinds` 默认集合内：打开期间重试只会撞回同一堵墙。
+- **可观测（R3）**：session 可选协议 `set_circuit_observer`，`TurnRunner` `getattr` 探测自动接入；三态各一个事件 kind（`provider_circuit_opened` / `_half_open` / `_closed`），console 分色渲染，OTel counter `taifeng.provider.circuit_transitions`（按 `to_state` / `failure_class`）。
+- **作用域**：状态挂装饰器实例 = 一个 endpoint 一个断路器，进程内所有 engine / turn 共享；不持久化，重启即闭合。完整契约见 [capabilities/provider-circuit-breaker.md](capabilities/provider-circuit-breaker.md)。
+
 ### 错误分类与恢复（G3）
 
 `llm/errors.py` 把异常分类到 `FailureClass`（12 桶：`context_window` / `provider_auth` / `provider_rate_limit` /
