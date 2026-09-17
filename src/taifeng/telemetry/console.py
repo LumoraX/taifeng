@@ -60,6 +60,10 @@ _KIND_TAG = {
     "cache_break_detected": ("cach", _Colors.RED, "!"),
     # provider 采样重试（黄色 ↻ —— 自愈中，非终态）：网络退避重试 / overflow 自愈共用
     "provider_retry": ("llm ", _Colors.YELLOW, "↻"),
+    # provider 断路器三态：跳闸红 ⊘ / 半开黄 ⇌ / 闭合绿 ✓（ADR 0042）
+    "provider_circuit_opened": ("llm ", _Colors.RED, "⊘"),
+    "provider_circuit_half_open": ("llm ", _Colors.YELLOW, "⇌"),
+    "provider_circuit_closed": ("llm ", _Colors.GREEN, "✓"),
     # Permission gate 事件（红色 —— 表示拦截）
     "permission_prompt_timeout": ("perm", _Colors.RED, "⏱"),
     "skill_dispatch_hook_denied": ("hook", _Colors.RED, "✗"),
@@ -238,6 +242,17 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
             )
         else:
             parts.append(f"{data.get('reason')} iter={data.get('iteration')}")
+    elif ev.msg.kind in (
+        "provider_circuit_opened",
+        "provider_circuit_half_open",
+        "provider_circuit_closed",
+    ):
+        parts.append(
+            f"{data.get('from_state')}→{data.get('to_state')} "
+            f"failures={data.get('consecutive_failures')} "
+            f"cooldown={float(data.get('cooldown_seconds') or 0):.1f}s "
+            f"class={data.get('last_failure_class')}"
+        )
     elif ev.msg.kind == "cache_break_detected":
         u = "unexpected" if data.get("unexpected") else "expected"
         parts.append(f"{u} drop={data.get('token_drop')} reason={data.get('reason')}")

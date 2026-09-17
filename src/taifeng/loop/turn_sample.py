@@ -37,6 +37,9 @@ from taifeng.loop.event import (
     CacheBreakDetected,
     ContextBudgetExceeded,
     LlmRequestRecorded,
+    ProviderCircuitClosed,
+    ProviderCircuitHalfOpen,
+    ProviderCircuitOpened,
     ProviderRetry,
     RewindCheckpointRecorded,
     ToolBatchDispatched,
@@ -55,6 +58,7 @@ from taifeng.loop.turn_helpers import (
 from taifeng.suspend.signal import SuspendSignal
 
 if TYPE_CHECKING:
+    from taifeng.llm.breaker import CircuitTransition
     from taifeng.llm.retrying import RetryAttempt
     from taifeng.loop.turn import TurnRunner
     from taifeng.tool.spec import ToolContext
@@ -265,6 +269,37 @@ class TurnSample:
             iteration_history_len=iteration_history_len,
         )
 
+    async def _emit_circuit_transition(
+        self, iteration: int, transition: CircuitTransition
+    ) -> None:
+        """provider 断路器状态转换 → 三个 R3 事件之一（ADR 0042）。
+
+        三态各占一个事件 kind（而非共用一个带 to_state 字段的事件）：运维按 kind 订阅
+        「跳闸」告警，不必再解析 data；与 ``denial_circuit_open`` 的粒度也一致。
+        """
+        event_types = {
+            "open": ProviderCircuitOpened,
+            "half_open": ProviderCircuitHalfOpen,
+            "closed": ProviderCircuitClosed,
+        }
+        event_type = event_types.get(transition.to_state)
+        if event_type is None:
+            # 未知状态说明 CircuitState 扩了新态却漏了接线——不静默吞掉
+            raise ValueError(f"未知断路器状态: {transition.to_state}")
+        await self.__sample_owner._emit(
+            event_type(
+                data={
+                    "from_state": transition.from_state,
+                    "to_state": transition.to_state,
+                    "consecutive_failures": transition.consecutive_failures,
+                    "cooldown_seconds": transition.cooldown_seconds,
+                    "last_failure_class": transition.last_failure_class,
+                    "last_error_kind": transition.last_error_kind,
+                    "iteration": iteration,
+                }
+            )
+        )
+
     async def _emit_provider_retry(self, iteration: int, attempt: RetryAttempt) -> None:
         """网络层退避重试 → ``provider_retry``（与 overflow 自愈共用事件，靠 ``reason`` 区分）。"""
         await self.__sample_owner._emit(
@@ -303,6 +338,11 @@ class TurnSample:
         attach_retry_observer = getattr(sess, "set_retry_observer", None)
         if callable(attach_retry_observer):
             attach_retry_observer(partial(self._emit_provider_retry, iteration))
+        # R3 断路器可观测（ADR 0042）：套了 CircuitBreakingModelClient 时 session 暴露
+        # ``set_circuit_observer``，三态转换各上一个事件；没套即无此方法 → 跳过。
+        attach_circuit_observer = getattr(sess, "set_circuit_observer", None)
+        if callable(attach_circuit_observer):
+            attach_circuit_observer(partial(self._emit_circuit_transition, iteration))
         assistant_text = ""
         # 取消时落 partial assistant 用（ADR 0029 / R5）：本轮已流出的文本
         self.__sample_owner._streamed_text = ""

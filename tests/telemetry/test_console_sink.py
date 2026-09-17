@@ -54,6 +54,39 @@ def test_provider_retry_network_has_dedicated_render() -> None:
     assert "class=provider_transport" in line
 
 
+def test_provider_circuit_events_have_dedicated_render() -> None:
+    """断路器三态：各自专用 tag，渲染出转换方向 / 计数 / 冷却 / 病根分类，不落兜底。"""
+    from taifeng.loop.event import (
+        ProviderCircuitClosed,
+        ProviderCircuitHalfOpen,
+        ProviderCircuitOpened,
+    )
+
+    data = {
+        "from_state": "closed", "to_state": "open", "consecutive_failures": 3,
+        "cooldown_seconds": 30.0, "last_failure_class": "provider_internal",
+        "last_error_kind": "ServerError", "iteration": 0,
+    }
+    line = _line(ProviderCircuitOpened(data=data))
+    assert " evt " not in line, f"不应落 evt 兜底：{line}"
+    assert "provider_circuit_opened {" not in line, "不应是 raw data dump"
+    assert "closed→open" in line
+    assert "failures=3" in line
+    assert "cooldown=30.0s" in line
+    assert "class=provider_internal" in line
+
+    half = _line(ProviderCircuitHalfOpen(data={**data, "from_state": "open", "to_state": "half_open"}))
+    assert " evt " not in half
+    assert "open→half_open" in half
+
+    closed = _line(ProviderCircuitClosed(data={
+        **data, "from_state": "half_open", "to_state": "closed",
+        "consecutive_failures": 0, "cooldown_seconds": 30.0,
+    }))
+    assert " evt " not in closed
+    assert "half_open→closed" in closed
+
+
 def test_provider_retry_overflow_shape_still_renders() -> None:
     """provider_retry（overflow 自愈，无 attempt 字段）：沿用 reason + iter 简式，不崩。"""
     from taifeng.loop.event import ProviderRetry

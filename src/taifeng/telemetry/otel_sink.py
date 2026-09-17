@@ -233,6 +233,10 @@ class OtelTelemetrySink:
             "taifeng.provider.retries",
             description="次数：ProviderRetry，按 reason / failure_class 维度",
         )
+        self._counter_circuit: Counter = meter.create_counter(
+            "taifeng.provider.circuit_transitions",
+            description="次数：provider 断路器状态转换，按 to_state / failure_class 维度",
+        )
         # G3：turn 失败按稳定 failure_class 维度计数（telemetry 聚合）
         self._counter_failures: Counter = meter.create_counter(
             "taifeng.turn.failures",
@@ -290,6 +294,12 @@ class OtelTelemetrySink:
             self._on_cache_break(submission_id, data)
         elif kind == "provider_retry":
             self._on_provider_retry(submission_id, data)
+        elif kind in (
+            "provider_circuit_opened",
+            "provider_circuit_half_open",
+            "provider_circuit_closed",
+        ):
+            self._on_circuit_transition(submission_id, kind, data)
         else:
             self._on_generic_event(submission_id, kind, data)
 
@@ -440,6 +450,19 @@ class OtelTelemetrySink:
             },
         )
         self._on_generic_event(submission_id, "provider_retry", data)
+
+    def _on_circuit_transition(
+        self, submission_id: str, kind: str, data: dict[str, Any]
+    ) -> None:
+        # 三个 kind 共用一个 counter：to_state 作维度，看板既能看跳闸次数也能算恢复时长
+        self._counter_circuit.add(
+            1,
+            attributes={
+                "to_state": str(data.get("to_state", "unknown")),
+                "failure_class": str(data.get("last_failure_class", "unknown")),
+            },
+        )
+        self._on_generic_event(submission_id, kind, data)
 
     def _on_generic_event(
         self, submission_id: str, kind: str, data: dict[str, Any]

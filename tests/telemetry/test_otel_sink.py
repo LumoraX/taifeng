@@ -304,6 +304,37 @@ class TestEventMapping:
         assert _sum_counter(data, "taifeng.provider.retries", reason="context_overflow") == 1
         assert _sum_counter(data, "taifeng.provider.retries") == 3
 
+    async def test_circuit_transitions_counter_by_to_state(
+        self,
+        sink: OtelTelemetrySink,
+        memory_meter_provider: tuple[MeterProvider, InMemoryMetricReader],
+    ) -> None:
+        """断路器三态计入 taifeng.provider.circuit_transitions，按 to_state 分维度（ADR 0042）。"""
+        _, reader = memory_meter_provider
+        base = {
+            "consecutive_failures": 3, "cooldown_seconds": 30.0,
+            "last_failure_class": "provider_transport",
+            "last_error_kind": "TransientNetworkError", "iteration": 0,
+        }
+        for kind, frm, to in (
+            ("provider_circuit_opened", "closed", "open"),
+            ("provider_circuit_half_open", "open", "half_open"),
+            ("provider_circuit_opened", "half_open", "open"),
+            ("provider_circuit_closed", "half_open", "closed"),
+        ):
+            await sink.handle(
+                _event("sub-cb", kind, {**base, "from_state": frm, "to_state": to})
+            )
+
+        data = reader.get_metrics_data()
+        metric = "taifeng.provider.circuit_transitions"
+        assert _sum_counter(data, metric, to_state="open") == 2
+        assert _sum_counter(data, metric, to_state="half_open") == 1
+        assert _sum_counter(data, metric, to_state="closed") == 1
+        assert _sum_counter(data, metric, failure_class="provider_transport") == 4
+        # 与重试 counter 各计各的，不得串味
+        assert _sum_counter(data, "taifeng.provider.retries") == 0
+
     async def test_compaction_completed_with_cache_invalidated_also_increments_cache_breaks(
         self,
         sink: OtelTelemetrySink,

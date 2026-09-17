@@ -36,6 +36,9 @@ MsgKind = Literal[
     "budget_hint_injected",
     "cache_break_detected",
     "provider_retry",
+    "provider_circuit_opened",
+    "provider_circuit_half_open",
+    "provider_circuit_closed",
     "llm_request_recorded",
     "user_input_injected",
     "system_message_injected",
@@ -380,6 +383,33 @@ class ProviderRetry(_Msg):
     """data = {"reason": str, "iteration": int}；网络重试另带 {"attempt", "max_attempts",
     "delay_seconds", "failure_class", "error_kind", "transport_phase", "retry_after_seconds"}
     （字段含义见 ``llm/retrying.RetryAttempt``）。"""
+
+
+class ProviderCircuitOpened(_Msg):
+    """provider 断路器跳闸：连续 N 次「重试耗尽」的最终失败 → 此后快速失败，不再触网（ADR 0042）。
+
+    与 ``denial_circuit_open`` 的分工：那个计的是 turn 内权限/hook 连续拒绝；
+    这个计的是**跨 turn** 的 provider 健康度，作用域是一个 endpoint。
+    """
+
+    kind: Literal["provider_circuit_opened"] = "provider_circuit_opened"
+    """data = {"from_state": str, "to_state": str, "consecutive_failures": int,
+    "cooldown_seconds": float, "last_failure_class": str | None,
+    "last_error_kind": str | None}（字段含义见 ``llm/breaker.CircuitTransition``）。"""
+
+
+class ProviderCircuitHalfOpen(_Msg):
+    """冷却到期转半开：放行恰一个探测请求，其余并发请求继续快速失败。"""
+
+    kind: Literal["provider_circuit_half_open"] = "provider_circuit_half_open"
+    """data 同 ``provider_circuit_opened``。"""
+
+
+class ProviderCircuitClosed(_Msg):
+    """半开探测成功 → 闭合：上游恢复，失败计数与冷却清零。"""
+
+    kind: Literal["provider_circuit_closed"] = "provider_circuit_closed"
+    """data 同 ``provider_circuit_opened``。"""
 
 
 class LlmRequestRecorded(_Msg):
@@ -941,6 +971,9 @@ Msg = Union[
     PeerWaitResolved,
     PeerWaitAnyStarted,
     PeerWaitAnyResolved,
+    ProviderCircuitOpened,
+    ProviderCircuitHalfOpen,
+    ProviderCircuitClosed,
 ]
 
 
