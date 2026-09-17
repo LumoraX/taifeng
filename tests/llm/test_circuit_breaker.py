@@ -381,6 +381,22 @@ async def test_forwards_optional_session_protocols() -> None:
     assert [a.reason for a in seen] == ["server_error"]
 
 
+async def test_forwards_client_capabilities() -> None:
+    """``capabilities`` 必须穿透断路器——挡掉它会让带图请求静默降级成 text-only。"""
+    from taifeng.llm.breaker import CircuitBreakingModelClient
+    from taifeng.llm.client import ModelCapabilities, model_capabilities
+
+    caps = ModelCapabilities(
+        input_modalities=frozenset({"text", "image"}), provider="p", protocol="chat",
+    )
+
+    class _CapableClient(_ScriptedClient):
+        capabilities = caps
+
+    breaker = CircuitBreakingModelClient(_CapableClient([None]), retry_config=_NO_RETRY)
+    assert model_capabilities(breaker) is caps
+
+
 async def test_circuit_observer_sees_all_transitions() -> None:
     """三态转换都要交给观察者（R3：宿主据此上事件总线）。"""
     from taifeng.llm.breaker import BreakerConfig, CircuitBreakingModelClient
