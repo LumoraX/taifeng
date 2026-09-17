@@ -209,6 +209,41 @@ class ImageCountExceededError(InvalidRequestError):
     kind = "image_count_exceeded"
 
 
+class CircuitOpenError(LLMError):
+    """provider 断路器处于拒绝态：本次采样**未触网**即失败（ADR 0042）。
+
+    ``retryable=True`` 的含义是「上游恢复后重跑即可」，而不是「立刻重试」——
+    ``circuit_open`` 刻意**不在** ``RetryConfig.retryable_kinds`` 默认集合内：在断路器
+    打开期间重试只会撞回同一堵墙。保守失败策略据 ``retryable`` 把它落成 SUSPEND，
+    业务侧读挂起 detail 即可区分「上游整体降级」与「本次调用失败」。
+
+    ``failure_class`` 继承**触发跳闸的那个错误**（如 ``provider_transport``），
+    比新造一个分类更利于聚合看板定位病根。
+    """
+
+    retryable = True
+    kind = "circuit_open"
+    failure_class: FailureClass = "unknown"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_class: FailureClass = "unknown",
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        """构造快速失败异常。
+
+        Args:
+            message: 错误描述（含连续失败次数与剩余冷却，**禁止包含 URL / 密钥**）。
+            failure_class: 触发跳闸的失败分类，默认 ``unknown``。
+            retry_after_seconds: 剩余冷却秒数，供业务侧展示「N 秒后自动恢复」。
+        """
+        super().__init__(message)
+        self.failure_class = failure_class
+        self.retry_after_seconds = retry_after_seconds
+
+
 class CancelledError(LLMError):
     retryable = False
     kind = "cancelled"

@@ -3,6 +3,12 @@
 设计文档：docs/architecture/llm-client.md
 """
 
+from taifeng.llm.breaker import (
+    BreakerConfig,
+    CircuitBreakingModelClient,
+    CircuitState,
+    CircuitTransition,
+)
 from taifeng.llm.client import (
     ModelCapabilities,
     ModelClient,
@@ -12,6 +18,7 @@ from taifeng.llm.client import (
 from taifeng.llm.errors import (
     AuthenticationError,
     CancelledError,
+    CircuitOpenError,
     ContentFilterError,
     ContextOverflowError,
     FailureClass,
@@ -69,6 +76,7 @@ __all__ = [
     "AuthenticationError",
     "CacheBreakpoint",
     "CancelledError",
+    "CircuitOpenError",
     "ContentFilterError",
     "CodexResponsesClient",
     "ContextOverflowError",
@@ -94,6 +102,10 @@ __all__ = [
     "RequestTooLargeError",
     "ResponseEvent",
     "ResponseFormatSpec",
+    "BreakerConfig",
+    "CircuitBreakingModelClient",
+    "CircuitState",
+    "CircuitTransition",
     "RetryConfig",
     "ServerError",
     "TokenUsage",
