@@ -109,6 +109,19 @@ resume 重入 SHALL 以确定性 call_id（`orch_{entry}_{step_idx}_{sid}_{idx}`
 
 ADR 0006 当年把「流程编排 (DAG)」判为推迟到 M6+；本节将其口径升级为**判 userspace**，非仅推迟。
 
+**运行时接线的三条约束**（`tests/loop/test_dag_expressibility.py` 钉住）：
+
+1. **节点集合由 entry 声明背书**：`spawn_skill` 的白名单以 **engine entry** 的 `child_skills` 为准
+   （`spawn_driver.spawn_skill` 以 entry 为唯一栈帧过 `DispatchPolicy`），**不是**以调用方 skill 为准。
+   故多级 DAG 的孙节点也必须写进 entry 的 `child_skills`——只有**边**是运行时接线，点集仍是静态声明。
+2. **barrier 的 then 边同受此约束**：`then_skill_id ∈ entry.child_skills ∪ {entry.id}`。
+3. **spawn 工具是业务侧注入项**：内核不自动注册，需 `EnginePool.create(extra_tools=[make_spawn_skill_tool(), ...])`；
+   不注入时 LLM 看不到这些工具（由 LLM 接线 DAG 的前提）。
+
+多级可行性已实测：barrier 起的聚合 turn 同样被注入 `spawn_coordinator`（`engine._build_child_runner`），
+故聚合 skill 可继续 spawn 孙节点，第二道 barrier 可架在孙句柄上——即 barrier 可链式串联。
+同一文件另钉住「D 只等 A 和 C，不等 B」这一 series-parallel 表达不了的形状确实可由句柄+barrier 表达。
+
 ### 不做：`loop` / `while` 循环原语
 
 同样判不做，理由按序：
