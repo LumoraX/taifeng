@@ -1,5 +1,10 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/brand/taifeng-lockup-dark.svg">
+  <img src="../assets/brand/taifeng-lockup.svg" alt="Taifeng" width="460">
+</picture>
+
 # Taifeng · 泰逢
 
 **A Python microkernel for LLM agents — skills are markdown, the LLM is the scheduler**

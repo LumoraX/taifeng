@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="docs/assets/brand/taifeng-favicon-source.png" alt="Taifeng logo" width="120">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/taifeng-lockup-dark.svg">
+  <img src="docs/assets/brand/taifeng-lockup.svg" alt="Taifeng" width="460">
+</picture>
 
 # 泰逢 · Taifeng
 

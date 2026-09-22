@@ -2,6 +2,10 @@
 
 > Entry point for Taifeng research notes, architecture documents, capability contracts, and ADRs.
 
+## Brand resources
+
+[Logo, avatar, favicon, and social preview assets](assets/brand/README.md).
+
 ## For Integrators
 
 If you are integrating Taifeng into a host system rather than changing the kernel, start here:

@@ -1,5 +1,10 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/brand/taifeng-lockup-dark.svg">
+  <img src="../assets/brand/taifeng-lockup.svg" alt="Taifeng" width="460">
+</picture>
+
 # 泰逢 · Taifeng
 
 **让 LLM 自主调度文档化 skill 的 Python agent 微内核**
