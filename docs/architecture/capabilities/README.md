@@ -46,6 +46,7 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | [turn-resource-guards](turn-resource-guards.md) | `DenialBreaker`, `IterationBudget`, child budget derivation, `ToolSpec.refunds_iteration`, and single-point accounting |
 | [postcompact-state-reinjection](postcompact-state-reinjection.md) | `PinnedStateSource`, pinned registry, budgeted reinjection, `system_injection(source=\"pinned:<name>\")`, events, and runtime register/unregister |
 | [token-accounting-calibration](token-accounting-calibration.md) | 跨 provider `TokenUsage.input_tokens` 口径归一（含缓存）、`TokenCalibration` 实测锚点 + 增量粗估三档估算、压缩改写前缀时失效保留 overhead、`ContextBudget.output_reserve_tokens`、全链路单一估算口径（ADR 0043） |
+| [usage-tree-accounting](usage-tree-accounting.md) | 会话用量整棵 turn 树共享记账：`SessionUsageMeter` 采样即入账、按 skill / thread 归因、K2 读实时总量（子树无法绕过上限）、`turn_completed.subtree_usage` / `thread_id` / `skill_id`、`introspect()["usage"]`（ADR 0044） |
 | [budget-awareness](budget-awareness.md) | Pre-turn neutral budget-fact injection on `soft_limit` crossing, one-shot-per-crossing, `system_injection(source="budget_hint")`, `budget_hint_injected` event (ADR 0017 rule ②) |
 | [peer-mailbox-messaging](peer-mailbox-messaging.md) | Live peer messaging by thread/handle/parent address, queue-only and trigger-turn semantics, `wait_peer` / `wait_any` (any-of-N), `SendToPeer`, and peer events |
 | [midturn-input-steering](midturn-input-steering.md) | `InjectUserInput`, pending input queues, iteration-boundary draining, no-active-turn fallback, delivered events, pairing protection, and cancellation guards |

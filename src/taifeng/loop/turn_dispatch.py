@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from taifeng.llm.types import add_usage
 from taifeng.loop.audit_skill import AuditedSkillDispatch
 from taifeng.loop.event import (
     SkillDispatched,
@@ -147,10 +148,12 @@ class TurnDispatch:
             capabilities=self.__dispatch_owner.capabilities,
             # K1: 子 turn 共享同一 spawn registry（配额贯穿整棵 turn 树）
             spawn_registry=self.__dispatch_owner.spawn_registry,
-            # K2: 子 turn 继承会话 token 上限（基线 = 父基线 + 父本 turn 已用）
+            # K2: 子 turn 继承会话 token 上限（基线 = 父基线 + 父本 turn 已用；
+            # 注入共享计量器时基线不再使用，K2 读计量器实时总量）
             session_tokens_used=self.__dispatch_owner.session_tokens_used
             + self.__dispatch_owner.total_usage.total_tokens,
             max_session_tokens=self.__dispatch_owner.max_session_tokens,
+            usage_meter=self.__dispatch_owner.usage_meter,
             # K3: 子 turn 共享同一 memory store
             memory_store=self.__dispatch_owner.memory_store,
             # 认知回路 ⑦：子 turn 继承同一战绩判定器（嵌套派发也按统一判据沉淀）
@@ -166,6 +169,10 @@ class TurnDispatch:
             audit_state=child_audit_state,
         )
         outcome = await sub_runner.run()
+        # usage-tree-accounting：阻塞子树的用量并入父的 subtree（无论子终态如何——
+        # token 已经花掉了）。会话账已由子 runner 采样时实时计入，这里只做归并展示。
+        self.__dispatch_owner.subtree_usage = add_usage(
+            self.__dispatch_owner.subtree_usage, sub_runner.subtree_usage)
         # audit：strict 能力面不接受挂起（skill_suspension/HITL/failure_policy 均已被
         # 静态拒）；子 turn 若仍挂起属 capability 契约违约 → fail closed 冻结。
         if child_ctx is not None and outcome.end_reason == "suspended":

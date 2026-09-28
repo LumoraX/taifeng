@@ -93,7 +93,8 @@ class EngineRunner:
             self._engine._rewind_checkpoints = derive_rewind_log(self._engine._history)
             self._engine._last_prompt_fingerprint = runner.last_prompt_fingerprint
             self._engine._compaction_count = runner.compaction_count
-            self._engine._session_tokens += runner.total_usage.total_tokens
+            # usage-tree-accounting：会话账已由各 runner 采样时实时计入共享计量器，
+            # 此处不再补加（否则根 turn 被重复计数）
 
     async def build_and_run_runner(
         self,

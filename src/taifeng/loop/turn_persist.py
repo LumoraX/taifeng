@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import assistant_message
-from taifeng.llm.types import TokenUsage
+from taifeng.llm.types import TokenUsage, add_usage
 from taifeng.loop.injection import injection_event
 
 if TYPE_CHECKING:
@@ -62,23 +62,28 @@ class TurnPersist:
         """
         if self.__persist_owner.max_session_tokens is None:
             return False
-        used = self.__persist_owner.session_tokens_used + self.__persist_owner.total_usage.total_tokens
-        return used >= self.__persist_owner.max_session_tokens
+        return self.session_tokens_now() >= self.__persist_owner.max_session_tokens
+
+    def session_tokens_now(self) -> int:
+        """会话累计 token（K2 口径）。
+
+        注入了共享计量器 → 读其实时总量（已含本 turn 与整棵树所有子 turn 的采样，
+        采样即入账）；否则退回「启动基线 + 本 turn 已用」的旧口径。
+        """
+        owner = self.__persist_owner
+        if owner.usage_meter is not None:
+            return owner.usage_meter.total_tokens
+        return owner.session_tokens_used + owner.total_usage.total_tokens
 
     def accumulate_usage(self, usage_dict: dict[str, Any]) -> None:
+        """入账一次采样的 usage：本 turn 累计、子树累计、会话共享计量器三处同步。"""
         u = TokenUsage(**usage_dict) if usage_dict else TokenUsage()
-        self.__persist_owner.total_usage = TokenUsage(
-            input_tokens=self.__persist_owner.total_usage.input_tokens + u.input_tokens,
-            output_tokens=self.__persist_owner.total_usage.output_tokens + u.output_tokens,
-            total_tokens=self.__persist_owner.total_usage.total_tokens
-            + (u.total_tokens or u.input_tokens + u.output_tokens),
-            cache_creation_input_tokens=self.__persist_owner.total_usage.cache_creation_input_tokens
-            + u.cache_creation_input_tokens,
-            cache_read_input_tokens=self.__persist_owner.total_usage.cache_read_input_tokens
-            + u.cache_read_input_tokens,
-            reasoning_tokens=self.__persist_owner.total_usage.reasoning_tokens + u.reasoning_tokens,
-            raw=u.raw,
-        )
+        owner = self.__persist_owner
+        owner.total_usage = add_usage(owner.total_usage, u)
+        owner.subtree_usage = add_usage(owner.subtree_usage, u)
+        # usage-tree-accounting：实时入会话账并归因（而非等 turn 收尾由 engine 加根 turn）
+        if owner.usage_meter is not None:
+            owner.usage_meter.add(u, thread_id=owner.thread_id, skill_id=owner.entry_skill.id)
 
     async def persist_partial_assistant(self) -> None:
         """取消时把已流式输出、尚未落史的 assistant 文本以 truncated 标记落史（R5）。

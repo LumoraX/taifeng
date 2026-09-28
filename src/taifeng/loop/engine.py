@@ -96,6 +96,7 @@ from taifeng.loop.submission import (
 from taifeng.loop.suspension_access import SuspensionAccess
 from taifeng.loop.suspension_ttl import SuspensionTtlScheduler
 from taifeng.loop.turn import TurnOutcome, TurnRunner
+from taifeng.loop.usage_meter import SessionUsageMeter
 from taifeng.skill.dispatch import DispatchPolicy
 
 if TYPE_CHECKING:
@@ -351,7 +352,9 @@ class AgentEngine:
         )
         for _src in pinned_state_sources or []:
             self._pinned_states.register(_src)
-        self._session_tokens: int = 0
+        # usage-tree-accounting：整棵 turn 树共享的会话计量器（root / call_skill /
+        # spawn / resume 续跑的每次采样实时入账）；_session_tokens 为其总量视图。
+        self._usage_meter = SessionUsageMeter()
         # detached-spawn：协调器（句柄表 / 分离驱动 / 错峰 resume / join-barrier / 冷恢复）
         # 抽到 SpawnDriver（见 spawn_driver.py），engine 仅留薄转发器（公共 API + 调用点）。
         # SpawnDriver 复用 engine 的 _spawn_registry(K1) / _root_cancel / _build_child_runner /
@@ -539,6 +542,16 @@ class AgentEngine:
             return list(self._rewind_checkpoints)
         return derive_rewind_log(await self._load_thread_items(thread_id))
 
+    @property
+    def _session_tokens(self) -> int:
+        """K2 会话累计 token（共享计量器总量视图；含全部子树与续跑）。"""
+        return self._usage_meter.total_tokens
+
+    @_session_tokens.setter
+    def _session_tokens(self, value: int) -> None:
+        """白盒测试 / 宿主恢复用：直接设定会话累计基线（归因明细不变）。"""
+        self._usage_meter.total_tokens = value
+
     def estimate_tokens(self) -> int:
         """估算当前 history 的 token 占用 —— 业务侧可据此决定是否 CompactNow。
 
@@ -588,6 +601,8 @@ class AgentEngine:
             "spawn": self._spawn_registry.snapshot(),
             # K2 会话累计 token + 上限
             "session_tokens": self._session_tokens,
+            # usage-tree-accounting：按 skill / thread 归因的会话用量明细
+            "usage": self._usage_meter.snapshot(),
             "max_session_tokens": self._max_session_tokens,
             # K4 出站事件丢弃计数
             "events_dropped": self._events_dropped,
@@ -1566,6 +1581,7 @@ class AgentEngine:
             compaction_degradation_threshold=self._compaction_degradation_threshold,
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
+            usage_meter=self._usage_meter,
             memory_store=self._memory_store,
             memory_query_builder=self._memory_query_builder,
             pinned_states=self._pinned_states,
@@ -1721,6 +1737,7 @@ class AgentEngine:
             spawn_registry=self._spawn_registry,
             session_tokens_used=self._session_tokens,
             max_session_tokens=self._max_session_tokens,
+            usage_meter=self._usage_meter,
             memory_store=self._memory_store,
             memory_query_builder=self._memory_query_builder,
             pinned_states=self._pinned_states,

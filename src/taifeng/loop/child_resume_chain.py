@@ -584,9 +584,10 @@ class ChildResumeChain:
             failure_suspend_on_expire=self._engine._failure_suspend_on_expire,
             auto_retry_count=auto_retry_count,
             # K2 执法(suspend-review-fixes):leaf/父层续跑注入会话预算——
-            # 增额后有执法;续跑用量不回写 engine 计量为既有缺口(文档声明)
+            # 续跑用量经共享计量器实时回写会话账(usage-tree-accounting)
             session_tokens_used=self._engine._session_tokens,
             max_session_tokens=self._engine._max_session_tokens,
+            usage_meter=self._engine._usage_meter,
             max_parallel_tool_calls=self._engine._max_parallel_tool_calls,
             sample_scope_id=sub.id,
             reasoning_passback=self._engine._reasoning_passback,

@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from taifeng.loop.failure_policy import (
         FailureDispositionPolicy,
     )
+    from taifeng.loop.usage_meter import SessionUsageMeter
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.eligibility import RuntimeCapabilities
     from taifeng.skill.registry import SkillSnapshot
@@ -226,6 +227,13 @@ class TurnRunner:
     # 累计基线（engine 注入）；max_session_tokens=None → 不强制（默认，行为不变）。
     session_tokens_used: int = 0
     max_session_tokens: int | None = None
+    # usage-tree-accounting：整棵 turn 树共享的会话计量器（engine 注入；None = 仅用
+    # 上面的基线口径，供不经 engine 直接构造 TurnRunner 的单测 / 嵌入场景）。
+    # 每次采样实时入账，K2 检查读其总量 → 并发兄弟子树彼此可见，无法绕过上限。
+    usage_meter: SessionUsageMeter | None = None
+    # 本 runner 自身 + 阻塞式 call_skill 子树的累计 usage（detached spawn 不计入：
+    # 其生命周期可长于父 turn，用量经 usage_meter 入会话账并在其自身 turn_completed 透出）
+    subtree_usage: TokenUsage = field(default_factory=TokenUsage)
     # K3：长期记忆 swap 接口（engine 注入）；None=无内存层级（默认，行为不变）。
     memory_store: Any = None  # MemoryStore | None
     # memory-integration-ergonomics：prefetch 检索 query 的业务侧构造器
@@ -377,6 +385,10 @@ class TurnRunner:
         """postcompact re-injection：压缩成功后把 pinned 状态钉回 history 尾。"""
         return await self._ctxload.reinject_pinned_state(history, phase)
 
+    def _session_tokens_now(self) -> int:
+        """K2 口径的会话累计 token：有共享计量器读其实时总量，否则基线 + 本 turn。"""
+        return self._persist.session_tokens_now()
+
     def _history_token_estimate(self) -> int:
         """按本 turn 的图片策略与业务估算器计算完整历史成本。"""
         return self._ctxload.history_token_estimate()
@@ -478,7 +490,7 @@ class TurnRunner:
                     # K2：累计 token 触顶且仍有后续工作（tool calls）→ 强制中止本 turn，
                     # 不再继续采样（OOM-killer，防 runaway turn 无界吃 token）。
                     if had_tool_calls and self._session_limit_exceeded():
-                        used = self.session_tokens_used + self.total_usage.total_tokens
+                        used = self._session_tokens_now()
                         rl_data = {
                             "limit_kind": "session_tokens",
                             "used": used,
@@ -633,6 +645,10 @@ class TurnRunner:
                         "iterations": iterations,
                         "duration_ms": duration_ms,
                         "usage": self.total_usage.model_dump(),
+                        # usage-tree-accounting：含阻塞 call_skill 子树的累计 + 归因键
+                        "subtree_usage": self.subtree_usage.model_dump(),
+                        "thread_id": self.thread_id,
+                        "skill_id": self.entry_skill.id,
                         "end_reason": end_reason,
                         "success": outcome.success,
                         # provider 原生终止原因（最后一次采样），不跨家归一

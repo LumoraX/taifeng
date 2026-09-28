@@ -37,6 +37,19 @@ class TokenUsage(BaseModel):
         return self.cache_read_input_tokens / denom
 
 
+def add_usage(a: TokenUsage, b: TokenUsage) -> TokenUsage:
+    """两份 usage 逐字段相加（``raw`` 取后者）；``b.total_tokens`` 缺省按 input + output 补。"""
+    return TokenUsage(
+        input_tokens=a.input_tokens + b.input_tokens,
+        output_tokens=a.output_tokens + b.output_tokens,
+        total_tokens=a.total_tokens + (b.total_tokens or b.input_tokens + b.output_tokens),
+        cache_creation_input_tokens=a.cache_creation_input_tokens + b.cache_creation_input_tokens,
+        cache_read_input_tokens=a.cache_read_input_tokens + b.cache_read_input_tokens,
+        reasoning_tokens=a.reasoning_tokens + b.reasoning_tokens,
+        raw=b.raw,
+    )
+
+
 class RateLimitSnapshot(BaseModel):
     """provider 返回的速率限制提示。"""
 

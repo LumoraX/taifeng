@@ -68,6 +68,7 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
 - 三类护栏触顶（`max_iterations` / `resource_limit_exceeded` / `denial_circuit_open`）在终结 turn 前经注入的 `FailureDispositionPolicy` 判定（`origin="guard_trip"`）：TERMINAL → 既有 end_reason 终结路径（默认 policy 恒 TERMINAL，零行为变化）；SUSPEND → 改落 `RESOURCE_LIMIT` 挂起（detail 携带 `end_reason` + 护栏快照，断路触发时 `denial_circuit_open` 事件仍恰好一次）。retry 续跑时预算与断路器随 runner 重建按原 cap 重置。完整契约见 [suspend-resume.md](suspend-resume.md) §失败处置裁决 policy。
 
 ### Requirement: limit 类失败 retry 语义（resource-limit-retry-semantics）
+- **K2 口径 = 整棵 turn 树**：会话累计由共享 `SessionUsageMeter` 采样即入账（根 / call_skill / spawn / 续跑），turn 内与 pre-turn 的 K2 检查都读实时总量，见 [usage-tree-accounting](usage-tree-accounting.md)。
 - **K2 retry = 预算增额裁决**：`limit_kind="session_tokens"` 触顶挂起的 retry payload 必须携带 `{"action":"retry","extend_tokens":N>0}`（engine 抬升 `_max_session_tokens`,触顶条件随之清除）;裸 retry / 非法增额 → `ResolveError`（触顶条件跨 turn 单调递增,裸 retry 必然立即再触顶 = 无效裁决,禁 silent 循环）。该挂起 `on_expire` 恒 abort（覆写配置——自动 retry 无人携带增额必然无效）。
 - **Resume 续跑路径过 K2 闸门**：与 UserMessage 路径同判;会话已触顶的续跑不得静默烧 token,按 policy 再裁决（挂起 / 终态）。
 - **limit 类失败全面进 policy**：K2 引擎级拒新 turn（policy SUSPEND → engine 级 RESOURCE_LIMIT 挂起,user_message 已入史,retry+增额后该 turn 正常执行）与 RequestTooLargeError 预检（SUSPEND → SYSTEM_RETRY 挂起,业务 CompactNow / 改参后 retry 可过）均咨询 policy;Conservative 对两者恒 TERMINAL,零行为变化。
