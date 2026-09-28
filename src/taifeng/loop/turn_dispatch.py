@@ -144,6 +144,9 @@ class TurnDispatch:
             max_parallel_tool_calls=self.__dispatch_owner.max_parallel_tool_calls,
             # reasoning-content-passback: 子 turn 继承回传开关
             reasoning_passback=self.__dispatch_owner.reasoning_passback,
+            # 审计可观测 层1：子 turn 继承 request 全文留痕开关（漏传则子步骤采样不留痕，
+            # 声明式编排入口无 LLM 迭代时整条链捕获归零）
+            enable_request_capture=self.__dispatch_owner.enable_request_capture,
             # G4a: 子 turn 继承同一运行时能力快照
             capabilities=self.__dispatch_owner.capabilities,
             # K1: 子 turn 共享同一 spawn registry（配额贯穿整棵 turn 树）
