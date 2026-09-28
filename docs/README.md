@@ -86,6 +86,7 @@ Later ADRs:
 46. [ADR 0046: 原生 provider 的 thinking 块与签名回传](decisions/0046-thinking-signature-passback.md): Anthropic provider 文件头宣称支持 extended thinking 却只解析 text/tool 增量、不能开启；Gemini 不处理 thoughtSignature——两家工具续传都要求原样回传带签名的思考内容。决策：新增不透明 `reasoning_state` 事件 / `ApiMessage.reasoning_state` / `provider_reasoning` 落史通道（内核只搬运）；Gemini 复用 `extra_content.google.thought_signature`；redacted-only 也落史；thinking 与 temperature / 过小 max_tokens 冲突显式报错；None 时不参与序列化保审计 digest 不变。真实端点验证未执行（无 key）。
 47. [ADR 0047: 工具参数派发前按 input_schema 校验](decisions/0047-tool-argument-schema-validation.md): 派发层只查合法 JSON 对象，缺字段 / 类型错直进 handler 或被 `args.get` 静默兜底（`call_skill` 必填 `reason` 即如此）。决策：不合 schema 不执行 handler，返回违例 + schema 让模型改参；内置子集校验器（不引 jsonschema，不认识的关键字放过）；主派发 / retry / 编排 / resume / 子 thread 续跑共用单一入口；不设关闭开关。
 48. [ADR 0048: 工具集运行时增删 + MCP list_changed 同步 + streamable HTTP 传输](decisions/0048-dynamic-tool-set-and-mcp-http.md): 注册表只能 register、MCP 忽略服务端通知且只有 stdio、指纹只比工具名。决策：`unregister` / `replace` / `version` / `subscribe` + `tool_set_changed` 事件，变更在下一次采样生效（不冻结到 turn）；指纹含描述与 schema；`McpClient` 协议 + `bind_mcp_tools` 只管自己的工具；`McpHttpClient` 用 httpx 实现 streamable HTTP，不做 OAuth。
+49. [ADR 0049: 取消 token 携带原因与墙钟截止时间，采样流与取消竞速](decisions/0049-cancel-reason-and-deadline.md): token 只有一个比特，终态分不清中止 / 超时 / 关停，也没有墙钟截止时间；采样循环只在收到流事件时查取消，provider 首字节前阻塞时取消迟迟不生效。决策：`CancelReason` 随取消级联；`child(deadline_seconds=)` 挂在子树根、只收紧；`UserMessage.deadline_seconds` / `spawn_skill(deadline_seconds=)` 入口；`interrupt_on_cancel` 让取消原地打断阻塞中的流读取；`turn_completed.cancel_reason`。
 
 ### Fourth Pass: Gap Tracking
 

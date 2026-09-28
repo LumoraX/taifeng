@@ -28,6 +28,7 @@ from taifeng.conversation.models import (
     spawn_settled_item,
     user_message,
 )
+from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.event import (
     EventMsg,
     SpawnCancelled,
@@ -129,7 +130,8 @@ class SpawnDriver:
     # -----------------------------------------------------------------
 
     async def spawn_skill(
-        self, *, skill_id: str, args: dict[str, Any], reason: str
+        self, *, skill_id: str, args: dict[str, Any], reason: str,
+        deadline_seconds: float | None = None,
     ) -> dict[str, str]:
         """分离式发起一个子 skill：立即返回句柄，子 skill 在后台分离 task 跑完。
 
@@ -222,7 +224,9 @@ class SpawnDriver:
             # 取消 token 与句柄登记同一同步步派生:首发 runner 起跑前的 kill_spawn
             # 也能命中(此前 token 在后台 task 内才派生,窗口内 kill 是静默 no-op)。
             assert eng._root_cancel is not None  # _await_root_cancel_ready 已保证  # noqa: SLF001
-            cancel = eng._root_cancel.child(f"spawn:{handle_id}")  # noqa: SLF001
+            # cancel-reason-deadline：可选墙钟上限挂在 spawn 子树根上（整棵子树共用）
+            cancel = eng._root_cancel.child(  # noqa: SLF001
+                f"spawn:{handle_id}", deadline_seconds=deadline_seconds)
             self._spawn_cancels[handle_id] = cancel
             from taifeng.conversation.models import spawn_item
 
@@ -729,7 +733,7 @@ class SpawnDriver:
         # 取消该 spawn 的专属子树 token（精确隔离，不动兄弟 spawn）。
         token = self._spawn_cancels.get(handle_id)
         if token is not None:
-            token.cancel()
+            token.cancel(CancelReason.REQUESTED, "kill_spawn")
         # running：有 live 子树，收敛权唯一交给被取消 runner 退栈后的 _finalize_spawn
         #   （已做终态幂等），此处**不**内联 emit，避免双发 spawn_cancelled。
         if h.status == "running":

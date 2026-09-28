@@ -37,6 +37,7 @@ from taifeng.loop.audit_llm import (
     record_model_cache_read,
 )
 from taifeng.loop.audit_tool import audited_tool_batch
+from taifeng.loop.cancellation import interrupt_on_cancel
 from taifeng.loop.event import (
     AssistantReasoning,
     AssistantText,
@@ -374,7 +375,8 @@ class TurnSample:
         # 可恢复 / 等外部介入类 → 转 SYSTEM_RETRY 挂起(等业务侧 resume 重跑同次 sample);
         # 确定性失败照旧上抛硬失败。CancelledError 走 asyncio 路径,不在此 except 内。
         try:
-            async with sess as s:
+            async with sess as s, interrupt_on_cancel(self.__sample_owner.cancel):
+                # R4：取消 / 截止时间原地打断阻塞中的流读取（provider 卡在首字节前也能及时停）
                 async for ev in s.stream(request):
                     self.__sample_owner.cancel.raise_if_cancelled()
                     if is_responses and responses_completed:

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from taifeng.loop.audit_admission import AcceptedUserMessage
 from taifeng.loop.audit_mailbox import finalize_audited_mailbox
+from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.event import EventMsg
 from taifeng.loop.event import Shutdown as ShutdownMsg
 
@@ -59,7 +60,7 @@ class EngineLifecycle:
                 self._engine._audit_state,
                 self._engine._audited_mailbox,
             )
-        cancel.cancel()
+        cancel.cancel(CancelReason.SHUTDOWN, "engine_shutdown")
         self._engine._cancel_ttl_timers()
         actor_cancellation = await self._engine._converge_operations()
         spawn_cancellation = await self._engine._spawn.converge_owned_tasks()

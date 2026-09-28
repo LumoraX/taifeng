@@ -358,36 +358,38 @@ final_text = 最后一步各 child 输出 join；run() 照常 emit TurnCompleted
 
 ## Cancellation 父子化
 
-参照 codex `tokio_util::CancellationToken`：
+参照 codex `tokio_util::CancellationToken` + Go `context.WithDeadline` / `context.Cause`：
 
 ```python
 # src/taifeng/loop/cancellation.py
 
+class CancelReason(StrEnum):
+    REQUESTED = "requested"                  # CancelTurn / kill_spawn / 业务显式取消
+    DEADLINE_EXCEEDED = "deadline_exceeded"  # 墙钟截止时间到
+    SHUTDOWN = "shutdown"                    # engine / pool 关停
+
 class CancellationToken:
-    """父子级联取消 token。
-
-    - parent.cancel() → 所有 child 同步标记 cancelled
-    - child.cancel() → 不影响 parent
-    """
-    def __init__(self, *, parent: "CancellationToken | None" = None) -> None: ...
-
-    def child(self, name: str = "") -> "CancellationToken":
-        """派生子 token，绑定父子关系。"""
-
-    def cancel(self) -> None: ...
-
+    def child(self, name: str = "", *, deadline_seconds: float | None = None) -> CancellationToken: ...
+    def cancel(self, reason: CancelReason = CancelReason.REQUESTED, detail: str | None = None) -> None: ...
+    def set_deadline(self, seconds: float) -> None: ...      # 只收紧不放宽
+    def deadline_remaining(self) -> float | None: ...         # 祖先链上最早的截止时间
     @property
-    def is_cancelled(self) -> bool: ...
+    def reason(self) -> CancelReason | None: ...              # 级联：后代看到祖先的原因
+    async def wait_cancelled(self) -> None: ...
 
-    async def wait_cancelled(self) -> None:
-        """供 anyio task group 监听。"""
+async with interrupt_on_cancel(token): ...                    # 取消原地打断当前 task 的阻塞 await
 ```
 
 **使用约定**：
-- `AgentEngine.run(cancel)` 收到根 token，整体取消
-- 每个 Submission 派生 `cancel.child(f"sub:{sub.id}")`
-- 工具调用派生 `cancel.child(f"tool:{call.id}")`，配合 `anyio.fail_after(spec.timeout_sec)` 超时
-- 子 agent 派发派生 `cancel.child(f"agent:{spawn_id}")`
+- `AgentEngine.run(cancel)` 收到根 token，整体取消（关停 → `SHUTDOWN`）
+- 每个根 turn 派生 `cancel.child(f"sub:{sub.id}", deadline_seconds=UserMessage.deadline_seconds)`——
+  墙钟上限挂在子树根，级联覆盖其全部 call_skill 子 turn 与工具调用
+- detached spawn 派生 `root.child(f"spawn:{handle_id}", deadline_seconds=...)`（`spawn_skill(deadline_seconds=)`）
+- 工具调用派生 `cancel.child(f"tool:{call.id}")`，配合 `spec.timeout_seconds` 超时
+- 采样循环在 `interrupt_on_cancel(turn_cancel)` 内消费 provider 流：provider 卡在首字节前时取消 / 截止时间也立即生效（读取仍在所属 task 内，满足审计 observed session 的 owner-task 约束）
+- 取消类终态 `turn_completed.end_reason="cancelled"` 带 `cancel_reason`（requested / deadline_exceeded / shutdown）
+
+契约：[capabilities/turn-resource-guards.md § 墙钟截止时间](capabilities/turn-resource-guards.md)。决策：ADR 0049。
 
 ## 与 codex 双 channel 的差异
 

@@ -228,6 +228,7 @@ class TenantPolicySource:
 | **`CompactNow`** | 业务主动触发压缩 | `target_tokens` / `preserve_tail` / `strategy` / `force` |
 | `InjectSystemMessage` | 注入业务 system 消息 | `text`, `source` |
 | **`ThreadRollback`** | 回滚最近 N 轮对话 | `num_turns` |
+| **`UserMessage(deadline_seconds=)`** | 本 turn 墙钟上限（含其全部 call_skill 子 turn）；到点 `cancel_reason="deadline_exceeded"`（ADR 0049） | `deadline_seconds: float > 0` |
 | **`UpdateBudget`** | 运行时调整 ContextBudget（只覆盖显式字段，其余保留；非法组合拒绝并保持原值） | `context_window` / `soft_limit_ratio` / `hard_limit_ratio` / `preserve_tail_messages` / `output_reserve_tokens` |
 | **`RefreshSnapshot`** | 拉最新 SkillSnapshot | — |
 | **`UpdateInstructions`** | 热更指定 layer 的 source；缓存立即失效；下个 turn 生效 | `layer_name`, `new_source` (str 或 `InstructionSource`) |

@@ -647,6 +647,11 @@ class TurnRunner:
                         "usage": self.total_usage.model_dump(),
                         # usage-tree-accounting：含阻塞 call_skill 子树的累计 + 归因键
                         "subtree_usage": self.subtree_usage.model_dump(),
+                        # cancel-reason-deadline：取消类终态区分用户中止 / 超时 / 关停
+                        "cancel_reason": (
+                            str(self.cancel.reason) if end_reason == "cancelled"
+                            and self.cancel.reason is not None else None
+                        ),
                         "thread_id": self.thread_id,
                         "skill_id": self.entry_skill.id,
                         "end_reason": end_reason,

@@ -19,6 +19,14 @@ class UserMessage(BaseModel):
     kind: Literal["user_message"] = "user_message"
     text: str
     attachments: list[dict[str, Any]] = Field(default_factory=list)
+    # None 时不参与序列化：未设上限的 UserMessage 外形与引入本字段前逐字一致
+    deadline_seconds: float | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None)
+    """本 turn 的墙钟上限（秒，含其全部 call_skill 子 turn）；None = 不限。
+
+    到点以 ``CancelReason.DEADLINE_EXCEEDED`` 取消整棵 turn 树，终态
+    ``turn_completed.end_reason="cancelled"`` 且 ``cancel_reason="deadline_exceeded"``
+    （cancel-reason-deadline）。计时自 turn 开始排队起（含等待 root gate 的时间）。"""
 
 
 class CancelTurn(BaseModel):

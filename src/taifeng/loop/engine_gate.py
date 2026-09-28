@@ -35,6 +35,14 @@ if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine
 
 
+
+def _turn_deadline(sub: object) -> float | None:
+    """根 turn 的墙钟上限：仅 legacy ``UserMessage`` 可携带；audited 输入（durable
+    envelope 只存文本）与其他 op 均无上限。"""
+    if isinstance(sub, Submission) and isinstance(sub.op, UserMessage):
+        return sub.op.deadline_seconds
+    return None
+
 class EngineGate:
     """engine 根 gate 与 turn 派发协作器（持 engine 引用，自身无状态）。"""
 
@@ -151,7 +159,9 @@ class EngineGate:
         （→ turn_failed{kind=cancelled}）。``gate_held=True``（audited 路径）表示
         调用方已在 application 之前持有 gate，这里不再取 / 放。
         """
-        turn_cancel = root_cancel.child(f"sub:{sub.id}")
+        # cancel-reason-deadline：UserMessage 可带墙钟上限，挂在本 turn 子树根上
+        # （级联覆盖其全部 call_skill 子 turn 与工具调用）
+        turn_cancel = root_cancel.child(f"sub:{sub.id}", deadline_seconds=_turn_deadline(sub))
         self._engine._pending[sub.id] = _PendingTurn(sub.id, turn_cancel, audited_turn_index(sub))
         if gate_held:
             await self._engine._run_turn_for_gated(sub, turn_cancel)

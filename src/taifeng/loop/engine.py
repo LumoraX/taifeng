@@ -56,6 +56,7 @@ from taifeng.loop.audit_mailbox import (
 from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shutdown
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.audit_support import _await_owned as audit_await_owned
+from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.child_resume_chain import ChildResumeChain
 from taifeng.loop.engine_events import EngineEvents
 from taifeng.loop.engine_gate import EngineGate
@@ -1064,7 +1065,7 @@ class AgentEngine:
                 if isinstance(sub.op, CancelTurn):
                     target = self._pending.get(sub.op.submission_id)
                     if target is not None:
-                        target.cancel.cancel()
+                        target.cancel.cancel(CancelReason.REQUESTED, "cancel_turn")
                         await self._emit(
                             EventMsg(
                                 submission_id=sub.id,
@@ -1650,7 +1651,8 @@ class AgentEngine:
         return self._spawn._fired_barriers  # noqa: SLF001
 
     async def spawn_skill(
-        self, *, skill_id: str, args: dict[str, Any], reason: str
+        self, *, skill_id: str, args: dict[str, Any], reason: str,
+        deadline_seconds: float | None = None,
     ) -> dict[str, str]:
         """转发到 SpawnDriver.spawn_skill —— 公共 API + tools 的 spawn_coordinator 入口。
 
@@ -1661,12 +1663,14 @@ class AgentEngine:
             skill_id: 要分离发起的子 skill id（须在 entry skill 的 child_skills 白名单内）。
             args: 子 skill 的种子输入（序列化为子 thread 首条 user_message）。
             reason: LLM / 业务自陈的发起理由（透传到事件 / 审计，taifeng 不解析语义）。
+            deadline_seconds: 可选墙钟上限（秒），到点以 ``DEADLINE_EXCEEDED`` 取消整棵
+                spawn 子树（cancel-reason-deadline）；None = 不限。
 
         Returns:
             ``{"handle_id": ..., "child_thread_id": ...}`` —— 立即可用于 ``spawn_status``。
         """
         return await self._spawn.spawn_skill(
-            skill_id=skill_id, args=args, reason=reason
+            skill_id=skill_id, args=args, reason=reason, deadline_seconds=deadline_seconds
         )
 
     def _build_child_runner(

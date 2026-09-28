@@ -88,3 +88,30 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
 ## 测试
 
 `tests/loop/test_iteration_budget.py`（5：耗尽/refund clamp/子独立/显式子 cap）、`tests/loop/test_denial_breaker.py`（6：连续/重置/滑窗/驱逐/无阈值/snapshot）、`tests/loop/test_doom_loop.py`（7：opt-in off/警在 N/断在 2N/闩锁/不同签名重置/不同 tool 重置/snapshot 无 args 泄漏）、`tests/loop/test_doom_loop_integration.py`（2 e2e：同 echo 反复 → 警注提示 + 断 end_reason 终止；未启用零检测）、`tests/loop/test_turn_resource_guards.py`（3 e2e：连续 deny 断路恰好一次 + end_reason；refunds 工具 5 轮跑过 cap=3 净耗 1；父 cap=3 耗 1 后子独立跑满 3 圈）。行为等价由全量回归（零断言改动）守护。`tests/loop/test_resource_limit.py`（K2 触顶挂起 retry 增额闭环 / turn_refused 进 policy / RequestTooLarge 预检双 policy）、`tests/test_suspension_ttl.py::test_auto_retry_lineage_exhaustion_forces_abort`（谱系熔断）。
+
+## 墙钟截止时间与取消原因（cancel-reason-deadline，ADR 0049）
+
+资源护栏的时间维：迭代数、token 之外，turn / spawn 子树可设**墙钟上限**。
+
+### 数据契约
+
+| 符号 | 含义 |
+| --- | --- |
+| `CancelReason` | `requested` / `deadline_exceeded` / `shutdown`（StrEnum） |
+| `CancellationToken.cancel(reason=REQUESTED, detail=None)` | 首次取消的原因生效，级联到全部后代 |
+| `CancellationToken.child(name, deadline_seconds=None)` / `set_deadline(s)` | 到点以 `DEADLINE_EXCEEDED` 取消子树；只收紧不放宽；≤0 → `ValueError` |
+| `deadline_remaining()` | 本 token 与祖先中最早截止时间的剩余秒数；无则 None |
+| `CancellationToken.on_cancel(cb) -> remove` | 取消时同步回调（已取消则立即调用） |
+| `interrupt_on_cancel(token)`（async context） | 块内 token 取消 → 对当前 task `cancel()` 原地打断阻塞 await；退出时 `uncancel` 并改抛带原因的 `CancelledError`（外层按 token 取消优雅终结，外部 task.cancel 仍外抛） |
+| `UserMessage.deadline_seconds: float \| None`（>0） | 根 turn 墙钟上限（自排队起计，含等 root gate） |
+| `engine.spawn_skill(..., deadline_seconds=)` | spawn 子树墙钟上限 |
+| `turn_completed.cancel_reason` | `end_reason="cancelled"` 时为取消原因，否则 None |
+
+### 行为契约
+
+- **Requirement: 截止时间及时生效** —— 采样循环 SHALL 在 `interrupt_on_cancel` 内消费 provider 流；
+  provider 在首字节前阻塞时，截止时间到点 SHALL 在当次等待内生效，而非等下一个流事件。
+- **Requirement: 终态可区分** —— 用户 `CancelTurn` → `cancel_reason="requested"`；截止时间 →
+  `"deadline_exceeded"`；engine / pool 关停 → `"shutdown"`。
+- 策略值（上限几秒）由宿主注入（R1）；内核不设默认上限。
+

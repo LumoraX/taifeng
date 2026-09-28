@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 from taifeng.conversation.journal.records import StableErrorV1
 from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
 from taifeng.loop.audit_lifecycle import SessionFinishResult, ThreadTerminalRequest
+from taifeng.loop.cancellation import CancelReason
 
 if TYPE_CHECKING:
     from taifeng.loop.audit_bootstrap import AuditedSessionState
@@ -375,7 +376,7 @@ async def _cleanup_pool_resources(
 ) -> BaseException | None:
     """逐段清理非 Session 资源，每段失败均不阻断后续资源。"""
     first = await _stop_watcher(pool, first)
-    pool._root_cancel.cancel()  # noqa: SLF001
+    pool._root_cancel.cancel(CancelReason.SHUTDOWN, "pool_close")  # noqa: SLF001
     if pool._hook_runner is not None:  # noqa: SLF001
         try:
             await pool._hook_runner.shutdown(grace_seconds=5.0)  # noqa: SLF001
