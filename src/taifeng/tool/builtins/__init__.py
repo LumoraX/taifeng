@@ -11,6 +11,7 @@
     - run_in_background / wait_for_task —— shell 长任务后台执行（M4）
     - http_request —— 受 PermissionPolicy(scope='network') 审批的 HTTP 调用（P0）
     - glob / grep —— 沙盒内只读文件搜索（ADR 0064）
+    - memory —— 模型主动检索 / 写入长期记忆，委托注入的 MemoryStore（ADR 0064）
     - spawn_skill / await_skills / join_skill / kill_skill —— detached-spawn LLM 入口
     - wait_peer / wait_any —— turn 内阻塞等待(等一个 / 等任一)
 """
@@ -27,6 +28,7 @@ from taifeng.tool.builtins.file_io import make_file_read_tool, make_file_write_t
 from taifeng.tool.builtins.glob_search import make_glob_tool
 from taifeng.tool.builtins.grep_search import make_grep_tool
 from taifeng.tool.builtins.http_request import make_http_request_tool
+from taifeng.tool.builtins.memory import make_memory_tool
 from taifeng.tool.builtins.read_skill import make_read_skill_tool
 from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
 from taifeng.tool.builtins.run_script import make_run_script_tool
@@ -61,6 +63,7 @@ __all__ = [
     "make_http_request_tool",
     "make_join_skill_tool",
     "make_kill_skill_tool",
+    "make_memory_tool",
     "make_read_skill_tool",
     "make_request_user_input_tool",
     "make_run_in_background_tool",
