@@ -576,6 +576,8 @@ class TurnSuspended(_Msg):
         "pending": list[dict],     # 每项 {request_id, reason, payload_schema,
                                    #        related_call_id, detail}
         "cache_invalidated": bool, # tier-2 跨进程 resume 必须为 True
+        "expires_at": int | None,  # suspension-ttl 到期时刻(None=永不过期)
+        "usage": dict,             # 仅本段(挂起前)调用用量;续跑段另报,见 suspend-resume 契约
     }
     """
 
@@ -663,7 +665,7 @@ class TurnFailed(_Msg):
     kind: Literal["turn_failed"] = "turn_failed"
     """data = {"error": str, "kind": str, "failure_class": str,
     "suggested_action": str, "recovery": dict, "iterations": int,
-    "is_root": bool}
+    "usage": dict, "is_root": bool}
 
     ``failure_class`` 是 G3 的稳定分类桶（见 ``llm.errors.FailureClass``），
     供 telemetry 聚合；``suggested_action`` 为人类可读处置建议；``recovery``

@@ -92,7 +92,7 @@ payload 形状由对应 `PendingRequest.reason` 决定：
 
 | kind | 触发 | data 形状 |
 | --- | --- | --- |
-| `turn_suspended` | turn 挂起的契约事件类型（定义并导出，业务可构造 / 匹配） | `{thread_id, record_id, pending: [{request_id, reason, payload_schema, related_call_id, detail}], cache_invalidated}` |
+| `turn_suspended` | turn 挂起的契约事件类型（定义并导出，业务可构造 / 匹配） | `{thread_id, record_id, pending: [{request_id, reason, payload_schema, related_call_id, detail}], cache_invalidated, expires_at, usage}`；`usage` 为挂起前本段 TurnRunner 的调用用量（`TokenUsage.model_dump()`，含触发挂起的那次采样），续跑段的 `turn_completed.usage` 只含续跑部分，两段相加即全部调用、互不重复（engine 级门控在采样前直接挂起时无调用、不含 `usage`） |
 | `suspension_resolved` | record **全部** pending 核销、turn 续跑 | `{record_id, request_ids: list[str]}` |
 | `suspension_partially_resolved` | 多 pending record 的子集核销（record 仍活跃,不续跑） | `{record_id, thread_id, resolved_request_ids, remaining_request_ids}` |
 | `suspension_resolve_rejected` | `Resume` 被拒（resolution 不全 / 多余、无活跃挂起、ResolveError 等） | `{reason: str, record_id: str \| None, detail: dict}` |
@@ -270,6 +270,6 @@ Resume(thread_id, resolutions)
 | --- | --- |
 | **R1 业务零侵入** | `suspend/` 全 typed、无业务词；`detail` / `resolutions` payload 不透明 JSON，taifeng 不解析其 keys。`created_at` / `record_id` / `request_id` 由注入工厂提供（src 内不取系统时钟 / 随机）。 |
 | **R2 Cache 友好** | resume 补齐 `function_call_output` 是 **tail append**（不动 head），符合 mid-turn 只改 tail；`turn_suspended.cache_invalidated` 标注 tier-2 跨进程必失效、tier-1 同进程尽量保 anchor。 |
-| **R3 可观测** | 新增 `turn_suspended` / `suspension_resolved` / `suspension_resolve_rejected` EventMsg；挂起结局以独立终结态 `turn_suspended` 上事件流（携带 `thread_id` / `record_id` / `pending` / `cache_invalidated`），与 `TurnCompleted` 区分。 |
+| **R3 可观测** | 新增 `turn_suspended` / `suspension_resolved` / `suspension_resolve_rejected` EventMsg；挂起结局以独立终结态 `turn_suspended` 上事件流（携带 `thread_id` / `record_id` / `pending` / `cache_invalidated` / `usage`），与 `TurnCompleted` 区分。 |
 | **R4 可取消** | 挂起态可被 `CancelTurn` 丢弃（`_cancel_active_suspension`）；协程已退栈，不阻塞主 actor。 |
 | **R5 可 resume** | `SuspensionRecord` 走既有 JSONL 追加写；复用 `resume_thread_id` 跨进程重建。resolved-marker 同样追加写、不改写历史。 |

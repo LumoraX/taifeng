@@ -577,6 +577,8 @@ class TurnRunner:
                         "recovery": recovery.to_dict(),
                         "request_id": request_id,
                         "iterations": iterations,
+                        # 失败前已成功采样的用量（resume/重提不会回补，此处不报即永久漏计）
+                        "usage": self.total_usage.model_dump(),
                         "is_root": is_root,
                     }
                 )
@@ -619,6 +621,10 @@ class TurnRunner:
                         # suspension-ttl:record 级到期时刻(None=永不过期)。engine 据此
                         # 武装到期定时器;事件流经 engine._emit,所有层级 turn 统一覆盖。
                         "expires_at": suspension.expires_at,
+                        # 挂起前本段已发生的调用用量（含触发挂起的那次采样）。resume 总是
+                        # 新建 TurnRunner 从零累计，续跑段的 turn_completed 只报续跑部分；
+                        # 此处不报，挂起段用量对订阅方即永久不可见。两段相加 = 全部调用。
+                        "usage": self.total_usage.model_dump(),
                     }
                 )
             )
