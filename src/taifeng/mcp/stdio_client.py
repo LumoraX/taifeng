@@ -24,21 +24,20 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from taifeng.tool.spec import ToolContext, ToolFunc, ToolResult, ToolSpec
+from taifeng.mcp.bridge import (
+    McpToolError,
+    extract_text_content,
+    register_mcp_tools,
+    register_mcp_tools_async,
+)
 
 if TYPE_CHECKING:
-    from taifeng.tool.registry import ToolRegistry
+    from collections.abc import Callable, Coroutine
 
 logger = logging.getLogger(__name__)
 
-
-class McpToolError(Exception):
-    """MCP 工具调用失败。"""
-
-    def __init__(self, code: int, message: str) -> None:
-        super().__init__(f"[{code}] {message}")
-        self.code = code
-        self.message = message
+# 兼容旧导入路径（桥接逻辑已迁到 taifeng.mcp.bridge，与传输无关）
+_extract_text_content = extract_text_content
 
 
 class McpStdioClient:
@@ -68,6 +67,9 @@ class McpStdioClient:
         self._initialized = False
         self._server_info: dict[str, Any] = {}
         self._request_timeout = request_timeout_seconds
+        # dynamic-tool-set：notifications/tools/list_changed 的异步监听者
+        self._tools_changed_listeners: list[Callable[[], Coroutine[Any, Any, None]]] = []
+        self._listener_tasks: set[asyncio.Task[None]] = set()
 
     @classmethod
     async def spawn(
@@ -165,14 +167,32 @@ class McpStdioClient:
                     else:
                         fut.set_result(msg.get("result"))
                 else:
-                    # 服务端通知 / 当前忽略
-                    logger.debug("mcp notification: %s", msg.get("method"))
+                    self._on_server_message(msg)
         finally:
             # 释放所有未决 future
             for fut in self._pending.values():
                 if not fut.done():
                     fut.set_exception(RuntimeError("mcp connection closed"))
             self._pending.clear()
+
+    def _on_server_message(self, msg: dict[str, Any]) -> None:
+        """服务端主动消息：tools/list_changed 触发监听者，其余记 debug。
+
+        监听者以 task 调度（reader loop 不能被回调阻塞，否则回调里再发请求会死锁：
+        响应要靠同一个 reader loop 读回来）。
+        """
+        method = msg.get("method")
+        if method == "notifications/tools/list_changed":
+            for listener in list(self._tools_changed_listeners):
+                task = asyncio.get_running_loop().create_task(listener())
+                self._listener_tasks.add(task)
+                task.add_done_callback(self._listener_tasks.discard)
+            return
+        logger.debug("mcp notification: %s", method)
+
+    def add_tools_changed_listener(self, listener: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        """登记 ``notifications/tools/list_changed`` 的异步回调（``bind_mcp_tools`` 使用）。"""
+        self._tools_changed_listeners.append(listener)
 
     # ------------------------------------------------------------------
     # Protocol methods
@@ -240,6 +260,9 @@ class McpStdioClient:
         except TimeoutError:
             self._proc.kill()
             await self._proc.wait()
+        # 未完成的 list_changed 同步任务随连接一起取消（连接已断，同步必然失败）
+        for task in list(self._listener_tasks):
+            task.cancel()
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:
@@ -248,108 +271,9 @@ class McpStdioClient:
                 pass
 
 
-# ----------------------------------------------------------------------
-# Bridge: 把 MCP tool 注册为 Taifeng ToolSpec
-# ----------------------------------------------------------------------
-
-
-def _extract_text_content(result: dict[str, Any]) -> tuple[str, bool]:
-    """从 MCP tools/call 结果提取文本 + is_error。"""
-    is_error = bool(result.get("isError"))
-    content = result.get("content") or []
-    parts: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "text":
-            parts.append(str(item.get("text", "")))
-        elif item.get("type") == "image":
-            parts.append(f"[image: {item.get('mimeType', 'unknown')}]")
-        else:
-            parts.append(json.dumps(item, ensure_ascii=False))
-    return "\n".join(parts), is_error
-
-
-def register_mcp_tools(
-    client: McpStdioClient,
-    registry: ToolRegistry,
-    *,
-    tool_prefix: str = "",
-    parallel_safe: bool = False,
-    timeout_seconds: float = 60.0,
-) -> list[ToolSpec]:
-    """异步包装：当前是同步入口，内部使用 client.list_tools() 应在 ``await`` 后调。
-
-    为简化使用，这里返回 ``list_tools()`` 的 awaitable 包装 ——
-    业务侧应：``specs = await register_mcp_tools_async(client, registry, ...)``。
-    """
-    raise RuntimeError(
-        "use `await register_mcp_tools_async(...)` instead",
-    )
-
-
-async def register_mcp_tools_async(
-    client: McpStdioClient,
-    registry: ToolRegistry,
-    *,
-    tool_prefix: str = "",
-    parallel_safe: bool = False,
-    timeout_seconds: float = 60.0,
-) -> list[ToolSpec]:
-    """把 MCP server 的所有 tool 注册为 Taifeng ToolSpec。
-
-    Args:
-        client: 已 initialize 的 MCP client
-        registry: 目标 ToolRegistry
-        tool_prefix: 命名前缀（避免与本地 tool 冲突，如 ``"mcp_fs_"``）
-        parallel_safe: 默认 False（MCP 工具通常有副作用）
-        timeout_seconds: 单次 tools/call 超时
-    """
-    remote_tools = await client.list_tools()
-    registered: list[ToolSpec] = []
-    for meta in remote_tools:
-        if not isinstance(meta, dict):
-            continue
-        name = meta.get("name")
-        if not name or not isinstance(name, str):
-            continue
-        description = meta.get("description", "")
-        schema = meta.get("inputSchema") or {"type": "object"}
-
-        local_name = f"{tool_prefix}{name}"
-
-        async def _handler_factory(mcp_name: str = name) -> ToolFunc:  # 闭包绑定
-            async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-                try:
-                    result = await asyncio.wait_for(
-                        client.call_tool(mcp_name, args),
-                        timeout=timeout_seconds,
-                    )
-                except McpToolError as e:
-                    return ToolResult.error(f"mcp_error: {e}", reason="mcp_error", code=e.code)
-                except TimeoutError:
-                    return ToolResult.error("mcp_timeout", reason="timeout")
-                text, is_error = _extract_text_content(result)
-                return ToolResult(
-                    output=text,
-                    is_error=is_error,
-                    data={"mcp_tool": mcp_name},
-                )
-            return handler
-
-        spec = ToolSpec(
-            name=local_name,
-            description=f"[MCP] {description}",
-            input_schema=schema,
-            handler=await _handler_factory(),
-            parallel_safe=parallel_safe,
-            timeout_seconds=timeout_seconds + 5.0,
-        )
-        try:
-            registry.register(spec)
-        except Exception as e:
-            logger.warning("failed to register mcp tool %s: %s", local_name, e)
-            continue
-        registered.append(spec)
-    logger.info("registered %d MCP tool(s) from %s", len(registered), client.server_info.get("name"))
-    return registered
+__all__ = [
+    "McpStdioClient",
+    "McpToolError",
+    "register_mcp_tools",
+    "register_mcp_tools_async",
+]

@@ -34,6 +34,7 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | [tool-argument-validation](tool-argument-validation.md) | 派发前按 `input_schema` 校验参数（内置子集校验器，不认识的关键字放过）、违例 + schema 回显的改参反馈、`arguments_rejection` 全路径单一入口（ADR 0047） |
 | [tool-builtins-extended](tool-builtins-extended.md) | `apply_patch` atomicity, `BackgroundTaskRegistry`, `http_request`, and builtin `parallel_safe` behavior |
 | [tool-image-attachment](tool-image-attachment.md) | 工具返回图片附件：`ToolResult.attachments`、落盘前 admission、`tool_output_modalities` 协议分档、fco 内 `PartContent` 投影与 wire `input_image`、`requires.modalities` 路由期门控、能力不足时 in-band 降级，以及内核/业务边界 |
+| [dynamic-tool-set](dynamic-tool-set.md) | `ToolRegistry.unregister` / `replace` / `version` / `subscribe`、`tool_set_changed` 事件、prompt 指纹含描述与 schema、MCP `McpClient` 协议 + `bind_mcp_tools` 随 `tools/list_changed` 同步、`McpHttpClient` streamable HTTP 传输（ADR 0048） |
 | [mcp-server](mcp-server.md) | `McpStdioServer`, MCP handshake, tools, resources, bidirectional JSON-RPC elicitation, and CLI `mcp serve` |
 | [telemetry-otel](telemetry-otel.md) | `OtelSinkConfig`, `OtelTelemetrySink`, EventMsg-to-OTel mapping, PII filtering, counters, and fire-and-forget export |
 | [turn-rewind](turn-rewind.md) | Addressable intra-turn nodes, `Rewind` op, `RewindCheckpoint`, `rewind_nodes()`, event classes, rejection paths, R2 expectations, and R5 append-only behavior |

@@ -52,6 +52,7 @@ from taifeng.loop.pool_session import (
     start_skill_watcher,
 )
 from taifeng.loop.tool_recovery import validate_tool_recovery_mode
+from taifeng.loop.tool_set_events import bind_tool_set_events
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.skill.recall import LlmSkillRecall, SkillRecall
 from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry
@@ -508,6 +509,8 @@ class EnginePool:
         )
 
         self._engines: dict[str, AgentEngine] = {}
+        # dynamic-tool-set：工具注册表变更 → 各活跃 engine 上 emit tool_set_changed（R3）
+        self._unbind_tool_events = bind_tool_set_events(tool_registry, lambda: self._engines)
         self._engine_tasks: dict[str, asyncio.Task[None]] = {}
         self._audit_sessions: dict[str, AuditedSessionState] = {}
         self._release_tasks: dict[str, asyncio.Task[None]] = {}

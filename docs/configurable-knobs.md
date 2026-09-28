@@ -678,6 +678,26 @@ client = await McpStdioClient.spawn(cmd, request_timeout_seconds=None)
 specs = await register_mcp_tools_async(client, registry, timeout_seconds=120)
 ```
 
+### 4.1 streamable HTTP 与工具集同步（dynamic-tool-set，ADR 0048）
+
+```python
+from taifeng.mcp import McpHttpClient, bind_mcp_tools
+
+client = await McpHttpClient.connect(
+    "https://mcp.example.com/mcp",
+    headers={"Authorization": "Bearer ..."},  # 鉴权由宿主注入
+    request_timeout_seconds=60.0,
+    listen_notifications=True,                  # GET 推送流；server 回 405 则只能手动 sync
+)
+binding = await bind_mcp_tools(client, pool_registry, tool_prefix="mcp_x_", watch=True)
+# server 推 tools/list_changed → 自动增删 / 替换，各 engine 收到 tool_set_changed
+await binding.sync()   # 也可手动同步
+binding.detach()       # 卸载本绑定的全部工具
+```
+
+`bind_mcp_tools` 同样接受 `McpStdioClient`。运行时也可直接 `ToolRegistry.register / unregister / replace`，
+变更在下一次采样生效。
+
 ## 5. MCP server mode（M3 mcp-server-mode）
 
 把 taifeng 自身暴露为 MCP server，让 Claude Code / Cursor 等通过 stdio JSON-RPC 调用 taifeng skills 与读取 SKILL.md 资源。

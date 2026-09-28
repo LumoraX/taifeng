@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -107,7 +108,13 @@ class TurnSample:
         snapshot_key = ",".join(
             sorted(self.__sample_owner.snapshot.reachable_from(self.__sample_owner.entry_skill.id))
         )
-        tools_key = ",".join(sorted(getattr(t, "name", "") for t in tools))
+        # 工具指纹含描述与 schema：同名替换（ToolRegistry.replace / MCP list_changed）
+        # 同样改变 cached prefix，只比名字会把这类失效误记为 unknown_drop
+        tools_key = ",".join(sorted(
+            f"{getattr(t, 'name', '')}:{getattr(t, 'description', '')}:"
+            f"{json.dumps(getattr(t, 'input_schema', {}), sort_keys=True, ensure_ascii=False)}"
+            for t in tools
+        ))
         instr_text = "\x01".join(getattr(i, "text", "") for i in self.__sample_owner.instructions)
         system_src = (
             f"{self.__sample_owner.entry_skill.id}\x00{self.__sample_owner.entry_skill.body}\x00{instr_text}"

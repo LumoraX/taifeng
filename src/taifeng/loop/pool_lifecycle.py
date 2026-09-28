@@ -347,6 +347,8 @@ async def close_engine_pool(pool: EnginePool) -> None:
 async def _drive_pool_close(pool: EnginePool) -> None:
     """保留首错，同时清理全部 Session、watcher、root、hook 与 store。"""
     first: BaseException | None = None
+    # dynamic-tool-set：先退订工具集变更广播（注册表可能比 pool 活得久，被外部继续修改）
+    pool._unbind_tool_events()  # noqa: SLF001
     async with pool._lock:  # noqa: SLF001
         session_ids = tuple(
             dict.fromkeys(

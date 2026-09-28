@@ -39,6 +39,7 @@ MsgKind = Literal[
     "provider_circuit_opened",
     "provider_circuit_half_open",
     "provider_circuit_closed",
+    "tool_set_changed",
     "llm_request_recorded",
     "user_input_injected",
     "system_message_injected",
@@ -410,6 +411,18 @@ class ProviderCircuitClosed(_Msg):
 
     kind: Literal["provider_circuit_closed"] = "provider_circuit_closed"
     """data 同 ``provider_circuit_opened``。"""
+
+
+class ToolSetChanged(_Msg):
+    """工具注册表发生增 / 删 / 同名替换（dynamic-tool-set）。
+
+    来源：业务侧 ``ToolRegistry.register`` / ``unregister`` / ``replace``，或 MCP server
+    ``tools/list_changed`` 触发的重新同步。变更在各 engine 的**下一次采样**生效；
+    随之的 cache 失效归因为 ``tool_spec_changed``（预期内）。
+    """
+
+    kind: Literal["tool_set_changed"] = "tool_set_changed"
+    """data = {"added": list[str], "removed": list[str], "replaced": list[str], "version": int}"""
 
 
 class LlmRequestRecorded(_Msg):
@@ -981,6 +994,7 @@ Msg = Union[
     ProviderCircuitOpened,
     ProviderCircuitHalfOpen,
     ProviderCircuitClosed,
+    ToolSetChanged,
 ]
 
 
