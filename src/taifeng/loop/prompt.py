@@ -571,28 +571,11 @@ def build_api_request(
 ) -> ApiRequest:
     resolved_policy = image_input_policy or DISABLED_IMAGE_POLICY
     resolved_capabilities = model_input_capabilities or TEXT_ONLY_CAPABILITIES
-    # G4a 模态门控：把 client 自己声明的能力派生成标签并入 RuntimeCapabilities，
-    # 使「要图片工具输出的 skill」在拿不到图片的环境下根本不出现在可派发列表里
-    # （路由期 fail-fast，优于派发后在渲染期降级）。业务无需手工同步这些标签——
-    # 同一事实若有「client 声明」与「业务汇报」两个来源必然漂移；业务自定义
-    # 标签保留，两者取并集。
-    resolved_runtime = capabilities
-    if capabilities is not None:
-        # 局部 import：与本文件 render_system_prompt 内的 skill.visibility 同形，
-        # 避免 loop → skill 的模块级导入环。
-        from taifeng.skill.eligibility import derive_modality_tags
-
-        resolved_runtime = replace(
-            capabilities,
-            modalities=(
-                capabilities.modalities | derive_modality_tags(resolved_capabilities)
-            ),
-        )
     system_prompt = render_system_prompt(
         entry,
         snapshot,
         instructions=instructions,
-        capabilities=resolved_runtime,
+        capabilities=_with_modality_tags(capabilities, resolved_capabilities),
         recall_threshold=recall_threshold,
         has_recall_backend=has_recall_backend,
     )
@@ -644,6 +627,50 @@ def build_api_request(
         else:
             messages.append(ApiMessage(role="system", content=memory_content))
 
+    return _assemble_request(
+        entry=entry, model=model, system_prompt=system_prompt, tools=tools,
+        breakpoints=breakpoints, messages=messages, input_items=input_items,
+    )
+
+
+def _with_modality_tags(
+    capabilities: RuntimeCapabilities | None, model_capabilities: ModelCapabilities,
+) -> RuntimeCapabilities | None:
+    """G4a 模态门控：把 client 自己声明的能力派生成标签并入 RuntimeCapabilities。
+
+    使「要图片工具输出的 skill」在拿不到图片的环境下根本不出现在可派发列表里
+    （路由期 fail-fast，优于派发后在渲染期降级）。业务无需手工同步这些标签——
+    同一事实若有「client 声明」与「业务汇报」两个来源必然漂移；业务自定义
+    标签保留，两者取并集。``capabilities`` 为 None（不做资格过滤）时原样返回。
+    """
+    if capabilities is None:
+        return None
+    # 局部 import：与本文件 render_system_prompt 内的 skill.visibility 同形，
+    # 避免 loop → skill 的模块级导入环。
+    from taifeng.skill.eligibility import derive_modality_tags
+
+    return replace(
+        capabilities,
+        modalities=capabilities.modalities | derive_modality_tags(model_capabilities),
+    )
+
+
+def _assemble_request(
+    *,
+    entry: SkillDefinition,
+    model: str,
+    system_prompt: str,
+    tools: list[ToolSpecRef],
+    breakpoints: list[CacheBreakpoint],
+    messages: list[ApiMessage],
+    input_items: list[ApiInputItem] | None,
+) -> ApiRequest:
+    """组装最终 ApiRequest：entry skill 声明的推理参数随每次采样下发。
+
+    顶层 entry 与 call_skill 子 turn 走同一路径，故 ``inference`` 块对两者都生效；
+    未声明的字段为 None，由 provider / 模型默认决定。
+    """
+    inference = entry.inference
     # 这里**刻意不抽公共 dict 再 ** 展开**,两个原因缺一不可:
     #   1. 混合值类型的 dict 会被推导成 dict[str, object],`**` 进 ApiRequest 后
     #      mypy 对每个字段都判不兼容 —— 等于这条关键路径完全脱离类型检查;
@@ -658,6 +685,9 @@ def build_api_request(
             tools=tools,
             parallel_tool_calls=True,
             cache_breakpoints=breakpoints,
+            reasoning_effort=inference.reasoning_effort,
+            temperature=inference.temperature,
+            max_output_tokens=inference.max_output_tokens,
         )
     return ApiRequest(
         model=model,
@@ -666,4 +696,7 @@ def build_api_request(
         tools=tools,
         parallel_tool_calls=True,
         cache_breakpoints=breakpoints,
+        reasoning_effort=inference.reasoning_effort,
+        temperature=inference.temperature,
+        max_output_tokens=inference.max_output_tokens,
     )

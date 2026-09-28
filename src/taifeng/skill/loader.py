@@ -15,8 +15,10 @@ import yaml
 
 from taifeng.skill.definition import (
     ChildRecall,
+    ReasoningEffort,
     SkillDefinition,
     SkillExposure,
+    SkillInference,
     SkillRequirements,
     SkillSource,
     SkillType,
@@ -44,6 +46,12 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 
 # child_recall 合法值集合（直接从 ChildRecall Literal 派生，避免魔法值重复）
 _CHILD_RECALL_VALUES: frozenset[str] = frozenset(get_args(ChildRecall))
+
+# inference 块合法键与 reasoning_effort 合法值（同样从类型派生）
+_INFERENCE_KEYS: frozenset[str] = frozenset({"reasoning_effort", "temperature", "max_output_tokens"})
+_REASONING_EFFORT_VALUES: frozenset[str] = frozenset(get_args(ReasoningEffort))
+# temperature 取值上限：OpenAI / Gemini 的公共上界（Anthropic 为 1，超出由 provider 报错）
+_MAX_TEMPERATURE = 2.0
 
 
 class SkillLoadError(Exception):
@@ -101,6 +109,7 @@ def _build_definition(
 
     scripts = _build_scripts(fm, skill_id, skill_dir)
     requires, exposure = _build_visibility(fm, skill_id)
+    inference = _build_inference(fm, skill_id)
 
     # === B 声明式编排：解析可选 orchestration（atomic 声明即报错，给清晰信息）===
     child_skills = frozenset(fm.get("child_skills", []) or [])
@@ -134,6 +143,7 @@ def _build_definition(
         model=fm.get("model"),
         requires=requires,
         exposure=exposure,
+        inference=inference,
         frontmatter_raw=fm,
         scripts=scripts,
         source=source,
@@ -185,6 +195,68 @@ def _build_visibility(
         child_recall=raw_recall,
     )
     return requires, exposure
+
+
+def _build_inference(fm: dict[str, Any], skill_id: str) -> SkillInference:
+    """从 frontmatter 解析 ``inference`` 块（skill 级推理参数）。
+
+    形如::
+
+        inference:
+          reasoning_effort: high
+          temperature: 0
+          max_output_tokens: 2048
+
+    缺省 → 全 None（不声明）。任何非法内容都在加载期抛错，不回退默认值：
+    写错的键名 / 值若被静默忽略，作者会以为参数已生效。
+
+    Raises:
+        SkillValidationError: 非 mapping、未知键、取值类型或范围非法。
+    """
+    raw = fm.get("inference")
+    if raw is None:
+        return SkillInference()
+    if not isinstance(raw, dict):
+        raise SkillValidationError(f"skill {skill_id!r} frontmatter inference 必须是 mapping")
+    unknown = sorted(set(raw) - _INFERENCE_KEYS)
+    if unknown:
+        raise SkillValidationError(
+            f"skill {skill_id!r} frontmatter inference 含未知键 {unknown}，"
+            f"合法键：{sorted(_INFERENCE_KEYS)}"
+        )
+
+    effort = raw.get("reasoning_effort")
+    if effort is not None and effort not in _REASONING_EFFORT_VALUES:
+        raise SkillValidationError(
+            f"skill {skill_id!r} inference.reasoning_effort 非法值 {effort!r}，"
+            f"合法值：{sorted(_REASONING_EFFORT_VALUES)}"
+        )
+
+    temperature = raw.get("temperature")
+    # bool 是 int 子类，须先排除（``temperature: true`` 是写错而非 1.0）
+    if temperature is not None and (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, int | float)
+        or not 0 <= temperature <= _MAX_TEMPERATURE
+    ):
+        raise SkillValidationError(
+            f"skill {skill_id!r} inference.temperature 须为 [0, {_MAX_TEMPERATURE}] 内的数值，"
+            f"实际 {temperature!r}"
+        )
+
+    max_output = raw.get("max_output_tokens")
+    if max_output is not None and (
+        isinstance(max_output, bool) or not isinstance(max_output, int) or max_output < 1
+    ):
+        raise SkillValidationError(
+            f"skill {skill_id!r} inference.max_output_tokens 须为 >= 1 的整数，实际 {max_output!r}"
+        )
+
+    return SkillInference(
+        reasoning_effort=effort,
+        temperature=None if temperature is None else float(temperature),
+        max_output_tokens=max_output,
+    )
 
 
 # 隐式发现支持的扩展名 → 默认 language 映射

@@ -351,6 +351,10 @@ version: 1.0.0
 type: composite              # atomic | composite
 entry: true                  # 是否可作为会话入口
 model: claude-sonnet-4-6     # entry skill 偏好模型（空 → 用 client 默认）
+inference:                   # 推理参数（可选，atomic / composite 通用；未声明 → provider 默认）
+  reasoning_effort: high     # none | minimal | low | medium | high
+  temperature: 0             # [0, 2]
+  max_output_tokens: 2048    # >= 1；非法值 / 未知键加载期报错
 child_skills: [...]          # composite 必填
 tool_names: [...]            # 显式允许的额外工具
 max_call_depth: 6            # 递归深度上限

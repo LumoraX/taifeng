@@ -93,6 +93,7 @@ Later ADRs:
 53. [ADR 0053: 审计 Session resume 与跨进程写者接管](decisions/0053-audited-session-resume-and-writer-takeover.md) (Amends #0025): writer fencing 只在进程内、append 前重扫只能事后发现并发写，崩溃的审计 Session 无法恢复。决策：`flock` 真互斥（锁 fd 持有到关闭，非 POSIX 显式报错）；`open_existing` 以 epoch+1 写 `writer_takeover`，verify 强制 epoch 单调；`session_ended` 后不可重开；resume 遇未结算 effect 一律 fail closed 并列出 record，失败只释放 lease 不写终态。
 54. [ADR 0054: 用审计 Journal 做确定性回放](decisions/0054-journal-deterministic-replay.md): Journal 已记请求摘要与最终响应，却无消费者可回放。决策：`JournalReplayClient` 以 Journal 为数据源、按 canonical 请求摘要匹配录制调用（并发子 turn 稳定）；分叉显式 `ReplayDivergenceError`；只支持 Chat 协议录制。
 55. [ADR 0055: 原生 Anthropic / Gemini 把历史中段 system 消息原位改写为带标签 user 文本](decisions/0055-mid-history-system-as-tagged-user.md): 两家 provider 直接丢弃 messages 里的 system，压缩摘要 / pinned / 预算提示 / 记忆 / 业务注入全部静默消失，压缩即删历史。决策：原位改写为 `<system-reminder>` 包裹的 user 文本并与相邻 user 合并；否决并入顶层 system（破坏 cache 前缀）与 prompt 层统一改写（改变 OpenAI 系 wire 与审计 digest）。
+56. [ADR 0056: SKILL.md `inference` 块声明 skill 级推理参数](decisions/0056-skill-inference-params.md): `ApiRequest` 早有 reasoning_effort / temperature / max_output_tokens 且各 provider 都会翻译，内核却从未设置，skill 无法按任务定参数。决策：frontmatter 嵌套 `inference` 块、atomic / composite 通用、加载期严格校验、经 `build_api_request` 按 entry skill 下发；否决平铺顶层键与 Pool 级默认值。
 
 ### Fourth Pass: Gap Tracking
 

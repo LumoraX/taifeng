@@ -26,6 +26,9 @@ version: 1.0.0
 type: composite
 entry: true                   # 可作为会话入口
 model: claude-opus-4-7        # entry skill 偏好模型（业务层可覆盖）
+inference:                    # 推理参数（可选，atomic / composite 通用，见下文）
+  reasoning_effort: high
+  max_output_tokens: 4096
 
 # Composite 特有字段
 child_skills:                 # 静态白名单：本 skill 能调用的子 skill
@@ -86,6 +89,23 @@ orchestration:
 
 **校验（加载期 fail-fast）**：atomic 声明 orchestration 报错；引用未知 child id 报错；parallel 组内重复报错。
 实现见 `src/taifeng/skill/orchestration.py`（解析+校验）+ `src/taifeng/loop/orchestration_exec.py`（执行驱动）。
+
+### inference（推理参数，可选 · atomic / composite 通用）
+
+```yaml
+inference:
+  reasoning_effort: high      # none | minimal | low | medium | high
+  temperature: 0              # [0, 2] 数值
+  max_output_tokens: 2048     # >= 1 整数
+```
+
+本 skill 作为 turn 的 entry 采样时，已声明的字段写入该次 `ApiRequest`；未声明的为 None，由 provider / 模型默认决定。
+顶层 entry 与经 `call_skill` 派发的子 turn 走同一条 `build_api_request` 路径，故父子各按自己的声明下发，互不继承。
+atomic 也可声明（它被派发时同样独立采样）；这与 `model` 不同，`model` 仍仅限 composite。
+
+**校验（加载期 fail-fast）**：`inference` 非 mapping、含未知键（如拼错的 `temprature`）、`reasoning_effort` 不在枚举内、
+`temperature` 非数值或越界、`max_output_tokens` 非正整数（`true` 这类布尔值同样拒绝）→ `SkillValidationError`。
+provider 不支持的组合由 provider 显式报错（如 Anthropic 开 extended thinking 时拒绝自定义 temperature），内核不静默丢弃。
 
 ### Atomic Skill（原子能力）
 
@@ -166,6 +186,9 @@ class SkillDefinition:
     # === G4 可见性治理（atomic / composite 通用）===
     requires: SkillRequirements = field(default_factory=SkillRequirements)   # bins/env/os 资格门控
     exposure: SkillExposure = field(default_factory=SkillExposure)           # model_invocable / user_invocable
+
+    # === 推理参数（atomic / composite 通用）===
+    inference: SkillInference = field(default_factory=SkillInference)        # reasoning_effort / temperature / max_output_tokens
 
     # === 业务透传 ===
     frontmatter_raw: dict = field(default_factory=dict)

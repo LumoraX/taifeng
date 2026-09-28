@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 SkillType = Literal["atomic", "composite"]
 SkillSource = Literal["system", "user", "marketplace"]
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high"]
+"""推理强度档位（与 ``ApiRequest.reasoning_effort`` 同一取值域）。"""
 ChildRecall = Literal["inline", "deferred", "auto"]
 """child skill 召回模式（相位 2 deferred 暴露）：
 
@@ -62,6 +64,27 @@ class SkillRequirements:
 
     def is_empty(self) -> bool:
         return not (self.bins or self.env or self.os or self.modalities)
+
+
+@dataclass(frozen=True)
+class SkillInference:
+    """skill 级推理参数声明（来自 frontmatter ``inference`` 块）。
+
+    本 skill 作为 turn 的 entry 采样时（顶层 entry 或经 ``call_skill`` 派发的子 turn），
+    非 None 的字段原样写入 ``ApiRequest``；None = 不声明，由 provider / 模型默认决定。
+    典型用法：分类 / 抽取类 skill 声明 ``temperature: 0``，重推理 skill 声明
+    ``reasoning_effort: high``，短答 skill 用 ``max_output_tokens`` 封顶输出。
+
+    本类只承载声明；provider 不支持某参数时由 provider 显式报错（如 Anthropic
+    extended thinking 拒绝自定义 temperature），内核不做静默丢弃。
+    """
+
+    reasoning_effort: ReasoningEffort | None = None
+    """推理强度；None = 不声明。"""
+    temperature: float | None = None
+    """采样温度，取值 [0, 2]；None = 不声明。"""
+    max_output_tokens: int | None = None
+    """单次采样输出 token 上限（>= 1）；None = 不声明。"""
 
 
 @dataclass(frozen=True)
@@ -118,6 +141,9 @@ class SkillDefinition:
     # === G4 可见性治理（atomic / composite 通用）===
     requires: SkillRequirements = field(default_factory=SkillRequirements)
     exposure: SkillExposure = field(default_factory=SkillExposure)
+
+    # === 推理参数（atomic / composite 通用：两者作 entry 时都独立采样）===
+    inference: SkillInference = field(default_factory=SkillInference)
 
     # === 业务透传 ===
     frontmatter_raw: dict[str, Any] = field(default_factory=dict)
