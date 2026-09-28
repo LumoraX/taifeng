@@ -14,7 +14,7 @@
 
 | 关注点 | 内核提供 | 业务提供 |
 | --- | --- | --- |
-| 图片来源 | ✗ | 取图工具自身（读盘 / 调用视觉 API / 抽帧……全部业务实现） |
+| 图片来源 | ✗（MCP 桥只把外部 server 已返回的 image 块转成附件，不取图） | 取图工具自身（读盘 / 调用视觉 API / 抽帧……全部业务实现），或业务绑定的 MCP server |
 | 图片承载 | `ToolResult.attachments` 契约位 + `ImageAttachmentV1.from_bytes` 构造器 | 调用它 |
 | 资源策略 | `ImageInputPolicy` 的**执行**（数量 / 字节 / MIME / 尺寸 / 帧数） | 策略**取值**（注入 `ImageInputPolicy`；不注入即整体关闭） |
 | 模型能力 | `ModelCapabilities.tool_output_modalities` 的声明位与判定 | 选哪个 client / 哪个模型 |
@@ -54,6 +54,19 @@
 8. **user 侧与工具侧的不对称是有意的**：user 消息遇能力不足**抛错**（用户明确塞了图却看不到 = 输入被吞，必须让调用方知道），工具侧降级（图是 agent 自己取的，留在轨内更合适）。
 9. **父 thread 不承载子 thread 的图**：`call_skill` 回传仍是纯字符串，拓扑不变。图只在取图的那条 thread 的 history 内重放——子 thread 因此是天然的视觉沙盒。
 
+## MCP 桥接工具
+
+`bind_mcp_tools` / `register_mcp_tools_async` 桥接的工具（[mcp-client](mcp-client.md)）是本契约的第二个
+附件来源：MCP `tools/call` 结果里的 `image` 块经 `ImageAttachmentV1.from_bytes` 进 `ToolResult.attachments`，
+之后与业务取图工具**完全同路**——同一个 `admit_tool_attachments` 落盘前准入、同一套失败语义与协议分档。
+
+- 桥只做形状校验（MIME 须在 PNG / JPEG / WebP / GIF、base64 合法且非空），不合即该次调用判错
+  （`mcp_invalid_content`）；资源策略仍只由宿主的 `ImageInputPolicy` 决定。
+- `attach_images=True` 为默认：宿主未启用策略时，带图的 MCP 调用以 `tool_attachment_rejected` 判错（行为契约 2、3）。
+  不需要看图的宿主显式传 `attach_images=False`，图片降级为带 MIME 与字节数的占位文本，不产附件。
+- MCP 内容里文本与图片交错时，`output` 为全部文本块按序拼接，附件按出现顺序排在其后（本契约「output 在前、
+  附件在后」）；`output` 不为已附上的图片写占位，避免与附件重复表达。
+
 ## 协议分档
 
 | 档 | provider | 行为 |
@@ -71,6 +84,7 @@ Anthropic 的 `tool_result` 原生支持内嵌 image block，但该 provider 当
 - `tests/llm/test_tool_image_wire.py` —— wire 投影，纯文本保持裸字符串
 - `tests/skill/test_skill_visibility.py` —— 模态门控与标签派生
 - `tests/loop/test_prompt_image_input.py` —— 门控接线（text-only 隐藏 / responses 可见，互为对照）
+- `tests/mcp/test_content.py` —— MCP 桥：image 块转附件、形状拒绝、经 loop admission 落 fco（策略启用 / 未启用）
 
 CI 全部走 Sim；真实 LLM 回归走 `examples/real_llm/capability_matrix.py`，结果落 `docs/real-llm-ledger.md`。
 

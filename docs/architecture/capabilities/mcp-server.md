@@ -31,17 +31,25 @@ McpStdioServer(
 
 ```json
 {
-  "protocolVersion": "2024-11-05",
+  "protocolVersion": <协商版本>,
   "capabilities": {"tools": {}, "resources": {}},
   "serverInfo": {"name": <server_name>, "version": <server_version>}
 }
 ```
 
-`protocolVersion` SHALL 等于 `"2024-11-05"`（MCP 当前稳定协议版本，与 `stdio_client.py::_initialize` 对齐）。
+版本协商与客户端同源（`taifeng.mcp.protocol`，见 [mcp-client](mcp-client.md)）：客户端请求的
+`params.protocolVersion` 在 `SUPPORTED_PROTOCOL_VERSIONS`（`2025-06-18` / `2025-03-26` / `2024-11-05`）内
+SHALL 原样回；否则（含缺失、非字符串）SHALL 回 `LATEST_PROTOCOL_VERSION`（`2025-06-18`），由客户端决定是否
+断开——initialize 不以 JSON-RPC 错误拒绝版本（规范 lifecycle）。`server.MCP_PROTOCOL_VERSION` 为
+`LATEST_PROTOCOL_VERSION` 的别名。
 
 #### Scenario: initialize 返回标准 handshake
-- **WHEN** MCP 客户端发送 `{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {...}}`
-- **THEN** server SHALL 返回 result 含 `protocolVersion="2024-11-05"`、`serverInfo.name=server_name`、`capabilities.tools` / `capabilities.resources` 字段
+- **WHEN** MCP 客户端发送 `{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", ...}}`
+- **THEN** server SHALL 返回 result 含 `protocolVersion="2025-03-26"`、`serverInfo.name=server_name`、`capabilities.tools` / `capabilities.resources` 字段
+
+#### Scenario: 请求了不支持的版本
+- **WHEN** 客户端请求 `protocolVersion="1.0.0"`（或未提供）
+- **THEN** server SHALL 回 `protocolVersion="2025-06-18"`
 
 ### Requirement: tools/list 暴露单个 meta-tool `run_skill_turn`
 

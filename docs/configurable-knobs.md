@@ -669,7 +669,12 @@ LiteLLMClient(
 | `command` | (必填) | 启动 server 的 argv（如 `["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]`） |
 | `env` | `None` | 子进程环境变量；`None` = 继承当前进程 |
 | `cwd` | `None` | 子进程工作目录 |
-| **`request_timeout_seconds`** | `60.0` | 单条 JSON-RPC 请求超时；`None` = 关闭 client 层超时，完全由调用方控制 |
+| **`request_timeout_seconds`** | `60.0` | 单条 JSON-RPC 请求超时；`None` = 关闭 client 层超时，完全由调用方控制。`tools/call` 途中 server 发起的 elicitation 等用户的时间也计入 |
+| **`elicitation_handler`** | `None` | 可选 `ElicitationHandler`；注入则 initialize 声明 `elicitation` 能力并处理 server 的 `elicitation/create`；`None` 不声明，server 仍发时回 `-32601`（见 §4.2） |
+
+协议版本不是旋钮：客户端恒声明 `2025-06-18`，接受 `SUPPORTED_PROTOCOL_VERSIONS`（`2025-06-18` / `2025-03-26` /
+`2024-11-05`）内的协商结果，其余断开并抛 `McpProtocolVersionError`；协商结果读 `client.protocol_version`
+（[mcp-client](architecture/capabilities/mcp-client.md)）。
 
 **双层 timeout 协同**：`register_mcp_tools_async(..., timeout_seconds=N)` 在 tool 调用外层包了一层 `wait_for(..., timeout=N)`。修复前内层硬编码 60s，外层调大会被静默截断；现在 `McpStdioClient(request_timeout_seconds=N)` 与外层匹配，**或** 显式设 `None` 把唯一 timeout 责任交给外层。
 
@@ -704,6 +709,44 @@ binding.detach()       # 卸载本绑定的全部工具
 `pure`（且可并行）/ `idempotent`，其余与默认一样按 `external_non_idempotent`（崩溃后挂起交人）。只对自己信任的
 server 打开。`register_mcp_tools_async` 同名参数语义相同。
 
+`attach_images`（默认 `True`）：工具结果里的 MCP `image` 块转为 `ToolResult.attachments`，走工具图片附件的
+落盘前 admission——宿主须在 `EnginePool.create(image_input_policy=ImageInputPolicy(enabled=True, ...))` 启用
+策略，否则带图的调用以 `tool_attachment_rejected` 判错。不需要看图的宿主传 `False`，图片降级为
+`[image: <mime>, <n> bytes, not attached ...]` 占位文本。`structuredContent` 不需要旋钮：恒进
+`ToolResult.data["structured_content"]`，文本侧缺等价 JSON 时自动补上。`register_mcp_tools_async` 同名参数语义相同。
+
+`McpHttpClient.connect` 同样接受 `elicitation_handler`（语义同 §4 表）。
+
+### 4.2 elicitation 注入口（taifeng 作为 MCP 客户端，ADR 0063）
+
+server 在处理请求途中可发 `elicitation/create` 向用户要结构化输入。内核不做 UI，宿主注入处理器：
+
+```python
+from taifeng.mcp import ElicitationRequest, ElicitationResult, McpStdioClient
+
+async def ask_user(request: ElicitationRequest) -> ElicitationResult:
+    # request.message / request.requested_schema（扁平 object schema）/ request.server_info
+    answer = await my_ui.show_form(request.server_info.get("name"), request.message,
+                                   request.requested_schema)
+    if answer is None:
+        return ElicitationResult("cancel")          # 用户关掉了对话框
+    if answer == "declined":
+        return ElicitationResult("decline")         # 用户明确拒绝
+    return ElicitationResult("accept", answer)      # content：键为字符串、值为原始类型
+
+client = await McpStdioClient.spawn(cmd, elicitation_handler=ask_user)
+```
+
+| 情形 | 内核行为 |
+| --- | --- |
+| handler 返回 `ElicitationResult` | 回 `{"action": ..., "content"?: ...}`；accept 的 content 先按 `requestedSchema` 子集校验，违例回 `-32603` |
+| handler 抛异常 / 返回其他类型 | 回 `-32603`（只含异常类型名），连接照常可用 |
+| server 发 `notifications/cancelled` | handler 被取消（`CancelledError`），不回响应 |
+| 客户端 `close()` | 在等的 handler 被取消 |
+| 未注入 handler | 不声明能力；server 仍发 → `-32601` |
+
+内核不给 handler 设超时（规范把请求超时归于发送方 server）；要自有时限在 handler 内限时后返回 `cancel`。
+
 `bind_mcp_tools` 同样接受 `McpStdioClient`。运行时也可直接 `ToolRegistry.register / unregister / replace`，
 变更在下一次采样生效。
 
@@ -723,7 +766,7 @@ server 打开。`register_mcp_tools_async` 同名参数语义相同。
 
 | MCP 方法 | 内容 |
 | --- | --- |
-| `initialize` | 协议版本 `2024-11-05` + serverInfo + capabilities (`tools` + `resources`) |
+| `initialize` | 版本协商（客户端请求的版本在 `2025-06-18` / `2025-03-26` / `2024-11-05` 内原样回，否则回 `2025-06-18`）+ serverInfo + capabilities (`tools` + `resources`) |
 | `tools/list` | 单个 meta-tool `run_skill_turn(skill_id, message, session_id?)` |
 | `tools/call` | 派发到 `pool.get_or_create + engine.submit + 等 turn_completed`，返回 final assistant text |
 | `resources/list` | 每个 skill 一个资源，URI = `taifeng://skill/<id>`，mimeType=`text/markdown` |

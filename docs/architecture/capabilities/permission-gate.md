@@ -156,7 +156,8 @@ McpPrompter(
 3. 解析响应：
    - `action="accept"` + `content.approved=true` → `PermissionDecision.allow(reason=content.reason or "user_approved", remember="once")`
    - `action="accept"` + `content.approved=false` → `PermissionDecision.deny(reason=content.reason or "user_denied")`
-   - `action="reject"` → `PermissionDecision.deny(reason="user_rejected")`
+   - `action="decline"`（MCP 2025-06-18 定稿）→ `PermissionDecision.deny(reason="user_declined")`
+   - `action="reject"`（定稿前草案的动作名，兼容早期客户端）→ `PermissionDecision.deny(reason="user_rejected")`
    - `action="cancel"` → `PermissionDecision.deny(reason="user_cancelled")`
    - 其他 `action` → `PermissionDecision.deny(reason=f"elicitation_unknown_action:{action}")`
 4. `TimeoutError` 捕获 → `PermissionDecision.deny(reason="elicitation_timeout")`
@@ -170,6 +171,10 @@ McpPrompter(
 #### Scenario: 用户拒绝
 - **WHEN** mock server 回 `{"action":"accept","content":{"approved":false,"reason":"unsafe"}}`
 - **THEN** SHALL 返回 `PermissionDecision(granted=False, mode="deny", reason="unsafe")`
+
+#### Scenario: 客户端 action=decline
+- **WHEN** mock server 回 `{"action":"decline"}`
+- **THEN** SHALL 返回 deny with reason `"user_declined"`
 
 #### Scenario: 客户端 action=reject
 - **WHEN** mock server 回 `{"action":"reject"}`
