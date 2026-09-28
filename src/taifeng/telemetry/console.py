@@ -66,6 +66,8 @@ _KIND_TAG = {
     "provider_circuit_closed": ("llm ", _Colors.GREEN, "✓"),
     # 工具集运行时变更（青色 ⇄）：MCP list_changed / 业务热插拔（dynamic-tool-set）
     "tool_set_changed": ("tool", _Colors.CYAN, "⇄"),
+    # 后台任务结束（绿 ✓ 通知）：完成摘要已投递回发起 thread（background-completion-wake）
+    "background_task_completed": ("tool", _Colors.GREEN, "✓"),
     # Permission gate 事件（红色 —— 表示拦截）
     "permission_prompt_timeout": ("perm", _Colors.RED, "⏱"),
     "skill_dispatch_hook_denied": ("hook", _Colors.RED, "✗"),

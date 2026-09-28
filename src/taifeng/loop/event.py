@@ -40,6 +40,7 @@ MsgKind = Literal[
     "provider_circuit_half_open",
     "provider_circuit_closed",
     "tool_set_changed",
+    "background_task_completed",
     "llm_request_recorded",
     "user_input_injected",
     "system_message_injected",
@@ -423,6 +424,19 @@ class ToolSetChanged(_Msg):
 
     kind: Literal["tool_set_changed"] = "tool_set_changed"
     """data = {"added": list[str], "removed": list[str], "replaced": list[str], "version": int}"""
+
+
+class BackgroundTaskCompleted(_Msg):
+    """``run_in_background`` 发起的后台任务结束（background-completion-wake）。
+
+    事件发在发起该任务的 engine 上；完成摘要同时投递到发起任务的 thread：运行中的
+    turn 在下一迭代边界看到；空闲的 spawn 子 thread 被唤醒续跑；根 thread 只落史
+    （根 turn 由宿主驱动——宿主可据本事件决定是否提交新 turn）。
+    """
+
+    kind: Literal["background_task_completed"] = "background_task_completed"
+    """data = {"task_id": str, "thread_id": str（发起 thread）, "delivered_to": str（实际投递 thread）,
+              "exit_code": int | None, "killed": bool, "delivered_via": str, "woken": bool}"""
 
 
 class LlmRequestRecorded(_Msg):
@@ -995,6 +1009,7 @@ Msg = Union[
     ProviderCircuitHalfOpen,
     ProviderCircuitClosed,
     ToolSetChanged,
+    BackgroundTaskCompleted,
 ]
 
 

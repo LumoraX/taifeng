@@ -1768,6 +1768,11 @@ class AgentEngine:
         """转发到 SpawnDriver.spawn_status —— 公共 API（业务侧轮询 / join 检查）。"""
         return self._spawn.spawn_status(handle_ids)
 
+    def is_spawn_thread(self, thread_id: str) -> bool:
+        """``thread_id`` 是否本 engine 登记过的 detached spawn 子 thread（可被 peer 寻址）。"""
+        return any(h.child_thread_id == thread_id
+                   for h in self._spawn_handles.handles.values())
+
     async def deliver_peer_message(
         self,
         *,

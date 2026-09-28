@@ -186,3 +186,138 @@ async def test_concurrent_wait_same_task() -> None:
     assert all("concurrent" in r["stdout"] for r in results)
 
     await reg.shutdown()
+
+
+# --------------------------------------------------------------------
+# background-completion-wake：完成回调 + 投递回发起 thread
+# --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_complete_receives_result_once() -> None:
+    """任务结束后完成回调恰好调用一次，参数与 wait() 结果同形。"""
+    reg = BackgroundTaskRegistry()
+    seen: list[dict] = []
+
+    async def _cb(result: dict) -> None:
+        seen.append(result)
+
+    task_id = await reg.spawn("echo hi", on_complete=_cb)
+    waited = await reg.wait(task_id, timeout=5.0)
+    await asyncio.sleep(0.05)
+    assert len(seen) == 1
+    assert seen[0] == waited
+    assert seen[0]["exit_code"] == 0 and "hi" in seen[0]["stdout"]
+    await reg.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_on_complete_fires_for_killed_task_and_errors_are_isolated() -> None:
+    """被 kill 的任务同样回调（killed=True）；回调抛异常不影响任务状态。"""
+    reg = BackgroundTaskRegistry()
+    seen: list[dict] = []
+
+    async def _cb(result: dict) -> None:
+        seen.append(result)
+        raise RuntimeError("callback bug")
+
+    task_id = await reg.spawn("sleep 5", on_complete=_cb)
+    assert await reg.kill(task_id)
+    for _ in range(100):
+        if seen:
+            break
+        await asyncio.sleep(0.02)
+    assert seen and seen[0]["killed"] is True
+    assert (await reg.wait(task_id, timeout=1.0))["status"] == "completed"
+    await reg.shutdown()
+
+
+async def _pool_engine(skills_dir, threads_dir, session_id: str):
+    import taifeng
+    from taifeng.llm.providers import SimClient
+
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir,
+        model_client=SimClient(turns=[]), compressors=[])
+    engine = await pool.get_or_create(session_id=session_id, entry_skill_id="code-reviewer")
+    return pool, engine
+
+
+async def _collect_events(engine) -> tuple[list, asyncio.Task]:
+    events: list = []
+
+    async def _run() -> None:
+        async for ev in engine.subscribe_all():
+            events.append(ev.msg)
+
+    task = asyncio.create_task(_run())
+    await asyncio.sleep(0)
+    return events, task
+
+
+@pytest.mark.asyncio
+async def test_completion_delivered_to_idle_root_thread(skills_dir, threads_dir) -> None:
+    """根 thread 空闲：完成摘要落根历史（不起新 turn），并 emit background_task_completed。"""
+    from tests.conftest import wait_for_condition
+
+    pool, engine = await _pool_engine(skills_dir, threads_dir, "bg-root")
+    events, collector = await _collect_events(engine)
+    reg = BackgroundTaskRegistry()
+    tool = make_run_in_background_tool(registry=reg)
+    ctx = ToolContext(call_id="c1", cancel=CancellationToken(), thread_id=engine.thread_id,
+                      extras={"spawn_coordinator": engine})
+
+    result = await tool.handler({"command": "echo built"}, ctx)
+    assert not result.is_error
+    await wait_for_condition(lambda: any(m.kind == "background_task_completed" for m in events))
+
+    done = next(m for m in events if m.kind == "background_task_completed")
+    assert done.data["exit_code"] == 0
+    assert done.data["delivered_to"] == engine.thread_id
+    assert done.data["woken"] is False
+    notes = [it for it in engine.history_snapshot()
+             if it.kind == "user_message" and "finished: exit=0" in it.payload.get("text", "")]
+    assert notes and "built" in notes[0].payload["text"]
+    collector.cancel()
+    await reg.shutdown()
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_completion_from_unaddressable_thread_routes_to_root(skills_dir, threads_dir) -> None:
+    """call_skill 阻塞子 thread 不可寻址 → 明确改投根 thread。"""
+    from tests.conftest import wait_for_condition
+
+    pool, engine = await _pool_engine(skills_dir, threads_dir, "bg-child")
+    events, collector = await _collect_events(engine)
+    reg = BackgroundTaskRegistry()
+    tool = make_run_in_background_tool(registry=reg)
+    ctx = ToolContext(call_id="c1", cancel=CancellationToken(), thread_id="thr_call_skill_child",
+                      extras={"spawn_coordinator": engine})
+
+    await tool.handler({"command": "echo x"}, ctx)
+    await wait_for_condition(lambda: any(m.kind == "background_task_completed" for m in events))
+    done = next(m for m in events if m.kind == "background_task_completed")
+    assert done.data["thread_id"] == "thr_call_skill_child"
+    assert done.data["delivered_to"] == engine.thread_id
+    collector.cancel()
+    await reg.shutdown()
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_notify_on_exit_disabled_skips_delivery(skills_dir, threads_dir) -> None:
+    """notify_on_exit=False → 不投递、不 emit（只能 wait_for_task 取结果）。"""
+    pool, engine = await _pool_engine(skills_dir, threads_dir, "bg-off")
+    events, collector = await _collect_events(engine)
+    reg = BackgroundTaskRegistry()
+    tool = make_run_in_background_tool(registry=reg, notify_on_exit=False)
+    ctx = ToolContext(call_id="c1", cancel=CancellationToken(), thread_id=engine.thread_id,
+                      extras={"spawn_coordinator": engine})
+    r = await tool.handler({"command": "echo x"}, ctx)
+    await reg.wait(r.data["task_id"], timeout=5.0)
+    await asyncio.sleep(0.1)
+    assert not any(m.kind == "background_task_completed" for m in events)
+    collector.cancel()
+    await reg.shutdown()
+    await pool.close()

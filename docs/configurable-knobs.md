@@ -802,7 +802,8 @@ from taifeng import (
 registry = BackgroundTaskRegistry(max_concurrent=8)
 
 extra_tools = [
-    make_run_in_background_tool(registry=registry, policy=my_policy),
+    # notify_on_exit=True（默认）：任务结束把摘要投回发起 thread + emit background_task_completed
+    make_run_in_background_tool(registry=registry, policy=my_policy, notify_on_exit=True),
     make_wait_for_task_tool(registry=registry, default_timeout=60.0),
 ]
 

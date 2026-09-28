@@ -7,6 +7,10 @@
       自决是否再 wait
     - 业务侧自管 registry 生命周期：构造时注入工具工厂，pool.close 前调
       ``registry.shutdown()``
+    - 完成唤醒（background-completion-wake，参照 openclaw ``notifyOnExit``）：任务结束时
+      把完成摘要投递回发起它的 thread——运行中的 turn 下一迭代边界可见；空闲 spawn 子
+      thread 被唤醒续跑；根 thread 落史 + ``background_task_completed`` 事件交宿主决定。
+      不再只能靠 wait_for_task 轮询。
 
 不支持（spec Non-goal）：
     - stream-tail（实时拉 stdout）—— MVP 一次取完
@@ -22,12 +26,15 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
 from taifeng.tool.builtins.shell import _quick_safety_check
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 from taifeng.tool.subprocess_env import default_safe_env
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,8 @@ class _BgTask:
     stderr: bytes = b""
     exit_code: int | None = None
     killed: bool = False
+    # 完成回调（任务结束后在收集协程里 await；异常只记日志）
+    on_complete: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None
 
 
 class BackgroundTaskRegistry:
@@ -84,8 +93,13 @@ class BackgroundTaskRegistry:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         max_output_bytes: int = 64 * 1024,
+        on_complete: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None,
     ) -> str:
         """启动一个 shell 子进程，返回 task_id。
+
+        Args:
+            on_complete: 任务结束（正常退出 / 被 kill / 收集失败）后调用一次，参数与
+                ``wait()`` 的完成结果同形；回调异常只记日志，不影响任务状态。
 
         Raises:
             RuntimeError: 当前活跃 task ≥ max_concurrent
@@ -116,6 +130,7 @@ class BackgroundTaskRegistry:
                 proc=proc,
                 started_at=time.time(),
                 max_output_bytes=max_output_bytes,
+                on_complete=on_complete,
             )
             self._tasks[task_id] = task
 
@@ -135,6 +150,23 @@ class BackgroundTaskRegistry:
             task.exit_code = -1
         finally:
             task._done.set()  # noqa: SLF001
+        if task.on_complete is not None:
+            try:
+                await task.on_complete(self._result(task))
+            except Exception:
+                logger.exception("bg task %s completion callback failed", task.task_id)
+
+    @staticmethod
+    def _result(task: _BgTask) -> dict[str, Any]:
+        """已完成任务的结果 dict（wait / 完成回调同形）。"""
+        return {
+            "task_id": task.task_id,
+            "status": "completed",
+            "exit_code": task.exit_code,
+            "killed": task.killed,
+            "stdout": task.stdout.decode("utf-8", errors="replace"),
+            "stderr": task.stderr.decode("utf-8", errors="replace"),
+        }
 
     async def wait(
         self,
@@ -178,13 +210,7 @@ class BackgroundTaskRegistry:
                 "stderr": task.stderr.decode("utf-8", errors="replace"),
             }
 
-        return {
-            "task_id": task_id,
-            "status": "completed",
-            "exit_code": task.exit_code,
-            "stdout": task.stdout.decode("utf-8", errors="replace"),
-            "stderr": task.stderr.decode("utf-8", errors="replace"),
-        }
+        return self._result(task)
 
     async def kill(self, task_id: str) -> bool:
         """杀子进程，返回是否成功找到并 kill。已 done 的 task 也返回 False。"""
@@ -244,6 +270,7 @@ def make_run_in_background_tool(
     env: dict[str, str] | None = None,
     max_output_bytes: int = 64 * 1024,
     enable_safety_blacklist: bool = True,
+    notify_on_exit: bool = True,
 ) -> ToolSpec:
     """构造 run_in_background 工具。
 
@@ -251,6 +278,11 @@ def make_run_in_background_tool(
     供后续 wait_for_task 拉取结果。
 
     permission：与 shell_exec 同 scope（``"shell_exec"``），业务侧规则共享。
+
+    Args:
+        notify_on_exit: True（默认）→ 任务结束时把完成摘要投递回发起 thread 并 emit
+            ``background_task_completed``（需工具上下文里有 engine 协调器；没有时——
+            如脱离 engine 的单测——只能靠 wait_for_task 取结果）。
     """
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -286,12 +318,18 @@ def make_run_in_background_tool(
                     reason="permission_denied",
                 )
 
+        coordinator = ctx.extras.get("spawn_coordinator") if notify_on_exit else None
+        on_complete = (
+            _completion_notifier(coordinator, ctx.thread_id)
+            if coordinator is not None else None
+        )
         try:
             task_id = await registry.spawn(
                 command,
                 cwd=cwd,
                 env=env,
                 max_output_bytes=max_output_bytes,
+                on_complete=on_complete,
             )
         except RuntimeError as e:
             return ToolResult.error(
@@ -330,6 +368,51 @@ def make_run_in_background_tool(
         parallel_safe=False,
         timeout_seconds=15.0,  # spawn 本身应该很快
     )
+
+
+_SUMMARY_TAIL_CHARS = 2000  # 完成摘要里 stdout 尾部的最大字符数（全文仍可 wait_for_task 取）
+
+
+def _completion_summary(result: dict[str, Any]) -> str:
+    """后台任务完成摘要（投递给发起 thread 的 LLM-facing 事实，中性无产品意见）。"""
+    stdout = str(result.get("stdout", ""))
+    tail = stdout[-_SUMMARY_TAIL_CHARS:]
+    state = "killed" if result.get("killed") else f"exit={result.get('exit_code')}"
+    head = f"[background task {result['task_id']} finished: {state}]"
+    if len(stdout) > len(tail):
+        head += f" (last {len(tail)} of {len(stdout)} stdout chars; full output via wait_for_task)"
+    return f"{head}\n{tail}" if tail else head
+
+
+def _completion_notifier(
+    coordinator: Any, thread_id: str,
+) -> Callable[[dict[str, Any]], Coroutine[Any, Any, None]]:
+    """构造完成回调：投递摘要到发起 thread，并在 engine 上 emit 完成事件。
+
+    路由规则（显式、非兜底）：
+      - 根 thread → queue_only（根 turn 由宿主驱动，运行中注入 / 空闲落史）；
+      - spawn 子 thread → trigger_turn（空闲即唤醒续跑）；
+      - call_skill 阻塞子 thread 不可寻址（它是根 turn 的一部分）→ 投根 thread queue_only。
+    engine 已关停等投递失败由 registry 记日志（回调在后台收集协程里跑）。
+    """
+
+    async def _notify(result: dict[str, Any]) -> None:
+        from taifeng.loop.event import BackgroundTaskCompleted, EventMsg
+
+        root = coordinator.thread_id
+        target = thread_id if thread_id == root or coordinator.is_spawn_thread(thread_id) else root
+        delivery = await coordinator.deliver_peer_message(
+            target=target, text=_completion_summary(result),
+            mode="queue_only" if target == root else "trigger_turn",
+            from_thread_id=target,
+        )
+        await coordinator._emit(EventMsg(submission_id="*", msg=BackgroundTaskCompleted(data={
+            "task_id": result["task_id"], "thread_id": thread_id, "delivered_to": target,
+            "exit_code": result.get("exit_code"), "killed": bool(result.get("killed")),
+            "delivered_via": delivery.get("delivered_via"), "woken": bool(delivery.get("woken")),
+        })))
+
+    return _notify
 
 
 def make_wait_for_task_tool(

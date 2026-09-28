@@ -126,6 +126,17 @@ handler SHALL 实现**两阶段原子语义**：
 - 未知 task_id 同样走 `ToolResult.ok(data={"status": "unknown"})`
 - `parallel_safe = True`（只读 task 状态）
 
+**完成唤醒（background-completion-wake，ADR 0050）**：`make_run_in_background_tool(..., notify_on_exit=True)`（默认开）。
+`BackgroundTaskRegistry.spawn(..., on_complete=)` 在任务结束（正常退出 / 被 kill / 收集失败）后恰好回调一次，参数与
+`wait()` 结果同形（新增 `killed` 字段），回调异常只记日志。工具据此：
+
+- 把中性完成摘要（`[background task <id> finished: exit=N]` + stdout 尾部 ≤2000 字符）经 `deliver_peer_message` 投递回发起 thread：
+  根 thread → `queue_only`（运行中注入 / 空闲落史，根 turn 由宿主驱动）；spawn 子 thread → `trigger_turn`（空闲即唤醒续跑）；
+  `call_skill` 阻塞子 thread 不可寻址 → 明确改投根 thread；
+- 在 engine 上 emit `background_task_completed`（`task_id` / `thread_id` / `delivered_to` / `exit_code` / `killed` / `delivered_via` / `woken`）。
+
+工具上下文没有 engine 协调器（脱离 engine 的直接调用）时不投递，只能 `wait_for_task` 取结果。
+
 #### Scenario: LLM 端到端跑一个长任务
 - **WHEN** LLM 调 `run_in_background({"command": "sleep 1 && echo done"})` 拿到 task_id
 - **AND** LLM 立刻调 `wait_for_task({"task_id": task_id, "timeout_seconds": 5})`
