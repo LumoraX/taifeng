@@ -17,6 +17,8 @@ CacheBreakReason = Literal[
     "skill_snapshot_changed",
     "tool_spec_changed",
     "system_prompt_changed",
+    "model_changed",  # 采样模型变更（skill frontmatter model 覆盖 / 热更）
+    "message_prefix_changed",  # 已缓存的消息前缀被非压缩路径改写（rollback / 外部改写历史）
     "unknown_drop",
 ]
 

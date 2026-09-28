@@ -89,6 +89,7 @@ Later ADRs:
 49. [ADR 0049: 取消 token 携带原因与墙钟截止时间，采样流与取消竞速](decisions/0049-cancel-reason-and-deadline.md): token 只有一个比特，终态分不清中止 / 超时 / 关停，也没有墙钟截止时间；采样循环只在收到流事件时查取消，provider 首字节前阻塞时取消迟迟不生效。决策：`CancelReason` 随取消级联；`child(deadline_seconds=)` 挂在子树根、只收紧；`UserMessage.deadline_seconds` / `spawn_skill(deadline_seconds=)` 入口；`interrupt_on_cancel` 让取消原地打断阻塞中的流读取；`turn_completed.cancel_reason`。
 50. [ADR 0050: 后台任务完成时唤醒发起方，而非只能轮询](decisions/0050-background-completion-wake.md): `run_in_background` 只能靠 `wait_for_task` 轮询。决策：注册表 `on_complete` 回调；工具经 peer mailbox 把中性摘要投回发起 thread（根 queue_only、spawn 子 trigger_turn、call_skill 子改投根）+ `background_task_completed` 事件；默认开。
 51. [ADR 0051: shell 类工具经 CommandExecutor 启动进程](decisions/0051-command-executor-seam.md): 脚本有 `ScriptExecutor`，`shell_exec` / `run_in_background` 却直接起子进程，沙箱无统一 seam；`shell_exec` 还不响应取消。决策：只抽「启动」一步为 `CommandExecutor.start(CommandSpec)`，审批 / env / 超时 / 截断 / 取消留在工具；内核只给本机默认实现；`shell_exec` 在 `interrupt_on_cancel` 内等待、取消即 kill。
+52. [ADR 0052: cache 失效分段归因](decisions/0052-segmented-cache-break-attribution.md): 指纹只有 skill / 工具名 / system，模型切换、同名 schema 变化、前缀被 rollback 都落 `unknown_drop`。决策：工具段含描述与 schema；新增 `model` 与消息前缀（发出时长度 + id 序列哈希）段；新增 `model_changed` / `message_prefix_changed`；旧指纹缺键不误判。
 
 ### Fourth Pass: Gap Tracking
 

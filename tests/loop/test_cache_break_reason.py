@@ -131,3 +131,72 @@ async def test_engine_cache_stats_persist_and_detect_break_across_turns(
     assert stats.last_break.reason == "unknown_drop"
 
     await pool.close()
+
+
+# ───────────── 分段归因：同名替换 / 模型 / 已缓存消息前缀（cache-break-attribution）─────────────
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_detects_same_name_schema_change(skills_dir: Path) -> None:
+    """同名工具 schema 变化（ToolRegistry.replace）→ tool_spec_changed，而非 unknown_drop。"""
+    runner = await _make_runner(skills_dir)
+    fp_a = runner._compute_prompt_fingerprint(  # noqa: SLF001
+        [_Stub(name="a", description="d", input_schema={"type": "object"})])
+    runner.last_prompt_fingerprint = fp_a
+    fp_b = runner._compute_prompt_fingerprint(  # noqa: SLF001
+        [_Stub(name="a", description="d", input_schema={"type": "object", "required": ["x"]})])
+    assert runner._detect_structural_break_reason(fp_b) == "tool_spec_changed"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_detects_model_change(skills_dir: Path) -> None:
+    """entry skill 采样模型变化 → model_changed。"""
+    from dataclasses import replace
+
+    runner = await _make_runner(skills_dir)
+    runner.last_prompt_fingerprint = runner._compute_prompt_fingerprint([])  # noqa: SLF001
+    runner.entry_skill = replace(runner.entry_skill, model="another-model")
+    fp = runner._compute_prompt_fingerprint([])  # noqa: SLF001
+    assert runner._detect_structural_break_reason(fp) == "model_changed"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_tail_growth_is_not_a_prefix_change(skills_dir: Path) -> None:
+    """history 在尾部增长属正常，不归因。"""
+    from taifeng.conversation.models import assistant_message, user_message
+
+    runner = await _make_runner(skills_dir)
+    runner.history_buffer = [user_message("hi", thread_id="t")]
+    runner.last_prompt_fingerprint = runner._compute_prompt_fingerprint([])  # noqa: SLF001
+    runner.history_buffer.append(assistant_message("ok", thread_id="t", model="m"))
+    fp = runner._compute_prompt_fingerprint([])  # noqa: SLF001
+    assert runner._detect_structural_break_reason(fp) is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["rollback", "rewrite"])
+async def test_fingerprint_detects_message_prefix_change(skills_dir: Path, mutation: str) -> None:
+    """已发出的前缀被截短或替换（非压缩路径）→ message_prefix_changed。"""
+    from taifeng.conversation.models import assistant_message, user_message
+
+    runner = await _make_runner(skills_dir)
+    runner.history_buffer = [
+        user_message("hi", thread_id="t"),
+        assistant_message("ok", thread_id="t", model="m"),
+    ]
+    runner.last_prompt_fingerprint = runner._compute_prompt_fingerprint([])  # noqa: SLF001
+    if mutation == "rollback":
+        runner.history_buffer = runner.history_buffer[:1]
+    else:
+        runner.history_buffer[1] = assistant_message("edited", thread_id="t", model="m")
+    fp = runner._compute_prompt_fingerprint([])  # noqa: SLF001
+    assert runner._detect_structural_break_reason(fp) == "message_prefix_changed"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_legacy_previous_without_new_segments(skills_dir: Path) -> None:
+    """上一轮指纹来自旧版本（无 model / prefix 键）→ 不误判为变化。"""
+    runner = await _make_runner(skills_dir)
+    fp = runner._compute_prompt_fingerprint([])  # noqa: SLF001
+    runner.last_prompt_fingerprint = {k: fp[k] for k in ("snapshot", "tools", "system")}
+    assert runner._detect_structural_break_reason(fp) is None  # noqa: SLF001

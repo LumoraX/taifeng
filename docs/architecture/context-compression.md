@@ -368,7 +368,7 @@ Rewind 截到 cut → anchor = min(anchor, cut - 1)，首采样 break 标 expect
 ```python
 # src/taifeng/context/cache_stats.py
 
-# CacheBreakReason —— 9 类归因 taxonomy（G-CACHE 自动判定接线）
+# CacheBreakReason —— 11 类归因 taxonomy（G-CACHE 自动判定接线 + 分段指纹）
 CacheBreakReason = Literal[
     "compaction_pre_turn",                 # 预期内：pre-turn 压缩动 head
     "compaction_manual",                   # 预期内：用户 /compact
@@ -378,6 +378,8 @@ CacheBreakReason = Literal[
     "skill_snapshot_changed",              # 预期内：skill 列表变更
     "tool_spec_changed",                   # 预期内：工具集变更
     "system_prompt_changed",               # 预期内：system prompt / instructions 变更
+    "model_changed",                       # 预期内：采样模型变更
+    "message_prefix_changed",              # 预期内：已缓存消息前缀被非压缩路径改写（rollback 等）
     "unknown_drop",                        # ⚠️ 异常：tokens 莫名下降
 ]
 
@@ -401,6 +403,12 @@ class PromptCacheStats:
     last_break: CacheBreakEvent | None = None
     history: list[CacheBreakEvent] = field(default_factory=list)
 ```
+
+**分段结构指纹**（`TurnSample.compute_prompt_fingerprint`，参照 claw-code 按 model / system / tools / messages
+分段）：`snapshot`（可见 skill）/ `tools`（名 + 描述 + input_schema，同名替换也能识别）/ `system` / `model` /
+`prefix_len` + `prefix`（发出时 history 长度与其 item id 序列哈希）。判定顺序：压缩 / rewind 等预期标记优先；
+其次 snapshot → tools → system → model → 前缀（上次发出的那段在当前 history 中被截短或 id 不符）。尾部增长不归因；
+缺少新分段键的旧指纹不误判。
 
 每次 LLM 调用返回的 `usage.cache_creation_input_tokens` / `cache_read_input_tokens` 喂给 `PromptCacheStats.record_turn(...)`，对比上一 turn 基线归因。**预期外的 cache break 是 bug**，触发告警。`record_turn` 接收 `anchor_expected` + `anchor_expected_reason`，由 `turn.py` 在压缩 / snapshot / tool / system 变更时设置——避免一切都落 `unknown_drop`（G-CACHE 接线，commit `cc86f24`）。
 

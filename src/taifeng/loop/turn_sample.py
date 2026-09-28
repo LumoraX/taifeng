@@ -89,6 +89,11 @@ class _SamplePrep:
     iteration_history_len: int
 
 
+def _history_prefix_hash(history: list[Any], length: int) -> str:
+    """history 前 ``length`` 项的 id 序列哈希（cache 前缀改写检测用）。"""
+    return _sha1_short(",".join(item.id for item in history[:length]))
+
+
 class TurnSample:
     """turn 采样协作器（持 TurnRunner 引用，自身无状态）。"""
 
@@ -102,9 +107,10 @@ class TurnSample:
     def compute_prompt_fingerprint(self, tools: list[Any]) -> dict[str, str]:
         """计算 prompt 结构指纹 —— 用于归因 cache 失效的结构性原因（G-CACHE）。
 
-        仅指纹影响 cached prefix 的三类结构：可见 skill 列表 / tool 集合 /
-        system 段（entry skill id + body + 注入指令文本）。history 增长属正常
-        tail，不入指纹（否则每轮都判为变更）。
+        指纹影响 cached prefix 的各段（参照 claw-code ``prompt_cache.rs`` 分段指纹）：
+        可见 skill 列表 / tool 集合（名 + 描述 + schema）/ system 段（entry skill id +
+        body + 注入指令文本）/ 模型 / 已发出消息前缀。history 在尾部增长属正常，
+        前缀段只记「发出时长度 + 这段的 item id 哈希」，下一轮只比较同一长度的那一段。
         """
         snapshot_key = ",".join(
             sorted(self.__sample_owner.snapshot.reachable_from(self.__sample_owner.entry_skill.id))
@@ -120,10 +126,14 @@ class TurnSample:
         system_src = (
             f"{self.__sample_owner.entry_skill.id}\x00{self.__sample_owner.entry_skill.body}\x00{instr_text}"
         )
+        history = self.__sample_owner.history_buffer
         return {
             "snapshot": _sha1_short(snapshot_key),
             "tools": _sha1_short(tools_key),
             "system": _sha1_short(system_src),
+            "model": _sha1_short(self.__sample_owner.entry_skill.model or ""),
+            "prefix_len": str(len(history)),
+            "prefix": _history_prefix_hash(history, len(history)),
         }
 
     def detect_structural_break_reason(
@@ -139,6 +149,17 @@ class TurnSample:
             return "tool_spec_changed"
         if current.get("system") != prev.get("system"):
             return "system_prompt_changed"
+        if "model" in prev and current.get("model") != prev.get("model"):
+            return "model_changed"
+        # 已缓存前缀：上次发出的那段 history（按长度截取）id 序列是否仍一致。
+        # 缩短（rollback）或同长度内被替换都算改写；压缩 / rewind 已在更早的预期标记里归因。
+        prev_len = int(prev.get("prefix_len", "0"))
+        history = self.__sample_owner.history_buffer
+        if prev.get("prefix") is not None and (
+            len(history) < prev_len
+            or _history_prefix_hash(history, prev_len) != prev.get("prefix")
+        ):
+            return "message_prefix_changed"
         return None
 
     async def _prepare_request(self, iteration: int) -> _SamplePrep:
