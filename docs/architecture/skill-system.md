@@ -529,6 +529,12 @@ pool = EnginePool.create(
 
 只有**入口 skill 的 body**进 system prompt（带 `<entry_skill>` XML 块）；子 skill 列表通过 `<available_child_skills>` 块注入名称 + 描述（不带 body）；子 skill 的 body 由 LLM 调 `read_skill(id)` 按需读。
 
+渐进加载第三层：`read_skill(skill_id, path)` 读取该 skill 目录内的附属文件（正文里引用的 `references/api.md`、
+`FORMS.md` 等），让作者把低频细节移出正文。约束：`path` 必须是相对路径且解析后（含符号链接展开）落在 skill 目录内，
+否则 `not_visible`；须为 UTF-8 文本（否则 `not_text`），≤ `MAX_SKILL_FILE_BYTES`（256KiB，否则 `too_large`）；
+可见性与读正文同一规则。文件读取在工作线程执行。frontmatter 的 `allowed-tools`（Agent Skills 生态字段）不映射为
+`tool_names`：前者是「免审批可用」，后者是「可见白名单」，且工具名不通用；它保留在 `frontmatter_raw` 供宿主映射到权限策略。
+
 ```xml
 <entry_skill id="code-reviewer">
 你是一位资深代码审查工程师。
