@@ -1,8 +1,8 @@
 # 微内核差距分析（kernel-lens）
 
-> 最近更新：2026-05-30
+> 最近更新：2026-09-28（第二轮全面 review：K8–K19）
 > 视角：把 taifeng 当作 **LLM agent 的 OS 微内核 / 调度器**，只问"内核机制长齐没"，
-> 不问"某个特性建了没"。上游对标：codex / claw-code / hermes-agent / openclaw。
+> 不问"某个特性建了没"。上游对标：codex / claw-code / hermes-agent / openclaw / opencode / deepagents。
 
 ## 与 `hermes-gap-roadmap.md` 的关系（不冲突，互补）
 
@@ -50,11 +50,36 @@ taifeng 是"可嵌入、一 session 一 engine"的微内核。换框后，一大
 | **K6** ✅ | **/proc 自省面**。**已落地**（见下方 commit）：`engine.introspect()` 返回只读快照（在飞 submission / turn_index / spawn 配额 active+total / 会话 token / events_dropped / 上下文占用 / cache 健康度）；`pool.introspect()` → 各活跃 session 的快照。纯读无副作用。**收口增强**：`pending[]` 逐条暴露 `cancel_requested`（取消已请求但 turn 未收尾）——对标 claw-code `lane_board` 存活看板的**可纯读那一半**；staleness 阈值判定需墙钟+策略，按 R1 留宿主 | 机制=内核 | codex `thread_manager::list_live_thread_spawn_edges`；claw-code `task_registry::lane_board` | R3 | ✅ 完成 |
 | **K7** ✅ | **depth/谱系从持久态可重导**。**已落地**（见下方 commit）：子 skill 派发把 `parent_thread_id` / `spawn_depth` / `stack_path` 写入 `ThreadMetadata.extra`（`create_thread(extra=...)` 全链路：MessageStore 协议 + _HookEmittingStore + JsonlMessageStore），resume 可从持久谱系重导深度/特权。**fork ≠ 持久快照那半判为刻意设计**：taifeng 给子 skill「干净 seed」是有意的隔离（非父 CoW bloat），非缺口 | 机制=内核（谱系持久）；隔离模型=刻意设计 | codex `flush-before-fork`；openclaw 从 lineage 重建 spawnDepth | R5 | ✅ 完成 |
 
+## 第二轮全面 review（2026-09-28）：K8–K19
+
+按 OS 内核十二维（进程 / IPC / 中断 / 内存 / syscall / 保护 / 资源配额 / 驱动 / 持久化 / 加载器 /
+自省 / 认知回路）重新清点，四路并行对照参照仓并在源码逐条核实。K1–K7 的机制仍成立，但发现**现有
+保证不成立**与**机制缺口**共 12 项，已全部补齐：
+
+| # | 缺口 | 维度 | 落地 | ADR |
+| --- | --- | --- | --- | --- |
+| **K8** ✅ | 上下文 token 只靠 `len/3.5` 粗估，看不到 system / 工具开销，CJK 严重低估；Anthropic `input_tokens` 不含缓存 | 内存管理 | 实测锚点 + 增量粗估、usage 口径归一、`output_reserve_tokens`（真实 LLM：粗估误差 98% → 校准 4.1%） | 0043 |
+| **K9** ✅ | 会话 token 上限（K2）可被 call_skill / spawn 子树绕过：只有根 turn 入账 | 资源配额 | 整棵 turn 树共享 `SessionUsageMeter`，采样即入账，按 skill / thread 归因 | 0044 |
+| **K10** ✅ | 工具执行中崩溃：Chat 路径意图丢失、resume 后副作用静默重复；`effect_kind` 恢复时无人读 | 持久化 | 写前 `tool_intent` + 冷恢复按副作用分流（可重发 / 回查 / `TOOL_OUTCOME_UNKNOWN` 交人） | 0045 |
+| **K11** ✅ | 原生 Anthropic / Gemini 不保留 thinking 签名，工具续传被拒 | 驱动 | 不透明 `reasoning_state` 通道 + Gemini `thoughtSignature` 往返 | 0046 |
+| **K12** ✅ | 工具参数不按 schema 校验，缺字段 / 类型错直进 handler | syscall | 派发前子集校验 + 改参反馈，全路径单一入口 | 0047 |
+| **K13** ✅ | 工具集不能运行时增删；MCP 忽略 `list_changed`、只有 stdio | syscall | `unregister` / `replace` / `tool_set_changed`；`bind_mcp_tools`；streamable HTTP | 0048 |
+| **K14** ✅ | 取消不带原因、无墙钟截止时间；provider 首字节前阻塞时取消迟迟不生效 | 中断 | `CancelReason` 级联、`deadline_seconds`、`interrupt_on_cancel` 原地打断 | 0049 |
+| **K15** ✅ | 后台任务完成只能轮询 | IPC | 完成回调 + 经 peer mailbox 投回发起 thread | 0050 |
+| **K16** ✅ | shell 类工具不经执行器协议，沙箱无统一 seam；`shell_exec` 不响应取消 | 保护 | `CommandExecutor` seam + 取消即 kill | 0051 |
+| **K17** ✅ | cache 失效只有三段指纹，模型切换 / 前缀改写 / 同名 schema 变化都落 `unknown_drop` | 自省 | 分段指纹（model / 消息前缀 / 工具 schema） | 0052 |
+| **K18** ✅ | 审计 Journal 不能 resume，跨进程写者无互斥与接管 | 持久化 | 见 ADR 0053 | 0053 |
+| **K19** ✅ | 录制的 Journal 无法用于确定性回放 | 可测试性 | `JournalReplayClient` 按请求摘要匹配 | 0054 |
+
+**判为非缺口（userspace / 宿主）**：model failover 链、客户端限流、成本定价（均可按断路器范式做成
+`ModelClient` 包装器）；cron / 定时唤醒（宿主到点提交）；优先级抢占；会话 fork；计划模式（可变
+`PermissionPolicy`）；子 agent 结构化返回；输入来源 / 污染标记（无业务驱动，按规则挂起）。
+
 ## 优先级与建议
 
 - ✅ **K1–K7 全部补齐**：K1 广度准入（`838265c`）/ K2 资源强制（`dc633ff`）/ K3 swap 内存层级（`1bd57b1`）/ K4 总线流控（`630c738`）/ K5 取消终态守卫（`bc09ad9`）/ K6 /proc 自省（`aadced5`）/ K7 谱系持久（本批）。
 - **内核机制层至此长齐**：进程模型（fork/spawn 配额）、IPC（双总线+流控）、内存管理（压缩换页+swap）、资源准入与强制、中断（取消终态）、保护（permission）、自省、谱系持久——七维全覆盖。
-- 后续是 userspace/host 与业务驱动的能力（见 `hermes-gap-roadmap.md`），内核 backlog 清空。
+- 2026-09-28 第二轮 review 发现上述机制中有「保证不成立」的实现缺陷（K8–K11）与新机制缺口（K12–K19），已补齐，见上节。
 
 ## 业务可消费性收口（last-mile：机制齐 ≠ 开箱可用）
 
