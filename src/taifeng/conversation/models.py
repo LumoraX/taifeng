@@ -217,12 +217,26 @@ def suspension_item(
     )
 
 
-def reasoning(text: str, *, thread_id: str, summary: str = "") -> ResponseItem:
-    return ResponseItem(
-        kind="reasoning",
-        thread_id=thread_id,
-        payload={"text": text, "summary": summary},
-    )
+def reasoning(
+    text: str,
+    *,
+    thread_id: str,
+    summary: str = "",
+    provider_reasoning: dict[str, Any] | None = None,
+) -> ResponseItem:
+    """构造 reasoning item。
+
+    Args:
+        text: reasoning 全文（thinking 模型的思考文本；redacted 时可为空）。
+        thread_id: 所属 thread。
+        summary: reasoning 摘要（部分 provider 提供）。
+        provider_reasoning: provider 专有回传状态（thinking-passback，不透明）；
+            None 时不写键（旧形状逐字不变）。
+    """
+    payload: dict[str, Any] = {"text": text, "summary": summary}
+    if provider_reasoning is not None:
+        payload["provider_reasoning"] = provider_reasoning
+    return ResponseItem(kind="reasoning", thread_id=thread_id, payload=payload)
 
 
 def compacted(

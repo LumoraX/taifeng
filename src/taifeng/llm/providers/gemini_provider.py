@@ -31,6 +31,7 @@ from taifeng.llm.events import (
     error,
     prompt_cache,
     rate_limits,
+    reasoning_delta,
     server_model,
     text_delta,
     tool_call_done,
@@ -51,6 +52,18 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from taifeng.loop.cancellation import CancellationToken
+
+# thinking-passback：reasoning_effort → Gemini thinkingBudget（请求级覆盖客户端配置）
+_EFFORT_BUDGETS = {"none": 0, "minimal": 512, "low": 1024, "medium": 8192, "high": 24576}
+
+
+def _thought_signature(tool_call: dict[str, Any]) -> str | None:
+    """从 tool_call 的 extra_content 取回 Gemini thought signature（与 OpenAI 兼容版同形）。"""
+    extra = tool_call.get("extra_content")
+    google = extra.get("google") if isinstance(extra, dict) else None
+    sig = google.get("thought_signature") if isinstance(google, dict) else None
+    return sig if isinstance(sig, str) and sig else None
+
 
 # Gemini role 映射
 _ROLE_MAP = {
@@ -178,12 +191,18 @@ def _to_gemini_contents(
                         )
                     except json.JSONDecodeError:
                         args = {}
-                    parts.append({
+                    fc_part: dict[str, Any] = {
                         "functionCall": {
                             "name": fn.get("name", ""),
                             "args": args,
                         },
-                    })
+                    }
+                    # thinking-passback：thinking 模型的 functionCall part 必须带回
+                    # 其 thoughtSignature，否则续传被拒（签名随 function_call 落史）
+                    signature = _thought_signature(tc)
+                    if signature is not None:
+                        fc_part["thoughtSignature"] = signature
+                    parts.append(fc_part)
 
         if not parts:
             continue
@@ -222,9 +241,14 @@ class GeminiSession:
         extra_headers: dict[str, str] | None = None,
         timeout_seconds: float = 300.0,
         previous_cache_read: int = 0,
+        thinking_budget: int | None = None,
+        include_thoughts: bool = False,
     ) -> None:
         self._api_key = api_key
         self._model = model
+        # thinking 配置（None = 用模型默认；include_thoughts 让思考摘要经 reasoning_delta 流出）
+        self._thinking_budget = thinking_budget
+        self._include_thoughts = include_thoughts
         self._base_url = base_url.rstrip("/")
         self._cancel = cancel
         self._auth_via = auth_via
@@ -265,12 +289,28 @@ class GeminiSession:
             gen_config["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             gen_config["maxOutputTokens"] = request.max_output_tokens
+        thinking = self._thinking_config(request)
+        if thinking:
+            gen_config["thinkingConfig"] = thinking
         if gen_config:
             payload["generationConfig"] = gen_config
         tools = _to_gemini_tools(request)
         if tools is not None:
             payload["tools"] = tools
         return payload
+
+    def _thinking_config(self, request: ApiRequest) -> dict[str, Any]:
+        """generationConfig.thinkingConfig：请求级 reasoning_effort 优先于客户端预算。"""
+        config: dict[str, Any] = {}
+        budget = (
+            _EFFORT_BUDGETS.get(request.reasoning_effort)
+            if request.reasoning_effort is not None else self._thinking_budget
+        )
+        if budget is not None:
+            config["thinkingBudget"] = budget
+        if self._include_thoughts:
+            config["includeThoughts"] = True
+        return config
 
     def _build_url(self, model: str) -> str:
         url = (
@@ -373,6 +413,7 @@ class GeminiSession:
                 call_id=tc["call_id"],
                 name=tc["name"],
                 arguments=tc["arguments"],
+                extra_content=tc.get("extra_content"),
             )
 
         if self._last_usage is not None:
@@ -401,7 +442,12 @@ class GeminiSession:
             cand = candidates[0]
             content = cand.get("content") or {}
             for part in content.get("parts") or []:
-                if "text" in part:
+                if "text" in part and part.get("thought") is True:
+                    # includeThoughts 下的思考摘要：走 reasoning 流，不混进正文
+                    t = part.get("text", "")
+                    if t:
+                        yield reasoning_delta(t)
+                elif "text" in part:
                     t = part.get("text", "")
                     if t:
                         self._produced_text = True
@@ -410,11 +456,17 @@ class GeminiSession:
                     fc = part["functionCall"] or {}
                     name = fc.get("name", "")
                     args = fc.get("args", {}) or {}
-                    pending_tool_calls.append({
+                    call: dict[str, Any] = {
                         "call_id": f"fc_{uuid.uuid4().hex[:24]}",
                         "name": name,
                         "arguments": json.dumps(args),
-                    })
+                    }
+                    # thinking-passback：签名挂在 functionCall part 上，经 extra_content
+                    # 随 function_call 落史（与 OpenAI 兼容版 Gemini 同一形状）
+                    signature = part.get("thoughtSignature")
+                    if isinstance(signature, str) and signature:
+                        call["extra_content"] = {"google": {"thought_signature": signature}}
+                    pending_tool_calls.append(call)
 
             finish_reason = cand.get("finishReason")
             if finish_reason:
@@ -442,6 +494,10 @@ class GeminiClient(OneNetworkAttemptModelClient, ModelClient):
         auth_via: ``"query"``（默认，URL 上挂 ``?key=``） / ``"header"``
         extra_headers: 额外 header
         timeout_seconds: httpx 超时
+        thinking_budget: ``generationConfig.thinkingConfig.thinkingBudget``（None = 模型默认）；
+            请求级 ``reasoning_effort`` 显式给出时覆盖。
+        include_thoughts: 让思考摘要经 ``reasoning_delta`` 流出（默认 False）。
+            无论是否开启，functionCall 的 ``thoughtSignature`` 都会随调用落史并回传。
     """
 
     def __init__(
@@ -453,9 +509,15 @@ class GeminiClient(OneNetworkAttemptModelClient, ModelClient):
         auth_via: Literal["query", "header"] = "query",
         extra_headers: dict[str, str] | None = None,
         timeout_seconds: float = 300.0,
+        thinking_budget: int | None = None,
+        include_thoughts: bool = False,
     ) -> None:
+        if thinking_budget is not None and thinking_budget < 0:
+            raise ValueError(f"thinking_budget must be >= 0 or None, got {thinking_budget}")
         self._api_key = api_key
         self._default_model = model
+        self._thinking_budget = thinking_budget
+        self._include_thoughts = include_thoughts
         self._base_url = base_url
         self._auth_via = auth_via
         self._extra_headers = extra_headers
@@ -477,6 +539,8 @@ class GeminiClient(OneNetworkAttemptModelClient, ModelClient):
             extra_headers=self._extra_headers,
             timeout_seconds=self._timeout_seconds,
             previous_cache_read=self._previous_cache_read,
+            thinking_budget=self._thinking_budget,
+            include_thoughts=self._include_thoughts,
         )
 
     def record_cache_read(self, value: int) -> None:

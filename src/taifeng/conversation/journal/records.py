@@ -547,6 +547,8 @@ class _ReasoningItemPayload(JournalModel):
     text: str
     summary: str
     provider_state: _ProviderStateEnvelopeV1 | None = None
+    # thinking-passback：Chat 协议 provider 的不透明回传状态（如 Anthropic thinking 块）
+    provider_reasoning: dict[str, JsonValue] | None = None
 
 
 class _SkillOutcomeItemPayload(JournalModel):

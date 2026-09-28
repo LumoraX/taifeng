@@ -358,6 +358,24 @@ native client SHALL 在 `api_key` 为空或纯空白时**省略**鉴权头/参�
 - **WHEN** 模型因 max_tokens 截断
 - **THEN** `completed.data.stop_reason` SHALL 为该 provider 的原生截断标识（`length` / `MAX_TOKENS` / `max_tokens`），与自然结束取值不同
 
+### Requirement: thinking 块与签名回传（thinking-passback）
+
+Anthropic 与 Gemini 原生 client SHALL 保留续传所需的思考签名，决策见 ADR 0046：
+
+| provider | 解析 | 落史载体 | 回传 |
+| --- | --- | --- | --- |
+| Anthropic | `thinking_delta` → `reasoning_delta`；`signature_delta` 记入块；`redacted_thinking` 记 `data` | 流末（`tool_call_done` 之前）emit `reasoning_state({"anthropic": {"blocks": [...]}})` → reasoning item `payload.provider_reasoning` | assistant content 开头按原序放回全部块 |
+| Gemini | `thought: true` 的 part → `reasoning_delta`；functionCall part 的 `thoughtSignature` | `tool_call_done.extra_content.google.thought_signature` → function_call payload | functionCall part 带 `thoughtSignature` |
+
+请求配置：`AnthropicClient(thinking_budget_tokens)` → `thinking={"type":"enabled","budget_tokens":N}`，`max_tokens`
+未指定时自动取「预算 + 4096」；预算 < 1024（构造期）、显式 `temperature`、显式 `max_output_tokens <= 预算` SHALL
+`InvalidRequestError`。`GeminiClient(thinking_budget, include_thoughts)` → `generationConfig.thinkingConfig`。两家都以
+请求级 `reasoning_effort`（若给出）覆盖客户端预算。
+
+#### Scenario: Anthropic 工具续传带回签名块
+- **WHEN** 第一轮响应含 `thinking`（signature=S）、`redacted_thinking`、`tool_use`，工具执行后续传
+- **THEN** 第二次请求的 assistant 消息 content SHALL 依次为 `thinking`（含 S）、`redacted_thinking`、…、`tool_use`
+
 ### Requirement: gemini functionResponse 使用真实函数名
 
 gemini provider 组装 `contents` 时，tool 角色消息的 `functionResponse.name` SHALL 填该 `tool_call_id` 对应的**函数名**（扫同一请求内 assistant 消息的 `tool_calls` 建 `call_id → name` 索引）。回溯不到时 SHALL 保持 `tool_call_id` 兜底，SHALL NOT 猜测或伪造函数名。

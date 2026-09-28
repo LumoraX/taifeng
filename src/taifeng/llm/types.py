@@ -200,6 +200,14 @@ class ApiMessage(BaseModel):
     openai_compat / litellm 组装请求体时翻译为 wire 字段 ``reasoning_content``,
     None 时不写键(非 thinking provider 零影响)。见 reasoning-content-passback。
     """
+    # None 时不参与序列化:无状态请求的 dump / 审计 digest 与引入本字段前逐字一致
+    reasoning_state: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None)
+    """reasoning 的 provider 专有回传状态(不透明,以 provider 名为顶层键)。
+
+    来自该轮采样的 ``reasoning_state`` 事件;只有产出它的 provider 会读取自己那个键
+    (如 Anthropic 把 thinking 块连同签名放回 assistant content 开头)。见 thinking-passback。
+    """
 
 
 def messages_to_input_items(messages: list[ApiMessage]) -> list[ApiInputItem]:

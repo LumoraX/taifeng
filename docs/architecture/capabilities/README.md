@@ -74,6 +74,7 @@ Aligned with [llm-client.md](../llm-client.md).
 | [llm-provider-native](llm-provider-native.md) | Native provider contract, `ResponseEvent` stream shape, Anthropic / Gemini / DeepSeek field mapping, cache field priority, error classification, and `record_cache_read` |
 | [llm-codex-provider](llm-codex-provider.md) | 独立 `codex-responses-v1` provider：顶层 instructions、有序 typed input、done-item 终态、provider-state 隔离、恢复与脱敏边界 |
 | [llm-image-input](llm-image-input.md) | 用户消息图片输入：`ImageAttachmentV1` / `ImagePart` canonical 形态、admission 与成本估算、OpenAI Chat/Responses 与 Codex 协议映射、持久化压缩与脱敏边界 |
+| [llm-provider-native § thinking-passback](llm-provider-native.md) | Anthropic thinking / redacted_thinking 块连同签名、Gemini thoughtSignature 的解析 → `reasoning_state` / `extra_content` 落史 → 续传原样回传；`thinking_budget_tokens` / `thinking_budget` / `include_thoughts` 配置与冲突校验（ADR 0046） |
 | [llm-structured-output](llm-structured-output.md) | `ResponseFormatSpec`, `structured_output` events, provider translation, and parse failure strategy |
 | [llm-sim-conformance](llm-sim-conformance.md) | Stateful conformance simulator, protocol checks, token accounting, prefix-cache ledger, full-fidelity chunks, fault injection, deterministic timing, and request ledger |
 

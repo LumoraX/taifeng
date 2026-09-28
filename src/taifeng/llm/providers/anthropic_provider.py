@@ -34,6 +34,8 @@ from taifeng.llm.events import (
     error,
     prompt_cache,
     rate_limits,
+    reasoning_delta,
+    reasoning_state,
     server_model,
     text_delta,
     tool_call_delta,
@@ -47,6 +49,12 @@ from taifeng.llm.providers._shared import (
     extract_usage_anthropic,
     parse_sse_event,
     transport_error,
+)
+from taifeng.llm.providers.anthropic_thinking import (
+    ThinkingAccumulator,
+    apply_thinking_config,
+    resolve_thinking_budget,
+    thinking_blocks_from_state,
 )
 from taifeng.llm.types import ApiRequest, ImagePart, TextPart, TokenUsage
 
@@ -122,6 +130,10 @@ def _to_anthropic_messages(
             continue
 
         content_blocks: list[dict[str, Any]] = []
+        # thinking-passback：assistant 消息必须以上一轮的 thinking 块（含签名）原样开头，
+        # 否则 Anthropic 拒绝工具续传（400）。无状态时为空列表，旧形状不变。
+        if msg.role == "assistant":
+            content_blocks.extend(thinking_blocks_from_state(msg.reasoning_state))
 
         # tool role → tool_result block
         if msg.role == "tool":
@@ -212,8 +224,11 @@ class AnthropicSession:
         timeout_seconds: float = 300.0,
         anthropic_version: str = _DEFAULT_ANTHROPIC_VERSION,
         previous_cache_read: int = 0,
+        thinking_budget_tokens: int | None = None,
     ) -> None:
         self._api_key = api_key
+        # extended thinking 预算（None = 不开，请求级 reasoning_effort 可覆盖）
+        self._thinking_budget = thinking_budget_tokens
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._cancel = cancel
@@ -257,6 +272,10 @@ class AnthropicSession:
         tools = _to_anthropic_tools(request)
         if tools is not None:
             payload["tools"] = tools
+        budget = resolve_thinking_budget(self._thinking_budget, request.reasoning_effort)
+        if budget is not None:
+            apply_thinking_config(
+                payload, budget=budget, requested_max_tokens=request.max_output_tokens)
         return payload
 
     async def stream(  # noqa: C901
@@ -280,6 +299,8 @@ class AnthropicSession:
         tool_calls_acc: dict[int, dict[str, Any]] = {}
         # 当前活跃的 content_block index → type（text / tool_use）
         block_types: dict[int, str] = {}
+        # thinking-passback：thinking / redacted_thinking 块（流末打包回传状态）
+        thinking = ThinkingAccumulator()
         request_id: str | None = None  # G3：服务端 request-id
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -315,7 +336,7 @@ class AnthropicSession:
                             # 事件分隔空行 → 处理累积缓冲
                             if event_buffer:
                                 async for ev in self._process_event(
-                                    event_buffer, tool_calls_acc, block_types,
+                                    event_buffer, tool_calls_acc, block_types, thinking,
                                 ):
                                     yield ev
                                 event_buffer = []
@@ -324,7 +345,7 @@ class AnthropicSession:
                     # 末尾残留事件
                     if event_buffer:
                         async for ev in self._process_event(
-                            event_buffer, tool_calls_acc, block_types,
+                            event_buffer, tool_calls_acc, block_types, thinking,
                         ):
                             yield ev
             except httpx.TransportError as exc:
@@ -350,6 +371,11 @@ class AnthropicSession:
                 message=str(failure), kind=failure.kind, retryable=failure.retryable,
             )
             raise failure
+
+        # thinking-passback：先交出 thinking 块（含签名），再发工具调用终态
+        state = thinking.state()
+        if state is not None:
+            yield reasoning_state(state)
 
         # 流末 tool_call_done 事件
         for acc in tool_calls_acc.values():
@@ -386,6 +412,7 @@ class AnthropicSession:
         lines: list[str],
         tool_calls_acc: dict[int, dict[str, Any]],
         block_types: dict[int, str],
+        thinking: ThinkingAccumulator,
     ) -> AsyncIterator[ResponseEvent]:
         """处理一个完整的 Anthropic SSE 事件块。"""
         name, payload = parse_sse_event(lines)
@@ -397,6 +424,8 @@ class AnthropicSession:
             block = payload.get("content_block") or {}
             btype = block.get("type", "text")
             block_types[idx] = btype
+            if thinking.start(idx, block):
+                return
             if btype == "tool_use":
                 tool_calls_acc[idx] = {
                     "id": block.get("id", ""),
@@ -409,7 +438,11 @@ class AnthropicSession:
             idx = payload.get("index", 0)
             delta = payload.get("delta") or {}
             dtype = delta.get("type")
-            if dtype == "text_delta":
+            if dtype in ("thinking_delta", "signature_delta"):
+                thought = thinking.delta(idx, delta)
+                if thought:
+                    yield reasoning_delta(thought)
+            elif dtype == "text_delta":
                 t = delta.get("text", "")
                 if t:
                     yield text_delta(t)
@@ -492,6 +525,10 @@ class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
         extra_headers: 额外 header（用于 third-party 网关）
         timeout_seconds: httpx 超时
         anthropic_version: API 版本（默认 ``2023-06-01``）
+        thinking_budget_tokens: extended thinking 预算（None = 不开；>= 1024）。
+            开启后 thinking 文本经 ``reasoning_delta`` 流出，thinking 块连同签名经
+            ``reasoning_state`` 落史，工具续传时原样回传（thinking-passback）。
+            请求级 ``reasoning_effort`` 显式给出时覆盖本值。
     """
 
     def __init__(
@@ -503,9 +540,13 @@ class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
         extra_headers: dict[str, str] | None = None,
         timeout_seconds: float = 300.0,
         anthropic_version: str = _DEFAULT_ANTHROPIC_VERSION,
+        thinking_budget_tokens: int | None = None,
     ) -> None:
+        # 构造期校验预算下限（请求期同一校验，这里提前暴露配置错误）
+        resolve_thinking_budget(thinking_budget_tokens, None)
         self._api_key = api_key
         self._default_model = model
+        self._thinking_budget = thinking_budget_tokens
         self._base_url = base_url
         self._extra_headers = extra_headers
         self._timeout_seconds = timeout_seconds
@@ -527,6 +568,7 @@ class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
             timeout_seconds=self._timeout_seconds,
             anthropic_version=self._anthropic_version,
             previous_cache_read=self._previous_cache_read,
+            thinking_budget_tokens=self._thinking_budget,
         )
 
     def record_cache_read(self, value: int) -> None:

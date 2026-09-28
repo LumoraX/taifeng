@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 _CONTENT_KINDS = frozenset({
     "text_delta",
     "reasoning_delta",
+    "reasoning_state",
     "tool_call_delta",
     "tool_call_done",
     "structured_output",

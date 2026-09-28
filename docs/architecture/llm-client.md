@@ -114,6 +114,19 @@ class ApiRequest(BaseModel):
 - **组装**：openai_compat / litellm 仅在 `reasoning` 非 None 时写 wire 字段 `reasoning_content`。回传天然自限：history 无 reasoning item 即不回传，非 thinking 模型零变化。
 - **旋钮**：`reasoning_passback: bool = True`（Engine / Pool 构造参数），仅控回传；落史无条件（R5）。
 
+**签名式回传（thinking-passback，ADR 0046）**：有些 provider 只回传文本不够，必须把思考块**连同签名**原样放回：
+
+- **Anthropic extended thinking**：`AnthropicClient(thinking_budget_tokens=N)`（≥1024；请求级 `reasoning_effort` 覆盖，
+  `none`/`minimal` 关闭）开启。流里 `thinking_delta` → `reasoning_delta`；`thinking` / `redacted_thinking` 块（含
+  `signature` / `data`）在流末经 **`reasoning_state`** 事件交出（`{"anthropic": {"blocks": [...]}}`，不透明），落为
+  reasoning item 的 `payload.provider_reasoning`（redacted-only 也落史）；prompt 重建挂到 `ApiMessage.reasoning_state`，
+  Anthropic 构建请求时把块放回 assistant content **开头**。显式 `temperature` 或不大于预算的 `max_output_tokens` →
+  `InvalidRequestError`（不静默改值）。
+- **Gemini thinking**：functionCall part 的 `thoughtSignature` 经 `extra_content.google.thought_signature` 随
+  function_call 落史并回传（与 OpenAI 兼容端点同一形状）；`thought: true` 的 part 走 `reasoning_delta` 不混进正文。
+  `GeminiClient(thinking_budget=, include_thoughts=)` → `generationConfig.thinkingConfig`。
+- 内核只搬运 `reasoning_state`，不解析（R1）；`ApiMessage.reasoning_state` 为 None 时不参与序列化（旧请求 dump 与审计 digest 逐字不变）。
+
 ## Provider 适配
 
 **双层架构：native 四件套（直连 HTTP，零 SDK）+ LiteLLM 兜底**。

@@ -353,6 +353,8 @@ class TurnSample:
         self.__sample_owner._streamed_text = ""
         # 累积本轮 reasoning 全文(thinking 模型;非 thinking 恒为空)
         reasoning_text = ""
+        # thinking-passback：provider 专有 reasoning 回传状态(如 Anthropic 签名块)
+        reasoning_state_data: dict[str, Any] | None = None
         # 累积 tool calls
         tool_calls: list[dict[str, Any]] = []
         normalized_items: list[dict[str, Any]] | None = None
@@ -383,6 +385,10 @@ class TurnSample:
                         # 带 tool_calls 的 assistant 消息续传时回传 reasoning_content
                         reasoning_text += r_delta
                         await self.__sample_owner._emit(AssistantReasoning(data={"delta": r_delta}))
+                    elif ev.kind == "reasoning_state":
+                        state = ev.data.get("state")
+                        if isinstance(state, dict) and state:
+                            reasoning_state_data = state
                     elif ev.kind == "tool_call_done":
                         if not is_responses:
                             tool_calls.append(
@@ -544,8 +550,12 @@ class TurnSample:
         # reasoning item(紧邻配对 assistant message 之前,与 provider 产出顺序一致;
         # 无产出轮不落——没有可关联的 assistant 消息,回传无意义)。
         if not is_responses:
-            if reasoning_text and (assistant_text or tool_calls):
-                response_items.append(reasoning(reasoning_text, thread_id=self.__sample_owner.thread_id))
+            # redacted thinking 可能只有签名状态、没有可读文本,同样要落史才能回传
+            if (reasoning_text or reasoning_state_data) and (assistant_text or tool_calls):
+                response_items.append(reasoning(
+                    reasoning_text, thread_id=self.__sample_owner.thread_id,
+                    provider_reasoning=reasoning_state_data,
+                ))
             # assistant message（即使为空也记下，因为 tool calls 也挂在这条消息上）
             if assistant_text or tool_calls:
                 response_items.append(assistant_message(

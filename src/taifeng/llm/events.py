@@ -22,6 +22,7 @@ EventKind = Literal[
     "tool_call_delta",
     "tool_call_done",
     "reasoning_delta",
+    "reasoning_state",
     "rate_limits",
     "server_model",
     "prompt_cache",
@@ -81,6 +82,17 @@ def tool_call_done(
 
 def reasoning_delta(delta: str) -> ResponseEvent:
     return ResponseEvent(kind="reasoning_delta", data={"delta": delta})
+
+
+def reasoning_state(state: dict[str, Any]) -> ResponseEvent:
+    """本次采样 reasoning 的 provider 专有回传状态（thinking-passback）。
+
+    有些 provider 要求把思考内容**连同签名**原样回传才能续传工具调用
+    （Anthropic thinking / redacted_thinking 块）。provider 在流末 emit 一次，
+    ``state`` 是以 provider 名为顶层键的不透明 dict（如 ``{"anthropic": {...}}``）；
+    内核只搬运、不解析（R1），由同一 provider 在下次构建请求时消费。
+    """
+    return ResponseEvent(kind="reasoning_state", data={"state": state})
 
 
 def rate_limits(snapshot: RateLimitSnapshot) -> ResponseEvent:

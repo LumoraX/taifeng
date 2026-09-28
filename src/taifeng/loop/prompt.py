@@ -362,6 +362,8 @@ def _convert_history(
     src: list[int] = []
     # 暂存待附着的 reasoning 文本;开窗(assistant 消息产出)时附上并清空
     pending_reasoning: str | None = None
+    # thinking-passback:暂存待附着的 provider 专有 reasoning 状态(与文本同生命周期)
+    pending_state: dict[str, Any] | None = None
     # 当前采样轮的 assistant 消息在 out 中的下标(合并窗口);
     # user/system/compacted 产出即关窗,fco 不关窗(同轮并行 fc 的配对序
     # 是 fc,fco,fc,fco 交错),记账类 item(suspension 等)跨过保窗
@@ -370,6 +372,8 @@ def _convert_history(
         if it.kind == "reasoning":
             if include_reasoning:
                 pending_reasoning = str(it.payload.get("text", "")) or None
+                state = it.payload.get("provider_reasoning")
+                pending_state = state if isinstance(state, dict) and state else None
             continue
         if it.kind == "assistant_message":
             out.append(
@@ -377,11 +381,13 @@ def _convert_history(
                     role="assistant",
                     content=str(it.payload.get("text", "")),
                     reasoning=pending_reasoning,
+                    reasoning_state=pending_state,
                 )
             )
             src.append(idx)
             window_idx = len(out) - 1
             pending_reasoning = None
+            pending_state = None
             continue
         if it.kind == "function_call":
             tc = _fc_to_tool_call(it)
@@ -398,11 +404,13 @@ def _convert_history(
                         content="",
                         tool_calls=[tc],
                         reasoning=pending_reasoning,
+                        reasoning_state=pending_state,
                     )
                 )
                 src.append(idx)
                 window_idx = len(out) - 1
                 pending_reasoning = None
+                pending_state = None
             continue
         if it.kind == "function_call_output":
             out.append(
@@ -429,6 +437,7 @@ def _convert_history(
         # user/system/compacted 产出 = 新对话段:关窗 + 孤儿 reasoning 结算丢弃
         window_idx = None
         pending_reasoning = None
+        pending_state = None
         out.append(msg)
         src.append(idx)
     return out, src
