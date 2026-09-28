@@ -144,6 +144,7 @@ def make_glob_tool(
     root = Path(root_dir).expanduser().resolve()
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        """参数校验 → 沙盒 → 审批 → 工作线程遍历 → 渲染；取消返回 cancelled 结果。"""
         parsed = _parse_args(args)
         if isinstance(parsed, ToolResult):
             return parsed

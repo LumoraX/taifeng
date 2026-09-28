@@ -186,6 +186,7 @@ def _match_parts(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:
     failed: set[tuple[int, int]] = set()
 
     def match_from(i: int, j: int) -> bool:
+        """模式从下标 i、路径从下标 j 起能否完整匹配到末尾。"""
         if (i, j) in failed:
             return False
         start = (i, j)
