@@ -24,6 +24,12 @@ from taifeng.llm.providers.replay import (
 from taifeng.loop.audit_config import AuditCapabilityError, AuditConfig
 from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
 from taifeng.mcp.http_client import McpHttpClient
+from taifeng.skill.fitness import (
+    InMemorySkillFitnessStore,
+    SkillFitness,
+    SkillFitnessRecorder,
+    SkillFitnessStore,
+)
 from taifeng.tool.spec import ReconcileVerdict
 
 __all__ = [
@@ -43,4 +49,9 @@ __all__ = [
     "McpHttpClient",
     "McpToolBinding",
     "bind_mcp_tools",
+    # skill 战绩聚合（skill-fitness，🧪：只沉淀不决策）
+    "InMemorySkillFitnessStore",
+    "SkillFitness",
+    "SkillFitnessRecorder",
+    "SkillFitnessStore",
 ]

@@ -17,6 +17,7 @@ Aligned with [skill-system.md](../skill-system.md).
 | [skill-dispatch](skill-dispatch.md) | `call_skill` lifecycle, Permission + Hook gates, `subagent_approval_mode`, `_SubagentAutoDecisionPolicy`, `reason` propagation, CallStack, and DispatchVerdict contracts |
 | [skill-orchestration](skill-orchestration.md) | Declarative orchestration (`parallel` / `serial` / `when`), load-time validation, deterministic execution without LLM sampling, and `orchestration_plan_resolved` events |
 | [skill-outcome-record](skill-outcome-record.md) | `SkillExecutionRecord` 数据契约（全字段含义）、`OutcomeJudge` 协议 + `StructuralOutcomeJudge` 默认映射、长相/战绩分离不变量、旁路 `skill_outcome` ItemKind、`skill_outcome_recorded` 事件、终态触发规则（suspended 不记）与 v1 显式边界 |
+| [skill-outcome-record § 战绩聚合](skill-outcome-record.md) | 战绩聚合：`SkillFitnessStore` 协议、`SkillFitnessRecorder`（TelemetrySink 适配）、`InMemorySkillFitnessStore`（实验层，只沉淀不决策，ADR 0067）|
 | [skill-recall](skill-recall.md) | skill 发现/召回/验证：`SkillCandidate` / `RecallEntry` / `SkillRecall` 协议 + `KeywordSkillRecall`（BM25-lite）/ `LlmSkillRecall`；opt-in 自动发现总闸 `enable_auto_discovery`；召回后验证门 `SkillVerifier` / `VerifiedCandidate` / `LlmSkillVerifier`（拉完整 body 判输入要求适配、长相 vs 适配分字段、C2 护栏）/ `SkillVerifyParseError`；deferred 暴露判定（`effective_child_recall` 单一真相 + `recall_threshold`）、召回作用域=白名单内 G4 过滤、`search_skills` payload + 置信路由（no_match 显式信号）、`skill_search_invoked` / `skill_candidates_returned` / `skill_candidates_verified` 事件、选择溯源连回 v1（`discovered`，用 verify_confidence） |
 
 ### Agent Loop, Tools, and Infrastructure
@@ -75,6 +76,8 @@ Aligned with [llm-client.md](../llm-client.md).
 | --- | --- |
 | [llm-provider-native](llm-provider-native.md) | Native provider contract, `ResponseEvent` stream shape, Anthropic / Gemini / DeepSeek field mapping, cache field priority, error classification, and `record_cache_read` |
 | [llm-codex-provider](llm-codex-provider.md) | 独立 `codex-responses-v1` provider：顶层 instructions、有序 typed input、done-item 终态、provider-state 隔离、恢复与脱敏边界 |
+| [llm-file-input](llm-file-input.md) | **预留**：用户消息文件（PDF 等）输入的数据形状、`"file"` 能力门控、策略、脱敏与四家 provider 映射；尚无实现（ADR 0067） |
+| [model-routing-composition](model-routing-composition.md) | 多模型路由 / 回退包装器的组合契约：叠加顺序（回退在断路器外）、零产出才回退、按 failure_class 决定、能力取交集、协议不混组、可观测与缓存影响；内核不实现路由（ADR 0067） |
 | [llm-image-input](llm-image-input.md) | 用户消息图片输入：`ImageAttachmentV1` / `ImagePart` canonical 形态、admission 与成本估算、OpenAI Chat/Responses 与 Codex 协议映射、持久化压缩与脱敏边界 |
 | [llm-provider-native § thinking-passback](llm-provider-native.md) | Anthropic thinking / redacted_thinking 块连同签名、Gemini thoughtSignature 的解析 → `reasoning_state` / `extra_content` 落史 → 续传原样回传；`thinking_budget_tokens` / `thinking_budget` / `include_thoughts` 配置与冲突校验（ADR 0046） |
 | [llm-structured-output](llm-structured-output.md) | `ResponseFormatSpec`, `structured_output` events, provider translation, and parse failure strategy |

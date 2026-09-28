@@ -200,3 +200,16 @@ call_skill 工具触发 → _spawn_sub_runner
 | selection_confidence 策略化 | 发现相位（⑥）尚未实现；v1 恒 None |
 | 跨 session 聚合统计 | 外部 DB / 分析层的职责，内核不承载 |
 | spawn detached 子 skill 的战绩记录 | detached spawn 子 thread 为独立 TurnRunner，其终态处理路径与 call_skill 不同；v1 仅覆盖 call_skill 路径 |
+
+## 战绩聚合（skill-fitness，ADR 0067，实验层）
+
+v1 的记录散落在各子 thread 的 JSONL 里。聚合由业务存储承担，内核给出协议与接线（`src/taifeng/skill/fitness.py`，经 `taifeng.experimental` 导出）：
+
+- `SkillFitnessStore`（Protocol）：`async record(record: SkillExecutionRecord)`（实现须按 `call_id` 幂等）/
+  `async fitness(skill_id) -> SkillFitness | None`。
+- `SkillFitness`：`skill_id` / `successes` / `failures` / `abandoned` / `last_ts_unix`，`total` 为三态之和。
+- `SkillFitnessRecorder(store)`：`TelemetrySink` 实现，只处理 `skill_outcome_recorded`，经
+  `SkillExecutionRecord.from_payload` 还原后交给 store；`attach(engine)` 订阅全量事件流（与 `JsonlSink` 同形）。store 异常原样上抛。
+- `InMemorySkillFitnessStore`：进程内参考实现（按 call_id 去重）。
+
+**只沉淀、不决策**：内核任何路径 SHALL NOT 读取 fitness 来改变 skill 的可见性、排序、召回或派发；`selection_confidence` 不参与聚合。

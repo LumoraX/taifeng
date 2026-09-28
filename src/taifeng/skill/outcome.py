@@ -59,6 +59,14 @@ class SkillExecutionRecord:
     cost_iterations: int
     ts_unix: int
 
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> SkillExecutionRecord:
+        """``as_payload`` 的逆：从事件 data / JSONL payload 还原记录。
+
+        缺字段抛 ``KeyError``（payload 由内核构造，缺字段即数据损坏，不补默认值）。
+        """
+        return cls(**{name: payload[name] for name in cls.__dataclass_fields__})
+
     def as_payload(self) -> dict[str, Any]:
         """转 JSON-safe dict，作为 ResponseItem.payload 落 JSONL / 事件 data。"""
         return {

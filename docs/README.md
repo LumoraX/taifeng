@@ -103,6 +103,7 @@ Later ADRs:
 62. [ADR 0062: Anthropic 尾部滚动缓存断点 + TTL 透传](decisions/0062-anthropic-rolling-cache-breakpoint-and-ttl.md): 只在 cache anchor 打一个标记，工具循环的尾部每轮全价重复计费；`ttl_seconds` 是死字段。决策：客户端默认在最后一条消息再打标记；300 / 3600 映射 5m / 1h，其他值报错；否决在 `build_api_request` 加断点与默认 1h。
 65. [ADR 0065: pinned 状态周期重注](decisions/0065-pinned-state-periodic-reinjection.md): 清单只在压缩后钉回，未压缩的长会话里工作记忆失焦。决策：`PeriodicPinnedStateSource.reinject_every_turns` 按 source 声明节奏，计数从 history 推导，pre-turn 压缩后尾追加；否决 engine 级全局旋钮与按迭代计数。
 66. [ADR 0066: 公共 API 分稳定 / 实验 / 内部三层 + 弃用策略](decisions/0066-public-api-tiers-and-deprecation.md): 顶层 ~160 个符号无分层、零弃用机制。决策：顶层 `__all__` 为稳定层并以快照守护；`taifeng.experimental` 承载 🧪 入口；`DEPRECATED_ALIASES` + `__getattr__` 发 `DeprecationWarning`，弃用期 ≥ 两个版本且 ≥ 30 天；否决挪动已发布符号。
+67. [ADR 0067: 预留协议——skill 战绩聚合、文件输入、多模型路由组合](decisions/0067-reserved-protocols-fitness-file-input-routing.md): 三项「先定协议」候选。决策：战绩聚合落代码（`SkillFitnessStore` + TelemetrySink 适配，实验层，只沉淀不决策）；文件输入只写预留契约（避免死代码）；路由 / 回退写包装器组合契约（回退在断路器外、零产出才回退、能力取交集）。
 
 ### Fourth Pass: Gap Tracking
 
