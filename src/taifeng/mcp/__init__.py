@@ -14,6 +14,8 @@
       ``bind_mcp_tools`` 随 list_changed 自动增删 / 替换（dynamic-tool-set）
     - tools/call 结果无损投影：图片进 ``ToolResult.attachments``、structuredContent 进
       ``ToolResult.data``、resource / audio 显式标注（``taifeng.mcp.content``）
+    - server → client 请求：``ping`` 应答；``elicitation/create`` 交宿主注入的
+      ``ElicitationHandler``（未注入回 -32601）；``notifications/cancelled`` 取消在飞应答
 
 支持（server 端，M3 mcp-server-mode）：
     - stdio transport
@@ -30,6 +32,7 @@
 
 from taifeng.mcp.bridge import McpClient, McpToolBinding, bind_mcp_tools
 from taifeng.mcp.content import McpContentError
+from taifeng.mcp.elicitation import ElicitationHandler, ElicitationRequest, ElicitationResult
 from taifeng.mcp.http_client import McpHttpClient
 from taifeng.mcp.prompter import McpPrompter
 from taifeng.mcp.protocol import (
@@ -48,6 +51,9 @@ from taifeng.mcp.stdio_client import (
 __all__ = [
     "LATEST_PROTOCOL_VERSION",
     "SUPPORTED_PROTOCOL_VERSIONS",
+    "ElicitationHandler",
+    "ElicitationRequest",
+    "ElicitationResult",
     "McpClient",
     "McpContentError",
     "McpHttpClient",
