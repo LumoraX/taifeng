@@ -142,7 +142,7 @@ class AgentEngine:
   默认 `256`，超出淘汰最老的、退化回等待；`<=0` 关闭补投。**未记账的 submission 维持等待**——
   `subscribe` 早于 `submit` 是推荐用法，不得被合成终结打断。解决「submit 后才 subscribe、turn 已跑完 →
   消费者永久挂死」。
-- **LLM request 留痕**：`enable_request_capture`（默认关）开启后，`turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（retry/重建各一条）；文字正文仍敏感，图片 base64/Data URL 则在事件生成前结构化替换为 `content_redacted` 描述。`OtelTelemetrySink` 按 kind 整条跳过不外发。
+- **LLM request 留痕**：`enable_request_capture`（默认关）开启后，`turn.py` 在 build 后发送前 emit `LlmRequestRecorded`（retry/重建各一条）；开关随 call_skill 子 turn / detached spawn / 续跑重建逐层透传，整棵 turn 树都留痕；文字正文仍敏感，图片 base64/Data URL 则在事件生成前结构化替换为 `content_redacted` 描述。`OtelTelemetrySink` 按 kind 整条跳过不外发。
 
 > 「可靠 fail-stop 审计真相源」是独立的层2 课题（留 ADR 0019），不改造 EventMsg emit 路径。
 

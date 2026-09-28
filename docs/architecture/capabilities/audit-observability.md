@@ -84,6 +84,7 @@
 
 - 注入点 SHALL 在 `turn.py` `build_api_request` 之后、发送 provider 之前（即便 provider 超时/失败，request 仍留痕）。
 - retry / mid-turn 压缩重建 request 走新一轮构建 → SHALL 各 emit 一条（「每次实发各一条」），留痕的是真正发出的那一版。
+- 开关 SHALL 贯穿整棵 turn 树：入口 turn、`call_skill` 同步派发的子 turn（含声明式编排合成的 call_skill）、`spawn_skill` detached 子 turn、挂起续跑重建的 turn 均继承同一开关，任何一层的实发 request 都留痕。
 - `LlmRequestRecorded` 含完整 prompt + conversation（敏感）：`OtelTelemetrySink` SHALL 按 kind 整条跳过、不转 OTel；可靠落盘 / 脱敏 / 访问控制 / 保留期 SHALL 全归业务消费者（内核只留痕、不治理）。
 
 #### Scenario: 默认不留痕
@@ -94,6 +95,10 @@
 - **WHEN** `enable_request_capture=True` 跑一次 turn
 - **THEN** SHALL 至少出现一条 `llm_request_recorded`
 - **AND** 其 `data` SHALL 含 `model` 与 `messages`（ApiRequest 全文）
+
+#### Scenario: call_skill 子 turn 同样留痕
+- **WHEN** `enable_request_capture=True`，入口经 `call_skill` 同步派发子 skill 且子 turn 发生采样
+- **THEN** 子 turn 的每次实发 request SHALL 各 emit 一条 `llm_request_recorded`
 
 #### Scenario: OtelSink 不外发 request 正文
 - **WHEN** `OtelTelemetrySink.handle` 收到 `llm_request_recorded`
