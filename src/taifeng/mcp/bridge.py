@@ -16,11 +16,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from taifeng.mcp.content import McpContentError, convert_tool_result
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -61,35 +61,46 @@ class McpClient(Protocol):
 
 
 def extract_text_content(result: dict[str, Any]) -> tuple[str, bool]:
-    """从 MCP tools/call 结果提取文本 + is_error。"""
-    is_error = bool(result.get("isError"))
-    content = result.get("content") or []
-    parts: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "text":
-            parts.append(str(item.get("text", "")))
-        elif item.get("type") == "image":
-            parts.append(f"[image: {item.get('mimeType', 'unknown')}]")
-        else:
-            parts.append(json.dumps(item, ensure_ascii=False))
-    return "\n".join(parts), is_error
+    """从 MCP tools/call 结果提取纯文本投影 + is_error（不产出附件）。
+
+    与桥内 handler 共用 ``convert_tool_result`` 的文本规则：图片为带 MIME / 字节数的显式
+    占位（等同 ``attach_images=False``），resource 内联 text、blob 给占位，structuredContent
+    缺等价 text 块时补序列化 JSON。需要图片附件与 structuredContent 原对象请直接用
+    ``taifeng.mcp.content.convert_tool_result``。
+
+    Raises:
+        McpContentError: 结果形状不合法（见 ``convert_tool_result``）。
+    """
+    output = convert_tool_result(result, attach_images=False)
+    return output.text, output.is_error
 
 
-def _make_handler(client: McpClient, mcp_name: str, timeout_seconds: float) -> Any:
-    """构造调用远端工具的 handler（闭包绑定远端工具名）。"""
+def _make_handler(client: McpClient, mcp_name: str, config: _BridgeConfig) -> Any:
+    """构造调用远端工具的 handler（闭包绑定远端工具名）。
+
+    结果投影见 ``convert_tool_result``：图片按 ``config.attach_images`` 进附件或占位；
+    ``structuredContent`` 原对象进 ``data["structured_content"]``（保留 ``mcp_tool`` 键）。
+    结果形状不合法 → 该次调用判错（``reason="mcp_invalid_content"``），不静默丢内容。
+    """
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:
             result = await asyncio.wait_for(
-                client.call_tool(mcp_name, args), timeout=timeout_seconds)
+                client.call_tool(mcp_name, args), timeout=config.timeout_seconds)
         except McpToolError as e:
             return ToolResult.error(f"mcp_error: {e}", reason="mcp_error", code=e.code)
         except TimeoutError:
             return ToolResult.error("mcp_timeout", reason="timeout")
-        text, is_error = extract_text_content(result)
-        return ToolResult(output=text, is_error=is_error, data={"mcp_tool": mcp_name})
+        try:
+            output = convert_tool_result(result, attach_images=config.attach_images)
+        except McpContentError as e:
+            return ToolResult.error(
+                f"mcp_invalid_content: {e}", reason="mcp_invalid_content", mcp_tool=mcp_name)
+        data: dict[str, Any] = {"mcp_tool": mcp_name}
+        if output.structured_content is not None:
+            data["structured_content"] = output.structured_content
+        return ToolResult(output=output.text, is_error=output.is_error, data=data,
+                          attachments=output.attachments)
 
     return handler
 
@@ -102,6 +113,9 @@ class _BridgeConfig:
     parallel_safe: bool
     timeout_seconds: float
     trust_annotations: bool = False
+    attach_images: bool = True
+    """True → MCP image 块转 ``ToolResult.attachments``（宿主须启用 ``ImageInputPolicy``，
+    否则按 tool-image-attachment 契约该次调用判错）；False → 显式占位文本。"""
 
 
 # 未信任 annotations 时的分类：远端工具一律假设有不可逆外部效果（崩溃恢复交人裁决）
@@ -152,7 +166,7 @@ def _specs_from_listing(
             name=local_name,
             description=f"[MCP] {meta.get('description', '')}",
             input_schema=meta.get("inputSchema") or {"type": "object"},
-            handler=_make_handler(client, name, config.timeout_seconds),
+            handler=_make_handler(client, name, config),
             parallel_safe=parallel_safe,
             effect_kind=effect_kind,
             reconciliation=reconciliation,
@@ -240,6 +254,7 @@ async def bind_mcp_tools(
     timeout_seconds: float = 60.0,
     watch: bool = True,
     trust_annotations: bool = False,
+    attach_images: bool = True,
 ) -> McpToolBinding:
     """注册 MCP server 的全部工具，并（默认）随 ``tools/list_changed`` 持续同步。
 
@@ -253,10 +268,15 @@ async def bind_mcp_tools(
         trust_annotations: True → 按 server 声明的 ``readOnlyHint`` / ``idempotentHint``
             细分副作用类型（只读工具另可并行）；默认 False 一律按外部不可幂等处理
             （MCP 规范：不可信 server 的提示不得据以决策）。
+        attach_images: True（默认）→ 工具结果里的 image 块转为图片附件，走
+            tool-image-attachment 契约（宿主未启用 ``ImageInputPolicy`` 时该次调用以
+            ``tool_attachment_rejected`` 判错，不静默降级）；False → 图片降级为带 MIME
+            与字节数的显式占位文本，适合不需要看图的宿主。
     """
     binding = McpToolBinding(
         client=client, registry=registry,
-        config=_BridgeConfig(tool_prefix, parallel_safe, timeout_seconds, trust_annotations))
+        config=_BridgeConfig(tool_prefix, parallel_safe, timeout_seconds, trust_annotations,
+                             attach_images))
     await binding.sync()
     if watch:
         client.add_tools_changed_listener(binding._on_list_changed)
@@ -271,14 +291,16 @@ async def register_mcp_tools_async(
     parallel_safe: bool = False,
     timeout_seconds: float = 60.0,
     trust_annotations: bool = False,
+    attach_images: bool = True,
 ) -> list[ToolSpec]:
     """一次性把 MCP server 的所有工具注册为 ToolSpec（不随 list_changed 同步）。
 
-    需要持续同步请用 ``bind_mcp_tools``；``trust_annotations`` 语义同该函数。
+    需要持续同步请用 ``bind_mcp_tools``；``trust_annotations`` / ``attach_images`` 语义同该函数。
     """
     binding = await bind_mcp_tools(
         client, registry, tool_prefix=tool_prefix, parallel_safe=parallel_safe,
-        timeout_seconds=timeout_seconds, watch=False, trust_annotations=trust_annotations)
+        timeout_seconds=timeout_seconds, watch=False, trust_annotations=trust_annotations,
+        attach_images=attach_images)
     registered = [spec for name in sorted(binding.owned)
                   if (spec := registry.get(name)) is not None]
     logger.info("registered %d MCP tool(s) from %s", len(registered), client.server_info.get("name"))
