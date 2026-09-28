@@ -2,8 +2,11 @@
 
 协议：
     - request:  {"jsonrpc": "2.0", "id": int, "method": str, "params": dict}
-    - response: {"jsonrpc": "2.0", "id": int, "result": ...} | {"jsonrpc": "2.0", "id": int, "error": {...}}
+    - response: {"jsonrpc": "2.0", "id": int, "result": ...}
+                | {"jsonrpc": "2.0", "id": int, "error": {...}}
     - 每条消息以单行 JSON 表示，stdin/stdout 行分隔
+    - 双向：server 也会发带 id 的请求（``elicitation/create`` / ``ping``）与通知，
+      交 ``ServerMessageRouter`` 处理，应答写回 server 的 stdin
 
 启动外部 server (示例)::
 
@@ -12,9 +15,12 @@
 
 用法::
 
-    client = await McpStdioClient.spawn(["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+    client = await McpStdioClient.spawn(
+        ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        elicitation_handler=my_handler,  # 可选：处理 server 的 elicitation/create
+    )
     tools = await client.list_tools()
-    specs = register_mcp_tools(client, registry)
+    binding = await bind_mcp_tools(client, registry)
 """
 
 from __future__ import annotations
@@ -30,9 +36,13 @@ from taifeng.mcp.bridge import (
     register_mcp_tools,
     register_mcp_tools_async,
 )
+from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
+from taifeng.mcp.server_messages import ServerMessageRouter
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+
+    from taifeng.mcp.elicitation import ElicitationHandler
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +58,7 @@ class McpStdioClient:
         proc: asyncio.subprocess.Process,
         *,
         request_timeout_seconds: float | None = 60.0,
+        elicitation_handler: ElicitationHandler | None = None,
     ) -> None:
         """
         Args:
@@ -56,20 +67,30 @@ class McpStdioClient:
                 ``None`` 表示不在 client 层超时（由调用方包装控制）。
                 与 ``register_mcp_tools_async`` 的 ``timeout_seconds`` 配合使用时，
                 建议设为相同值，避免双层 timeout 互相截断
-                （详见 spec config-consistency-fixes A1）。
+                （详见 spec config-consistency-fixes A1）。注意 ``tools/call`` 途中
+                server 发起的 elicitation 等待用户的时间也计入该超时。
+            elicitation_handler: 可选；注入则 initialize 声明 ``elicitation`` 能力，
+                server 的 ``elicitation/create`` 交它处理；不注入则不声明，server 仍发
+                时回 ``-32601``。
         """
         self._proc = proc
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._reader_task: asyncio.Task[None] | None = None
         self._closed = False
+        # 写 server stdin 的互斥锁：本端请求 / 通知与对 server 请求的应答并发写出
         self._lock = asyncio.Lock()
         self._initialized = False
         self._server_info: dict[str, Any] = {}
+        # initialize 协商出的协议版本（握手完成前为 None）
+        self._protocol_version: str | None = None
         self._request_timeout = request_timeout_seconds
-        # dynamic-tool-set：notifications/tools/list_changed 的异步监听者
-        self._tools_changed_listeners: list[Callable[[], Coroutine[Any, Any, None]]] = []
-        self._listener_tasks: set[asyncio.Task[None]] = set()
+        # server 主动消息（请求 / list_changed / cancelled）的路由器
+        self._router = ServerMessageRouter(
+            send=self._write_message,
+            server_info=lambda: dict(self._server_info),
+            elicitation_handler=elicitation_handler,
+        )
 
     @classmethod
     async def spawn(
@@ -79,12 +100,17 @@ class McpStdioClient:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         request_timeout_seconds: float | None = 60.0,
+        elicitation_handler: ElicitationHandler | None = None,
     ) -> McpStdioClient:
         """fork 一个 MCP server 子进程并完成 JSON-RPC handshake。
 
         Args:
             request_timeout_seconds: 透传到 ``McpStdioClient.__init__``；
                 ``None`` 表示无 client 层 timeout
+            elicitation_handler: 透传到 ``McpStdioClient.__init__``。
+
+        Raises:
+            McpProtocolVersionError: server 回的协议版本不受支持（子进程已关闭）。
         """
         if not command:
             raise ValueError("empty command")
@@ -96,7 +122,8 @@ class McpStdioClient:
             env=env,
             cwd=cwd,
         )
-        client = cls(proc, request_timeout_seconds=request_timeout_seconds)
+        client = cls(proc, request_timeout_seconds=request_timeout_seconds,
+                     elicitation_handler=elicitation_handler)
         client._reader_task = asyncio.create_task(client._reader_loop())
         try:
             await client._initialize()
@@ -109,43 +136,60 @@ class McpStdioClient:
     # JSON-RPC primitives
     # ------------------------------------------------------------------
 
-    async def _send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    async def _write_message(self, payload: dict[str, Any]) -> None:
+        """把一条 JSON-RPC 消息写到 server stdin（过写锁）。
+
+        Raises:
+            RuntimeError: 客户端已关闭。
+        """
         if self._closed:
             raise RuntimeError("client closed")
+        line = json.dumps(payload, separators=(",", ":")) + "\n"
         async with self._lock:
-            req_id = self._next_id
-            self._next_id += 1
-            future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-            self._pending[req_id] = future
-            payload = {"jsonrpc": "2.0", "id": req_id, "method": method}
-            if params is not None:
-                payload["params"] = params
-            line = json.dumps(payload, separators=(",", ":")) + "\n"
             assert self._proc.stdin is not None
             self._proc.stdin.write(line.encode("utf-8"))
             await self._proc.stdin.drain()
+
+    async def _send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        """发一条带 id 的请求并等待其响应。
+
+        Raises:
+            RuntimeError: 客户端已关闭 / 连接断开。
+            McpToolError: JSON-RPC error 或超时（-32000）。
+        """
+        if self._closed:
+            raise RuntimeError("client closed")
+        req_id = self._next_id
+        self._next_id += 1
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._pending[req_id] = future
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id, "method": method}
+        if params is not None:
+            payload["params"] = params
         try:
+            await self._write_message(payload)
             if self._request_timeout is None:
                 # 无 client 层 timeout：由调用方（如 register_mcp_tools_async 的
                 # 外层 wait_for）控制；这里直接等
                 return await future
             return await asyncio.wait_for(future, timeout=self._request_timeout)
         except TimeoutError as e:
-            self._pending.pop(req_id, None)
             raise McpToolError(-32000, f"request timeout: {method}") from e
+        finally:
+            # 超时 / 外层取消后迟到的响应按孤儿处理，不再落到已放弃的 future 上
+            self._pending.pop(req_id, None)
 
     async def _send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
+        """发一条通知（无 id、无响应）；客户端已关闭时不发。"""
         if self._closed:
             return
         payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
         if params is not None:
             payload["params"] = params
-        line = json.dumps(payload, separators=(",", ":")) + "\n"
-        assert self._proc.stdin is not None
-        self._proc.stdin.write(line.encode("utf-8"))
-        await self._proc.stdin.drain()
+        await self._write_message(payload)
 
     async def _reader_loop(self) -> None:
+        """逐行读 server stdout 并分派；退出时让所有未决请求以连接关闭失败。"""
         assert self._proc.stdout is not None
         try:
             while not self._closed:
@@ -157,17 +201,10 @@ class McpStdioClient:
                 except json.JSONDecodeError:
                     logger.warning("mcp: invalid JSON: %r", line)
                     continue
-                # 响应消息（有 id 字段）
-                msg_id = msg.get("id")
-                if msg_id is not None and msg_id in self._pending:
-                    fut = self._pending.pop(msg_id)
-                    if "error" in msg:
-                        err = msg["error"]
-                        fut.set_exception(McpToolError(err.get("code", -1), err.get("message", "")))
-                    else:
-                        fut.set_result(msg.get("result"))
-                else:
-                    self._on_server_message(msg)
+                if not isinstance(msg, dict):
+                    logger.warning("mcp: non-object JSON-RPC message ignored: %r", line[:200])
+                    continue
+                self._dispatch_message(msg)
         finally:
             # 释放所有未决 future
             for fut in self._pending.values():
@@ -175,49 +212,55 @@ class McpStdioClient:
                     fut.set_exception(RuntimeError("mcp connection closed"))
             self._pending.clear()
 
-    def _on_server_message(self, msg: dict[str, Any]) -> None:
-        """服务端主动消息：tools/list_changed 触发监听者，其余记 debug。
+    def _dispatch_message(self, msg: dict[str, Any]) -> None:
+        """带 ``method`` 的是 server 发起的请求 / 通知（交路由器）；否则按 id 结算本端请求。
 
-        监听者以 task 调度（reader loop 不能被回调阻塞，否则回调里再发请求会死锁：
-        响应要靠同一个 reader loop 读回来）。
+        必须先看 ``method``：server 请求与本端请求的 id 各自编号、可能撞号，先按 id 匹配
+        会把 server 的请求误当成本端请求的响应。
         """
-        method = msg.get("method")
-        if method == "notifications/tools/list_changed":
-            for listener in list(self._tools_changed_listeners):
-                task = asyncio.get_running_loop().create_task(listener())
-                self._listener_tasks.add(task)
-                task.add_done_callback(self._listener_tasks.discard)
+        if "method" in msg:
+            self._router.route(msg)
             return
-        logger.debug("mcp notification: %s", method)
+        msg_id = msg.get("id")
+        fut = self._pending.pop(msg_id, None) if isinstance(msg_id, int) else None
+        if fut is None or fut.done():
+            logger.warning("mcp: response for unknown or abandoned request id=%r", msg_id)
+            return
+        if "error" in msg:
+            err = msg["error"] if isinstance(msg["error"], dict) else {}
+            fut.set_exception(McpToolError(err.get("code", -1), err.get("message", "")))
+        else:
+            fut.set_result(msg.get("result"))
 
     def add_tools_changed_listener(self, listener: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """登记 ``notifications/tools/list_changed`` 的异步回调（``bind_mcp_tools`` 使用）。"""
-        self._tools_changed_listeners.append(listener)
+        self._router.add_tools_changed_listener(listener)
 
     # ------------------------------------------------------------------
     # Protocol methods
     # ------------------------------------------------------------------
 
     async def _initialize(self) -> None:
-        """MCP initialize handshake。"""
+        """MCP initialize handshake：声明最新协议版本，校验 server 回的版本后发 initialized。
+
+        Raises:
+            McpProtocolVersionError: server 回的版本不在支持清单内（或缺失）——``spawn``
+                据此关闭子进程后上抛（规范：客户端不支持该版本 SHOULD 断开）。
+        """
         from taifeng import __version__
 
-        result = await self._send_request(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "clientInfo": {"name": "taifeng", "version": __version__},
-            },
-        )
-        self._server_info = result.get("serverInfo", {}) if isinstance(result, dict) else {}
+        result = await self._send_request("initialize", initialize_params(
+            capabilities=self._router.client_capabilities(), client_version=__version__))
+        self._protocol_version = negotiate_protocol_version(result)
+        self._server_info = result.get("serverInfo", {})
         # 必须发 initialized notification
         await self._send_notification("notifications/initialized")
         self._initialized = True
         logger.info(
-            "mcp connected: %s v%s",
+            "mcp connected: %s v%s (protocol %s)",
             self._server_info.get("name", "?"),
             self._server_info.get("version", "?"),
+            self._protocol_version,
         )
 
     async def list_tools(self) -> list[dict[str, Any]]:
@@ -240,35 +283,41 @@ class McpStdioClient:
 
     @property
     def server_info(self) -> dict[str, Any]:
+        """initialize 返回的 serverInfo（副本）。"""
         return dict(self._server_info)
+
+    @property
+    def protocol_version(self) -> str | None:
+        """initialize 协商出的协议版本；握手完成前为 None。"""
+        return self._protocol_version
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def close(self) -> None:
+        """关闭连接：先收敛 server 请求的应答任务与监听任务，再关 stdin、等子进程退出。
+
+        在等用户的 elicitation handler 在这里被取消（不再写任何响应——连接即将断开）。
+        """
         if self._closed:
             return
         self._closed = True
+        await self._router.aclose()
         if self._proc.stdin is not None and not self._proc.stdin.is_closing():
             try:
                 self._proc.stdin.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 —— 关闭期管道已断属预期
+                logger.debug("mcp: closing server stdin failed", exc_info=True)
         try:
             await asyncio.wait_for(self._proc.wait(), timeout=3.0)
         except TimeoutError:
             self._proc.kill()
             await self._proc.wait()
-        # 未完成的 list_changed 同步任务随连接一起取消（连接已断，同步必然失败）
-        for task in list(self._listener_tasks):
-            task.cancel()
         if self._reader_task is not None:
             self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            # 读循环的取消 / 收尾异常属预期，收集而非外抛
+            await asyncio.gather(self._reader_task, return_exceptions=True)
 
 
 __all__ = [

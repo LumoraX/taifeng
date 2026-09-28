@@ -36,7 +36,8 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | [tool-builtins-extended](tool-builtins-extended.md) | `apply_patch` atomicity, `BackgroundTaskRegistry`, `http_request`, opt-in `glob` / `grep` search and `memory` tool (ADR 0064), and builtin `parallel_safe` behavior |
 | [tool-image-attachment](tool-image-attachment.md) | 工具返回图片附件：`ToolResult.attachments`、落盘前 admission、`tool_output_modalities` 协议分档、fco 内 `PartContent` 投影与 wire `input_image`、`requires.modalities` 路由期门控、能力不足时 in-band 降级，以及内核/业务边界 |
 | [dynamic-tool-set](dynamic-tool-set.md) | `ToolRegistry.unregister` / `replace` / `version` / `subscribe`、`tool_set_changed` 事件、prompt 指纹含描述与 schema、MCP `McpClient` 协议 + `bind_mcp_tools` 随 `tools/list_changed` 同步、`McpHttpClient` streamable HTTP 传输（ADR 0048） |
-| [mcp-server](mcp-server.md) | `McpStdioServer`, MCP handshake, tools, resources, bidirectional JSON-RPC elicitation, and CLI `mcp serve` |
+| [mcp-client](mcp-client.md) | taifeng 作为 MCP 客户端：2025-06-18 版本协商（清单外断开、HTTP `MCP-Protocol-Version` 头）、tools/call 结果无损投影（图片走附件 admission、structuredContent 进 `data`、resource / audio 显式标注）、server → client 请求路由（`ping` / `elicitation/create` / `-32601` / `notifications/cancelled`）与 `ElicitationHandler` 注入口（ADR 0063） |
+| [mcp-server](mcp-server.md) | `McpStdioServer`, MCP handshake（版本协商）, tools, resources, bidirectional JSON-RPC elicitation, and CLI `mcp serve` |
 | [telemetry-otel](telemetry-otel.md) | `OtelSinkConfig`, `OtelTelemetrySink`, EventMsg-to-OTel mapping, PII filtering, counters, and fire-and-forget export |
 | [turn-rewind](turn-rewind.md) | Addressable intra-turn nodes, `Rewind` op, `RewindCheckpoint`, `rewind_nodes()`, event classes, rejection paths, R2 expectations, and R5 append-only behavior |
 | [detached-spawn](detached-spawn.md) | Detached spawn, join barriers, independent child HITL, keepalive refcounts, `kill_spawn`, cold recovery rebuild, spawn/join events, and LLM-facing tools |

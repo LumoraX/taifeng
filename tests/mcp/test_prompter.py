@@ -103,6 +103,16 @@ async def test_user_rejects_action_returns_deny() -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_declines_action_returns_deny() -> None:
+    """MCP 2025-06-18 定稿的拒绝动作名是 decline（不再落到 unknown_action）。"""
+    stub = _StubServer(response={"action": "decline"})
+    prompter = McpPrompter(stub)
+    decision = await prompter.prompt(_make_request())
+    assert decision.granted is False
+    assert decision.reason == "user_declined"
+
+
+@pytest.mark.asyncio
 async def test_user_cancels_action_returns_deny() -> None:
     stub = _StubServer(response={"action": "cancel"})
     prompter = McpPrompter(stub)

@@ -132,7 +132,7 @@ src/taifeng/
 │
 ├── hooks/        # PreToolUse / PostToolUse / PreCompact / PreTurn / Pre|PostSkillDispatch / Pre|PostScriptUse
 ├── instructions/ # §1.6 指令分层注入（InstructionResolver + InstructionSource 协议 + engine/session/turn 三档 scope）
-├── mcp/          # MCP client（stdio / streamable HTTP，bridge 随 list_changed 同步 tools）+ server（taifeng 作为 MCP server）+ prompter
+├── mcp/          # MCP client（stdio / streamable HTTP，2025-06-18 版本协商；bridge 随 list_changed 同步 tools、结果投影含图片附件 / structuredContent；server→client 请求路由 + elicitation 注入口）+ server（taifeng 作为 MCP server）+ prompter
 ├── permission/   # HITL 审批：PermissionPolicy + Rule + Decision（per-builtin 权限模型，无中央门）
 └── telemetry/    # TelemetrySink 协议 + Console / Jsonl / OTel 三 sink
 ```

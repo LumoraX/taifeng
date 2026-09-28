@@ -136,7 +136,8 @@ for line in sys.stdin:
     msg = json.loads(line)
     method, mid = msg.get("method"), msg.get("id")
     if method == "initialize":
-        send({"jsonrpc": "2.0", "id": mid, "result": {"serverInfo": {"name": "chg"}}})
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": "2025-06-18", "serverInfo": {"name": "chg"}}})
     elif method == "tools/list":
         send({"jsonrpc": "2.0", "id": mid, "result": {"tools": tools}})
     elif method == "tools/call":
@@ -216,7 +217,8 @@ class _FakeHttpServer:
             return httpx.Response(202)
         if method == "initialize":
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": mid, "result": {
-                "serverInfo": {"name": "http-fake"}}}, headers={"Mcp-Session-Id": "S-1"})
+                "protocolVersion": "2025-06-18", "serverInfo": {"name": "http-fake"}}},
+                headers={"Mcp-Session-Id": "S-1"})
         if method == "tools/list":
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": mid,
                                              "result": {"tools": self.tools}})
