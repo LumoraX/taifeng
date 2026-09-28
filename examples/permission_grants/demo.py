@@ -82,7 +82,7 @@ def _client() -> SimClient:
             text="我来发起会诊。",
             tool_calls=[{
                 "id": "c1", "name": "call_skill",
-                "arguments": '{"skill_id": "specialist", "args": {}}',
+                "arguments": '{"skill_id": "specialist", "args": {}, "reason": "需要专科给出结论"}',
             }],
         ),
         SimTurn(text="结论：各项指标正常。"),   # child specialist

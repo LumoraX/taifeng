@@ -706,6 +706,7 @@ class TurnSample:
                 submission_id=self.__sample_owner.submission_id,
                 entry_skill_id=self.__sample_owner.entry_skill.id,
                 visible_tools=visible_tools,
+                registry=self.__sample_owner.tool_runtime._registry,  # noqa: SLF001
             )
 
         # audit：整批意图先于派发 durable，取消无关地把每个意图收敛为唯一终态

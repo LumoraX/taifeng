@@ -91,7 +91,7 @@ async def test_empty_subskill_completion_is_tolerated(tmp_path: Path, caplog) ->
             tool_calls=[{
                 "id": "tc_leaf",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "leaf", "args": {"q": "x"}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {"q": "x"}}',
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),

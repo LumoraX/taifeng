@@ -84,6 +84,7 @@ Later ADRs:
 44. [ADR 0044: 会话用量整棵 turn 树共享记账，采样即入账](decisions/0044-usage-tree-accounting.md): 会话累计唯一入账点是根 turn 收尾，call_skill / spawn / 续跑子树 usage 从不回灌，K2 可被子树绕过。决策：engine 持 `SessionUsageMeter` 注入整棵树、采样即入账并按 skill / thread 归因；`turn_completed.usage` 语义不变，另加 `subtree_usage` / `thread_id` / `skill_id`；detached spawn 不并入父 subtree。
 45. [ADR 0045: 工具执行途中崩溃的冷恢复——写前意图 + 按副作用类型分流](decisions/0045-tool-crash-reconciliation.md): Chat 路径 fc 在执行后才成对落盘，执行中崩溃则意图丢失、resume 后副作用静默重复；Responses 一刀切「未知」；`effect_kind` 恢复时无人读。决策：派发前落记账类 `tool_intent`（同进 hot history，不改交错结构）；冷恢复按副作用分流（pure/idempotent 告知可重发、`reconcile` 回查、其余 `TOOL_OUTCOME_UNKNOWN` 挂起交人 retry/provide/abort）；恢复从不自动执行工具；`tool_recovery="report"` 保留旧行为。
 46. [ADR 0046: 原生 provider 的 thinking 块与签名回传](decisions/0046-thinking-signature-passback.md): Anthropic provider 文件头宣称支持 extended thinking 却只解析 text/tool 增量、不能开启；Gemini 不处理 thoughtSignature——两家工具续传都要求原样回传带签名的思考内容。决策：新增不透明 `reasoning_state` 事件 / `ApiMessage.reasoning_state` / `provider_reasoning` 落史通道（内核只搬运）；Gemini 复用 `extra_content.google.thought_signature`；redacted-only 也落史；thinking 与 temperature / 过小 max_tokens 冲突显式报错；None 时不参与序列化保审计 digest 不变。真实端点验证未执行（无 key）。
+47. [ADR 0047: 工具参数派发前按 input_schema 校验](decisions/0047-tool-argument-schema-validation.md): 派发层只查合法 JSON 对象，缺字段 / 类型错直进 handler 或被 `args.get` 静默兜底（`call_skill` 必填 `reason` 即如此）。决策：不合 schema 不执行 handler，返回违例 + schema 让模型改参；内置子集校验器（不引 jsonschema，不认识的关键字放过）；主派发 / retry / 编排 / resume / 子 thread 续跑共用单一入口；不设关闭开关。
 
 ### Fourth Pass: Gap Tracking
 

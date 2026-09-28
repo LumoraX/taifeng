@@ -209,7 +209,7 @@ async def test_search_then_call_records_discovered(tmp_path: Path) -> None:
             tool_calls=[{
                 "id": "tc_leaf",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "leaf", "args": {"q": "y"}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {"q": "y"}}',
             }],
             usage=u,
         ),
@@ -264,7 +264,7 @@ async def test_call_without_search_records_whitelist(tmp_path: Path) -> None:
             tool_calls=[{
                 "id": "tc_leaf",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "leaf", "args": {"q": "y"}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {"q": "y"}}',
             }],
             usage=u,
         ),
@@ -342,7 +342,7 @@ async def test_cross_turn_search_then_call_degrades(tmp_path: Path) -> None:
                 tool_calls=[{
                     "id": "tc_leaf_t2",
                     "name": "call_skill",
-                    "arguments": '{"skill_id": "leaf", "args": {"q": "y"}}',
+                    "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {"q": "y"}}',
                 }],
                 usage=u,
             ),

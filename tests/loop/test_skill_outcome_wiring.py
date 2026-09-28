@@ -152,7 +152,7 @@ async def test_sub_skill_dispatch_records_outcome(tmp_path: Path) -> None:
             tool_calls=[{
                 "id": "tc_leaf",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "leaf", "args": {"q": "y"}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {"q": "y"}}',
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
@@ -449,7 +449,7 @@ async def test_business_judge_override(tmp_path: Path) -> None:
             tool_calls=[{
                 "id": "tc_leaf_biz",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "leaf", "args": {"q": "biz"}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {"q": "biz"}}',
             }],
             usage=u,
         ),
@@ -529,7 +529,7 @@ async def test_failed_sub_skill_records_failure(tmp_path: Path) -> None:
                 tool_calls=[{
                     "id": "tc_leaf_fail",
                     "name": "call_skill",
-                    "arguments": '{"skill_id": "leaf", "args": {}}',
+                    "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {}}',
                 }],
                 usage=TokenUsage(
                     input_tokens=10, output_tokens=5, total_tokens=15
@@ -607,7 +607,7 @@ async def test_skill_outcome_item_invisible_in_resume_rebuild(
             tool_calls=[{
                 "id": "tc_resume",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "leaf", "args": {}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {}}',
             }],
             usage=u,
         ),

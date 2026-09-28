@@ -82,7 +82,7 @@ def _client() -> RoutingSimClient:
         "EXPERT_MARK": [
             SimTurn(text="专科编排：先调用子步骤采集信息。", tool_calls=[
                 {"id": "call_step", "name": "call_skill",
-                 "arguments": '{"skill_id": "nested-step", "args": {}}'}]),
+                 "arguments": '{"skill_id": "nested-step", "args": {}, "reason": "需要下一步专科意见"}'}]),
             SimTurn(text="专科最终诊断 EXPERT_DONE"),
         ],
         "STEP_MARK": [

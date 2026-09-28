@@ -245,7 +245,7 @@ async def test_call_skill_chain_inherits_policy_and_nested_resume(
             "HOST_MARK": [
                 SimTurn(text="派发专家", tool_calls=[
                     {"id": "ck1", "name": "call_skill",
-                     "arguments": '{"skill_id": "budget-expert", "args": {}}'}]),
+                     "arguments": '{"reason": "测试派发", "skill_id": "budget-expert", "args": {}}'}]),
                 SimTurn(text="HOST_DONE"),
             ],
             # 专家:第 1 次采样被 flaky 拦截(抛 content_filter);retry 后直接出结论

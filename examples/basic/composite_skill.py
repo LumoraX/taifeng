@@ -69,7 +69,7 @@ async def main() -> None:
                 tool_calls=[{
                     "id": "tc_review",
                     "name": "call_skill",
-                    "arguments": '{"skill_id": "code-review", "args": {"code": "def add(a,b): return a+b"}}',
+                    "arguments": '{"skill_id": "code-review", "args": {"code": "def add(a,b): return a+b"}, "reason": "需要代码审查专家检查这段函数"}',
                 }],
                 usage=TokenUsage(input_tokens=120, output_tokens=20, total_tokens=140),
             ),

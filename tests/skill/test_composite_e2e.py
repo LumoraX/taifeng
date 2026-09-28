@@ -176,7 +176,7 @@ async def test_three_level_dispatch_emits_correct_stack(
             tool_calls=[{
                 "id": "tc_mid",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "middle", "args": {"q": "x"}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "middle", "args": {"q": "x"}}',
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
@@ -186,7 +186,7 @@ async def test_three_level_dispatch_emits_correct_stack(
             tool_calls=[{
                 "id": "tc_leaf",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "leaf", "args": {"q": "y"}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {"q": "y"}}',
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
@@ -291,7 +291,7 @@ async def test_max_depth_blocks_grandchild_dispatch(
             tool_calls=[{
                 "id": "tc_mid",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "middle", "args": {}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "middle", "args": {}}',
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
@@ -300,7 +300,7 @@ async def test_max_depth_blocks_grandchild_dispatch(
             tool_calls=[{
                 "id": "tc_leaf_blocked",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "leaf", "args": {}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "leaf", "args": {}}',
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
@@ -376,7 +376,7 @@ async def test_runtime_cycle_detected_when_child_calls_entry(
             tool_calls=[{
                 "id": "tc_mid",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "middle", "args": {}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "middle", "args": {}}',
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),
@@ -385,7 +385,7 @@ async def test_runtime_cycle_detected_when_child_calls_entry(
             tool_calls=[{
                 "id": "tc_cycle",
                 "name": "call_skill",
-                "arguments": '{"skill_id": "entry", "args": {}}',
+                "arguments": '{"reason": "测试派发", "skill_id": "entry", "args": {}}',
             }],
             usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
         ),

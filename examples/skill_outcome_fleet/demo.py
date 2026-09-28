@@ -76,7 +76,7 @@ def build_routes(
                 {
                     "id": f"tc_{s.id}_{c}",
                     "name": "call_skill",
-                    "arguments": json.dumps({"skill_id": c, "args": {}}),
+                    "arguments": json.dumps({"skill_id": c, "args": {}, "reason": f"派发 {c} 取得专项结论"}),
                 }
                 for c in children
             ]

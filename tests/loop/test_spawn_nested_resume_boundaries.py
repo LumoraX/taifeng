@@ -87,13 +87,13 @@ async def test_spawn_nested_depth3_resume(d3_skills, threads_dir):
         "D3L1_MARK": [
             SimTurn(text="L1 调用 L2。", tool_calls=[
                 {"id": "c_l2", "name": "call_skill",
-                 "arguments": '{"skill_id": "d3l2", "args": {}}'}]),
+                 "arguments": '{"reason": "测试派发", "skill_id": "d3l2", "args": {}}'}]),
             SimTurn(text="L1 最终 D3_DONE"),
         ],
         "D3L2_MARK": [
             SimTurn(text="L2 调用 L3。", tool_calls=[
                 {"id": "c_l3", "name": "call_skill",
-                 "arguments": '{"skill_id": "d3l3", "args": {}}'}]),
+                 "arguments": '{"reason": "测试派发", "skill_id": "d3l3", "args": {}}'}]),
             SimTurn(text="L2 结论 L2_OK"),
         ],
         "D3L3_MARK": [
@@ -229,7 +229,7 @@ async def test_join_barrier_fires_after_nested_resume(barrier_skills, threads_di
         "B_EXPERT_MARK": [
             SimTurn(text="专家调子步。", tool_calls=[
                 {"id": "c_step", "name": "call_skill",
-                 "arguments": '{"skill_id": "b-step", "args": {}}'}]),
+                 "arguments": '{"reason": "测试派发", "skill_id": "b-step", "args": {}}'}]),
             SimTurn(text="专家完成 B_EXPERT_DONE"),
         ],
         "B_STEP_MARK": [

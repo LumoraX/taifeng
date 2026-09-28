@@ -32,6 +32,7 @@ from taifeng.loop.event import (
 from taifeng.loop.tool_batch import parse_tool_arguments
 from taifeng.loop.turn import TurnRunner
 from taifeng.suspend.resolver import CHAIN_CANCELLED_RESULT
+from taifeng.tool.arg_validation import arguments_rejection
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
@@ -667,11 +668,11 @@ class ChildResumeChain:
                 "script_executors": self._engine._script_executors,
             },
         )
-        if args_error is not None:
-            # 参数非法 → 不执行 handler,以 invalid_arguments error 结算(同派发层规则)
-            result = ToolResult.error(
-                f"invalid_arguments: {args_error}", reason="invalid_arguments"
-            )
+        rejection = arguments_rejection(
+            self._engine._tool_runtime._registry, name, args, args_error)  # noqa: SLF001
+        if rejection is not None:
+            # 参数非法(坏 JSON / 不合 schema)→ 不执行 handler,同派发层规则结算
+            result = ToolResult.error(rejection, reason="invalid_arguments")
         else:
             if self._engine._permission_policy is not None:
                 self._engine._permission_policy.preapprove(call_id)

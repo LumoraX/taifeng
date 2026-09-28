@@ -19,7 +19,7 @@
 
 1. **声明即可见**：请求 tools = `visible_tool_names()` ∩ registry 已注册（未注册静默不可见——现状保留，同源化后只剩这一处过滤点）。
 2. **可见才可执行**：`tool_batch` 在 PreToolUse hook **之前**校验 `req.name ∈ visible_tools`；不在集合 → is_error 的 `function_call_output` 核销 call_id（LLM 可见错误自行恢复，turn 不中断），不消耗 hook / 权限 / 锁资源；`ToolCallCompleted(is_error=True)` 照常 emit（R3）。
-2b. **参数合法才可执行**：紧随 not_offered（工具不存在是更根本的错）、仍在 hook 之前，`req.arguments_error` 非 None → `invalid_arguments` is_error 输出核销 call_id，**不执行 handler、不退化为 `{}`**（禁止 silent fallback）；两类拒绝共用 `_reject_before_dispatch`。resumed tool 路径不经 batch 层，同样用 `parse_tool_arguments`，出错即以 error fco 结算不 dispatch。
+2b. **参数合法才可执行**：紧随 not_offered（工具不存在是更根本的错）、仍在 hook 之前，经 `arguments_rejection` 判定——`req.arguments_error` 非 None（非法 JSON / 非对象），或参数不合 `input_schema`（见 [tool-argument-validation](tool-argument-validation.md)）→ `invalid_arguments` is_error 输出核销 call_id，**不执行 handler、不退化为 `{}`**（禁止 silent fallback）；两类拒绝共用 `_reject_before_dispatch`。resumed tool 路径不经 batch 层，同样经 `arguments_rejection`，出错即以 error fco 结算不 dispatch。
 3. **传入基准按调用点**：turn 主路径传请求名集（严格同源）；retry_tool 重跑传声明层 `visible_tool_names()`（热重载移除声明则如实拒）；声明式编排 turn 同源传入（只合成 call_skill，内核发起非幻觉面）。
 4. **豁免面**：engine 的 resume 重放（原始派发已校验且人已批准）与业务直发工具 Op（非 LLM 发起）不经 batch 层，不做**可见性**校验；参数合法性校验不豁免（resume 重放同样走 `parse_tool_arguments`）。
 5. **composite 空壳校验**：`child_skills / tool_names / scripts` 至少其一（scripts-only composite 有 agency，合法）；atomic 仍禁声明 tool_names。

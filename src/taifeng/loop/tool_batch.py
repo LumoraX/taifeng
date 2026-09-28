@@ -21,11 +21,14 @@ from typing import TYPE_CHECKING, Any
 from taifeng.context.truncate import truncate_middle
 from taifeng.loop.event import ToolCallCompleted
 from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获,不可放 TYPE_CHECKING
+from taifeng.tool.arg_validation import arguments_rejection
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
     # 仅注解用 → 放 TYPE_CHECKING 块(ruff TC003;from __future__ annotations 下运行时不需要)
     from collections.abc import Awaitable, Callable
+
+    from taifeng.tool.registry import ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,7 @@ async def dispatch_batch(
     submission_id: str,
     entry_skill_id: str,
     visible_tools: frozenset[str],
+    registry: ToolRegistry | None = None,
 ) -> list[ToolCallOutcome]:
     """并发执行一批 tool call,返回按 ``index`` 升序的结果列表。
 
@@ -115,6 +119,8 @@ async def dispatch_batch(
     - ``thread_id`` / ``submission_id`` / ``entry_skill_id``:构造 HookContext 用。
     - ``visible_tools``:本轮**实际注入请求**的工具名集(与请求严格同源,tool-whitelist
       契约)——LLM 调用集合外的工具在 hook 之前被拒,以 is_error 输出核销。
+    - ``registry``:取 ``input_schema`` 做参数预校验(tool-argument-validation)。生产
+      调用点必传;None 时只做 JSON 解析校验(仅供不带注册表的单测替身)。
     """
 
     async def _run(req: ToolCallRequest) -> ToolCallOutcome:
@@ -124,6 +130,7 @@ async def dispatch_batch(
                 req, runtime=runtime, ctx_for=ctx_for, hooks=hooks, emit=emit,
                 thread_id=thread_id, submission_id=submission_id,
                 entry_skill_id=entry_skill_id, visible_tools=visible_tools,
+                registry=registry,
             )
 
     outcomes = await asyncio.gather(*(_run(r) for r in requests))
@@ -142,6 +149,7 @@ async def _dispatch_one(
     submission_id: str,
     entry_skill_id: str,
     visible_tools: frozenset[str],
+    registry: ToolRegistry | None,
 ) -> ToolCallOutcome:
     """执行单条:可执行校验 → PreToolUse hook → dispatch → PostToolUse hook → emit。
 
@@ -160,12 +168,12 @@ async def _dispatch_one(
             start=start, emit=emit,
         )
     # 参数校验(同样在 hook 之前,次于 not_offered——工具不存在是更根本的错):
-    # 坏 JSON / 非对象参数不执行 handler,以 is_error 输出核销 call_id 让模型改参
-    # 重试;不退化为 {} 静默执行(禁止 silent fallback)
-    if req.arguments_error is not None:
+    # 坏 JSON / 非对象 / 不合 input_schema 的参数不执行 handler,以 is_error 输出
+    # (含违例清单 + 期望 schema)核销 call_id 让模型改参重试;不退化为 {} 静默执行
+    rejection = arguments_rejection(registry, req.name, req.arguments, req.arguments_error)
+    if rejection is not None:
         return await _reject_before_dispatch(
-            req, f"invalid_arguments: {req.arguments_error}",
-            reason="invalid_arguments", start=start, emit=emit,
+            req, rejection, reason="invalid_arguments", start=start, emit=emit,
         )
 
     try:

@@ -104,7 +104,7 @@ def test_root_history_after_child_resume_renders_valid() -> None:
     hist = [
         user_message("患者数据", thread_id=tid),
         assistant_message("先做初诊", thread_id=tid, model="m"),
-        function_call("CS1", "call_skill", '{"skill_id":"initial-scan"}', thread_id=tid),
+        function_call("CS1", "call_skill", '{"reason": "测试派发", "skill_id":"initial-scan"}', thread_id=tid),
         # resume 回填：output 必须用 CS1（与上面的 function_call 配对）
         function_call_output("CS1", "初诊结果", thread_id=tid),
         system_injection("suspend_resolved:rec_root", thread_id=tid, source="suspend_resolved"),

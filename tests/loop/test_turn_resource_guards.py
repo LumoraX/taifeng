@@ -76,7 +76,7 @@ def guard_skills(tmp_path):
 def _call_skill_turn(i: int) -> SimTurn:
     return SimTurn(text=f"第{i}次派发。", tool_calls=[
         {"id": f"c{i}", "name": "call_skill",
-         "arguments": '{"skill_id": "guard-sub", "args": {}}'}])
+         "arguments": '{"reason": "测试派发", "skill_id": "guard-sub", "args": {}}'}])
 
 
 async def test_denial_circuit_opens_and_terminates(guard_skills, threads_dir):

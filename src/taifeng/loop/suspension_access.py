@@ -22,6 +22,7 @@ from taifeng.loop.rewind import derive_rewind_log
 from taifeng.loop.tool_batch import parse_tool_arguments
 from taifeng.loop.turn import TurnRunner
 from taifeng.suspend.record import SuspensionRecord
+from taifeng.tool.arg_validation import arguments_rejection
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
@@ -272,11 +273,11 @@ class SuspensionAccess:
                 "script_executors": self._engine._script_executors,
             },
         )
-        if args_error is not None:
-            # 参数非法 → 不执行 handler,以 invalid_arguments error 结算(同派发层规则)
-            result = ToolResult.error(
-                f"invalid_arguments: {args_error}", reason="invalid_arguments"
-            )
+        rejection = arguments_rejection(
+            self._engine._tool_runtime._registry, name, args, args_error)  # noqa: SLF001
+        if rejection is not None:
+            # 参数非法(坏 JSON / 不合 schema)→ 不执行 handler,同派发层规则结算
+            result = ToolResult.error(rejection, reason="invalid_arguments")
         else:
             # resume：人类已批准该挂起 call → 预批准，避免重跑时再次触发 prompter（防无限挂起）
             if self._engine._permission_policy is not None:

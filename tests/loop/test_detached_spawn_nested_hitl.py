@@ -110,7 +110,7 @@ async def test_spawn_nested_child_skill_hitl_resume(nested_skills, threads_dir):
         "NESTED_EXPERT_MARK": [
             SimTurn(text="专家编排：调用子步骤。", tool_calls=[
                 {"id": "call_step", "name": "call_skill",
-                 "arguments": '{"skill_id": "nested-step", "args": {}}'},
+                 "arguments": '{"reason": "测试派发", "skill_id": "nested-step", "args": {}}'},
             ]),
             SimTurn(text="专家最终结论 EXPERT_DONE"),
         ],
@@ -268,10 +268,10 @@ async def test_spawn_nested_multi_round_hitl_resume(nested2_skills, threads_dir)
         "EXPERT2_MARK": [
             SimTurn(text="调用 step-a。", tool_calls=[
                 {"id": "call_a", "name": "call_skill",
-                 "arguments": '{"skill_id": "step-a", "args": {}}'}]),
+                 "arguments": '{"reason": "测试派发", "skill_id": "step-a", "args": {}}'}]),
             SimTurn(text="调用 step-b。", tool_calls=[
                 {"id": "call_b", "name": "call_skill",
-                 "arguments": '{"skill_id": "step-b", "args": {}}'}]),
+                 "arguments": '{"reason": "测试派发", "skill_id": "step-b", "args": {}}'}]),
             SimTurn(text="两步完成 EXPERT2_DONE"),
         ],
         "STEP_A_MARK": [

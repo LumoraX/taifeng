@@ -218,6 +218,7 @@ class TurnTooling:
             entry_skill_id=self.__tooling_owner.entry_skill.id,
             # retry 重跑仍受声明层可见集约束（原始派发已过校验；热重载移除声明则如实拒）
             visible_tools=self.__tooling_owner.entry_skill.visible_tool_names(),
+            registry=self.__tooling_owner.tool_runtime._registry,  # noqa: SLF001
         )
         outcome = outcomes[0]
         if outcome.suspend is not None:

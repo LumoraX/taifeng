@@ -117,7 +117,7 @@ async def _run(tmp_path: Path, threads_dir: Path) -> tuple[list, dict[str, list]
                 tool_calls=[{
                     "id": "call_dispatch",
                     "name": "call_skill",
-                    "arguments": '{"skill_id": "watcher", "args": {"input": "看两帧"}}',
+                    "arguments": '{"reason": "测试派发", "skill_id": "watcher", "args": {"input": "看两帧"}}',
                 }]
             ),
             # 子第 1 轮：取第一帧
