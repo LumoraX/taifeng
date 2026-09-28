@@ -388,6 +388,34 @@ def _check_envelope_epoch(
     _validate_takeover(envelope, committed_epoch=committed_epoch, line_no=line_no)
 
 
+def _decode_pending_envelope(
+    value: dict[str, object],
+    pending: list[JournalEnvelope],
+    *,
+    session_id: str,
+    tail_seq: int,
+    tail_hash: str,
+    committed_epoch: int | None,
+    line_no: int,
+) -> tuple[JournalEnvelope, str]:
+    """解析 batch 内一条 envelope：epoch 单调、seq/hash chain 接续当前 pending 尾。"""
+    envelope = _parse_model(JournalEnvelope, value, line_no=line_no)
+    _check_envelope_epoch(
+        envelope,
+        batch_epoch=pending[0].writer_epoch if pending else None,
+        committed_epoch=committed_epoch,
+        line_no=line_no,
+    )
+    fingerprint = _validate_envelope(
+        envelope,
+        session_id=session_id,
+        expected_seq=tail_seq + len(pending) + 1,
+        expected_previous_hash=pending[-1].record_hash if pending else tail_hash,
+        line_no=line_no,
+    )
+    return envelope, fingerprint
+
+
 def decode_committed_lines(
     lines: Sequence[bytes | str],
     *,
@@ -445,20 +473,13 @@ def decode_committed_lines(
             continue
         if pending_begin is None:
             raise JournalIntegrityError("envelope outside batch", line_no=line_no)
-        envelope = _parse_model(JournalEnvelope, value, line_no=line_no)
-        _check_envelope_epoch(
-            envelope,
-            batch_epoch=pending_envelopes[0].writer_epoch if pending_envelopes else None,
-            committed_epoch=committed_epoch,
-            line_no=line_no,
-        )
-        expected_seq = tail_seq + len(pending_envelopes) + 1
-        expected_hash = pending_envelopes[-1].record_hash if pending_envelopes else tail_hash
-        fingerprint = _validate_envelope(
-            envelope,
+        envelope, fingerprint = _decode_pending_envelope(
+            value,
+            pending_envelopes,
             session_id=session_id,
-            expected_seq=expected_seq,
-            expected_previous_hash=expected_hash,
+            tail_seq=tail_seq,
+            tail_hash=tail_hash,
+            committed_epoch=committed_epoch,
             line_no=line_no,
         )
         pending_envelopes.append(envelope)
