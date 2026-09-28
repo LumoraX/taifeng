@@ -43,7 +43,11 @@ created → server_model → (text_delta | reasoning_delta | tool_call_delta)*
 - `tools` 字段格式 `[{name, description, input_schema}]`（注意是 `input_schema` 不是 `parameters`）
 - `messages` 中 assistant role 的 tool_calls SHALL 翻译为 `content: [{type: "tool_use", id, name, input}]`
 - `messages` 中 tool role 的 result SHALL 翻译为 `user` role + `content: [{type: "tool_result", tool_use_id, content}]`
-- `cache_breakpoints` SHALL 翻译为对应 content block 的 `cache_control: {type: "ephemeral"}` 字段
+- `cache_breakpoints` SHALL 翻译为对应 content block 的 `cache_control` 字段（anthropic-cache，ADR 0062）：
+  - TTL：`ttl_seconds=300` → `{type: "ephemeral"}`；`3600` → `{type: "ephemeral", ttl: "1h"}`；其他值 → `InvalidRequestError`。
+    同一请求所有标记 SHALL 用同一 TTL（断点 TTL 不一致 → `InvalidRequestError`）；`AnthropicClient(cache_ttl_seconds=)` 统一覆盖。
+  - 尾部滚动断点：`AnthropicClient(cache_tail=True)`（默认）时，除 anchor 外 SHALL 在最后一条消息的最后一个非 thinking 块上
+    再打一个同 TTL 的标记（该块已是 anchor 则不重复）；总标记数 ≤ 2。`cache_tail=False` 只打 anchor。
 
 SSE 事件 SHALL 按 Anthropic `event: <type>\ndata: {...}` 双行格式解析：
 
@@ -69,6 +73,10 @@ SSE 事件 SHALL 按 Anthropic `event: <type>\ndata: {...}` 双行格式解析�
 #### Scenario: cache_breakpoints 注入 cache_control
 - **WHEN** `ApiRequest.cache_breakpoints` 含一个指向 `messages[0]` 的 breakpoint
 - **THEN** 实际发往 Anthropic 的 body 中 `messages[0].content[-1]` SHALL 含 `cache_control: {type: "ephemeral"}`
+
+#### Scenario: 工具循环的尾部滚动缓存
+- **WHEN** 请求含指向 `messages[0]` 的 anchor，最后一条消息是 `tool_result`，客户端为默认配置
+- **THEN** body 中 `messages[0]` 末块与最后一条消息的 `tool_result` 块 SHALL 各带 `cache_control: {type: "ephemeral"}`
 
 #### Scenario: cache 元数据从 message_start 直接取
 - **WHEN** Anthropic 返回的 `message_start.message.usage` 含 `cache_creation_input_tokens: 100` + `cache_read_input_tokens: 200`

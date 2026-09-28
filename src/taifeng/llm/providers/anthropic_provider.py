@@ -51,6 +51,11 @@ from taifeng.llm.providers._shared import (
     parse_sse_event,
     transport_error,
 )
+from taifeng.llm.providers.anthropic_cache import (
+    cache_control_for,
+    mark_tail,
+    resolve_cache_control,
+)
 from taifeng.llm.providers.anthropic_thinking import (
     ThinkingAccumulator,
     apply_thinking_config,
@@ -105,6 +110,7 @@ def _to_anthropic_messages(
     req: ApiRequest,
     *,
     cache_indexes: set[int],
+    cache_control: dict[str, Any] | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """把 ``ApiRequest`` 翻译为 Anthropic ``system`` + ``messages``。
 
@@ -116,9 +122,10 @@ def _to_anthropic_messages(
         - role=``tool`` → 翻译为 ``user`` 角色 + ``content: [{type: "tool_result",
           tool_use_id, content}]``（Anthropic 把 tool result 当 user 输入）
         - 连续同 role 消息会按 Anthropic 要求合并 content 块
-        - ``cache_indexes`` 中索引对应的消息最后一个 content block 加
-          ``cache_control: {type: "ephemeral"}``
+        - ``cache_indexes`` 中索引对应的消息最后一个 content block 加 ``cache_control``
+          （缺省 ``{type: "ephemeral"}``；TTL 由调用方经 ``cache_control`` 给出，见 anthropic_cache）
     """
+    control = cache_control or {"type": "ephemeral"}
     # system prompt 合并
     sys_parts = [s for s in req.system_prompt if s]
     system_str: str | None = "\n\n".join(sys_parts) if sys_parts else None
@@ -185,7 +192,7 @@ def _to_anthropic_messages(
 
         # cache_control 注入到最后一个 content block
         if idx in cache_indexes and content_blocks:
-            content_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+            content_blocks[-1]["cache_control"] = dict(control)
 
         if not content_blocks:
             continue
@@ -228,8 +235,13 @@ class AnthropicSession:
         anthropic_version: str = _DEFAULT_ANTHROPIC_VERSION,
         previous_cache_read: int = 0,
         thinking_budget_tokens: int | None = None,
+        cache_tail: bool = True,
+        cache_ttl_seconds: int | None = None,
     ) -> None:
         self._api_key = api_key
+        # anthropic-cache：尾部滚动断点开关 + 统一 TTL 覆盖（None = 按断点声明）
+        self._cache_tail = cache_tail
+        self._cache_ttl_seconds = cache_ttl_seconds
         # extended thinking 预算（None = 不开，请求级 reasoning_effort 可覆盖）
         self._thinking_budget = thinking_budget_tokens
         self._model = model
@@ -259,9 +271,13 @@ class AnthropicSession:
         # 与 openai_compat 同一道门控:未声明 image 输入能力,序列化前显式拒图
         assert_text_only_request(request)
         cache_indexes = {bp.index for bp in request.cache_breakpoints}
+        control = resolve_cache_control(request.cache_breakpoints, self._cache_ttl_seconds)
         system_str, messages = _to_anthropic_messages(
-            request, cache_indexes=cache_indexes,
+            request, cache_indexes=cache_indexes, cache_control=control,
         )
+        if self._cache_tail:
+            # 尾部滚动断点：下一次请求按缓存价读取本次完整前缀（见 anthropic_cache）
+            mark_tail(messages, control)
         payload: dict[str, Any] = {
             "model": request.model or self._model,
             "messages": messages,
@@ -532,6 +548,10 @@ class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
             开启后 thinking 文本经 ``reasoning_delta`` 流出，thinking 块连同签名经
             ``reasoning_state`` 落史，工具续传时原样回传（thinking-passback）。
             请求级 ``reasoning_effort`` 显式给出时覆盖本值。
+        cache_tail: True（默认）→ 除内核的 cache anchor 外，在最后一条消息再打一个
+            ``cache_control``，工具循环里上一轮前缀按缓存价读取。False = 只打 anchor。
+        cache_ttl_seconds: 统一覆盖本客户端所有缓存标记的 TTL，只接受 300 / 3600
+            （1 小时档写入价更高、适合长间隔会话）；None = 按请求断点声明（默认 300）。
     """
 
     def __init__(
@@ -544,9 +564,15 @@ class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
         timeout_seconds: float = 300.0,
         anthropic_version: str = _DEFAULT_ANTHROPIC_VERSION,
         thinking_budget_tokens: int | None = None,
+        cache_tail: bool = True,
+        cache_ttl_seconds: int | None = None,
     ) -> None:
-        # 构造期校验预算下限（请求期同一校验，这里提前暴露配置错误）
+        # 构造期校验预算下限与 TTL 档位（请求期同一校验，这里提前暴露配置错误）
         resolve_thinking_budget(thinking_budget_tokens, None)
+        if cache_ttl_seconds is not None:
+            cache_control_for(cache_ttl_seconds)
+        self._cache_tail = cache_tail
+        self._cache_ttl_seconds = cache_ttl_seconds
         self._api_key = api_key
         self._default_model = model
         self._thinking_budget = thinking_budget_tokens
@@ -572,6 +598,8 @@ class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
             anthropic_version=self._anthropic_version,
             previous_cache_read=self._previous_cache_read,
             thinking_budget_tokens=self._thinking_budget,
+            cache_tail=self._cache_tail,
+            cache_ttl_seconds=self._cache_ttl_seconds,
         )
 
     def record_cache_read(self, value: int) -> None:

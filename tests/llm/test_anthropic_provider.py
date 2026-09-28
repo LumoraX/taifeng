@@ -567,12 +567,13 @@ def _image_part() -> ImagePart:
 
 
 def _payload_session() -> AnthropicSession:
-    """构造一个只用于组 payload 的 session(不发请求)。"""
+    """构造一个只用于组 payload 的 session(不发请求;关尾部缓存断点,只看块映射)。"""
     return AnthropicSession(
         api_key="sk-ant",
         model="claude-x",
         base_url="https://api.anthropic.com",
         cancel=CancellationToken(),
+        cache_tail=False,
     )
 
 

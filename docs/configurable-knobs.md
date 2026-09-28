@@ -189,6 +189,9 @@ class TenantPolicySource:
 | `anthropic_version` | `"2023-06-01"` | API 版本 header |
 | `extra_headers` | `None` | 额外 header（third-party gateway 用） |
 | `timeout_seconds` | `300.0` | httpx 超时 |
+| `thinking_budget_tokens` | `None` | extended thinking 预算（≥1024；请求级 `reasoning_effort` 覆盖；ADR 0046） |
+| `cache_tail` | `True` | 除 cache anchor 外在最后一条消息再打 `cache_control`（尾部滚动断点）：工具循环里上一轮前缀按缓存价读取。`False` = 只打 anchor（ADR 0062） |
+| `cache_ttl_seconds` | `None` | 统一覆盖所有缓存标记的 TTL，只接受 `300` / `3600`（1h 档写入价约为 2 倍，适合间隔超过 5 分钟的会话）；`None` = 按断点声明（默认 300） |
 
 #### `GeminiClient`（Google AI Studio Gemini）
 
