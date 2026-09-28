@@ -713,10 +713,10 @@ binding.detach()       # 卸载本绑定的全部工具
 `pure`（且可并行）/ `idempotent`，其余与默认一样按 `external_non_idempotent`（崩溃后挂起交人）。只对自己信任的
 server 打开。`register_mcp_tools_async` 同名参数语义相同。
 
-`attach_images`（默认 `True`）：工具结果里的 MCP `image` 块转为 `ToolResult.attachments`，走工具图片附件的
-落盘前 admission——宿主须在 `EnginePool.create(image_input_policy=ImageInputPolicy(enabled=True, ...))` 启用
-策略，否则带图的调用以 `tool_attachment_rejected` 判错。不需要看图的宿主传 `False`，图片降级为
-`[image: <mime>, <n> bytes, not attached ...]` 占位文本。`structuredContent` 不需要旋钮：恒进
+`attach_images`（默认 `False`）：默认把 MCP `image` 块降级为 `[image: <mime>, <n> bytes, not attached]` 占位文本
+（模型知道有图、看不到内容，调用照常成功）。要让模型看图，传 `True` 并在
+`EnginePool.create(image_input_policy=ImageInputPolicy(enabled=True, ...))` 启用策略：图片转为 `ToolResult.attachments`，
+走工具图片附件的落盘前 admission；只开 `True` 不开策略，带图的调用以 `tool_attachment_rejected` 判错。`structuredContent` 不需要旋钮：恒进
 `ToolResult.data["structured_content"]`，文本侧缺等价 JSON 时自动补上。`register_mcp_tools_async` 同名参数语义相同。
 
 `McpHttpClient.connect` 同样接受 `elicitation_handler`（语义同 §4 表）。
@@ -886,7 +886,7 @@ await pool.close()
 填补 hermes / codex / claw-code 都有但 TF 缺失的网络访问能力。**保守要求 PermissionPolicy**（与 shell_exec 同），`policy=None` 时立即拒绝。
 
 ```python
-from taifeng import make_http_request_tool
+from taifeng.tool.builtins import make_http_request_tool
 
 tool = make_http_request_tool(
     policy=my_permission_policy,   # 必填；None 时 handler 返回 reason='no_policy'
