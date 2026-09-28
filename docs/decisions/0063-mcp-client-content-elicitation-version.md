@@ -32,7 +32,8 @@ taifeng 作为 MCP 客户端有三处与规范（2025-06-18）脱节：
 2. **结果按类型投影**（`mcp/content.py`）。image → `ImageAttachmentV1` 进附件，与业务取图工具同走落盘前
    admission；structuredContent → `ToolResult.data["structured_content"]`，文本侧缺与之 JSON 等价的 text 块时
    补序列化 JSON；text 资源标注 uri 内联；blob / audio / resource_link / 未知类型给带 MIME 与字节数的显式占位，
-   base64 不进文本；形状非法 → 该次调用判错（`mcp_invalid_content`）。新增 `attach_images`（默认 True）。
+   base64 不进文本；形状非法 → 该次调用判错（`mcp_invalid_content`）。新增 `attach_images`（默认 False：
+   图片为带 MIME 与字节数的显式占位；True 时进附件并要求宿主启用 `ImageInputPolicy`）。
    `extract_text_content` 保留为同规则的纯文本投影。
 3. **server → client 路由器**（`mcp/server_messages.py`，两种传输共用）。先看 `method` 再按 id 结算（修撞号）；
    `ping` 回空 result；`elicitation/create` 交宿主注入的 `ElicitationHandler`，未注入回 -32601；其余请求 -32601；
@@ -50,9 +51,10 @@ taifeng 作为 MCP 客户端有三处与规范（2025-06-18）脱节：
   协议不兼容；一刀切只会让既有绑定（含 `examples/mcp_showcase`）全部建连失败，而换不来任何正确性。
 - **版本不在清单内时「尽量继续」**：规范说客户端不支持时 SHOULD 断开；继续意味着以未知语义解释对端消息，
   失败会在更远处以更难归因的形式出现。
-- **`attach_images` 默认 False**：兼容性好，但开启了 `ImageInputPolicy` 的宿主还得再记得翻一个开关，漏翻时模型
-  静默看不见图（只剩占位）。默认附件让「策略没开」以 `tool_attachment_rejected` 在模型与日志里如实暴露——与
-  tool-image-attachment 契约「准入期失败如实报」一致；不看图的宿主一个参数显式降级。
+- **`attach_images` 默认 True**：`ImageInputPolicy` 默认关闭，默认附图会让所有返回截图的 MCP 工具在默认配置下
+  整次调用判错（`tool_attachment_rejected`），连同一结果里的文本一起丢失——此前它们至少能拿到文本与占位。
+  默认占位不是静默：模型看到带 MIME 与字节数的 `[image: …, not attached]`，知道有图未附；要看图的宿主开策略时
+  顺带传 `attach_images=True`。
 - **structuredContent 取代 content 进模型视野**（codex 的做法）：会丢掉同一结果里的图片与人类可读摘要；taifeng
   两者都保留，只在 text 块缺等价 JSON 时补上。
 - **structuredContent 无条件追加 JSON**：遵守规范 SHOULD 的 server 已把同一 JSON 放进 text 块，无条件追加会让模型

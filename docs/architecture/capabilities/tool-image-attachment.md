@@ -62,8 +62,8 @@
 
 - 桥只做形状校验（MIME 须在 PNG / JPEG / WebP / GIF、base64 合法且非空），不合即该次调用判错
   （`mcp_invalid_content`）；资源策略仍只由宿主的 `ImageInputPolicy` 决定。
-- `attach_images=True` 为默认：宿主未启用策略时，带图的 MCP 调用以 `tool_attachment_rejected` 判错（行为契约 2、3）。
-  不需要看图的宿主显式传 `attach_images=False`，图片降级为带 MIME 与字节数的占位文本，不产附件。
+- `attach_images=False` 为默认：图片降级为带 MIME 与字节数的占位文本，不产附件，调用照常成功。
+  要看图的宿主传 `attach_images=True` 并启用策略；只开前者不开策略时，带图的 MCP 调用以 `tool_attachment_rejected` 判错（行为契约 2、3）。
 - MCP 内容里文本与图片交错时，`output` 为全部文本块按序拼接，附件按出现顺序排在其后（本契约「output 在前、
   附件在后」）；`output` 不为已附上的图片写占位，避免与附件重复表达。
 

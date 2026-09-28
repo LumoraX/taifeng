@@ -64,7 +64,7 @@ class _FakeMcp:
         return None
 
 
-async def _call_bridged(result: dict[str, Any], *, attach_images: bool = True) -> ToolResult:
+async def _call_bridged(result: dict[str, Any], *, attach_images: bool = False) -> ToolResult:
     """经真实桥注册后调用一次 handler，返回 ToolResult。"""
     specs = await register_mcp_tools_async(
         _FakeMcp(result), ToolRegistry(), attach_images=attach_images)
@@ -101,7 +101,7 @@ def test_image_placeholder_when_attachments_disabled() -> None:
     out = convert_tool_result({"content": [_image_block()]}, attach_images=False)
     assert out.attachments == ()
     size = len(_png())
-    assert out.text == f"[image: image/png, {size} bytes, not attached (attach_images=False)]"
+    assert out.text == f"[image: image/png, {size} bytes, not attached]"
 
 
 @pytest.mark.parametrize(("block", "match"), [
@@ -225,25 +225,26 @@ async def test_bridge_puts_structured_content_into_data_and_keeps_mcp_tool() -> 
     assert result.is_error is False
 
 
-async def test_bridge_attaches_images_by_default() -> None:
-    """默认 attach_images=True：image 块进 ToolResult.attachments。"""
-    result = await _call_bridged({"content": [{"type": "text", "text": "t"}, _image_block()]})
+async def test_bridge_attaches_images_when_enabled() -> None:
+    """attach_images=True：image 块进 ToolResult.attachments。"""
+    result = await _call_bridged(
+        {"content": [{"type": "text", "text": "t"}, _image_block()]}, attach_images=True)
     assert result.output == "t"
     assert [a.media_type for a in result.attachments] == ["image/png"]
 
 
 async def test_bridge_turns_invalid_content_into_error_result() -> None:
     """形状非法 → 该次调用判错（reason=mcp_invalid_content），原因对模型可见。"""
-    result = await _call_bridged({"content": [_image_block(mime="image/bmp")]})
+    result = await _call_bridged({"content": [_image_block(mime="image/bmp")]}, attach_images=True)
     assert result.is_error is True
     assert result.data["reason"] == "mcp_invalid_content"
     assert result.data["mcp_tool"] == "shot"
     assert "image/bmp" in result.output
 
 
-async def test_bridge_placeholder_mode_produces_no_attachments() -> None:
-    """attach_images=False → 占位文本、无附件（text-only 宿主用）。"""
-    result = await _call_bridged({"content": [_image_block()]}, attach_images=False)
+async def test_bridge_placeholder_by_default_produces_no_attachments() -> None:
+    """默认 attach_images=False → 占位文本、无附件（图片策略默认关闭时调用不失败）。"""
+    result = await _call_bridged({"content": [_image_block()]})
     assert result.attachments == ()
     assert result.output.startswith("[image: image/png, ")
 
@@ -270,14 +271,16 @@ _IMAGE_CAPS = ModelCapabilities(
     tool_output_modalities=frozenset({"text", "image"}))
 
 
-async def _run_turn(tmp_path: Path, threads_dir: Path, policy: ImageInputPolicy) -> dict[str, Any]:
+async def _run_turn(
+    tmp_path: Path, threads_dir: Path, policy: ImageInputPolicy, *, attach_images: bool,
+) -> dict[str, Any]:
     """模型调 MCP 桥接工具 shot → 结算 → 返回 fco payload。"""
     skills = tmp_path / "skills"
     (skills / "viewer").mkdir(parents=True)
     (skills / "viewer" / "SKILL.md").write_text(_SKILL, encoding="utf-8")
     specs = await register_mcp_tools_async(
         _FakeMcp({"content": [{"type": "text", "text": "页面截图"}, _image_block()]}),
-        ToolRegistry())
+        ToolRegistry(), attach_images=attach_images)
     client = SimClient(turns=[
         SimTurn(tool_calls=[{"id": "call_1", "name": "shot", "arguments": "{}"}]),
         SimTurn(text="看到了")], capabilities=_IMAGE_CAPS)
@@ -298,7 +301,8 @@ async def test_mcp_image_lands_in_fco_when_policy_enabled(
     tmp_path: Path, threads_dir: Path,
 ) -> None:
     """策略启用：MCP 图片经 admission 落进 fco 附件，文本为 content 的 text 部分。"""
-    payload = await _run_turn(tmp_path, threads_dir, ImageInputPolicy(enabled=True))
+    payload = await _run_turn(
+        tmp_path, threads_dir, ImageInputPolicy(enabled=True), attach_images=True)
     assert payload["output"] == "页面截图"
     assert payload["is_error"] is False
     assert [a["media_type"] for a in payload["attachments"]] == ["image/png"]
@@ -307,8 +311,19 @@ async def test_mcp_image_lands_in_fco_when_policy_enabled(
 async def test_mcp_image_rejected_explicitly_when_policy_disabled(
     tmp_path: Path, threads_dir: Path,
 ) -> None:
-    """策略未启用：按 tool-image-attachment 契约该次调用判错，原因对模型可见。"""
-    payload = await _run_turn(tmp_path, threads_dir, DISABLED_IMAGE_POLICY)
+    """显式附图但策略未启用：按 tool-image-attachment 契约该次调用判错，原因对模型可见。"""
+    payload = await _run_turn(tmp_path, threads_dir, DISABLED_IMAGE_POLICY, attach_images=True)
     assert payload["is_error"] is True
     assert "tool_attachment_rejected" in payload["output"]
+    assert "attachments" not in payload
+
+
+async def test_mcp_image_placeholder_by_default_keeps_call_successful(
+    tmp_path: Path, threads_dir: Path,
+) -> None:
+    """默认（不附图）+ 策略未启用：调用成功，文本保留，图片为显式占位。"""
+    payload = await _run_turn(tmp_path, threads_dir, DISABLED_IMAGE_POLICY, attach_images=False)
+    assert payload["is_error"] is False
+    assert payload["output"].startswith("页面截图")
+    assert "[image: image/png, " in payload["output"]
     assert "attachments" not in payload

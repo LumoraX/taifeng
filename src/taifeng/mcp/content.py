@@ -134,7 +134,7 @@ def _block_to_parts(
             return None, _image_attachment(item, where)
         mime = _require_str(item, "mimeType", where)
         size = _base64_size(_require_str(item, "data", where))
-        return f"[image: {mime}, {size} bytes, not attached (attach_images=False)]", None
+        return f"[image: {mime}, {size} bytes, not attached]", None
     if kind == "audio":
         mime = _require_str(item, "mimeType", where)
         size = _base64_size(_require_str(item, "data", where))

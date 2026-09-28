@@ -42,7 +42,7 @@ server 完成双向 JSON-RPC：本端发请求，server 也会在处理途中反
 | MCP 内容 | `ToolResult` |
 | --- | --- |
 | `text` | 原文进 `output`（各块按出现顺序换行拼接） |
-| `image` | `attach_images=True`（默认）→ `ImageAttachmentV1.from_bytes` 进 `attachments`，按出现顺序排在全部文本之后；`False` → `[image: <mime>, <n> bytes, not attached (attach_images=False)]` |
+| `image` | `attach_images=True` → `ImageAttachmentV1.from_bytes` 进 `attachments`，按出现顺序排在全部文本之后；`False` → `[image: <mime>, <n> bytes, not attached]` |
 | `audio` | `[audio: <mime>, <n> bytes, not shown: audio content is unsupported]` |
 | `resource`（text） | `[resource <uri> (<mime>)]` + 换行 + 原文 |
 | `resource`（blob） | `[resource <uri>: <mime>, <n> bytes binary, not shown]` |
@@ -108,8 +108,8 @@ server 侧：客户端请求的版本受支持 SHALL 原样回，否则回最新
 
 图片附件 SHALL 走 [tool-image-attachment](tool-image-attachment.md) 的落盘前 admission：桥只做「能否表达为
 `ImageAttachmentV1`」的形状校验；数量 / 字节 / MIME 白名单 / 尺寸 / 帧数由 loop 按宿主注入的
-`ImageInputPolicy` 执行。宿主未启用策略时，带图的 MCP 调用按该契约以 `tool_attachment_rejected` 判错；
-不需要看图的宿主以 `attach_images=False` 显式选占位档。
+`ImageInputPolicy` 执行。`attach_images` 默认 `False`（占位档，调用照常成功）；显式 `True` 但宿主未启用策略时，
+带图的 MCP 调用按该契约以 `tool_attachment_rejected` 判错。
 
 #### Scenario: 截图工具
 - **WHEN** 已绑定的 MCP 工具返回 `[text "页面截图", image/png]`，宿主启用了 `ImageInputPolicy`

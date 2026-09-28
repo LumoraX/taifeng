@@ -113,9 +113,9 @@ class _BridgeConfig:
     parallel_safe: bool
     timeout_seconds: float
     trust_annotations: bool = False
-    attach_images: bool = True
+    attach_images: bool = False
     """True → MCP image 块转 ``ToolResult.attachments``（宿主须启用 ``ImageInputPolicy``，
-    否则按 tool-image-attachment 契约该次调用判错）；False → 显式占位文本。"""
+    否则按 tool-image-attachment 契约该次调用判错）；False（默认）→ 显式占位文本。"""
 
 
 # 未信任 annotations 时的分类：远端工具一律假设有不可逆外部效果（崩溃恢复交人裁决）
@@ -254,7 +254,7 @@ async def bind_mcp_tools(
     timeout_seconds: float = 60.0,
     watch: bool = True,
     trust_annotations: bool = False,
-    attach_images: bool = True,
+    attach_images: bool = False,
 ) -> McpToolBinding:
     """注册 MCP server 的全部工具，并（默认）随 ``tools/list_changed`` 持续同步。
 
@@ -268,10 +268,10 @@ async def bind_mcp_tools(
         trust_annotations: True → 按 server 声明的 ``readOnlyHint`` / ``idempotentHint``
             细分副作用类型（只读工具另可并行）；默认 False 一律按外部不可幂等处理
             （MCP 规范：不可信 server 的提示不得据以决策）。
-        attach_images: True（默认）→ 工具结果里的 image 块转为图片附件，走
-            tool-image-attachment 契约（宿主未启用 ``ImageInputPolicy`` 时该次调用以
-            ``tool_attachment_rejected`` 判错，不静默降级）；False → 图片降级为带 MIME
-            与字节数的显式占位文本，适合不需要看图的宿主。
+        attach_images: False（默认）→ 图片降级为带 MIME 与字节数的显式占位文本（模型知道有图、
+            看不到内容）；True → 转为图片附件，走 tool-image-attachment 契约——宿主须已启用
+            ``ImageInputPolicy``，否则该次调用以 ``tool_attachment_rejected`` 判错。默认不附图：
+            图片策略默认关闭，默认附图会让所有返回截图的 MCP 工具整次调用失败（文本也丢）。
     """
     binding = McpToolBinding(
         client=client, registry=registry,
@@ -291,7 +291,7 @@ async def register_mcp_tools_async(
     parallel_safe: bool = False,
     timeout_seconds: float = 60.0,
     trust_annotations: bool = False,
-    attach_images: bool = True,
+    attach_images: bool = False,
 ) -> list[ToolSpec]:
     """一次性把 MCP server 的所有工具注册为 ToolSpec（不随 list_changed 同步）。
 
