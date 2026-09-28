@@ -49,6 +49,7 @@ from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获，�
 if TYPE_CHECKING:
     from taifeng.context.budget import (
         ContextBudget,
+        TokenCalibration,
     )
     from taifeng.context.compressor import (
         CompressionOrchestrator,
@@ -157,6 +158,9 @@ class TurnRunner:
     # 条目下标,-1 = 无缓存。采样成功后 _sample_once 推进到「发出时末项」;压缩回写
     # anchor_preserved_until;rewind 回退 cut-1;跨进程重载置 -1
     cache_anchor_index: int = -1
+    # token-accounting-calibration：上下文 token 实测校准锚点（None = 尚无实测）。
+    # 采样成功后按 provider usage 刷新；压缩改写前缀时失效；Engine 跨 turn 读回/注入。
+    token_calibration: TokenCalibration | None = None
     # 单 turn 内最大循环（LLM ↔ tool 配对次数）；超过强制 max_iterations 结束
     max_iterations: int = DEFAULT_MAX_INNER_ITERATIONS
     # turn-resource-guards：迭代预算（None → run() 按 max_iterations 自建）。

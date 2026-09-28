@@ -12,7 +12,6 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from taifeng.context.budget import ContextBudget
 from taifeng.conversation.models import function_call, system_injection
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext
@@ -243,30 +242,36 @@ async def handle_rollback(engine: AgentEngine, submission_id: str, num_turns: in
     )
 
 def handle_update_budget(engine: AgentEngine, submission_id: str, op: UpdateBudget) -> None:
-    """运行时调整 ContextBudget（部分字段）。"""
-    cur = engine._budget
-    engine._budget = ContextBudget(
-        context_window=(
-            op.context_window if op.context_window is not None else cur.context_window
-        ),
-        soft_limit_ratio=(
-            op.soft_limit_ratio if op.soft_limit_ratio is not None else cur.soft_limit_ratio
-        ),
-        hard_limit_ratio=(
-            op.hard_limit_ratio if op.hard_limit_ratio is not None else cur.hard_limit_ratio
-        ),
-        preserve_tail_messages=(
-            op.preserve_tail_messages
-            if op.preserve_tail_messages is not None
-            else cur.preserve_tail_messages
-        ),
-    )
+    """运行时调整 ContextBudget（部分字段）。
+
+    只覆盖 op 中显式给出（非 None）的字段，其余字段（含 ``max_request_bytes``）
+    原样保留——此前逐字段重建会把未列出的字段悄悄重置回默认值。
+
+    新值构造期校验失败（如缩小窗口后预留 >= 窗口）→ 记 error 日志并保持原预算，
+    不让一个非法 Op 打断 engine 主循环。
+    """
+    from dataclasses import replace
+
+    changes = {
+        name: getattr(op, name)
+        for name in (
+            "context_window", "soft_limit_ratio", "hard_limit_ratio",
+            "preserve_tail_messages", "output_reserve_tokens",
+        )
+        if getattr(op, name) is not None
+    }
+    try:
+        engine._budget = replace(engine._budget, **changes)
+    except ValueError:
+        logger.exception("budget update rejected (kept previous budget): %s", changes)
+        return
     logger.info(
-        "budget updated: window=%d soft=%.2f hard=%.2f tail=%d",
+        "budget updated: window=%d soft=%.2f hard=%.2f tail=%d reserve=%d",
         engine._budget.context_window,
         engine._budget.soft_limit_ratio,
         engine._budget.hard_limit_ratio,
         engine._budget.preserve_tail_messages,
+        engine._budget.output_reserve_tokens,
     )
 
 async def handle_update_instructions(

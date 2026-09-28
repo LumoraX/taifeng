@@ -280,11 +280,27 @@ result.new_history
 
 契约：[capabilities/postcompact-state-reinjection.md](capabilities/postcompact-state-reinjection.md)。demo：`examples/compression_showcase/pinned_demo.py`（mock 可跑）。
 
+## 上下文 token 计数（token-accounting-calibration）
+
+所有「上下文占了多少」的判断——压缩触发、预算提示、发送前预检、`engine.estimate_tokens()`——
+走同一个 `calibrated_history_tokens`：
+
+- **有实测锚点**：`provider 实测 prompt token + 锚点之后新增条目的 len/3.5 粗估`。锚点在每次
+  采样成功时与 cache anchor 同一处刷新（位置 = 发出时 history 长度）。实测天然含 system prompt、
+  工具 schema、协议模板开销。
+- **锚点失效**（压缩改写前缀 / rewind 截断）：`全量粗估 + 上次测得的 overhead`。
+- **从未实测**（新会话首次采样前 / 冷重载后）：全量粗估。
+
+`TokenUsage.input_tokens` 跨 provider 统一为含缓存的完整 prompt 数（Anthropic 在映射层归一）。
+`ContextBudget.output_reserve_tokens` 从窗口中扣除输出预留后再按比例算 soft / hard。
+
+契约：[capabilities/token-accounting-calibration.md](capabilities/token-accounting-calibration.md)。决策：ADR 0043。
+
 ## 预算自知提示（budget-awareness，规则② 原语）
 
 压缩是「系统替模型收拾上下文」；预算自知是「让模型自己知道快撞上限、从而主动收敛」——
 二者互补。`TurnRunner._maybe_inject_budget_hint` 在每次迭代顶部、`_maybe_compress(pre_turn)`
-**之前**按当前 history 估算用量（复用 `estimate_history_tokens`），穿越 `soft_limit` 时往 history
+**之前**按当前 history 估算用量（与压缩同一口径，见下节「上下文 token 计数」），穿越 `soft_limit` 时往 history
 尾追一条 `system_injection(source="budget_hint")` 中性预算事实（`"Context budget: ~X% ... (~M
 tokens until the hard limit)."`）+ emit `budget_hint_injected`。
 

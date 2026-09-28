@@ -191,7 +191,51 @@ async def drive_wait_any(engine: Any, res: Any) -> None:
                     what="root turn_completed", wait_seconds=300.0)
 
 
+def _last_root_usage(res: Any) -> dict[str, Any]:
+    """最近一个 root turn_completed 携带的 usage（本 turn 所有采样累计）。"""
+    for msg in reversed(res.events):
+        if msg.kind == "turn_completed" and msg.data.get("is_root"):
+            return dict(msg.data.get("usage") or {})
+    raise AssertionError("未观测到 root turn_completed")
+
+
+async def drive_token_calibration(engine: Any, res: Any) -> None:
+    """token 实测校准真实验证（ADR 0043）：用校准后的估算**预测**下一轮 prompt 大小。
+
+    第 1 轮（无工具单采样）结束后，按 engine.estimate_tokens()（实测锚点 + 增量粗估）
+    加上第 2 轮用户消息的粗估，预测第 2 轮 provider 实测的 prompt token；同时算纯
+    len/3.5 粗估的预测作对照。断言：校准预测误差 < 20%，且严格优于纯粗估。
+    """
+    from taifeng.context.budget import estimate_history_tokens, estimate_text_tokens
+
+    await engine.submit(taifeng.UserMessage(text="用一句话回答：为什么天空是蓝色的？"))
+    await _wait_for(res, lambda m: _root_completions(res) >= 1,
+                    what="第1轮 root turn_completed", wait_seconds=240.0)
+    first = _last_root_usage(res)
+    assert int(first.get("input_tokens") or 0) > 0, f"provider 未回报 usage: {first}"
+
+    second_text = "再用一句话补充：为什么日落时天空偏红？"
+    calibrated_pred = engine.estimate_tokens() + estimate_text_tokens(second_text)
+    naive_pred = (estimate_history_tokens(engine.history_snapshot())
+                  + estimate_text_tokens(second_text))
+
+    await engine.submit(taifeng.UserMessage(text=second_text))
+    await _wait_for(res, lambda m: _root_completions(res) >= 2,
+                    what="第2轮 root turn_completed", wait_seconds=240.0)
+    measured = int(_last_root_usage(res).get("input_tokens") or 0)
+    assert measured > 0, "第2轮 provider 未回报 usage"
+
+    cal_err = abs(calibrated_pred - measured) / measured
+    naive_err = abs(naive_pred - measured) / measured
+    print(f"  [calibration] 实测={measured} 校准预测={calibrated_pred}"
+          f"（误差 {cal_err:.1%}） 纯粗估预测={naive_pred}（误差 {naive_err:.1%}）")
+    assert cal_err < 0.20, f"校准预测误差过大: {cal_err:.1%}"
+    assert cal_err < naive_err, (
+        f"校准预测({cal_err:.1%}) 未优于纯粗估({naive_err:.1%})")
+
+
 DRIVERS: dict[str, Any] = {
+    "token_calibration": drive_token_calibration,
     "suspend_resume": drive_suspend_resume,
     "turn_rewind": drive_turn_rewind,
     "thread_rewind": drive_thread_rewind,

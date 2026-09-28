@@ -11,7 +11,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from taifeng.context.budget import estimate_history_tokens
+from taifeng.context.budget import (
+    build_token_calibration,
+    calibrated_history_tokens,
+    estimate_history_tokens,
+)
 from taifeng.context.budget_hint import evaluate_budget_hint, render_budget_hint
 from taifeng.loop.event import BudgetHintInjected, EngineLog, PinnedStateReinjected
 from taifeng.loop.turn_helpers import _latest_user_text
@@ -152,13 +156,37 @@ class TurnContextLoad:
         }))
         return new_history
 
-    def history_token_estimate(self) -> int:
-        """按本 turn 的图片策略与业务估算器计算完整历史成本。"""
+    def estimate_items(self, items: list[ResponseItem]) -> int:
+        """本地粗估一段 items 的 token（按本 turn 的图片策略与业务估算器）。"""
         return estimate_history_tokens(
-            self.__ctxload_owner.history_buffer,
+            items,
             image_input_policy=self.__ctxload_owner.image_input_policy,
             input_cost_estimator=self.__ctxload_owner.input_cost_estimator,
             model=self.__ctxload_owner.entry_skill.model or "",
+        )
+
+    def history_token_estimate(self) -> int:
+        """当前上下文 token 占用：有实测锚点走「实测 + 增量粗估」，否则退回粗估。"""
+        return calibrated_history_tokens(
+            self.__ctxload_owner.history_buffer,
+            self.__ctxload_owner.token_calibration,
+            estimate=self.estimate_items,
+        )
+
+    def calibrate_from_usage(self, sent_history_len: int, prompt_tokens: int) -> None:
+        """采样成功后以 provider 实测 prompt token 数刷新校准锚点。
+
+        Args:
+            sent_history_len: 请求发出时 history 长度（锚点位置）。
+            prompt_tokens: provider 回报的完整 prompt token 数；<= 0 表示该 provider
+                没回报 usage，此时保留旧锚点不动（无实测就不伪造实测）。
+        """
+        if prompt_tokens <= 0:
+            return
+        self.__ctxload_owner.token_calibration = build_token_calibration(
+            self.__ctxload_owner.history_buffer[:sent_history_len],
+            prompt_tokens,
+            estimate=self.estimate_items,
         )
 
     async def maybe_inject_budget_hint(self) -> None:

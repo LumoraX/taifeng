@@ -74,6 +74,7 @@ SSE 事件 SHALL 按 Anthropic `event: <type>\ndata: {...}` 双行格式解析�
 - **WHEN** Anthropic 返回的 `message_start.message.usage` 含 `cache_creation_input_tokens: 100` + `cache_read_input_tokens: 200`
 - **THEN** session 末尾 emit 的 `prompt_cache` 事件 SHALL `cache_creation=100` + `cache_read=200`
 - **AND** `completed.usage.cache_creation_input_tokens == 100`，`completed.usage.cache_read_input_tokens == 200`
+- **AND** `completed.usage.input_tokens` SHALL 为完整 prompt 数（上游 `input_tokens` + 100 + 200）——跨 provider 统一含缓存口径，见 [token-accounting-calibration](token-accounting-calibration.md)
 
 ---
 

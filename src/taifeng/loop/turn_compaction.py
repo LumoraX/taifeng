@@ -163,6 +163,14 @@ class TurnCompaction:
             new_history = await self.__compaction_owner._reinject_pinned_state(new_history, phase)
             self.__compaction_owner.history_buffer[:] = new_history
             self.__compaction_owner.cache_anchor_index = result.anchor_preserved_until
+            # token-accounting-calibration：压缩改写了实测锚点之前的前缀（破 cache 或
+            # 保留点退到锚点之前）→ 锚点失效，只保留 overhead 继续修正粗估
+            cal = self.__compaction_owner.token_calibration
+            if cal is not None and cal.anchor_valid and (
+                result.cache_invalidated
+                or result.anchor_preserved_until < cal.anchor_len - 1
+            ):
+                self.__compaction_owner.token_calibration = cal.invalidated()
             # 持久化新的 compacted item
             if result.summary_item_id:
                 for it in new_history:

@@ -95,8 +95,13 @@ ContextBudget(
     soft_limit_ratio=0.85,       # 触发 mid-turn 压缩的占比
     hard_limit_ratio=0.95,       # 必须压缩否则报错的占比
     preserve_tail_messages=4,    # 压缩时保留尾部消息数
+    max_request_bytes=None,      # 发送前请求体字节硬上限（G2b）
+    output_reserve_tokens=0,     # 输出预留：soft/hard 按「窗口 - 预留」计算（ADR 0043）
 )
 ```
+
+> 占用估算以 provider 实测 usage 校准（ADR 0043）：首次采样后 `engine.estimate_tokens()` =
+> 实测 prompt token + 之后新增条目粗估，不再只是 `len/3.5`。
 
 ### §1.1 InstructionLayer 字段（instructions-injection）
 
@@ -222,7 +227,7 @@ class TenantPolicySource:
 | **`CompactNow`** | 业务主动触发压缩 | `target_tokens` / `preserve_tail` / `strategy` / `force` |
 | `InjectSystemMessage` | 注入业务 system 消息 | `text`, `source` |
 | **`ThreadRollback`** | 回滚最近 N 轮对话 | `num_turns` |
-| **`UpdateBudget`** | 运行时调整 ContextBudget | `context_window` / `soft_limit_ratio` / `hard_limit_ratio` / `preserve_tail_messages` |
+| **`UpdateBudget`** | 运行时调整 ContextBudget（只覆盖显式字段，其余保留；非法组合拒绝并保持原值） | `context_window` / `soft_limit_ratio` / `hard_limit_ratio` / `preserve_tail_messages` / `output_reserve_tokens` |
 | **`RefreshSnapshot`** | 拉最新 SkillSnapshot | — |
 | **`UpdateInstructions`** | 热更指定 layer 的 source；缓存立即失效；下个 turn 生效 | `layer_name`, `new_source` (str 或 `InstructionSource`) |
 | **`Resume`** | 续跑一个挂起的 thread（`end_reason="suspended"` 的 turn）。配对 `resolutions` → 补齐 history-gap → 续采样。详见 §8 与 [suspend-resume 契约](architecture/capabilities/suspend-resume.md) | `thread_id`, `resolutions: {request_id: payload}` |

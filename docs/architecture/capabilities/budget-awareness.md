@@ -41,7 +41,8 @@
 - 每次迭代边界（`_drain_pending_input` 之后、`_maybe_compress(phase="pre_turn")` **之前**）按
   当前 history 估算用量判定。放在压缩前，使提示反映**承压瞬间的高水位**（`soft_limit` 同时是
   压缩触发点；压缩会随后把用量降下来，提示则解释「刚发生了承压」）。
-- 估算口径复用 `estimate_history_tokens`（与压缩判定同源），不引入第二套口径。
+- 估算口径复用 `calibrated_history_tokens`（与压缩判定同源；有 provider 实测锚点时走「实测 + 增量粗估」，
+  见 [token-accounting-calibration](token-accounting-calibration.md)），不引入第二套口径。
 
 ### Requirement: 复用 `soft_limit` 阈值，穿越一次注一次（回落复位）
 

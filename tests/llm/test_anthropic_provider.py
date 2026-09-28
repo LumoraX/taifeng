@@ -288,7 +288,8 @@ async def test_stream_minimal_text_turn(monkeypatch: pytest.MonkeyPatch) -> None
     assert kinds[-1] == "completed"
     completed = events[-1]
     assert completed.data["end_turn"] is True
-    assert completed.data["usage"]["input_tokens"] == 100
+    # 归一口径：完整 prompt = 未命中 100 + 缓存读 20（token-accounting-calibration）
+    assert completed.data["usage"]["input_tokens"] == 120
     assert completed.data["usage"]["output_tokens"] == 5
     # cache 元数据精准透传
     assert completed.data["usage"]["cache_read_input_tokens"] == 20

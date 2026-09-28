@@ -681,11 +681,19 @@ def extract_usage_anthropic(raw: dict[str, Any]) -> TokenUsage:
 
     Anthropic 字段：``input_tokens`` / ``output_tokens`` /
     ``cache_creation_input_tokens`` / ``cache_read_input_tokens``。
+
+    口径归一（token-accounting-calibration）：Anthropic 的 ``input_tokens`` 只含
+    **未命中缓存**的部分，缓存写入 / 读取另列；OpenAI / Gemini / Responses 的输入数
+    则**包含**缓存部分。``TokenUsage.input_tokens`` 统一取「完整 prompt token 数」
+    = uncached + cache_creation + cache_read——否则 K2 会话累计、``cached_ratio``
+    与上下文校准在 Anthropic 上都会系统性偏低。原始字段仍保留在 ``raw``。
     """
-    it = int(raw.get("input_tokens", 0) or 0)
+    uncached = int(raw.get("input_tokens", 0) or 0)
     ot = int(raw.get("output_tokens", 0) or 0)
     cc = int(raw.get("cache_creation_input_tokens", 0) or 0)
     cr = int(raw.get("cache_read_input_tokens", 0) or 0)
+    # 完整 prompt = 未命中 + 缓存写入 + 缓存读取（与 OpenAI 系 prompt_tokens 同口径）
+    it = uncached + cc + cr
     return TokenUsage(
         input_tokens=it,
         output_tokens=ot,

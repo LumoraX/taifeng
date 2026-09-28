@@ -89,6 +89,7 @@ class EngineRunner:
                     ) from None
                 self._engine._history = merged_history
             self._engine._cache_anchor_index = runner.cache_anchor_index
+            self._engine._token_calibration = runner.token_calibration
             self._engine._rewind_checkpoints = derive_rewind_log(self._engine._history)
             self._engine._last_prompt_fingerprint = runner.last_prompt_fingerprint
             self._engine._compaction_count = runner.compaction_count

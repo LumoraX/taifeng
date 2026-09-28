@@ -12,7 +12,7 @@ from contextlib import suppress
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
-from taifeng.context.budget import ContextBudget
+from taifeng.context.budget import ContextBudget, TokenCalibration
 from taifeng.context.cache_stats import PromptCacheStats
 from taifeng.conversation.models import (
     ResponseItem,
@@ -398,6 +398,9 @@ class AgentEngine:
         # cache anchor 保持 -1：resume 场景下 provider prompt cache 跨进程
         # 不可信任，下一次 turn 的 pre_turn 压缩会重新决定 anchor 位置
         self._cache_anchor_index: int = -1
+        # token-accounting-calibration：上下文 token 实测校准锚点（跨 turn 携带；
+        # 冷重载 / 进程重启后为 None，首次采样后重建）
+        self._token_calibration: TokenCalibration | None = None
         # turn-rewind 冷重建：从逻辑 history 现算全 turn 节点表（纯 CPU，不碰 IO）。
         # 新建 thread（initial_history 为空/None）→ 空节点表（既有行为不变）。
         self._rewind_checkpoints: list[RewindCheckpoint] = derive_rewind_log(self._history)
@@ -537,14 +540,23 @@ class AgentEngine:
         return derive_rewind_log(await self._load_thread_items(thread_id))
 
     def estimate_tokens(self) -> int:
-        """估算当前 history 的 token 占用 —— 业务侧可据此决定是否 CompactNow。"""
-        from taifeng.context.budget import estimate_history_tokens
+        """估算当前 history 的 token 占用 —— 业务侧可据此决定是否 CompactNow。
 
-        return estimate_history_tokens(
+        与 turn 内压缩判定同一口径：有实测校准锚点时走「实测 + 增量粗估」。
+        """
+        from functools import partial
+
+        from taifeng.context.budget import calibrated_history_tokens, estimate_history_tokens
+
+        return calibrated_history_tokens(
             self._history,
-            image_input_policy=self._image_input_policy,
-            input_cost_estimator=self._input_cost_estimator,
-            model=self._entry_skill.model or "",
+            self._token_calibration,
+            estimate=partial(
+                estimate_history_tokens,
+                image_input_policy=self._image_input_policy,
+                input_cost_estimator=self._input_cost_estimator,
+                model=self._entry_skill.model or "",
+            ),
         )
 
     def usage_ratio(self) -> float:
@@ -1539,6 +1551,7 @@ class AgentEngine:
             history_buffer=list(self._history),
             pending_input=pending_input,
             cache_anchor_index=self._cache_anchor_index,
+            token_calibration=self._token_calibration,
             instructions=list(resolved_for_turn),
             permission_policy=self._permission_policy,
             request_metadata=self._request_metadata,

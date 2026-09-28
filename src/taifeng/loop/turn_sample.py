@@ -352,6 +352,8 @@ class TurnSample:
         tool_calls: list[dict[str, Any]] = []
         normalized_items: list[dict[str, Any]] | None = None
         responses_completed = False
+        # token-accounting-calibration：本次采样 provider 实测的完整 prompt token 数
+        sample_prompt_tokens = 0
         # retry 由**外层** `RetryingModelClient` 兜底：只在本次 attempt **零产出**时
         # 重发（已 yield 过内容再重发会重复投递，ADR 0037）；走到这里的 LLMError
         # 即重试已耗尽或本就不可重试。
@@ -414,6 +416,7 @@ class TurnSample:
                             responses_completed = True
                         usage_dict = ev.data.get("usage") or {}
                         self.__sample_owner._accumulate_usage(usage_dict)
+                        sample_prompt_tokens = int(usage_dict.get("input_tokens") or 0)
                         # G3：回流的服务端 request-id（供失败 / telemetry 关联）
                         rid = ev.data.get("request_id")
                         if rid:
@@ -505,6 +508,10 @@ class TurnSample:
         # 末项下标(含语义)。本轮产出(assistant / fc)尚未进缓存,不计入;LLMError /
         # overflow / 取消路径不经此处,不推进
         self.__sample_owner.cache_anchor_index = sent_history_len - 1
+        # token-accounting-calibration：同一时刻用实测 prompt token 刷新校准锚点
+        # （锚点位置 = 发出时 history 长度；本轮产出按增量粗估计入）
+        self.__sample_owner._ctxload.calibrate_from_usage(
+            sent_history_len, sample_prompt_tokens)
 
         if is_responses:
             if normalized_items is None or not responses_completed:

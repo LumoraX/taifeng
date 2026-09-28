@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import taifeng
+from taifeng.context.budget import ContextBudget
 from taifeng.llm.providers import SimClient, SimTurn
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.submission import (
@@ -82,6 +83,50 @@ async def test_update_budget_at_runtime(skills_dir: Path, threads_dir: Path) -> 
     assert engine.budget.soft_limit_ratio == pytest.approx(0.7)
     # 未传字段保持原值
     assert engine.budget.preserve_tail_messages == 4
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_update_budget_preserves_unlisted_fields_and_sets_reserve(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """UpdateBudget 只改显式字段：max_request_bytes 不被重置；output_reserve_tokens 可调。"""
+    client = SimClient(turns=[SimTurn(text="hi")])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+        budget=ContextBudget(context_window=100_000, max_request_bytes=1_000_000),
+    )
+    engine = await pool.get_or_create(session_id="s_b2", entry_skill_id="code-reviewer")
+
+    await engine.submit(UpdateBudget(output_reserve_tokens=8_000))
+    await wait_for_condition(
+        lambda: engine.budget.output_reserve_tokens == 8_000,
+        message="UpdateBudget 未在守卫期限内被 actor loop 处理",
+    )
+    assert engine.budget.max_request_bytes == 1_000_000
+    assert engine.budget.usable_input_window == 92_000
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_update_budget_invalid_values_keep_previous_budget(
+    skills_dir: Path, threads_dir: Path
+) -> None:
+    """非法组合（预留 >= 新窗口）→ 拒绝并保持原预算，后续 Op 仍正常处理。"""
+    client = SimClient(turns=[SimTurn(text="hi")])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s_b3", entry_skill_id="code-reviewer")
+
+    await engine.submit(UpdateBudget(context_window=1_000, output_reserve_tokens=2_000))
+    await engine.submit(UpdateBudget(soft_limit_ratio=0.6))
+    await wait_for_condition(
+        lambda: engine.budget.soft_limit_ratio == pytest.approx(0.6),
+        message="非法 UpdateBudget 之后的 Op 未被处理",
+    )
+    assert engine.budget.context_window == 200_000
+    assert engine.budget.output_reserve_tokens == 0
     await pool.close()
 
 

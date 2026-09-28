@@ -99,6 +99,8 @@ class UpdateBudget(BaseModel):
     soft_limit_ratio: float | None = None
     hard_limit_ratio: float | None = None
     preserve_tail_messages: int | None = None
+    output_reserve_tokens: int | None = None
+    """输出预留 token（token-accounting-calibration）；None = 保持原值。"""
 
 
 class RefreshSnapshot(BaseModel):

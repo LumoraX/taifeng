@@ -101,9 +101,10 @@ def test_anthropic_usage_full() -> None:
         "cache_creation_input_tokens": 100,
         "cache_read_input_tokens": 80,
     })
-    assert u.input_tokens == 200
+    # input_tokens 归一为完整 prompt：未命中 200 + 缓存写 100 + 缓存读 80
+    assert u.input_tokens == 380
     assert u.output_tokens == 50
-    assert u.total_tokens == 250
+    assert u.total_tokens == 430
     assert u.cache_creation_input_tokens == 100
     assert u.cache_read_input_tokens == 80
 

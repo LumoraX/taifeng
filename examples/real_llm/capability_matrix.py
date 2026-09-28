@@ -238,6 +238,13 @@ SCENARIOS: list[Scenario] = [
              capability="预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020）",
              expect={"budget_hint_injected", "turn_completed"},
              ctx_window=3000),
+    # token 实测校准（ADR 0043）：两轮对话，用第 1 轮实测锚点预测第 2 轮 prompt 大小，
+    # 断言误差 < 20% 且优于纯 len/3.5 粗估（driver 内断言，失败即 FAIL）
+    Scenario("token_calibration", "compression_showcase", "chatty-assistant",
+             "",
+             capability="上下文 token 实测校准（预测下一轮 prompt，ADR 0043）",
+             expect={"turn_completed"},
+             driver="token_calibration"),
 ]
 
 

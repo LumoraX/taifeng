@@ -2,19 +2,26 @@
 
 参照：codex codex-rs/core/src/compact.rs::estimate_message_tokens
 
-估算策略（粗略，足够触发判断）：
-    - 文本：len(text) / 3.5（中英混合的经验比例）
-    - 图像：~1500 token（256×256 base）
-    - reasoning：实际 reasoning_tokens 字段
+估算策略（两层）：
+    1. 本地粗估（无实测时的地板）：
+       - 文本：len(text) / 3.5（中英混合的经验比例）
+       - 图像：~1500 token（256×256 base）或业务估算器
+    2. 实测校准（token-accounting-calibration，参照 codex
+       ``context_manager/history.rs`` 的「上次真实 usage + 之后新增条目估算」）：
+       每次采样成功后用 provider 回报的完整 prompt token 数建一个 ``TokenCalibration``
+       锚点；此后估算 = 实测 prompt token + 锚点之后新增条目的本地估算。
+       实测天然含 system prompt / 工具 schema / provider 模板开销，本地粗估看不到这些。
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     from taifeng.conversation.models import ResponseItem
     from taifeng.llm.image_input import ImageInputPolicy, InputCostEstimator
 
@@ -146,6 +153,95 @@ def estimate_history_bytes(items: list[ResponseItem]) -> int:
 
 
 @dataclass(frozen=True)
+class TokenCalibration:
+    """上下文 token 实测校准锚点（token-accounting-calibration）。
+
+    采样成功后由 TurnRunner 以 provider 回报的 usage 建立，跨 turn 由 Engine 持有。
+
+    Attributes:
+        anchor_len: 该次请求发出时的 history 长度；``-1`` 表示锚点已失效
+            （压缩改写了前缀等），此时只剩 ``overhead_tokens`` 可用。
+        anchor_item_id: 发出时 history 末项 id（``anchor_len == 0`` 时为 None），
+            用于检测前缀是否仍是当初那一段（rewind / 冷重载后会变）。
+        prompt_tokens: provider 实测的完整 prompt token 数（含缓存部分，
+            口径见 ``extract_usage_anthropic``）。
+        overhead_tokens: 实测 - 本地粗估 history 的差（下限 0）——即 system prompt、
+            工具 schema、协议模板与粗估误差的合计；锚点失效后作为粗估的加项继续使用。
+    """
+
+    anchor_len: int
+    anchor_item_id: str | None
+    prompt_tokens: int
+    overhead_tokens: int
+
+    @property
+    def anchor_valid(self) -> bool:
+        """锚点是否仍可用于「实测 + 增量」估算。"""
+        return self.anchor_len >= 0
+
+    def invalidated(self) -> TokenCalibration:
+        """返回锚点失效但保留 overhead 的副本（前缀被压缩改写时调用）。"""
+        return replace(self, anchor_len=-1, anchor_item_id=None)
+
+
+def build_token_calibration(
+    sent_history: Sequence[ResponseItem],
+    prompt_tokens: int,
+    *,
+    estimate: Callable[[list[ResponseItem]], int],
+) -> TokenCalibration:
+    """以一次成功采样的实测 prompt token 数建立校准锚点。
+
+    Args:
+        sent_history: 该次请求发出时的 history（发出时刻的前缀，不含本次产出）。
+        prompt_tokens: provider 回报的完整 prompt token 数（必须 > 0，调用方保证）。
+        estimate: 与估算路径同配置的本地粗估函数（含图片策略）。
+
+    Returns:
+        新的 ``TokenCalibration``；``overhead_tokens`` 下限为 0——粗估偏高时不做负修正，
+        宁可高估触发压缩，也不低估撞上 provider 的上下文上限。
+    """
+    items = list(sent_history)
+    overhead = max(0, prompt_tokens - estimate(items))
+    return TokenCalibration(
+        anchor_len=len(items),
+        anchor_item_id=items[-1].id if items else None,
+        prompt_tokens=prompt_tokens,
+        overhead_tokens=overhead,
+    )
+
+
+def calibrated_history_tokens(
+    items: Sequence[ResponseItem],
+    calibration: TokenCalibration | None,
+    *,
+    estimate: Callable[[list[ResponseItem]], int],
+) -> int:
+    """按校准锚点估算当前上下文 token 占用。
+
+    三档，按精度从高到低：
+    1. 锚点有效且前缀未变（长度够、末项 id 对得上）→ 实测 prompt + 锚点后新增条目粗估；
+    2. 有校准但锚点失效 / 前缀已变 → 全量粗估 + 上次测得的 overhead；
+    3. 从未校准 → 全量粗估（旧行为）。
+
+    Args:
+        items: 当前 history。
+        calibration: 最近一次校准；None = 尚无实测。
+        estimate: 本地粗估函数。
+    """
+    history = list(items)
+    if calibration is None:
+        return estimate(history)
+    n = calibration.anchor_len
+    # 前缀校验：长度够且锚点末项 id 一致，才认为锚点之前的内容就是当初实测的那一段
+    if calibration.anchor_valid and len(history) >= n and (
+        n == 0 or history[n - 1].id == calibration.anchor_item_id
+    ):
+        return calibration.prompt_tokens + estimate(history[n:])
+    return estimate(history) + calibration.overhead_tokens
+
+
+@dataclass(frozen=True)
 class ContextBudget:
     """token 预算配置。
 
@@ -156,6 +252,9 @@ class ContextBudget:
         preserve_tail_messages: 压缩时保留尾部消息数
         max_request_bytes: 发送前请求体字节数硬上限（G2b）。None=不启用（默认，
             行为不变）；设值后超限在发送前抛 RequestTooLargeError 而非等 provider 4xx
+        output_reserve_tokens: 为模型输出预留的 token 数。上下文窗口是输入 + 输出
+            共用的，soft / hard 阈值按「窗口 - 预留」计算；0 = 不预留（默认，
+            行为不变）。典型取值 = 请求的 max_output_tokens。
     """
 
     context_window: int = 200_000
@@ -163,14 +262,30 @@ class ContextBudget:
     hard_limit_ratio: float = 0.95
     preserve_tail_messages: int = 4
     max_request_bytes: int | None = None
+    output_reserve_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        """构造期校验：预留必须非负且小于窗口，否则 usable 为 0 / 负，阈值失去意义。"""
+        if self.output_reserve_tokens < 0:
+            raise ValueError(
+                f"output_reserve_tokens must be >= 0, got {self.output_reserve_tokens}")
+        if self.output_reserve_tokens >= self.context_window:
+            raise ValueError(
+                "output_reserve_tokens must be < context_window, got "
+                f"{self.output_reserve_tokens} >= {self.context_window}")
+
+    @property
+    def usable_input_window(self) -> int:
+        """可供输入（prompt）使用的窗口 = 窗口 - 输出预留。"""
+        return self.context_window - self.output_reserve_tokens
 
     @property
     def soft_limit(self) -> int:
-        return int(self.context_window * self.soft_limit_ratio)
+        return int(self.usable_input_window * self.soft_limit_ratio)
 
     @property
     def hard_limit(self) -> int:
-        return int(self.context_window * self.hard_limit_ratio)
+        return int(self.usable_input_window * self.hard_limit_ratio)
 
     def is_soft_exceeded(self, current: int) -> bool:
         return current >= self.soft_limit

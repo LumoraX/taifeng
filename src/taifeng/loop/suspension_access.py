@@ -355,6 +355,7 @@ class SuspensionAccess:
             enable_request_capture=self._engine._enable_request_capture,
             history_buffer=list(self._engine._history),
             cache_anchor_index=self._engine._cache_anchor_index,
+            token_calibration=self._engine._token_calibration,
             compaction_count=self._engine._compaction_count,
             pinned_states=self._engine._pinned_states,
             # T6: 一致性透传（CompactNow runner 不采样，阈值无实效但保字段齐整）
@@ -365,6 +366,7 @@ class SuspensionAccess:
         async with self._engine._lock:
             self._engine._history = list(runner.history_buffer)
             self._engine._cache_anchor_index = runner.cache_anchor_index
+            self._engine._token_calibration = runner.token_calibration
             # 与 _writeback_turn_runner 同步回写压缩计数，否则 G1c 降级告警跨 turn 少计
             self._engine._compaction_count = runner.compaction_count
             # turn-rewind：对当前全量逻辑 history 重算节点表(derive 为唯一产出方)。
