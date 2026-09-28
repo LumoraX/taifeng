@@ -514,6 +514,7 @@ class MemoryStore(Protocol):
 - **检索语境定制**：`EnginePool.create(memory_query_builder=...)`（同步 `(history 拷贝) -> str`）——默认 query 只取最后一条用户消息，多轮指代场景用 builder 拼近 N 轮语境；builder 异常记日志回退默认。
 - **writeback 语义注意**：钩子收到的是「本 turn 运行期间新增」items（assistant 输出等）；用户消息在 turn 构造前已入 history、不在新增集合内。
 - demo：`examples/memory/knowledge_demo.py`（三件套一起演示）。
+- **模型主动读写**：opt-in 的 `memory` 工具（`tool/builtins/memory.py::make_memory_tool`）让模型在 turn 中途自己 `search`（委托 `prefetch`）/ `save`（委托 `writeback`，item 带 `metadata.source="memory_tool"`）；不扩协议、不带后端，后端异常显式返回给模型。契约见 [tool-builtins-extended § memory](capabilities/tool-builtins-extended.md)，决策 ADR 0064。
 
 ## `replaced_range` 与冷加载消费
 

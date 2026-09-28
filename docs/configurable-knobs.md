@@ -56,7 +56,7 @@
 | **`max_concurrent_spawns`** | `16` | K1 广度准入 | 单 engine 内并发**在飞**（running）detached spawn 的上限。防 fork-bomb。超限时内核把 `SpawnLimitError` 转成 `SkillSpawnRejected` **事件** + `ToolResult.error`。⚠️ **nuance**：只统计 `runner.run()` in-flight 的 spawn；HITL 挂起的 spawn **退栈即释放 slot**（suspended 不计并发），resume / rewind 重推经统一驱动重新占用——满额时**排队等待**而非拒绝（被 kill / 根取消即放弃；ADR 0035）——HITL 等待期不消耗并发额度。详见 [detached-spawn 契约](architecture/capabilities/detached-spawn.md) §K1 | codex `agent/registry.rs::reserve_spawn_slot` |
 | **`max_total_spawns`** | `1000` | K1 广度准入 | 单 engine 生命周期内累计 spawn 上限（单调递增，不回收；兜底 runaway 循环），与并发上限独立 | codex 同上 |
 | **`max_session_tokens`** | `None` | K2 资源强制 | 会话累计 token 硬天花板（OOM-killer）。累计口径 = 整棵 turn 树（根 + call_skill 子 turn + detached spawn + 续跑链）每次采样实时入账（ADR 0044）。`None`=不强制（只告警）。设值后：跨 turn 累计触顶 → pre-turn 拒新 turn（`turn_refused`）；turn 内触顶且有后续 tool call → `ResourceLimitExceeded(turn_aborted)` 事件 + 停采样 | codex `UsageLimitReached` |
-| **`memory_store`** | `None` | K3 内存层级 | `MemoryStore` 协议实现（长期记忆 swap/缺页接口）：`prefetch` 换入注入 prompt 尾部 / `writeback` 脏页写回 / `on_pre_evict` 换出前抢救 digest / `on_session_end` teardown。`None`=无内存层级（=`NullMemoryStore`）。全 best-effort（钩子异常不打断 turn）。后端（向量库/KV/RAG）是 **userspace**，业务自接。协议见 `src/taifeng/context/memory.py`。**最简只读接入**：继承 `NullMemoryStore` 仅覆写 `prefetch`；**多源**：`CompositeMemoryStore([知识库, 会话记忆])` fan-out 组合（单子异常不传染） | hermes `memory_provider.py`（剔业务字段） |
+| **`memory_store`** | `None` | K3 内存层级 | `MemoryStore` 协议实现（长期记忆 swap/缺页接口）：`prefetch` 换入注入 prompt 尾部 / `writeback` 脏页写回 / `on_pre_evict` 换出前抢救 digest / `on_session_end` teardown。`None`=无内存层级（=`NullMemoryStore`）。全 best-effort（钩子异常不打断 turn）。后端（向量库/KV/RAG）是 **userspace**，业务自接。协议见 `src/taifeng/context/memory.py`。**最简只读接入**：继承 `NullMemoryStore` 仅覆写 `prefetch`；**多源**：`CompositeMemoryStore([知识库, 会话记忆])` fan-out 组合（单子异常不传染）。**模型主动读写**：`extra_tools=[make_memory_tool(store)]`（见 §6.8） | hermes `memory_provider.py`（剔业务字段） |
 | **`memory_query_builder`** | `None` | prefetch 检索语境定制 | 同步 `(history: list[ResponseItem]) -> str`：从当前 history **拷贝**自由构造检索 query（如近 N 轮拼接，解多轮指代）。`None`=默认（最后一条用户消息文本）。builder 异常 → 记日志回退默认（best-effort 域）。demo：`examples/memory/knowledge_demo.py` | 集成工效（memory-integration-ergonomics） |
 | **`pinned_state_sources`** | `None` | E1 压缩后状态保活 | `list[PinnedStateSource]`（name / max_chars / `format_for_injection()`，同步协议）：压缩成功后按注册序渲染并以 `system_injection(source="pinned:<name>")` 钉回 history 尾（R5 持久化）。`None`/空=零行为变化。运行时增删走 `engine.register_pinned_state` / `unregister_pinned_state`。详见 [capabilities/postcompact-state-reinjection.md](architecture/capabilities/postcompact-state-reinjection.md) | hermes 压缩后重注入 `todo_snapshot`（协议化） |
 | **`pinned_total_max_chars`** | `8000` | pinned 注入总预算 | 单轮注入字符总预算（按注册序累计，装不下的 source 整体丢弃并记入事件 `dropped`）；per-source 上限由各 source 的 `max_chars` 控制（truncate_middle 截断） | 防 pinned 反噬压缩收益 |
@@ -930,6 +930,75 @@ pool = await EnginePool.create(
 - 父 turn 结束后（engine keepalive 中），LLM 在下一条 `UserMessage` 的 turn 内可继续调用上述工具操作已有句柄
 
 **K1 配额 nuance**：`max_concurrent_spawns` 只统计 running（in-flight runner）的 spawn；suspended spawn 释放 slot，不计入并发额度；resume / rewind 重推重新占用，满额排队（见 §1.0）。
+
+### 6.7 `glob` / `grep` —— 沙盒内只读文件搜索（ADR 0064）
+
+**opt-in**：不在 `EnginePool.create` 默认注入，经 `extra_tools=` 显式传入，入口 skill 在 `tool_names` 声明。纯 Python 实现（不依赖 rg），只读、可并行（`parallel_safe=True`、`effect_kind="pure"`）。契约见 [tool-builtins-extended § glob / grep](architecture/capabilities/tool-builtins-extended.md)。
+
+```python
+from taifeng.tool.builtins import (
+    DEFAULT_SEARCH_EXCLUDE_DIRS,
+    make_file_read_tool,
+    make_glob_tool,
+    make_grep_tool,
+)
+
+pool = await EnginePool.create(
+    ...,
+    extra_tools=[
+        make_file_read_tool(root_dir="./workspace", policy=my_policy),
+        make_glob_tool(root_dir="./workspace", policy=my_policy),   # 与 file_read 同 root / 同 policy
+        make_grep_tool(
+            root_dir="./workspace",
+            policy=my_policy,
+            max_results=200,                  # 结果条数上限（content 按匹配行，其余按文件）
+            max_line_chars=500,               # content 模式单行字符上限
+            max_file_bytes=2 * 1024 * 1024,   # 更大的文件跳过并在尾注列出
+            exclude_dirs=DEFAULT_SEARCH_EXCLUDE_DIRS | {"dist"},  # 不下探的目录名
+        ),
+    ],
+)
+```
+
+| 工厂参数 | glob | grep | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `root_dir` | ✓ | ✓ | 必填 | 沙盒根；基点与被读文件都必须在内（同 `file_read`，拒绝 `..` 与符号链接逃逸） |
+| `policy` | ✓ | ✓ | `None` | 每次调用审批一次：`scope="file_read"`、target=基点绝对路径（整棵子树粒度） |
+| `max_results` | ✓ | ✓ | `200` | 超出截断并在输出尾告知，遍历提前停止 |
+| `max_line_chars` | — | ✓ | `500` | 单行截断并注明原长度 |
+| `max_file_bytes` | — | ✓ | `2MB` | 超大文件跳过并列出名字 |
+| `exclude_dirs` | ✓ | ✓ | `DEFAULT_SEARCH_EXCLUDE_DIRS` | `.git` `.hg` `.svn` `node_modules` `.venv` `__pycache__` `.mypy_cache` `.pytest_cache` `.ruff_cache` `.tox` |
+| `timeout_seconds` | ✓ | ✓ | `30.0` | ToolSpec 级超时 |
+
+**LLM 视角**：`glob({"pattern": "**/*.py", "path"?})` → 每行一个路径；`grep({"pattern": "<re>", "path"?, "include"?, "ignore_case"?, "output_mode"?: "content"|"files_with_matches"|"count"})` → `路径:行号:行`（行号 1 基，`file_read` 的 `offset = 行号 - 1`）。结果按路径排序、路径相对沙盒根；二进制 / 非 UTF-8 / 超大文件 / 被跳过的符号链接都以 `[skipped ...]` 尾注告知。
+
+### 6.8 `memory` —— 模型主动检索 / 写入长期记忆（ADR 0064）
+
+K3 `memory_store` 的模型侧入口：`search` 委托 `store.prefetch`、`save` 委托 `store.writeback`，内核不带后端。**opt-in**，同一 store 双注入：
+
+```python
+from taifeng.tool.builtins import make_memory_tool
+
+store = MyMemory(...)                 # 业务实现的 MemoryStore
+pool = await EnginePool.create(
+    ...,
+    memory_store=store,               # 内核被动 page-in / 写回（可选）
+    extra_tools=[make_memory_tool(store)],
+)
+
+# 只读知识库（继承 NullMemoryStore 只覆写 prefetch）：只开 search
+make_memory_tool(knowledge_base, actions=("search",))
+```
+
+| 工厂参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `store` | 必填 | `MemoryStore` 实现 |
+| `actions` | `("search", "save")` | 启用的动作子集；决定 schema 与副作用分类（含 save → 串行 + `external_non_idempotent`/`manual`；仅 search → 可并行 + `pure`） |
+| `max_result_chars` | `4000` | search 返回文本的字符上限（协议返回单段文本，按字符计），超出截断并注明 |
+| `max_save_chars` | `2000` | save 单条上限，超出以 `too_large` 拒绝（不截断写入） |
+| `timeout_seconds` | `30.0` | ToolSpec 级超时 |
+
+`save` 写入一条 `assistant_message`，`metadata={"source": "memory_tool", "call_id": ...}`——后端据此区分模型主动记忆与 turn 结束的脏页写回、或按 call_id 去重。后端异常以 `reason="memory_error"` 显式返回给模型（不同于被动钩子的 best-effort）。
 
 ## 7. LLM 强类型输出（structured_output / P1）
 
