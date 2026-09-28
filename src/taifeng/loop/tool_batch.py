@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.context.truncate import truncate_middle
 from taifeng.loop.event import ToolCallCompleted
+from taifeng.loop.tool_output import apply_post_tool_hooks, cap_tool_result
 from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获,不可放 TYPE_CHECKING
 from taifeng.tool.arg_validation import arguments_rejection
 from taifeng.tool.spec import ToolContext, ToolResult
@@ -110,6 +111,7 @@ async def dispatch_batch(
     entry_skill_id: str,
     visible_tools: frozenset[str],
     registry: ToolRegistry | None = None,
+    result_cap_bytes: int | None = None,
 ) -> list[ToolCallOutcome]:
     """并发执行一批 tool call,返回按 ``index`` 升序的结果列表。
 
@@ -121,6 +123,8 @@ async def dispatch_batch(
       契约)——LLM 调用集合外的工具在 hook 之前被拒,以 is_error 输出核销。
     - ``registry``:取 ``input_schema`` 做参数预校验(tool-argument-validation)。生产
       调用点必传;None 时只做 JSON 解析校验(仅供不带注册表的单测替身)。
+    - ``result_cap_bytes``:工具结果文本字节上限(见 ``loop/tool_output.py``);生产调用点
+      传 ``tool_result_cap(budget, compressors)``,None = 不截断。
     """
 
     async def _run(req: ToolCallRequest) -> ToolCallOutcome:
@@ -130,7 +134,7 @@ async def dispatch_batch(
                 req, runtime=runtime, ctx_for=ctx_for, hooks=hooks, emit=emit,
                 thread_id=thread_id, submission_id=submission_id,
                 entry_skill_id=entry_skill_id, visible_tools=visible_tools,
-                registry=registry,
+                registry=registry, result_cap_bytes=result_cap_bytes,
             )
 
     outcomes = await asyncio.gather(*(_run(r) for r in requests))
@@ -150,8 +154,9 @@ async def _dispatch_one(
     entry_skill_id: str,
     visible_tools: frozenset[str],
     registry: ToolRegistry | None,
+    result_cap_bytes: int | None,
 ) -> ToolCallOutcome:
-    """执行单条:可执行校验 → PreToolUse hook → dispatch → PostToolUse hook → emit。
+    """执行单条:可执行校验 → PreToolUse hook → dispatch → PostToolUse hook → 上限 → emit。
 
     若执行链抛 SuspendSignal(如 SuspendingPrompter / request_user_input 触发),
     捕获为带 suspend=pending 的 outcome,不让其冒泡打断整批(挂起不是错误)。
@@ -180,7 +185,7 @@ async def _dispatch_one(
         return await _dispatch_one_inner(
             req, ctx=ctx, start=start, runtime=runtime, hooks=hooks, emit=emit,
             thread_id=thread_id, submission_id=submission_id,
-            entry_skill_id=entry_skill_id,
+            entry_skill_id=entry_skill_id, result_cap_bytes=result_cap_bytes,
         )
     except SuspendSignal as sig:
         # 挂起:不 emit ToolCallCompleted(turn 侧据 suspend 落 suspension);返回占位 result
@@ -217,6 +222,40 @@ async def _reject_before_dispatch(
     )
 
 
+async def _run_pre_tool_hooks(
+    req: ToolCallRequest, hooks: Any, hook_ctx: Any,
+) -> tuple[dict[str, Any], Any]:
+    """G5a：串行跑 PreToolUse handler，返回 ``(生效参数, 拒绝决策 | None)``。
+
+    放行且给出合法 dict ``args_override`` 时替换参数（链式：后续 handler 看到改写后的
+    args，与 script hook 对齐）。直接遍历 registry handlers —— ``HookRunner.run`` 在全部
+    allow 时返回新的 ``HookDecision.ok()`` 会丢失 metadata。SuspendSignal 放行给外层落挂起。
+    """
+    from taifeng.hooks.types import HookDecision, PreToolUseHook
+
+    effective_args = req.arguments
+    for handler in hooks.registry.handlers("pre_tool_use"):
+        try:
+            decision = await handler(
+                PreToolUseHook(
+                    tool_name=req.name, arguments=effective_args,
+                    parallel_safe=req.parallel_safe, call_id=req.call_id,
+                ),
+                hook_ctx,
+            )
+        except SuspendSignal:
+            # 挂起信号不是 hook 错误,放行给外层 _dispatch_one 捕获落挂起
+            raise
+        except Exception as e:  # noqa: BLE001 —— hook 异常按 deny 处理
+            return effective_args, HookDecision.deny(f"hook_error: {e}")
+        if not decision.allow:
+            return effective_args, decision
+        override = decision.metadata.get("args_override")
+        if isinstance(override, dict):
+            effective_args = override
+    return effective_args, None
+
+
 async def _dispatch_one_inner(
     req: ToolCallRequest,
     *,
@@ -228,47 +267,21 @@ async def _dispatch_one_inner(
     thread_id: str,
     submission_id: str,
     entry_skill_id: str,
+    result_cap_bytes: int | None,
 ) -> ToolCallOutcome:
-    """``_dispatch_one`` 的成功路径主体(从原函数体平移而来)。
+    """``_dispatch_one`` 的成功路径主体:hook → dispatch → hook → 上限 → emit。
 
-    单列为内层函数,使 ``_dispatch_one`` 仅承担 SuspendSignal try/except 边界,
-    保持各函数 ≤ 80 行且圈复杂度受控。
+    单列为内层函数,使 ``_dispatch_one`` 仅承担 SuspendSignal try/except 边界。
     """
-    # G5a：PreToolUse hook 可改写 args（与 script hook 的 args_override 对齐）。
-    # effective_args 默认 = LLM 原始 args；hook 放行且给出合法 dict override 时替换。
-    # 注：直接遍历 registry handlers —— HookRunner.run 在全部 allow 时返回新的
-    # HookDecision.ok() 会丢失 metadata['args_override']（与 run_script 同处理）。
+    from taifeng.hooks.types import HookContext
+
+    hook_ctx = HookContext(
+        thread_id=thread_id, submission_id=submission_id, entry_skill_id=entry_skill_id,
+    )
     effective_args = req.arguments
     denied = None  # HookDecision | None
-
     if hooks is not None:
-        from taifeng.hooks.types import HookContext, HookDecision, PreToolUseHook
-
-        hook_ctx = HookContext(
-            thread_id=thread_id, submission_id=submission_id,
-            entry_skill_id=entry_skill_id,
-        )
-        for handler in hooks.registry.handlers("pre_tool_use"):
-            try:
-                decision = await handler(
-                    PreToolUseHook(
-                        tool_name=req.name, arguments=effective_args,
-                        parallel_safe=req.parallel_safe, call_id=req.call_id,
-                    ),
-                    hook_ctx,
-                )
-            except SuspendSignal:
-                # 挂起信号不是 hook 错误,放行给外层 _dispatch_one 捕获落挂起
-                raise
-            except Exception as e:  # noqa: BLE001 —— hook 异常按 deny 处理
-                denied = HookDecision.deny(f"hook_error: {e}")
-                break
-            if not decision.allow:
-                denied = decision
-                break
-            override = decision.metadata.get("args_override")
-            if isinstance(override, dict):
-                effective_args = override  # 链式：后续 handler 看到改写后的 args
+        effective_args, denied = await _run_pre_tool_hooks(req, hooks, hook_ctx)
 
     if denied is not None:
         result = ToolResult.error(
@@ -282,35 +295,29 @@ async def _dispatch_one_inner(
 
     duration_ms = int((time.monotonic() - start) * 1000)
 
-    # === PostToolUse hook ===
+    # PostToolUse 可改写模型可见输出;之后再按上限截断(见 loop/tool_output.py)
+    rewritten = False
     if hooks is not None:
-        from taifeng.hooks.types import HookContext, PostToolUseHook
-
-        await hooks.run(
-            "post_tool_use",
-            PostToolUseHook(
-                tool_name=req.name, arguments=effective_args,
-                output=result.output, is_error=result.is_error,
-                duration_ms=duration_ms, call_id=req.call_id,
-            ),
-            HookContext(
-                thread_id=thread_id, submission_id=submission_id,
-                entry_skill_id=entry_skill_id,
-            ),
+        result, rewritten = await apply_post_tool_hooks(
+            hooks, tool_name=req.name, call_id=req.call_id, arguments=effective_args,
+            result=result, duration_ms=duration_ms, hook_ctx=hook_ctx,
         )
+    result, capped = cap_tool_result(result, result_cap_bytes)
 
     # 完成即 emit(并发下按真实完成序交错,反映真实并行;输出截断给事件流)
-    await emit(
-        ToolCallCompleted(
-            data={
-                "call_id": req.call_id, "name": req.name,
-                # G6b：中段截断，错误信息常在尾部，朴素 [:500] 会丢失
-                "output": truncate_middle(result.output, 500),
-                "is_error": result.is_error,
-                "duration_ms": duration_ms,
-            }
-        )
-    )
+    data: dict[str, Any] = {
+        "call_id": req.call_id, "name": req.name,
+        # G6b：中段截断，错误信息常在尾部，朴素 [:500] 会丢失
+        "output": truncate_middle(result.output, 500),
+        "is_error": result.is_error,
+        "duration_ms": duration_ms,
+    }
+    # 仅在发生时附加,未改写 / 未截断的事件形状与既有一致
+    if rewritten:
+        data["output_rewritten_by_hook"] = True
+    if capped is not None:
+        data["output_capped"] = capped
+    await emit(ToolCallCompleted(data=data))
     return ToolCallOutcome(
         index=req.index, call_id=req.call_id, name=req.name,
         result=result, duration_ms=duration_ms,

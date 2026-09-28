@@ -23,6 +23,7 @@ from taifeng.llm.errors import (
 from taifeng.llm.image_input import admit_tool_attachments
 from taifeng.loop.event import DenialCircuitOpen, DoomLoopCircuitOpen, DoomLoopWarned
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
+from taifeng.loop.tool_output import tool_result_cap
 from taifeng.loop.turn_helpers import _latest_user_text
 from taifeng.tool.spec import ToolContext, ToolResult
 
@@ -219,6 +220,8 @@ class TurnTooling:
             # retry 重跑仍受声明层可见集约束（原始派发已过校验；热重载移除声明则如实拒）
             visible_tools=self.__tooling_owner.entry_skill.visible_tool_names(),
             registry=self.__tooling_owner.tool_runtime._registry,  # noqa: SLF001
+            result_cap_bytes=tool_result_cap(
+                self.__tooling_owner.budget, self.__tooling_owner.compressors),
         )
         outcome = outcomes[0]
         if outcome.suspend is not None:

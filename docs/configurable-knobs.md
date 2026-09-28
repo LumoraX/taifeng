@@ -98,6 +98,7 @@ ContextBudget(
     preserve_tail_messages=4,    # 压缩时保留尾部消息数
     max_request_bytes=None,      # 发送前请求体字节硬上限（G2b）
     output_reserve_tokens=0,     # 输出预留：soft/hard 按「窗口 - 预留」计算（ADR 0043）
+    max_tool_result_bytes=128 * 1024,  # 单条工具结果进历史前的字节上限，超限保头尾；None=不限；配 OffloadStrategy 时不生效（ADR 0061）
 )
 ```
 

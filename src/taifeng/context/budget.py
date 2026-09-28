@@ -260,6 +260,10 @@ class ContextBudget:
         output_reserve_tokens: 为模型输出预留的 token 数。上下文窗口是输入 + 输出
             共用的，soft / hard 阈值按「窗口 - 预留」计算；0 = 不预留（默认，
             行为不变）。典型取值 = 请求的 max_output_tokens。
+        max_tool_result_bytes: 单条工具结果文本进入历史前的 UTF-8 字节上限，超限保头尾、
+            省中间并写明省略量；None = 不限。默认 128KiB（约 3–4 万 token）：防止 MCP /
+            业务工具的超大输出一次吃掉大半窗口。配置了 OffloadStrategy 时不生效（大结果
+            交给 offload 无损落盘）。
     """
 
     context_window: int = 200_000
@@ -268,9 +272,14 @@ class ContextBudget:
     preserve_tail_messages: int = 4
     max_request_bytes: int | None = None
     output_reserve_tokens: int = 0
+    max_tool_result_bytes: int | None = 128 * 1024
 
     def __post_init__(self) -> None:
-        """构造期校验：预留必须非负且小于窗口，否则 usable 为 0 / 负，阈值失去意义。"""
+        """构造期校验：预留必须非负且小于窗口，否则 usable 为 0 / 负，阈值失去意义；
+        工具结果上限须留得下截断标记（< 1KiB 的上限截完只剩标记）。"""
+        if self.max_tool_result_bytes is not None and self.max_tool_result_bytes < 1024:
+            raise ValueError(
+                f"max_tool_result_bytes must be >= 1024 or None, got {self.max_tool_result_bytes}")
         if self.output_reserve_tokens < 0:
             raise ValueError(
                 f"output_reserve_tokens must be >= 0, got {self.output_reserve_tokens}")

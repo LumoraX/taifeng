@@ -83,6 +83,11 @@ class CompressionOrchestrator:
     def __init__(self, strategies: list[CompressionStrategy]) -> None:
         self._strategies = sorted(strategies, key=lambda s: -s.priority)
 
+    @property
+    def strategies(self) -> tuple[CompressionStrategy, ...]:
+        """按优先级倒序的策略（只读视图；如工具结果上限据此判断是否配置了 offload）。"""
+        return tuple(self._strategies)
+
     async def maybe_compress(
         self,
         ctx: CompressionContext,

@@ -115,3 +115,29 @@ dispatch **成功**完成（非 error、非挂起）且标记为 True → 外层
   `"deadline_exceeded"`；engine / pool 关停 → `"shutdown"`。
 - 策略值（上限几秒）由宿主注入（R1）；内核不设默认上限。
 
+
+## 工具结果字节上限（tool-result-cap，ADR 0061）
+
+### 数据契约
+
+- `ContextBudget.max_tool_result_bytes: int | None = 128 * 1024`：单条工具结果文本（`ToolResult.output`）进入历史前的
+  UTF-8 字节上限；`None` = 不限；`< 1024` 构造期 `ValueError`（截完只剩标记无意义）。
+- `tool_call_completed` 事件 data 在截断发生时附 `output_capped: {original_bytes, cap_bytes}`；未截断时形状不变。
+- 实现：`src/taifeng/loop/tool_output.py`（`tool_result_cap` / `cap_tool_result`），经 `dispatch_batch(result_cap_bytes=)`
+  覆盖全部三个派发点（采样后批量派发、`retry_tool` 重跑、声明式编排）。
+
+### 行为契约
+
+#### Requirement: 超限保头尾、写明省略量
+超限时 SHALL 保留头部约 60%、尾部约 40%，中间替换为模型可读的标记（上限字节数 + 省略字节数 + 「缩小请求范围」提示），
+总长 SHALL 不超过上限；切点落在多字节字符中间时丢弃残片，结果仍为合法 UTF-8。`is_error` / `data` / 附件不变。
+
+#### Requirement: 与 offload 衔接
+compressors 中含 `OffloadStrategy` 时 SHALL 不截断：offload 会把大结果无损落盘并以 stub 替换，先截断会让落盘内容残缺。
+
+#### Requirement: 顺序
+上限作用在 PostToolUse 改写之后（钩子可能改变长度），ToolCallCompleted 之前；审计模式落账的即是截断后的结果。
+
+#### Scenario: MCP 工具返回 1MB 文本
+- **WHEN** 默认预算下某工具返回 1MB 文本，且未配置 OffloadStrategy
+- **THEN** 历史与下一次请求中的该结果 SHALL ≤ 128KiB 并含截断标记，`tool_call_completed.data.output_capped.original_bytes` 为原始字节数

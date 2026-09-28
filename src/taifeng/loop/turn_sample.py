@@ -56,6 +56,7 @@ from taifeng.loop.failure_policy import DEFAULT_FAILURE_POLICY, FailureDispositi
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.rewind import count_turns
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
+from taifeng.loop.tool_output import tool_result_cap
 from taifeng.loop.turn_helpers import (
     _llm_failure_context,
     _responses_conversation_items,
@@ -737,6 +738,8 @@ class TurnSample:
                 entry_skill_id=self.__sample_owner.entry_skill.id,
                 visible_tools=visible_tools,
                 registry=self.__sample_owner.tool_runtime._registry,  # noqa: SLF001
+                result_cap_bytes=tool_result_cap(
+                    self.__sample_owner.budget, self.__sample_owner.compressors),
             )
 
         # audit：整批意图先于派发 durable，取消无关地把每个意图收敛为唯一终态

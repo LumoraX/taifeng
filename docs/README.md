@@ -96,6 +96,7 @@ Later ADRs:
 56. [ADR 0056: SKILL.md `inference` 块声明 skill 级推理参数](decisions/0056-skill-inference-params.md): `ApiRequest` 早有 reasoning_effort / temperature / max_output_tokens 且各 provider 都会翻译，内核却从未设置，skill 无法按任务定参数。决策：frontmatter 嵌套 `inference` 块、atomic / composite 通用、加载期严格校验、经 `build_api_request` 按 entry skill 下发；否决平铺顶层键与 Pool 级默认值。
 57. [ADR 0057: MCP 工具副作用分类默认保守，annotations 需显式信任](decisions/0057-mcp-tool-effect-classification.md): 桥接工具落默认 `pure`，崩溃恢复会引导模型重发 MCP 写操作。决策：默认 `external_non_idempotent`（挂起交人）；`trust_annotations=True` 才按 `readOnlyHint` / `idempotentHint` 细分；否决默认信任（规范称不可信提示不得据以决策）。
 58. [ADR 0058: SKILL.md 严格加载](decisions/0058-strict-skill-loading.md): 坏 frontmatter 被 warning 后跳过、超长 body 被截断、`bool()` / `frozenset()` 强转把 `entry: "false"` 读成 True、多目录同名静默覆盖。决策：前三类加载期报错；覆盖保留分层语义但告警；顶层未知键仍透传。
+61. [ADR 0061: PostToolUse 可改写工具输出 + 工具结果统一字节上限](decisions/0061-post-tool-output-override-and-result-cap.md): PostToolUse 返回值被丢弃，宿主无处清洗工具输出；MCP / 业务工具输出无上限进入历史。决策：`output_override` 链式改写并打事件标记；`ContextBudget.max_tool_result_bytes` 默认 128KiB 保头尾截断，配 offload 时让位；否决钩子异常 fail-closed 与逐工具上限。
 
 ### Fourth Pass: Gap Tracking
 

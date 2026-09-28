@@ -26,6 +26,7 @@ from taifeng.loop.event import (
     ToolBatchDispatched,
 )
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch
+from taifeng.loop.tool_output import tool_result_cap
 from taifeng.skill.orchestration import (
     OrchestrationConditionError,
     ParallelStep,
@@ -237,6 +238,7 @@ async def _execute_leaf(
         # 编排 turn 只合成 call_skill（内核发起非 LLM 幻觉面），仍传声明层可见集保持同源
         visible_tools=runner.entry_skill.visible_tool_names(),
         registry=runner.tool_runtime._registry,  # noqa: SLF001
+        result_cap_bytes=tool_result_cap(runner.budget, runner.compressors),
     )
 
     # 历史按发起序回填（R5 resume；与 A 阶段 3 一致）。编排 turn 无 assistant_message

@@ -180,6 +180,21 @@ CancellationToken。post_turn 同步执行会占用本 turn 收尾时段,长耗�
 - **WHEN** 静态检查 `MsgKind` literal
 - **THEN** SHALL 包含 `"pre_turn_hook_denied"` 与 `"pre_compact_hook_skipped"`
 
+### Requirement: PostToolUse 可改写模型可见输出
+
+PostToolUse handler 返回 `HookDecision.ok(output_override=<str>)` 时，`ToolResult.output` SHALL 被替换后再回填历史；
+多个 handler 串行链式生效（后者的 `PostToolUseHook.output` 是前者改写后的文本）。`is_error` / `data` / 图片附件不变。
+
+- PostToolUse 不可否决（工具已执行）：`allow=False` 无效果。
+- handler 抛异常或 `output_override` 非 `str` → 记错误日志、输出保持不变、后续 handler 照常执行。
+  需要「清洗失败即不放行原文」的宿主应在 handler 内自行捕获异常并返回安全的 override。
+- 改写发生时，本次 `tool_call_completed` 事件 data 附 `output_rewritten_by_hook: true`（R3）；未改写时事件形状不变。
+- 改写之后才应用工具结果字节上限（`ContextBudget.max_tool_result_bytes`，见 [turn-resource-guards](turn-resource-guards.md)）。
+
+#### Scenario: 宿主清洗工具输出中的注入文本
+- **WHEN** PostToolUse handler 把输出中的 `IGNORE PREVIOUS INSTRUCTIONS` 替换为 `[removed]` 并以 `output_override` 返回
+- **THEN** 下一次采样请求中的该工具结果 SHALL 为清洗后的文本，且 `tool_call_completed.data.output_rewritten_by_hook` 为 true
+
 ### Requirement: HookRegistry 桶位完整性（无死代码）
 
 `HookRegistry._handlers` dict SHALL 包含 9 个 kind 桶位，且所有 9 个桶位 SHALL 在 `src/taifeng/` 内有至少一个调用点（即不存在"声明但未触发"的死代码）。
@@ -187,7 +202,7 @@ CancellationToken。post_turn 同步执行会占用本 turn 收尾时段,长耗�
 具体调用点映射（实现层文档，spec 只约束契约）：
 
 - `pre_tool_use` → `loop/turn.py::_sample_once`：deny → tool 不执行，返回 hook_denied error
-- `post_tool_use` → `loop/turn.py::_sample_once`：仅审计 run_audit_only
+- `post_tool_use` → `loop/tool_output.py::apply_post_tool_hooks`（经 `loop/tool_batch.py` 派发路径）：不可否决；可经 `output_override` 改写模型可见输出（见下）
 - `pre_compact` → `loop/turn.py::_maybe_compress`：deny → 跳过压缩
 - `pre_turn` → `loop/engine.py::_run_turn_for`：deny → emit turn_failed
 - `post_turn` → `loop/engine.py::_fire_post_turn_hook`（`_build_and_run_runner` 收尾）：仅审计 run_audit_only；root turn 真终态触发，emit post_turn_hook_fired
