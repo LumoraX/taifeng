@@ -73,6 +73,23 @@ handler SHALL 实现**两阶段原子语义**：
 - **WHEN** 业务显式传入 `env`
 - **THEN** 子进程 SHALL 使用该 env
 
+### Requirement: 命令执行器 seam（sandbox-seam，ADR 0051）
+
+`shell_exec` 与 `run_in_background` SHALL 经 `taifeng.tool.command_executor.CommandExecutor` 启动子进程，
+不直接调 `asyncio.create_subprocess_*`：
+
+| 符号 | 含义 |
+| --- | --- |
+| `CommandSpec(command, shell, cwd, env)` | 一次执行请求；`env` 为工具按白名单构造的**完整**环境 |
+| `CommandExecutor.start(spec) -> CommandProcess` | 启动并立即返回；失败抛 `OSError` |
+| `CommandProcess` | `returncode` / `communicate()` / `kill()` / `wait()`（`asyncio.subprocess.Process` 天然满足） |
+| `LocalCommandExecutor` | 默认：本机子进程（`shell=True` → shell，否则 `shlex.split` + exec） |
+| `make_shell_exec_tool(executor=)` / `BackgroundTaskRegistry(executor=)` | 注入点；None = 本机 |
+
+权限审批、黑名单、超时、输出截断、取消仍由工具统一负责——换执行器不改变这些语义。`shell_exec` SHALL
+在 `interrupt_on_cancel(ctx.cancel)` 内等待子进程：turn 取消 / 截止时间到点即 kill 并返回
+`cancelled (<reason>)` 错误结果；外部 task 取消照常外抛。argv 模式下 `shlex` 解析失败归为 `spawn_error`。
+
 ### Requirement: BackgroundTaskRegistry 进程内管理
 
 系统 SHALL 提供 `taifeng.tool.builtins.BackgroundTaskRegistry`：

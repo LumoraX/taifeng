@@ -88,6 +88,7 @@ Later ADRs:
 48. [ADR 0048: 工具集运行时增删 + MCP list_changed 同步 + streamable HTTP 传输](decisions/0048-dynamic-tool-set-and-mcp-http.md): 注册表只能 register、MCP 忽略服务端通知且只有 stdio、指纹只比工具名。决策：`unregister` / `replace` / `version` / `subscribe` + `tool_set_changed` 事件，变更在下一次采样生效（不冻结到 turn）；指纹含描述与 schema；`McpClient` 协议 + `bind_mcp_tools` 只管自己的工具；`McpHttpClient` 用 httpx 实现 streamable HTTP，不做 OAuth。
 49. [ADR 0049: 取消 token 携带原因与墙钟截止时间，采样流与取消竞速](decisions/0049-cancel-reason-and-deadline.md): token 只有一个比特，终态分不清中止 / 超时 / 关停，也没有墙钟截止时间；采样循环只在收到流事件时查取消，provider 首字节前阻塞时取消迟迟不生效。决策：`CancelReason` 随取消级联；`child(deadline_seconds=)` 挂在子树根、只收紧；`UserMessage.deadline_seconds` / `spawn_skill(deadline_seconds=)` 入口；`interrupt_on_cancel` 让取消原地打断阻塞中的流读取；`turn_completed.cancel_reason`。
 50. [ADR 0050: 后台任务完成时唤醒发起方，而非只能轮询](decisions/0050-background-completion-wake.md): `run_in_background` 只能靠 `wait_for_task` 轮询。决策：注册表 `on_complete` 回调；工具经 peer mailbox 把中性摘要投回发起 thread（根 queue_only、spawn 子 trigger_turn、call_skill 子改投根）+ `background_task_completed` 事件；默认开。
+51. [ADR 0051: shell 类工具经 CommandExecutor 启动进程](decisions/0051-command-executor-seam.md): 脚本有 `ScriptExecutor`，`shell_exec` / `run_in_background` 却直接起子进程，沙箱无统一 seam；`shell_exec` 还不响应取消。决策：只抽「启动」一步为 `CommandExecutor.start(CommandSpec)`，审批 / env / 超时 / 截断 / 取消留在工具；内核只给本机默认实现；`shell_exec` 在 `interrupt_on_cancel` 内等待、取消即 kill。
 
 ### Fourth Pass: Gap Tracking
 

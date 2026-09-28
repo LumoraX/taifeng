@@ -101,6 +101,7 @@ from taifeng.loop import (
     UpdateInstructions,
     UserMessage,
 )
+from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
 from taifeng.loop.engine import AgentEngine, DeliveredEvent
@@ -192,6 +193,13 @@ from taifeng.tool.builtins import (
     make_wait_for_task_tool,
     make_wait_peer_tool,
 )
+from taifeng.tool.command_executor import (
+    CommandExecutor,
+    CommandProcess,
+    CommandSpec,
+    LocalCommandExecutor,
+)
+from taifeng.tool.spec import ReconcileVerdict
 
 __all__ = [
     "AgentEngine",
@@ -201,7 +209,13 @@ __all__ = [
     "ImageInputPolicy",
     "ImagePart",
     "CallStack",
+    "CancelReason",
     "CancellationToken",
+    "CommandExecutor",
+    "CommandProcess",
+    "CommandSpec",
+    "LocalCommandExecutor",
+    "ReconcileVerdict",
     "CompressionContext",
     "CompressionOrchestrator",
     "CompressionResult",

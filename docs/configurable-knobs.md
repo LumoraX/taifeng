@@ -799,7 +799,7 @@ from taifeng import (
     make_wait_for_task_tool,
 )
 
-registry = BackgroundTaskRegistry(max_concurrent=8)
+registry = BackgroundTaskRegistry(max_concurrent=8)   # executor=MySandboxExecutor() 可把命令放进沙箱
 
 extra_tools = [
     # notify_on_exit=True（默认）：任务结束把摘要投回发起 thread + emit background_task_completed

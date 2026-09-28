@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
 from typing import Any
 
+from taifeng.loop.cancellation import interrupt_on_cancel
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
+from taifeng.tool.command_executor import CommandExecutor, CommandSpec, LocalCommandExecutor
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 from taifeng.tool.subprocess_env import default_safe_env
 
@@ -59,6 +60,7 @@ def make_shell_exec_tool(
     max_output_bytes: int = 64 * 1024,
     enable_safety_blacklist: bool = True,
     allow_shell: bool = True,
+    executor: CommandExecutor | None = None,
 ) -> ToolSpec:
     """Shell 执行工具。
 
@@ -72,7 +74,10 @@ def make_shell_exec_tool(
         max_output_bytes: 截断输出
         enable_safety_blacklist: 启用启发式黑名单
         allow_shell: 是否允许 shell expansion；False 则使用 argv 模式（更安全）
+        executor: 命令执行器（sandbox-seam）；None = 本机子进程。宿主注入 Docker /
+            firejail / 远端实现即可把命令隔离执行，审批 / 超时 / 取消 / 截断语义不变。
     """
+    run = executor or LocalCommandExecutor()
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         command = args.get("command")
@@ -111,36 +116,31 @@ def make_shell_exec_tool(
         # env=None → 最小白名单（不继承宿主全环境，防 API key 等凭据泄漏给子进程）
         child_env = env if env is not None else default_safe_env()
         try:
-            if allow_shell:
-                proc = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=cwd,
-                    env=child_env,
-                )
-            else:
-                argv = shlex.split(command)
-                proc = await asyncio.create_subprocess_exec(
-                    *argv,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=cwd,
-                    env=child_env,
-                )
-        except OSError as e:
+            proc = await run.start(CommandSpec(
+                command=command, shell=allow_shell, cwd=cwd, env=child_env))
+        except (OSError, ValueError) as e:
+            # ValueError：argv 模式下 shlex 解析失败（引号不配对等）
             return ToolResult.error(f"spawn_error: {e}", reason="spawn_error")
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds,
-            )
+            # R4：turn 取消 / 截止时间原地打断等待，并杀掉子进程（此前只受超时约束）
+            async with interrupt_on_cancel(ctx.cancel):
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds,
+                )
         except TimeoutError:
             proc.kill()
             await proc.wait()
             return ToolResult.error(
                 f"timeout after {timeout_seconds}s", reason="timeout",
             )
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            if not ctx.cancel.is_cancelled:
+                raise  # 外部 task 取消：照常外抛（K5）
+            return ToolResult.error(
+                f"cancelled ({ctx.cancel.reason})", reason="cancelled")
 
         out_text = stdout.decode("utf-8", errors="replace")[:max_output_bytes]
         err_text = stderr.decode("utf-8", errors="replace")[:max_output_bytes]

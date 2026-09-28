@@ -30,6 +30,12 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
 from taifeng.tool.builtins.shell import _quick_safety_check
+from taifeng.tool.command_executor import (
+    CommandExecutor,
+    CommandProcess,
+    CommandSpec,
+    LocalCommandExecutor,
+)
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 from taifeng.tool.subprocess_env import default_safe_env
 
@@ -49,7 +55,7 @@ class _BgTask:
 
     task_id: str
     command: str
-    proc: asyncio.subprocess.Process
+    proc: CommandProcess
     started_at: float
     max_output_bytes: int
     _done: asyncio.Event = field(default_factory=asyncio.Event)
@@ -75,12 +81,20 @@ class BackgroundTaskRegistry:
         await registry.shutdown()
     """
 
-    def __init__(self, *, max_concurrent: int = 16) -> None:
+    def __init__(
+        self, *, max_concurrent: int = 16, executor: CommandExecutor | None = None,
+    ) -> None:
+        """
+        Args:
+            max_concurrent: 同时运行的后台任务上限。
+            executor: 命令执行器（sandbox-seam）；None = 本机子进程。
+        """
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
         self._tasks: dict[str, _BgTask] = {}
         self._lock = asyncio.Lock()
         self._max_concurrent = max_concurrent
+        self._executor = executor or LocalCommandExecutor()
 
     # ------------------------------------------------------------------
     # spawn / wait / kill / shutdown
@@ -116,14 +130,11 @@ class BackgroundTaskRegistry:
                 )
             task_id = f"bg_{secrets.token_hex(4)}"
 
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
+            proc = await self._executor.start(CommandSpec(
+                command=command, shell=True, cwd=cwd,
                 # env=None → 最小白名单（不继承宿主全环境，防凭据泄漏给子进程）
                 env=env if env is not None else default_safe_env(),
-            )
+            ))
             task = _BgTask(
                 task_id=task_id,
                 command=command,
