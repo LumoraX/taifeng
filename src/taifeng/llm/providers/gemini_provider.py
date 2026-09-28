@@ -36,6 +36,7 @@ from taifeng.llm.events import (
     text_delta,
     tool_call_done,
 )
+from taifeng.llm.providers._mid_history import mid_history_system_text
 from taifeng.llm.providers._shared import (
     assert_text_only_request,
     classify_abnormal_finish,
@@ -43,7 +44,6 @@ from taifeng.llm.providers._shared import (
     extract_rate_limit_snapshot,
     extract_request_id,
     extract_usage_gemini,
-    mid_history_system_text,
     parse_sse_data,
     transport_error,
 )

@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -44,9 +43,6 @@ from taifeng.loop.event import (
     CacheBreakDetected,
     ContextBudgetExceeded,
     LlmRequestRecorded,
-    ProviderCircuitClosed,
-    ProviderCircuitHalfOpen,
-    ProviderCircuitOpened,
     ProviderRetry,
     RewindCheckpointRecorded,
     ToolBatchDispatched,
@@ -54,6 +50,11 @@ from taifeng.loop.event import (
 )
 from taifeng.loop.failure_policy import DEFAULT_FAILURE_POLICY, FailureDisposition
 from taifeng.loop.prompt import build_api_request
+from taifeng.loop.prompt_fingerprint import (
+    compute_prompt_fingerprint,
+    detect_structural_break_reason,
+)
+from taifeng.loop.resilience_events import circuit_transition_event, provider_retry_event
 from taifeng.loop.rewind import count_turns
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
 from taifeng.loop.tool_output import tool_result_cap
@@ -61,7 +62,6 @@ from taifeng.loop.turn_helpers import (
     _llm_failure_context,
     _responses_conversation_items,
     _responses_sample_id,
-    _sha1_short,
 )
 from taifeng.suspend.signal import SuspendSignal
 
@@ -90,11 +90,6 @@ class _SamplePrep:
     iteration_history_len: int
 
 
-def _history_prefix_hash(history: list[Any], length: int) -> str:
-    """history 前 ``length`` 项的 id 序列哈希（cache 前缀改写检测用）。"""
-    return _sha1_short(",".join(item.id for item in history[:length]))
-
-
 class TurnSample:
     """turn 采样协作器（持 TurnRunner 引用，自身无状态）。"""
 
@@ -106,62 +101,19 @@ class TurnSample:
         self.__sample_owner = owner
 
     def compute_prompt_fingerprint(self, tools: list[Any]) -> dict[str, str]:
-        """计算 prompt 结构指纹 —— 用于归因 cache 失效的结构性原因（G-CACHE）。
-
-        指纹影响 cached prefix 的各段（参照 claw-code ``prompt_cache.rs`` 分段指纹）：
-        可见 skill 列表 / tool 集合（名 + 描述 + schema）/ system 段（entry skill id +
-        body + 注入指令文本）/ 模型 / 已发出消息前缀。history 在尾部增长属正常，
-        前缀段只记「发出时长度 + 这段的 item id 哈希」，下一轮只比较同一长度的那一段。
-        """
-        snapshot_key = ",".join(
-            sorted(self.__sample_owner.snapshot.reachable_from(self.__sample_owner.entry_skill.id))
+        """计算 prompt 结构指纹（G-CACHE；实现见 ``prompt_fingerprint``）。"""
+        owner = self.__sample_owner
+        return compute_prompt_fingerprint(
+            snapshot=owner.snapshot, entry_skill=owner.entry_skill,
+            instructions=owner.instructions, history=owner.history_buffer, tools=tools,
         )
-        # 工具指纹含描述与 schema：同名替换（ToolRegistry.replace / MCP list_changed）
-        # 同样改变 cached prefix，只比名字会把这类失效误记为 unknown_drop
-        tools_key = ",".join(sorted(
-            f"{getattr(t, 'name', '')}:{getattr(t, 'description', '')}:"
-            f"{json.dumps(getattr(t, 'input_schema', {}), sort_keys=True, ensure_ascii=False)}"
-            for t in tools
-        ))
-        instr_text = "\x01".join(getattr(i, "text", "") for i in self.__sample_owner.instructions)
-        system_src = (
-            f"{self.__sample_owner.entry_skill.id}\x00{self.__sample_owner.entry_skill.body}\x00{instr_text}"
-        )
-        history = self.__sample_owner.history_buffer
-        return {
-            "snapshot": _sha1_short(snapshot_key),
-            "tools": _sha1_short(tools_key),
-            "system": _sha1_short(system_src),
-            "model": _sha1_short(self.__sample_owner.entry_skill.model or ""),
-            "prefix_len": str(len(history)),
-            "prefix": _history_prefix_hash(history, len(history)),
-        }
 
     def detect_structural_break_reason(
         self, current: dict[str, str]
     ) -> str | None:
         """对比上一轮指纹，判定本轮 cache 失效的结构性原因（无变更 → None）。"""
-        prev = self.__sample_owner.last_prompt_fingerprint
-        if prev is None:
-            return None
-        if current.get("snapshot") != prev.get("snapshot"):
-            return "skill_snapshot_changed"
-        if current.get("tools") != prev.get("tools"):
-            return "tool_spec_changed"
-        if current.get("system") != prev.get("system"):
-            return "system_prompt_changed"
-        if "model" in prev and current.get("model") != prev.get("model"):
-            return "model_changed"
-        # 已缓存前缀：上次发出的那段 history（按长度截取）id 序列是否仍一致。
-        # 缩短（rollback）或同长度内被替换都算改写；压缩 / rewind 已在更早的预期标记里归因。
-        prev_len = int(prev.get("prefix_len", "0"))
-        history = self.__sample_owner.history_buffer
-        if prev.get("prefix") is not None and (
-            len(history) < prev_len
-            or _history_prefix_hash(history, prev_len) != prev.get("prefix")
-        ):
-            return "message_prefix_changed"
-        return None
+        return detect_structural_break_reason(
+            self.__sample_owner.last_prompt_fingerprint, current, self.__sample_owner.history_buffer)
 
     async def _prepare_request(self, iteration: int) -> _SamplePrep:
         """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检。
@@ -307,51 +259,12 @@ class TurnSample:
     async def _emit_circuit_transition(
         self, iteration: int, transition: CircuitTransition
     ) -> None:
-        """provider 断路器状态转换 → 三个 R3 事件之一（ADR 0042）。
-
-        三态各占一个事件 kind（而非共用一个带 to_state 字段的事件）：运维按 kind 订阅
-        「跳闸」告警，不必再解析 data；与 ``denial_circuit_open`` 的粒度也一致。
-        """
-        event_types = {
-            "open": ProviderCircuitOpened,
-            "half_open": ProviderCircuitHalfOpen,
-            "closed": ProviderCircuitClosed,
-        }
-        event_type = event_types.get(transition.to_state)
-        if event_type is None:
-            # 未知状态说明 CircuitState 扩了新态却漏了接线——不静默吞掉
-            raise ValueError(f"未知断路器状态: {transition.to_state}")
-        await self.__sample_owner._emit(
-            event_type(
-                data={
-                    "from_state": transition.from_state,
-                    "to_state": transition.to_state,
-                    "consecutive_failures": transition.consecutive_failures,
-                    "cooldown_seconds": transition.cooldown_seconds,
-                    "last_failure_class": transition.last_failure_class,
-                    "last_error_kind": transition.last_error_kind,
-                    "iteration": iteration,
-                }
-            )
-        )
+        """provider 断路器状态转换 → 三个 R3 事件之一（ADR 0042，组装见 resilience_events）。"""
+        await self.__sample_owner._emit(circuit_transition_event(iteration, transition))
 
     async def _emit_provider_retry(self, iteration: int, attempt: RetryAttempt) -> None:
-        """网络层退避重试 → ``provider_retry``（与 overflow 自愈共用事件，靠 ``reason`` 区分）。"""
-        await self.__sample_owner._emit(
-            ProviderRetry(
-                data={
-                    "reason": attempt.reason,
-                    "iteration": iteration,
-                    "attempt": attempt.attempt,
-                    "max_attempts": attempt.max_attempts,
-                    "delay_seconds": attempt.delay_seconds,
-                    "failure_class": attempt.failure_class,
-                    "error_kind": attempt.error_kind,
-                    "transport_phase": attempt.transport_phase,
-                    "retry_after_seconds": attempt.retry_after_seconds,
-                }
-            )
-        )
+        """网络层退避重试 → ``provider_retry``（组装见 resilience_events）。"""
+        await self.__sample_owner._emit(provider_retry_event(iteration, attempt))
 
     async def sample_once(self, iteration: int) -> tuple[str, bool]:
         """一次 LLM 采样 + 工具调度，返回 (本轮 assistant text, 是否有 tool call)。"""
