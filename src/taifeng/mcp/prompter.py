@@ -2,7 +2,7 @@
 
 参照：
     - codex codex-rs/mcp-server/src/exec_approval.rs（elicitation 路由）
-    - MCP 协议 spec 2024-11-05 / elicitation/create
+    - MCP 协议 spec 2025-06-18 / elicitation/create（elicitation 自该版进入规范）
 
 设计要点（R1 业务零侵入）：
     - McpPrompter 实现 PermissionPrompter 协议；业务侧把它注入 PermissionPolicy
@@ -38,15 +38,17 @@ class McpPrompter:
         pool = await EnginePool.create(..., permission_policy=policy)
         await server.run()
 
-    elicitation/create 协议形态（MCP 2024-11-05）：
+    elicitation/create 协议形态（MCP 2025-06-18）：
 
         request → server 发：
             {"method": "elicitation/create",
              "params": {"message": "<prompt>",
                         "requestedSchema": {"type": "object", ...}}}
         response ← client 回：
-            {"result": {"action": "accept"|"reject"|"cancel",
+            {"result": {"action": "accept"|"decline"|"cancel",
                         "content": {...}}}
+
+    ``reject`` 是规范定稿前草案里的拒绝动作名，仍按拒绝处理以兼容早期客户端。
     """
 
     def __init__(
@@ -70,7 +72,8 @@ class McpPrompter:
         失败语义（全保守 deny）：
             - timeout → deny(reason='elicitation_timeout')
             - server-initiated error → deny(reason='elicitation_error:<type>')
-            - client action != accept → deny(reason='user_<action>')
+            - client action != accept → deny(reason='user_declined' / 'user_rejected'
+              / 'user_cancelled')
             - accept + content.approved=false → deny(reason=content.reason
               or 'user_denied')
         """
@@ -172,7 +175,11 @@ class McpPrompter:
             return PermissionDecision.deny(
                 reason=reason_str or "user_denied",
             )
+        if action == "decline":
+            # 规范定稿的显式拒绝
+            return PermissionDecision.deny(reason="user_declined")
         if action == "reject":
+            # 定稿前草案的拒绝动作名（兼容早期客户端）
             return PermissionDecision.deny(reason="user_rejected")
         if action == "cancel":
             return PermissionDecision.deny(reason="user_cancelled")

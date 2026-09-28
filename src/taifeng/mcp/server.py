@@ -3,7 +3,7 @@
 参照：
     - codex codex-rs/mcp-server
     - claw-code crates/runtime/src/mcp_server.rs
-    - https://modelcontextprotocol.io / spec 2024-11-05
+    - https://modelcontextprotocol.io / spec 2025-06-18（版本协商见 ``taifeng.mcp.protocol``）
 
 设计原则（R1 业务零侵入）：
     - McpStdioServer 不构造 EnginePool；业务侧先按既有路径配齐，再注入 server
@@ -11,7 +11,7 @@
     - 不引入第三方 mcp-sdk / FastMCP；与 stdio_client.py 一致手写 JSON-RPC
 
 支持的 MCP 方法（最小可用集）：
-    - initialize（handshake）
+    - initialize（handshake；客户端请求的版本受支持则原样回，否则回最新版）
     - tools/list, tools/call（暴露 `run_skill_turn` meta-tool）
     - resources/list, resources/read（每个 skill 一个 ``taifeng://skill/<id>`` 资源）
 
@@ -30,20 +30,24 @@ import logging
 import sys
 from typing import TYPE_CHECKING, Any
 
+from taifeng.mcp.protocol import (
+    JSONRPC_INTERNAL_ERROR,
+    JSONRPC_INVALID_PARAMS,
+    JSONRPC_INVALID_REQUEST,
+    JSONRPC_METHOD_NOT_FOUND,
+    JSONRPC_PARSE_ERROR,
+    LATEST_PROTOCOL_VERSION,
+    jsonrpc_error,
+    select_server_protocol_version,
+)
+
 if TYPE_CHECKING:
     from taifeng.loop.pool import EnginePool
 
 logger = logging.getLogger(__name__)
 
-# MCP 协议版本（与 stdio_client.py 对齐）
-MCP_PROTOCOL_VERSION = "2024-11-05"
-
-# JSON-RPC 2.0 错误码
-JSONRPC_PARSE_ERROR = -32700
-JSONRPC_INVALID_REQUEST = -32600
-JSONRPC_METHOD_NOT_FOUND = -32601
-JSONRPC_INVALID_PARAMS = -32602
-JSONRPC_INTERNAL_ERROR = -32603
+# server 支持的最新协议版本（与客户端同源于 taifeng.mcp.protocol，保留旧名供既有导入）
+MCP_PROTOCOL_VERSION = LATEST_PROTOCOL_VERSION
 
 # 资源 URI scheme
 SKILL_URI_PREFIX = "taifeng://skill/"
@@ -188,7 +192,7 @@ class McpStdioServer:
             raise
         except Exception as e:  # noqa: BLE001 —— 不让单次 turn 的异常打穿读循环
             logger.exception("tools/call failed: id=%s", req_id)
-            response = _jsonrpc_error(
+            response = jsonrpc_error(
                 req_id, JSONRPC_INTERNAL_ERROR, f"Internal error: {e}",
             )
         await self._write_message(response)
@@ -212,12 +216,12 @@ class McpStdioServer:
                 return None
             payload = json.loads(text)
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 None, JSONRPC_PARSE_ERROR, f"Parse error: {e}"
             )
 
         if not isinstance(payload, dict):
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 None, JSONRPC_INVALID_REQUEST,
                 "Invalid Request: expected JSON object",
             )
@@ -235,7 +239,7 @@ class McpStdioServer:
 
         # 路径 1 / 3：incoming request 或 notification（method 必须是字符串）
         if not isinstance(method, str):
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 req_id, JSONRPC_INVALID_REQUEST,
                 "Invalid Request: missing method",
             )
@@ -416,7 +420,7 @@ class McpStdioServer:
             # JSON-RPC notification —— 不需要响应
             return None
         else:
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 req_id, JSONRPC_METHOD_NOT_FOUND, f"Method not found: {method}",
             )
 
@@ -430,9 +434,13 @@ class McpStdioServer:
     # ------------------------------------------------------------------
 
     def _handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
-        """initialize handshake —— 协议版本协商 + server info 公告。"""
+        """initialize handshake —— 协议版本协商 + server info 公告。
+
+        版本协商按规范 lifecycle：客户端请求的版本在支持清单内则原样回，否则回最新版
+        （由客户端决定是否断开）；不以 JSON-RPC 错误拒绝版本。
+        """
         return {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "protocolVersion": select_server_protocol_version(params.get("protocolVersion")),
             "capabilities": {"tools": {}, "resources": {}},
             "serverInfo": {
                 "name": self._server_name,
@@ -493,7 +501,7 @@ class McpStdioServer:
         name = params.get("name")
         args = params.get("arguments") or {}
         if name != "run_skill_turn":
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 req_id, JSONRPC_METHOD_NOT_FOUND,
                 f"Unknown tool: {name}",
             )
@@ -504,12 +512,12 @@ class McpStdioServer:
 
         # 参数缺失 → JSON-RPC 协议级错误（客户端的 bug，而非 LLM 视图）
         if not isinstance(skill_id, str) or not skill_id:
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 req_id, JSONRPC_INVALID_PARAMS,
                 "Invalid params: 'skill_id' must be a non-empty string",
             )
         if not isinstance(message, str):
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 req_id, JSONRPC_INVALID_PARAMS,
                 "Invalid params: 'message' must be a string",
             )
@@ -616,14 +624,14 @@ class McpStdioServer:
         """resources/read: 解析 ``taifeng://skill/<id>`` 返回 SKILL.md body。"""
         uri = params.get("uri")
         if not isinstance(uri, str) or not uri.startswith(SKILL_URI_PREFIX):
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 req_id, JSONRPC_INVALID_PARAMS,
                 f"Invalid params: unsupported uri scheme {uri!r}",
             )
         skill_id = uri[len(SKILL_URI_PREFIX):]
         defn = self._pool.skill_registry.snapshot().get(skill_id)
         if defn is None:
-            return _jsonrpc_error(
+            return jsonrpc_error(
                 req_id, JSONRPC_INVALID_PARAMS,
                 f"Invalid params: unknown skill {skill_id!r}",
             )
@@ -643,17 +651,6 @@ class McpStdioServer:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-
-
-def _jsonrpc_error(
-    req_id: Any, code: int, message: str,
-) -> dict[str, Any]:
-    """构造 JSON-RPC 2.0 error response。"""
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "error": {"code": code, "message": message},
-    }
 
 
 async def _connect_std_streams() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:

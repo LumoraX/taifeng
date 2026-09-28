@@ -30,6 +30,7 @@ from taifeng.mcp.bridge import (
     register_mcp_tools,
     register_mcp_tools_async,
 )
+from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -66,6 +67,8 @@ class McpStdioClient:
         self._lock = asyncio.Lock()
         self._initialized = False
         self._server_info: dict[str, Any] = {}
+        # initialize 协商出的协议版本（握手完成前为 None）
+        self._protocol_version: str | None = None
         self._request_timeout = request_timeout_seconds
         # dynamic-tool-set：notifications/tools/list_changed 的异步监听者
         self._tools_changed_listeners: list[Callable[[], Coroutine[Any, Any, None]]] = []
@@ -199,18 +202,18 @@ class McpStdioClient:
     # ------------------------------------------------------------------
 
     async def _initialize(self) -> None:
-        """MCP initialize handshake。"""
+        """MCP initialize handshake：声明最新协议版本，校验 server 回的版本后发 initialized。
+
+        Raises:
+            McpProtocolVersionError: server 回的版本不在支持清单内（或缺失）——``spawn``
+                据此关闭子进程后上抛（规范：客户端不支持该版本 SHOULD 断开）。
+        """
         from taifeng import __version__
 
         result = await self._send_request(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "clientInfo": {"name": "taifeng", "version": __version__},
-            },
-        )
-        self._server_info = result.get("serverInfo", {}) if isinstance(result, dict) else {}
+            "initialize", initialize_params(capabilities={}, client_version=__version__))
+        self._protocol_version = negotiate_protocol_version(result)
+        self._server_info = result.get("serverInfo", {})
         # 必须发 initialized notification
         await self._send_notification("notifications/initialized")
         self._initialized = True
@@ -240,7 +243,13 @@ class McpStdioClient:
 
     @property
     def server_info(self) -> dict[str, Any]:
+        """initialize 返回的 serverInfo（副本）。"""
         return dict(self._server_info)
+
+    @property
+    def protocol_version(self) -> str | None:
+        """initialize 协商出的协议版本；握手完成前为 None。"""
+        return self._protocol_version
 
     # ------------------------------------------------------------------
     # Lifecycle
