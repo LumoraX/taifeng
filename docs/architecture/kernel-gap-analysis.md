@@ -1,6 +1,6 @@
 # 微内核差距分析（kernel-lens）
 
-> 最近更新：2026-09-28（第二轮全面 review：K8–K19）
+> 最近更新：2026-09-29（第二轮全面 review：K8–K19；能力侧 review：C1–C16）
 > 视角：把 taifeng 当作 **LLM agent 的 OS 微内核 / 调度器**，只问"内核机制长齐没"，
 > 不问"某个特性建了没"。上游对标：codex / claw-code / hermes-agent / openclaw / opencode / deepagents。
 
@@ -74,6 +74,30 @@ taifeng 是"可嵌入、一 session 一 engine"的微内核。换框后，一大
 **判为非缺口（userspace / 宿主）**：model failover 链、客户端限流、成本定价（均可按断路器范式做成
 `ModelClient` 包装器）；cron / 定时唤醒（宿主到点提交）；优先级抢占；会话 fork；计划模式（可变
 `PermissionPolicy`）；子 agent 结构化返回；输入来源 / 污染标记（无业务驱动，按规则挂起）。
+
+## 能力侧 review（2026-09-28 / 29）：C1–C16
+
+机制齐之后再看「能力是否真的可用」：同样四路对照参照仓并逐条核实，发现既有能力实际失效（P0）、该补的能力（P1）
+与只定协议的候选（P2），已全部处置：
+
+| # | 问题 | 级别 | 落地 | ADR |
+| --- | --- | --- | --- | --- |
+| **C1** ✅ | 原生 Anthropic / Gemini 丢弃历史中段 system（压缩摘要 / pinned / 预算提示 / 记忆全失效） | P0 | 原位改写为 `<system-reminder>` user 文本 | 0055 |
+| **C2** ✅ | MCP 工具一律落 `pure`，崩溃恢复引导重发写操作 | P0 | 默认 `external_non_idempotent`；`trust_annotations` 才按 hint 细分 | 0057 |
+| **C3** ✅ | `reasoning_effort` / `temperature` / `max_output_tokens` 从未被设置 | P0 | SKILL.md `inference` 块，按 entry skill 下发 | 0056 |
+| **C4** ✅ | skill 加载静默跳过 / 截断 / `bool()` 误读 | P0 | 严格加载，加载期报错 | 0058 |
+| **C5** ✅ | 压缩把用户原话一并转述；续接提示语只在文档里 | P1 | 压缩条目 = 续接前言 + 最近用户原话 + 摘要（新增当前工作 / 错误与修复段） | 0059 |
+| **C6** ✅ | `read_skill` 读不到附属文件（渐进加载缺第三层） | P1 | `read_skill(skill_id, path)`，限定 skill 目录 | 0060 |
+| **C7** ✅ | PostToolUse 不能改写输出；工具结果无统一上限 | P1 | `output_override` + `ContextBudget.max_tool_result_bytes` | 0061 |
+| **C8** ✅ | 只在 anchor 打一个缓存标记；`ttl_seconds` 是死字段 | P1 | Anthropic 尾部滚动断点 + 5m / 1h TTL | 0062 |
+| **C9** ✅ | MCP 结果丢图片 / structuredContent；server 请求无人应答；版本不一致 | P1 / P2 | 无损投影 + `ElicitationHandler` + 2025-06-18 协商 | 0063 |
+| **C10** ✅ | 模型找文件只能借 shell；记忆只能被动 page-in | P2 | opt-in `glob` / `grep` / `memory` 工具 | 0064 |
+| **C11** ✅ | todo 清单只在压缩后钉回 | P2 | `reinject_every_turns` 周期重注 | 0065 |
+| **C12** ✅ | 公共 API 无分层、无弃用机制 | P2 | 稳定 / 实验 / 内部三层 + 快照 + `DeprecationWarning` | 0066 |
+| **C13** ✅ | 战绩散落各 thread，无聚合入口 | P2 | `SkillFitnessStore` + sink 适配（只沉淀不决策） | 0067 |
+| **C14** 📝 | 文件（PDF）输入 | P2 | 预留契约 `llm-file-input`，待有输入路径时实现 | 0067 |
+| **C15** 📝 | 多模型路由 / 回退 | P2 | 组合契约 `model-routing-composition`（userspace 实现） | 0067 |
+| **C16** ⛔ | `allowed-tools` 作为 `tool_names` 别名 | P1 | 判为不做：免审批 ≠ 可见白名单，保留在 `frontmatter_raw` | 0060 |
 
 ## 优先级与建议
 
