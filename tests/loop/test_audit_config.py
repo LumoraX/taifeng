@@ -16,7 +16,6 @@ from taifeng.loop.audit_config import (
     AuditConfig,
     AuditStaticInputs,
     validate_audit_config,
-    validate_audit_session_request,
 )
 from taifeng.skill.definition import SkillDefinition, SkillType
 from taifeng.skill.orchestration import OrchestrationSpec, SerialStep
@@ -228,19 +227,6 @@ def test_resolved_inputs_are_validated_instead_of_config_shadow() -> None:
         )
 
     assert caught.value.code == "audit_hooks_unsupported"
-
-
-def test_audit_session_resume_is_rejected_by_separate_request_gate() -> None:
-    """per-session resume 在 get_or_create 生命周期门禁独立拒绝。"""
-    with pytest.raises(AuditCapabilityError) as caught:
-        validate_audit_session_request(_config(), resume_thread_id="old-thread")
-
-    assert caught.value.code == "audit_resume_unsupported"
-
-
-def test_new_audit_session_request_passes() -> None:
-    """新 Session 请求不携带 resume 时通过 request gate。"""
-    validate_audit_session_request(_config(), resume_thread_id=None)
 
 
 @pytest.mark.parametrize(
@@ -783,7 +769,6 @@ def test_strict_config_requires_resolved_static_inputs() -> None:
     assert caught.value.code == "audit_static_inputs_required"
 
 
-def test_legacy_none_skips_static_and_session_validation() -> None:
-    """audit=None 的 legacy 路径不要求 strict resolved inputs 或新 Session。"""
+def test_legacy_none_skips_static_validation() -> None:
+    """audit=None 的 legacy 路径不要求 strict resolved inputs。"""
     validate_audit_config(None)
-    validate_audit_session_request(None, resume_thread_id="legacy-thread")

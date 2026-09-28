@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         SessionCreateResult,
         SessionDescriptor,
         SessionLease,
+        SessionOpenResult,
     )
     from taifeng.llm.client import ModelClient
     from taifeng.skill.registry import SkillSnapshot
@@ -35,6 +36,16 @@ class AuditJournalCore(Protocol):
         descriptor: SessionDescriptor,
     ) -> SessionCreateResult:
         """原子创建一个新 Session Journal。"""
+        ...
+
+    async def open_existing(
+        self,
+        session_id: str,
+        *,
+        writer_id: str,
+        operation_id: str,
+    ) -> SessionOpenResult:
+        """以更高 writer epoch 接管已有 Session（resume 用）。"""
         ...
 
     async def append_batch(
@@ -210,16 +221,6 @@ def validate_audit_config(
     _validate_tool_capabilities(static_inputs.tools)
 
 
-def validate_audit_session_request(
-    config: AuditConfig | None,
-    *,
-    resume_thread_id: str | None,
-) -> None:
-    """在 per-session get_or_create 边界拒绝 strict audit resume。"""
-    if config is not None and resume_thread_id is not None:
-        raise AuditCapabilityError("audit_resume_unsupported")
-
-
 def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
     """按稳定优先级拒绝未接入的 store/context/suspension 能力。"""
     for field_name, code in _OBJECT_CAPABILITY_RULES:
@@ -323,5 +324,4 @@ __all__ = [
     "AuditToolEffectKind",
     "AuditToolReconciliationMode",
     "validate_audit_config",
-    "validate_audit_session_request",
 ]

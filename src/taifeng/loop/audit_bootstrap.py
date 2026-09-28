@@ -29,7 +29,7 @@ from taifeng.loop.audit_config import (
 from taifeng.loop.audit_lifecycle import SessionFinishResult, ThreadTerminalRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from taifeng.context.compressor import CompressionOrchestrator
     from taifeng.conversation.transcript import JsonlMessageStore
@@ -39,13 +39,20 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class AuditedSessionState:
-    """EnginePool 持有的 audited Session bootstrap ownership。"""
+    """EnginePool 持有的 audited Session bootstrap ownership。
+
+    ``next_turn_index``：新 Engine 的 audited turn index 起点（resume 时接续 Journal）。
+    ``abort_resume``：仅 resume 路径设置；Engine 启动失败时只释放接管的 lease、不写
+    ``session_ended``（resume 失败不是 Session 的终结）。新建路径为 None，走唯一 finish。
+    """
 
     thread_id: str
     coordinator: SessionAuditCoordinator
     projector: JournalConversationProjector
     max_attachment_bytes: int
     max_total_attachment_bytes: int
+    next_turn_index: int = 0
+    abort_resume: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +246,13 @@ async def fail_audited_bootstrap(
     *,
     reason: str = "engine_bootstrap_failed",
 ) -> None:
-    """唯一 finish 路径收敛 root error/session end，再抛稳定创建错误。"""
+    """唯一 finish 路径收敛 root error/session end，再抛稳定创建错误。
+
+    resume 出来的 Session 只释放 lease 后抛错，不提交 terminal batch。
+    """
+    if state.abort_resume is not None:
+        await state.abort_resume()
+        raise AuditEngineCreationError(state.coordinator.session_id) from cause
     terminal = ThreadTerminalRequest(
         thread_id=state.thread_id,
         status="error",

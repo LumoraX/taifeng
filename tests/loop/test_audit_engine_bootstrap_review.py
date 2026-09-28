@@ -20,6 +20,7 @@ from taifeng.conversation.models import ResponseItem, ThreadInfo
 from taifeng.conversation.transcript import JsonlMessageStore
 from taifeng.llm.providers.sim import SimClient
 from taifeng.loop.audit_config import AuditCapabilityError
+from taifeng.loop.audit_resume import AuditResumeError
 from taifeng.loop.pool import EnginePool
 from taifeng.tool.registry import ToolRegistry
 from tests.conftest import GUARD_TIMEOUT_SECONDS
@@ -208,7 +209,7 @@ async def test_audited_cache_hit_resume_is_rejected_before_return(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """cached audited Engine 也必须执行独立 resume gate。"""
+    """cached audited Engine 的 resume 只能指向同一 thread，其他 thread 返回前拒绝。"""
     events: list[str] = []
     core = _JournalCore(events)
     monkeypatch.setattr(
@@ -219,14 +220,14 @@ async def test_audited_cache_hit_resume_is_rejected_before_return(
     pool = _pool(tmp_path, core, events)
     cached = await pool.get_or_create(session_id="ses-cache", entry_skill_id="entry")
 
-    with pytest.raises(AuditCapabilityError) as caught:
+    with pytest.raises(AuditResumeError) as caught:
         await pool.get_or_create(
             session_id="ses-cache",
             entry_skill_id="entry",
             resume_thread_id="any-resume",
         )
 
-    assert caught.value.code == "audit_resume_unsupported"
+    assert caught.value.code == "audit_resume_session_active"
     assert pool._engines["ses-cache"] is cached  # noqa: SLF001
     await pool.close()
 

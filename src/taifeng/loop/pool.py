@@ -37,7 +37,7 @@ from taifeng.loop.audit_bootstrap import (
     ensure_legacy_resume_allowed,
     validate_pool_audit,
 )
-from taifeng.loop.audit_config import AuditConfig, validate_audit_session_request
+from taifeng.loop.audit_resume import ensure_audited_cache_hit
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
 from taifeng.loop.pool_lifecycle import (
@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from taifeng.llm.client import ModelClient
     from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
+    from taifeng.loop.audit_config import AuditConfig
     from taifeng.skill.watcher import SkillFileWatcher
     from taifeng.telemetry.sink import TelemetrySink
     from taifeng.tool.spec import ToolSpec
@@ -774,6 +775,7 @@ class EnginePool:
                 物化历史 + 用同一 thread_id 构造 engine，**不**新建 thread。
                 未知 thread_id 抛 ``ValueError``，不静默回退。session_id
                 已有 cached engine 时本参数被忽略（既有 cache 命中优先）。
+                strict audit 下改为 Journal 接管恢复（ADR 0053，``AuditResumeError``）。
                 详见 spec ``jsonl-transcript`` / change ``engine-resume-by-thread-id``。
         """
         if self._audit is None and resume_thread_id is not None:
@@ -784,15 +786,14 @@ class EnginePool:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("EnginePool closed")
-            validate_audit_session_request(
-                self._audit,
-                resume_thread_id=resume_thread_id,
-            )
             if session_id in self._release_tasks:
                 raise EnginePoolSessionReleasingError(session_id)
             if session_id in self._engines:
-                # 既有 cache 命中：忽略 resume_thread_id（与既有语义一致）
-                return self._engines[session_id]
+                # 既有 cache 命中：legacy 忽略 resume_thread_id；audit 只允许同一 thread
+                cached = self._engines[session_id]
+                ensure_audited_cache_hit(self._audit, session_id, cached.thread_id,
+                                         resume_thread_id)
+                return cached
 
             snapshot = self._registry.snapshot()
             entry = snapshot.get(entry_skill_id)

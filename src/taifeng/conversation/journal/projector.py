@@ -431,6 +431,64 @@ class JournalConversationProjector:
                 projected[0].seq,
             )
 
+    async def reconcile_resumed_thread(
+        self,
+        *,
+        thread_id: str,
+        session_id: str,
+        items: Sequence[ResponseItem],
+        first_seq: int | None,
+        last_seq: int,
+    ) -> ProjectionResult:
+        """resume 时以 Journal 已提交 items 为真相核对既有投影 thread。
+
+        投影是 Journal 的可重建派生：若已有投影是 Journal items 的前缀（含相等），
+        追加缺失后缀并把 watermark 设为 ``last_seq``；投影领先或分叉时返回 stale，
+        不改写文件、不冻结执行（投影可删除后重放）。Session identity 不符是 audited
+        不变量违约，抛 ``ProjectionOrderError``。
+        """
+        expected = tuple(items)
+        try:
+            async with self._store.projection_scope(thread_id):
+                await self._validate_projection_session(thread_id, session_id)
+                snapshot = await self._store.load_projection_snapshot(thread_id)
+                stored = tuple(snapshot.items)
+                if stored != expected[: len(stored)]:
+                    return self._set_stale(
+                        thread_id, 0, "resume_projection_divergent", None, last_seq
+                    )
+                if len(stored) < len(expected):
+                    await self._store.append_projection_batch(
+                        thread_id, list(expected[len(stored) :]), snapshot.identity
+                    )
+                return self._set_resumed_healthy(thread_id, first_seq, last_seq)
+        except ProjectionIdentityError as exc:
+            raise ProjectionOrderError(
+                "projection target identity invariant violated"
+            ) from exc
+        except (
+            JSONDecodeError,
+            OSError,
+            ProjectionLifecycleError,
+            UnicodeError,
+            ValidationError,
+        ) as exc:
+            return self._set_stale(thread_id, 0, type(exc).__name__, None, last_seq)
+
+    def _set_resumed_healthy(
+        self,
+        thread_id: str,
+        first_seq: int | None,
+        last_seq: int,
+    ) -> ProjectionResult:
+        """resume 核对成功：以 Journal 水位覆盖旧状态并关闭 generation replay 窗口。"""
+        healthy = ProjectionResult(thread_id=thread_id, projected_seq=last_seq, stale=False)
+        if first_seq is not None:
+            self._store.record_projection_first_seq(thread_id, first_seq)
+        self._store.advance_projection_replay(thread_id, last_seq)
+        self._store.update_projection_state(thread_id, healthy, None)
+        return healthy
+
     async def _validate_projection_session(
         self,
         thread_id: str,
