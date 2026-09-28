@@ -108,7 +108,13 @@ class FilesystemSkillRegistry(SkillRegistry):
                 logger.warning("skills_dir not found: %s", d)
                 continue
             loaded = load_skills_from_dir(d, source="user")
-            # 后加载的覆盖先加载的（用户目录覆盖系统目录的语义）
+            # 后加载的覆盖先加载的（分层语义：靠后的目录覆盖靠前的）。覆盖是有意为之，
+            # 但必须可见：同名 skill 静默替换会让作者改了 A 目录却看不到效果。
+            for skill_id in sorted(loaded.keys() & all_skills.keys()):
+                logger.warning(
+                    "skill %r from %s overrides the one from %s",
+                    skill_id, loaded[skill_id].body_path, all_skills[skill_id].body_path,
+                )
             all_skills.update(loaded)
 
         reachable = compute_reachable_graph(all_skills)

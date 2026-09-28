@@ -150,6 +150,22 @@ strict_tool_names: true
 `read_skill` / `call_skill`。该开关用于收窄 LLM 的选择面，不替代执行期 `tool-whitelist`
 校验；实际派发仍必须命中本轮请求里注入过的工具。
 
+### 加载校验（严格，fail-fast）
+
+loader 对 SKILL.md 的任何问题都在加载期抛 `SkillValidationError`，不跳过、不截断、不强转：
+
+| 情况 | 行为 |
+| --- | --- |
+| 子目录下没有 `SKILL.md`（如共享素材目录） | 合法跳过 |
+| `SKILL.md` 缺 `---` frontmatter / YAML 语法错误 / frontmatter 不是 mapping | 报错 |
+| body 超过 `MAX_SKILL_BODY_SIZE`（256KB，UTF-8 字节） | 报错（提示拆到附属文件） |
+| `name` / `description` 缺失、为 null 或空串 | 报错 |
+| 已知字段类型不符：`entry` 与 `exposure.*_invocable` 须 YAML 布尔；`child_skills` / `tool_names` / `requires.*` 须字符串列表（裸字符串拒绝）；`max_call_depth` 须 >= 1 整数；`model` 须字符串 | 报错 |
+| 顶层未知键 | 保留在 `frontmatter_raw` 供业务透传，不报错 |
+
+类型化读取集中在 `skill/frontmatter_fields.py`。多目录加载（`FilesystemSkillRegistry.load([a, b])`）时同名 skill 由靠后的目录覆盖，
+覆盖以 warning 日志写明两处路径。热更新（watcher）时新版本校验失败 → 保留旧快照并记异常日志。
+
 ## 核心抽象
 
 ```python

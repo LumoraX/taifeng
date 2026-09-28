@@ -9,22 +9,25 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from taifeng.skill.definition import (
-    ChildRecall,
-    ReasoningEffort,
     SkillDefinition,
-    SkillExposure,
-    SkillInference,
-    SkillRequirements,
     SkillSource,
     SkillType,
     SkillValidationError,
 )
 from taifeng.skill.dispatch import CircularSkillReference, detect_cycles
+from taifeng.skill.frontmatter_fields import (
+    build_inference,
+    build_visibility,
+    get_bool,
+    get_positive_int,
+    get_str,
+    get_str_set,
+)
 from taifeng.skill.scripts.types import (
     DEFAULT_MAX_OUTPUT_BYTES,
     DEFAULT_TIMEOUT_SECONDS,
@@ -37,21 +40,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# SKILL.md 大小限制（body）
+# SKILL.md body 大小上限（UTF-8 字节）：超出即加载失败——截断会让模型拿到残缺指令且无人知晓
 MAX_SKILL_BODY_SIZE = 256 * 1024  # 256KB
-TRUNCATE_SUFFIX = "\n\n[内容已截断，完整文档请参考 references/]"
 
 # Frontmatter 分隔符
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
-
-# child_recall 合法值集合（直接从 ChildRecall Literal 派生，避免魔法值重复）
-_CHILD_RECALL_VALUES: frozenset[str] = frozenset(get_args(ChildRecall))
-
-# inference 块合法键与 reasoning_effort 合法值（同样从类型派生）
-_INFERENCE_KEYS: frozenset[str] = frozenset({"reasoning_effort", "temperature", "max_output_tokens"})
-_REASONING_EFFORT_VALUES: frozenset[str] = frozenset(get_args(ReasoningEffort))
-# temperature 取值上限：OpenAI / Gemini 的公共上界（Anthropic 为 1，超出由 provider 报错）
-_MAX_TEMPERATURE = 2.0
 
 
 class SkillLoadError(Exception):
@@ -66,27 +59,33 @@ def parse_skill_md(path: Path) -> dict[str, Any] | None:
     """解析单个 SKILL.md 文件。
 
     Returns:
-        含 ``frontmatter`` / ``body`` 的 dict；若文件不存在或格式错误返回 ``None``
+        含 ``frontmatter`` / ``body`` / ``path`` 的 dict；文件不存在返回 ``None``
+        （skill 目录下没有 SKILL.md 的子目录，如共享素材目录，合法跳过）。
+
+    Raises:
+        SkillValidationError: 文件存在但 frontmatter 缺失 / YAML 语法错误 / 不是 mapping，
+            或 body 超过 ``MAX_SKILL_BODY_SIZE``。此前这些情况只记 warning 后跳过或截断，
+            skill 从列表里悄悄消失或带着残缺指令运行。
     """
     if not path.is_file():
         return None
     text = path.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(text)
     if m is None:
-        logger.warning("missing/invalid frontmatter in %s", path)
-        return None
+        raise SkillValidationError(f"{path}: 缺少 --- 包围的 YAML frontmatter")
     try:
         frontmatter = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError as e:
-        logger.warning("YAML parse error in %s: %s", path, e)
-        return None
+        raise SkillValidationError(f"{path}: frontmatter YAML 解析失败：{e}") from e
     if not isinstance(frontmatter, dict):
-        logger.warning("frontmatter is not a mapping in %s", path)
-        return None
+        raise SkillValidationError(f"{path}: frontmatter 必须是 mapping")
     body = m.group(2)
-    if len(body.encode("utf-8")) > MAX_SKILL_BODY_SIZE:
-        logger.warning("body of %s exceeds %dKB, truncated", path, MAX_SKILL_BODY_SIZE // 1024)
-        body = body[:MAX_SKILL_BODY_SIZE] + TRUNCATE_SUFFIX
+    body_bytes = len(body.encode("utf-8"))
+    if body_bytes > MAX_SKILL_BODY_SIZE:
+        raise SkillValidationError(
+            f"{path}: body {body_bytes} 字节超过上限 {MAX_SKILL_BODY_SIZE}；"
+            "请把细节拆到 skill 目录下的附属文件"
+        )
     return {"frontmatter": frontmatter, "body": body, "path": path}
 
 
@@ -102,17 +101,22 @@ def _build_definition(
     missing = [k for k in required if k not in fm]
     if missing:
         raise SkillValidationError(f"skill {skill_id!r} missing required fields: {missing}")
+    name = get_str(fm, "name", skill_id)
+    description = get_str(fm, "description", skill_id)
+    # 必填字段写成 null / 空串同样视为缺失（空 description 会让 LLM 无从选择该 skill）
+    if not name or not description:
+        raise SkillValidationError(f"skill {skill_id!r} name / description 不能为空")
 
     skill_type: SkillType = fm.get("type", "atomic")
     if skill_type not in ("atomic", "composite"):
         raise SkillValidationError(f"skill {skill_id!r} invalid type: {skill_type!r}")
 
     scripts = _build_scripts(fm, skill_id, skill_dir)
-    requires, exposure = _build_visibility(fm, skill_id)
-    inference = _build_inference(fm, skill_id)
+    requires, exposure = build_visibility(fm, skill_id)
+    inference = build_inference(fm, skill_id)
 
     # === B 声明式编排：解析可选 orchestration（atomic 声明即报错，给清晰信息）===
-    child_skills = frozenset(fm.get("child_skills", []) or [])
+    child_skills = get_str_set(fm, "child_skills", skill_id)
     orchestration = None
     raw_orch = fm.get("orchestration")
     if raw_orch is not None:
@@ -130,17 +134,17 @@ def _build_definition(
 
     return SkillDefinition(
         id=skill_id,
-        name=str(fm["name"]),
-        description=str(fm["description"]),
+        name=name,
+        description=description,
         version=str(fm.get("version", "1.0.0")),
         body=parsed["body"],
         body_path=parsed["path"],
         type=skill_type,
-        entry=bool(fm.get("entry", False)),
+        entry=get_bool(fm, "entry", skill_id, default=False),
         child_skills=child_skills,
-        tool_names=frozenset(fm.get("tool_names", []) or []),
-        max_call_depth=int(fm.get("max_call_depth", 6)),
-        model=fm.get("model"),
+        tool_names=get_str_set(fm, "tool_names", skill_id),
+        max_call_depth=get_positive_int(fm, "max_call_depth", skill_id, default=6),
+        model=get_str(fm, "model", skill_id),
         requires=requires,
         exposure=exposure,
         inference=inference,
@@ -148,114 +152,6 @@ def _build_definition(
         scripts=scripts,
         source=source,
         orchestration=orchestration,
-    )
-
-
-def _build_visibility(
-    fm: dict[str, Any], skill_id: str
-) -> tuple[SkillRequirements, SkillExposure]:
-    """从 frontmatter 解析 G4 可见性字段（``requires`` + ``exposure``）。
-
-    ``requires`` 形如::
-
-        requires:
-          bins: [jq, rg]
-          env: [OPENAI_API_KEY]
-          os: [linux, darwin]
-
-    ``exposure`` 形如 ``exposure: {model_invocable: false, user_invocable: true}``。
-    缺省时全部用安全默认（无要求 / 全可见）。
-    """
-    raw_req = fm.get("requires") or {}
-    if not isinstance(raw_req, dict):
-        raise SkillValidationError(
-            f"skill {skill_id!r} frontmatter requires 必须是 mapping"
-        )
-    requires = SkillRequirements(
-        bins=frozenset(raw_req.get("bins", []) or []),
-        env=frozenset(raw_req.get("env", []) or []),
-        os=frozenset(raw_req.get("os", []) or []),
-    )
-
-    raw_exp = fm.get("exposure") or {}
-    if not isinstance(raw_exp, dict):
-        raise SkillValidationError(
-            f"skill {skill_id!r} frontmatter exposure 必须是 mapping"
-        )
-    # child_recall 三值枚举校验：缺省回退 auto；非法值必须抛错（禁 silent fallback）
-    raw_recall = raw_exp.get("child_recall", "auto")
-    if raw_recall not in _CHILD_RECALL_VALUES:
-        raise SkillValidationError(
-            f"skill {skill_id!r} frontmatter exposure.child_recall 非法值 "
-            f"{raw_recall!r}，合法值：{sorted(_CHILD_RECALL_VALUES)}"
-        )
-    exposure = SkillExposure(
-        model_invocable=bool(raw_exp.get("model_invocable", True)),
-        user_invocable=bool(raw_exp.get("user_invocable", True)),
-        child_recall=raw_recall,
-    )
-    return requires, exposure
-
-
-def _build_inference(fm: dict[str, Any], skill_id: str) -> SkillInference:
-    """从 frontmatter 解析 ``inference`` 块（skill 级推理参数）。
-
-    形如::
-
-        inference:
-          reasoning_effort: high
-          temperature: 0
-          max_output_tokens: 2048
-
-    缺省 → 全 None（不声明）。任何非法内容都在加载期抛错，不回退默认值：
-    写错的键名 / 值若被静默忽略，作者会以为参数已生效。
-
-    Raises:
-        SkillValidationError: 非 mapping、未知键、取值类型或范围非法。
-    """
-    raw = fm.get("inference")
-    if raw is None:
-        return SkillInference()
-    if not isinstance(raw, dict):
-        raise SkillValidationError(f"skill {skill_id!r} frontmatter inference 必须是 mapping")
-    unknown = sorted(set(raw) - _INFERENCE_KEYS)
-    if unknown:
-        raise SkillValidationError(
-            f"skill {skill_id!r} frontmatter inference 含未知键 {unknown}，"
-            f"合法键：{sorted(_INFERENCE_KEYS)}"
-        )
-
-    effort = raw.get("reasoning_effort")
-    if effort is not None and effort not in _REASONING_EFFORT_VALUES:
-        raise SkillValidationError(
-            f"skill {skill_id!r} inference.reasoning_effort 非法值 {effort!r}，"
-            f"合法值：{sorted(_REASONING_EFFORT_VALUES)}"
-        )
-
-    temperature = raw.get("temperature")
-    # bool 是 int 子类，须先排除（``temperature: true`` 是写错而非 1.0）
-    if temperature is not None and (
-        isinstance(temperature, bool)
-        or not isinstance(temperature, int | float)
-        or not 0 <= temperature <= _MAX_TEMPERATURE
-    ):
-        raise SkillValidationError(
-            f"skill {skill_id!r} inference.temperature 须为 [0, {_MAX_TEMPERATURE}] 内的数值，"
-            f"实际 {temperature!r}"
-        )
-
-    max_output = raw.get("max_output_tokens")
-    if max_output is not None and (
-        isinstance(max_output, bool) or not isinstance(max_output, int) or max_output < 1
-    ):
-        raise SkillValidationError(
-            f"skill {skill_id!r} inference.max_output_tokens 须为 >= 1 的整数，实际 {max_output!r}"
-        )
-
-    return SkillInference(
-        reasoning_effort=effort,
-        temperature=None if temperature is None else float(temperature),
-        max_output_tokens=max_output,
     )
 
 
