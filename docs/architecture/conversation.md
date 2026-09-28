@@ -10,12 +10,18 @@
 - **零配置开箱即用**（避免库变 framework）：传 `storage_dir` 一个参数即拿到完整能力
 - **不引第三方 DB 依赖**（R1 强制）：src 内仅允许 stdlib `sqlite3`
 
-## 实验性 SessionJournal durable core（Phase 1）
+## 实验性 SessionJournal durable core（Phase 1 + Phase 2 写者接管）
 
 `taifeng.conversation.journal` 现包含一个隔离的、实验性的 Session 级 durable core。它使用 RFC 8785
 canonical JSON、SHA-256 envelope hash chain、`BEGIN + envelopes + COMMIT` 原子 batch、同进程 live lease
 fencing，以及 fail-closed strict verification。每次 durable ack 都在 file flush+fsync 后返回；新建文件还会
 fsync 父目录。同步文件操作和 strict scan 全部经 anyio worker thread 执行。
+
+writer 互斥是跨进程的：`create_session` / `open_existing` 先取 `<session>.journal.lock` 的
+`flock(LOCK_EX|LOCK_NB)`（经可注入 `WriterLockAdapter`），fd 持有到 `close_session` / `close`；被占即
+`JournalBusyError`，非 POSIX 显式 `JournalLockUnsupportedError`。`open_existing` 在持锁后 strict verify，
+拒绝尾损、已 `session_ended` 的 Session，然后以 `writer_epoch + 1` 追加一条 `writer_takeover` 接管；strict
+verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
 
 这一能力当前**不是默认 conversation 持久化路径**（legacy 模式）：
 
@@ -37,15 +43,21 @@ fsync 父目录。同步文件操作和 strict scan 全部经 anyio worker threa
   一个 finish future、terminal batch（thread terminal + 唯一 `session_ended`）+ `close_session(lease)` 恰一次；
   首个 Journal IO / 完整性 / ack 不确定失败即关闭 effect gate（freeze），且**每 Session 独立**——一个
   Session 冻结不影响其他 Session。
-- **current recovery exclusions（本阶段不支持）**：audit 静态拒绝 resume、custom store/directory、IndexHook、
-  hooks、permission/HITL、compressor、memory、instruction layers、orchestration、spawn/peer、非 attempt-
-  observable client、可 suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable
-  拒绝。跨进程崩溃接管、repair/reconcile/unfreeze、历史迁移仍不在本阶段范围。
+- **resume（Journal 接管）**：`get_or_create(resume_thread_id=...)` 经投影 marker 定位 Journal Session →
+  `open_existing` 接管（epoch+1）→ 存在未结算 effect（intent 无 outcome / 已落 unknown / submission 未 applied）
+  即 `AuditResumeError("audit_resume_recovery_required")` 并列出 record id，否则用 root thread 已提交
+  `conversation_item` 重建 history、复用并核对既有投影 thread 后续跑；已 `session_ended` 的 Session 不可重开。
+  resume 失败只释放 lease，不写 `session_ended`。
+- **current recovery exclusions（本阶段不支持）**：custom store/directory、IndexHook、hooks、permission/HITL、
+  compressor、memory、instruction layers、orchestration、spawn/peer、非 attempt-observable client、可
+  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。未结算 effect 的
+  repair/reconcile/unfreeze、历史迁移仍不在本阶段范围（resume 只 fail closed，不替运维裁决）。
 
 完整数据契约与边界以
 [SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)、
-[SessionJournal Durable Core（Phase 1）能力契约](capabilities/session-journal-core.md) 和
-[ADR 0025](../decisions/0025-session-journal-source-of-truth.md) 为准。
+[SessionJournal Durable Core 能力契约](capabilities/session-journal-core.md)、
+[ADR 0025](../decisions/0025-session-journal-source-of-truth.md) 和
+[ADR 0053](../decisions/0053-audited-session-resume-and-writer-takeover.md) 为准。
 
 ## 三协议总览
 

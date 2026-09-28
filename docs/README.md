@@ -90,6 +90,7 @@ Later ADRs:
 50. [ADR 0050: 后台任务完成时唤醒发起方，而非只能轮询](decisions/0050-background-completion-wake.md): `run_in_background` 只能靠 `wait_for_task` 轮询。决策：注册表 `on_complete` 回调；工具经 peer mailbox 把中性摘要投回发起 thread（根 queue_only、spawn 子 trigger_turn、call_skill 子改投根）+ `background_task_completed` 事件；默认开。
 51. [ADR 0051: shell 类工具经 CommandExecutor 启动进程](decisions/0051-command-executor-seam.md): 脚本有 `ScriptExecutor`，`shell_exec` / `run_in_background` 却直接起子进程，沙箱无统一 seam；`shell_exec` 还不响应取消。决策：只抽「启动」一步为 `CommandExecutor.start(CommandSpec)`，审批 / env / 超时 / 截断 / 取消留在工具；内核只给本机默认实现；`shell_exec` 在 `interrupt_on_cancel` 内等待、取消即 kill。
 52. [ADR 0052: cache 失效分段归因](decisions/0052-segmented-cache-break-attribution.md): 指纹只有 skill / 工具名 / system，模型切换、同名 schema 变化、前缀被 rollback 都落 `unknown_drop`。决策：工具段含描述与 schema；新增 `model` 与消息前缀（发出时长度 + id 序列哈希）段；新增 `model_changed` / `message_prefix_changed`；旧指纹缺键不误判。
+53. [ADR 0053: 审计 Session resume 与跨进程写者接管](decisions/0053-audited-session-resume-and-writer-takeover.md) (Amends #0025): writer fencing 只在进程内、append 前重扫只能事后发现并发写，崩溃的审计 Session 无法恢复。决策：`flock` 真互斥（锁 fd 持有到关闭，非 POSIX 显式报错）；`open_existing` 以 epoch+1 写 `writer_takeover`，verify 强制 epoch 单调；`session_ended` 后不可重开；resume 遇未结算 effect 一律 fail closed 并列出 record，失败只释放 lease 不写终态。
 
 ### Fourth Pass: Gap Tracking
 

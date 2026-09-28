@@ -1,15 +1,16 @@
-# SessionJournal Durable Core（Phase 1）能力契约
+# SessionJournal Durable Core 能力契约（Phase 1 + Phase 2 写者接管）
 
-> 状态：Experimental。关联 ADR 0025。本契约只覆盖孤立 durable core，不表示 Engine 已获得完整审计能力。
+> 状态：Experimental。关联 ADR 0025、ADR 0053。本契约只覆盖 durable core，不表示 Engine 已获得完整审计能力。
 
 ## 1. 范围
 
 本能力在 `taifeng.conversation.journal` 内提供 Session 级 canonical record、hash chain、原子 JSONL batch、
-同进程 live writer fencing、strict load/verify。它不替换 `JsonlMessageWriter` / `JsonlMessageStore`，不接入
-Engine、EventMsg、resume、Timeline 或外部 effect，也不从 `taifeng.conversation` 顶层导出。
+同进程 live writer fencing + 跨进程 OS 写者锁、`open_existing` 以更高 writer epoch 接管、strict load/verify。
+它不替换 `JsonlMessageWriter` / `JsonlMessageStore`，不直接接入 Engine、EventMsg、Timeline 或外部 effect，
+也不从 `taifeng.conversation` 顶层导出（业务接入见 `session-journal-business-integration`）。
 
-Phase 1 不提供 `open_existing`、跨进程接管、recovery lease、repair/reconcile/unfreeze、legacy migration、
-redaction、blob 外置或签名/WORM。调用方不能把本阶段描述为完整审计真相源集成。
+本能力不提供 recovery lease、repair/reconcile/unfreeze 状态机、legacy migration、redaction、blob 外置或
+签名/WORM。调用方不能把本阶段描述为完整审计真相源集成。
 
 ## 2. 数据契约
 
@@ -177,9 +178,60 @@ fingerprint 且 lease 仍 live 的同进程重试返回同一个 create result�
 文件只能收到 `JournalBusyError` 或 `JournalAlreadyExistsError`，不得复制旧 lease。
 
 每次 append 必须完整匹配 session id、writer id、writer epoch、lease id。`close()` 在 per-session lock 内先把
-writer 标记为 closed，再释放 lease/cache/文件资源；已经取得旧 writer 引用但仍排队等待 lock 的 append 也必须
-拒绝。多 writer `close()` 逐锁期间被取消时，必须按反序释放全部已取得的 writer lock，且不得把未完成 close
-误标成 closed。`close()` 不写 `session_ended`。跨进程接管与更高 epoch 由 Phase 2 负责。
+writer 标记为 closed，再释放 lease/cache/文件资源与写者锁；已经取得旧 writer 引用但仍排队等待 lock 的 append
+也必须拒绝。多 writer `close()` 逐锁期间被取消时，必须按反序释放全部已取得的 writer lock，且不得把未完成
+close 误标成 closed。`close()` / `close_session()` 不写 `session_ended`。
+
+### 5.1 跨进程写者锁
+
+`create_session` 与 `open_existing` 在任何文件 mutation 前获取 `<root>/<session_id>.journal.lock` 的 OS 级建议锁
+（默认 `fcntl.flock(LOCK_EX | LOCK_NB)`），fd 持有到 `close_session` / `close` 释放：
+
+- 锁被其他进程或其他 core 实例持有 → `JournalBusyError(writer_id=None)`；同实例 live writer 冲突仍报
+  `JournalBusyError(writer_id=<持有者>)`；
+- 非 POSIX 平台 → `JournalLockUnsupportedError`，禁止静默退化为不加锁；
+- 锁文件永不删除（删除会让两个进程各自锁住不同 inode）；进程崩溃时由内核释放；默认 handle 被回收时
+  finalizer 关闭 fd，等价于进程退出；
+- create/open 在 commit dispatch 后结果未知时，锁不释放，park 到 `close()`，防止后台线程仍在写时被别的
+  进程接管；其余失败路径立即释放；
+- 获取 / 释放经可注入 `WriterLockAdapter`（同步 `acquire(path) -> handle` / `release(handle)`，core 派发到
+  线程池），语义与 `SyncFileAdapter` 相同。
+
+### 5.2 open_existing
+
+```python
+async def open_existing(
+    self, session_id: str, *, writer_id: str, operation_id: str,
+) -> SessionOpenResult: ...
+
+class SessionOpenResult:
+    lease: SessionLease      # writer_epoch = 接管后 epoch
+    ack: JournalAck          # 覆盖 writer_takeover 记录
+    previous_epoch: int
+
+class WriterTakeoverV1:      # record_type = "writer_takeover"
+    payload_version: Literal[1]
+    writer_id: str
+    operation_id: str
+    previous_epoch: int
+    previous_tail_seq: int
+    previous_tail_hash: str
+```
+
+持锁后 strict scan：
+
+| 状态 | 结果 |
+| --- | --- |
+| 文件不存在 | `JournalSessionNotFoundError` |
+| torn tail / 未闭合 batch | `JournalRecoveryRequiredError(cause="physical_tail")`，文件不变 |
+| 已有 committed `session_ended` | `JournalSessionEndedError`（终结的 Session 不可重开） |
+| committed 区域完整性违约 | `JournalIntegrityError` |
+| 其他 | 以 `epoch = tail.writer_epoch + 1` 单独 batch 追加 `writer_takeover`（record id `<operation_id>:writer_takeover`） |
+
+新 writer 的幂等索引由全部 committed batch 重建（旧 record id 的重复 append 返回原 ack）。幂等：同实例同
+operation/writer 的重复调用返回同一结果，其他 operation 得 Busy；跨实例重试时若同 id 的接管记录已 durable
+且仍是 tail、writer 一致，则复用其 epoch 与 ack 且不再追加；若其后已有写入（该 epoch 已被使用）→
+`JournalConflictError`。接管 commit 结果未知时冻结该 Session 的 create/open 并 park 锁（同 §7）。
 
 ## 6. 幂等与 CAS 顺序
 
@@ -225,6 +277,11 @@ torn、未 committed batch 内出现同 record id 不算幂等成功；ordinary 
 | seq gap / duplicate | `JournalIntegrityError` |
 | payload/previous/record hash mismatch | `JournalIntegrityError` |
 | conflicting committed record id | `JournalIntegrityError` |
+| Session 首 batch `writer_epoch != 1` | `JournalIntegrityError` |
+| batch 内 `writer_epoch` 不一致 | `JournalIntegrityError` |
+| `writer_epoch` 递减 | `JournalIntegrityError` |
+| epoch 上升但 batch 首条不是 `writer_takeover`，或跨度 ≠ 1 | `JournalIntegrityError` |
+| `writer_takeover` 未升 epoch / 不在 batch 首条 / payload 的 previous epoch、tail seq、tail hash 与链不符 | `JournalIntegrityError` |
 
 `load(after_seq=N)` 只返回 `seq > N` 的 committed envelope，保持原顺序。新 reader 禁止复用 legacy transcript
 “跳过损坏行”策略。health 为 `RECOVERY_REQUIRED` 时 ordinary append 必须拒绝。
@@ -240,5 +297,8 @@ torn、未 committed batch 内出现同 record id 不算幂等成功；ordinary 
   等锁取消时释放先前锁。
 - IO 覆盖 mutation 前取消/fatal、mutation 后取消/异常/fatal、create/append 统一分类、slow fsync 不阻塞
   event loop，以及 COMMIT 已写入后 fsync error 触发 recovery-required。
-- strict verify 覆盖本契约第 8 节全部状态。
+- strict verify 覆盖本契约第 8 节全部状态（含 epoch 单调与接管 lineage）。
+- 写者锁与接管覆盖：两个 core 实例争同一 Session → Busy；崩溃（只释放锁）后 open_existing epoch 递增、写
+  接管记录、verify 通过；ended / torn tail / missing 拒绝且失败路径释放锁；同实例幂等、ack 丢失重试复用、
+  已消费 operation 冲突；非 POSIX 显式报错。
 - focused tests、全量 pytest、real-LLM selfcheck 与 capability matrix/ledger 刷新全部通过后，Phase 1 才可完成。
