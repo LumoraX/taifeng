@@ -335,6 +335,19 @@ native provider 实现可在请求里带额外 header（如 `extra_headers`）�
 **这些 header 不是 `ModelClientSession` 协议的一部分**——协议只约定 `stream(request)`；header 由具体 provider
 实现或业务侧注入（保持协议层 R1-clean）。
 
+## Journal 确定性回放（journal-replay，ADR 0054）
+
+`JournalReplayClient.from_records(records)` 把 strict audit Journal 录下的 LLM 调用反过来当成 `ModelClient`：
+每个新请求按录制侧同一规则（`project_attempt_request(provider, model, request)`，空模型以录制模型补齐）算
+`canonical_attempt_sha256`，按摘要取对应录制的 `llm_response_committed.normalized_items` 还原为
+`reasoning_delta` / `text_delta` / `tool_call_done` / `completed` 事件流。
+
+- **按摘要而非顺序匹配**：并发 call_skill 子 turn 的请求顺序不稳定；同摘要多次录制按录制顺序消费。
+- **分叉即报错**：无匹配 → `ReplayDivergenceError`（`failure_class=invalid_request`），turn 以 `turn_failed` 终止——
+  这正是回归信号；`remaining` / `consumed` 供断言「新运行是否少走 / 多走了调用」。
+- **边界**：只回放 Chat 协议录制（Responses 输入项带 thread 派生的 sample id，跨运行不可复现 → 构造期
+  `ReplayUnsupportedError`）；只回放 `status=complete`；provider 专有回传状态（thinking 签名等）不还原。
+
 ## Cache 统计
 
 cache 统计**不挂在 `ModelClient` 上**，而是 `Engine` 跨 turn 持有一份 `PromptCacheStats`

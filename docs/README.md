@@ -90,6 +90,7 @@ Later ADRs:
 50. [ADR 0050: 后台任务完成时唤醒发起方，而非只能轮询](decisions/0050-background-completion-wake.md): `run_in_background` 只能靠 `wait_for_task` 轮询。决策：注册表 `on_complete` 回调；工具经 peer mailbox 把中性摘要投回发起 thread（根 queue_only、spawn 子 trigger_turn、call_skill 子改投根）+ `background_task_completed` 事件；默认开。
 51. [ADR 0051: shell 类工具经 CommandExecutor 启动进程](decisions/0051-command-executor-seam.md): 脚本有 `ScriptExecutor`，`shell_exec` / `run_in_background` 却直接起子进程，沙箱无统一 seam；`shell_exec` 还不响应取消。决策：只抽「启动」一步为 `CommandExecutor.start(CommandSpec)`，审批 / env / 超时 / 截断 / 取消留在工具；内核只给本机默认实现；`shell_exec` 在 `interrupt_on_cancel` 内等待、取消即 kill。
 52. [ADR 0052: cache 失效分段归因](decisions/0052-segmented-cache-break-attribution.md): 指纹只有 skill / 工具名 / system，模型切换、同名 schema 变化、前缀被 rollback 都落 `unknown_drop`。决策：工具段含描述与 schema；新增 `model` 与消息前缀（发出时长度 + id 序列哈希）段；新增 `model_changed` / `message_prefix_changed`；旧指纹缺键不误判。
+54. [ADR 0054: 用审计 Journal 做确定性回放](decisions/0054-journal-deterministic-replay.md): Journal 已记请求摘要与最终响应，却无消费者可回放。决策：`JournalReplayClient` 以 Journal 为数据源、按 canonical 请求摘要匹配录制调用（并发子 turn 稳定）；分叉显式 `ReplayDivergenceError`；只支持 Chat 协议录制。
 
 ### Fourth Pass: Gap Tracking
 

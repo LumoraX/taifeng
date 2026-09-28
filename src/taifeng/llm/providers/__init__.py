@@ -28,6 +28,11 @@ from taifeng.llm.providers.openai_compat import (
     OpenAICompatClient,
     OpenAICompatSession,
 )
+from taifeng.llm.providers.replay import (
+    JournalReplayClient,
+    ReplayDivergenceError,
+    ReplayUnsupportedError,
+)
 from taifeng.llm.providers.sim import (
     RequestLedger,
     RoutingSimClient,
@@ -41,6 +46,9 @@ from taifeng.llm.providers.sim import (
 )
 
 __all__ = [
+    "JournalReplayClient",
+    "ReplayDivergenceError",
+    "ReplayUnsupportedError",
     "AnthropicClient",
     "AnthropicSession",
     "CodexResponsesClient",

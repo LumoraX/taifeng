@@ -129,7 +129,7 @@ async def test_engine_call_skill_turn_durably_records_tool_and_skill_lineage(
                             "id": "c1",
                             "name": "call_skill",
                             "arguments": (
-                                '{"reason": "测试派发", "skill_id": "style-checker", '
+                                '{"skill_id": "style-checker", '
                                 '"reason": "审查代码风格"}'
                             ),
                         }
