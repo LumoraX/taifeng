@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime  # noqa: TC003  # Pydantic 运行期解析字段类型
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Never, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Never, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -243,7 +243,7 @@ class JournalEnvelope(JournalModel):
 
 
 class SessionLease(JournalModel):
-    """Phase 1 同进程 live writer 的 fencing capability。"""
+    """live writer 的 fencing capability（同进程 lease + 跨进程 OS 锁 + epoch）。"""
 
     session_id: NonEmptyStr
     writer_id: NonEmptyStr
@@ -280,6 +280,35 @@ class SessionCreateResult(JournalModel):
 
     lease: SessionLease
     ack: JournalAck
+
+
+class SessionOpenResult(JournalModel):
+    """``open_existing`` 接管成功后返回的新 epoch lease 与接管记录 ack。"""
+
+    lease: SessionLease
+    ack: JournalAck
+    previous_epoch: Annotated[int, Field(ge=1)]
+
+
+# Session 唯一 durable 终态的 record type（业务层写入；core 据此拒绝重开）。
+SESSION_ENDED_RECORD_TYPE = "session_ended"
+# 跨进程接管时由 core 写入的 epoch 递增记录。
+WRITER_TAKEOVER_RECORD_TYPE = "writer_takeover"
+
+
+class WriterTakeoverV1(JournalModel):
+    """``writer_takeover`` 的 V1 payload：新 writer 以更高 epoch 接管的证据。
+
+    放在 core models（而非业务 records）：它与初始化三记录一样由 core 自己写入，
+    strict verify 依赖其 ``previous_epoch`` 校验 epoch 只经接管单步递增。
+    """
+
+    payload_version: Literal[1] = 1
+    writer_id: NonEmptyStr
+    operation_id: NonEmptyStr
+    previous_epoch: Annotated[int, Field(ge=1)]
+    previous_tail_seq: Annotated[int, Field(ge=1)]
+    previous_tail_hash: HashHex
 
 
 _SYSTEM_ACTOR = ActorRef(kind="system", source="taifeng")
@@ -332,6 +361,33 @@ def build_initialization_records(
     return session_record, thread_record, binding_record
 
 
+def build_takeover_record(
+    *,
+    session_id: str,
+    writer_id: str,
+    operation_id: str,
+    previous_epoch: int,
+    previous_tail_seq: int,
+    previous_tail_hash: str,
+) -> JournalRecord:
+    """确定性构造接管记录；record id 只由 operation id 决定，便于幂等重试识别。"""
+    payload = WriterTakeoverV1(
+        writer_id=writer_id,
+        operation_id=operation_id,
+        previous_epoch=previous_epoch,
+        previous_tail_seq=previous_tail_seq,
+        previous_tail_hash=previous_tail_hash,
+    )
+    return JournalRecord(
+        session_id=session_id,
+        record_id=f"{operation_id}:{WRITER_TAKEOVER_RECORD_TYPE}",
+        operation_id=operation_id,
+        record_type=WRITER_TAKEOVER_RECORD_TYPE,
+        actor=_SYSTEM_ACTOR,
+        payload=payload.model_dump(mode="python"),
+    )
+
+
 __all__ = [
     "ActorRef",
     "Durability",
@@ -342,8 +398,13 @@ __all__ = [
     "JournalVerification",
     "JsonValue",
     "RootThreadDescriptor",
+    "SESSION_ENDED_RECORD_TYPE",
     "SessionCreateResult",
     "SessionDescriptor",
     "SessionLease",
+    "SessionOpenResult",
+    "WRITER_TAKEOVER_RECORD_TYPE",
+    "WriterTakeoverV1",
     "build_initialization_records",
+    "build_takeover_record",
 ]

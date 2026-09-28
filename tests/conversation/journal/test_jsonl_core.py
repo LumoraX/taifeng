@@ -212,11 +212,18 @@ async def test_create_session_snapshots_descriptor_before_first_await(
 
 @pytest.mark.anyio
 async def test_existing_file_is_not_adopted_by_another_core(tmp_path: Path) -> None:
-    """另一个 core 不得把已存在文件当成自己的 live Session。"""
+    """另一个 core 不得把已存在文件当成自己的 live Session。
+
+    creator 仍 live 时跨实例写者锁先拒绝（Busy）；creator 释放锁后文件仍存在，
+    contender 的 create 只能得到 AlreadyExists，绝不复制旧 lease。
+    """
     creator = JsonlSessionJournalCore(tmp_path)
     await creator.create_session(_descriptor())
     contender = JsonlSessionJournalCore(tmp_path)
 
+    with pytest.raises(JournalBusyError):
+        await contender.create_session(_descriptor())
+    await creator.close()
     with pytest.raises(JournalAlreadyExistsError):
         await contender.create_session(_descriptor())
 
