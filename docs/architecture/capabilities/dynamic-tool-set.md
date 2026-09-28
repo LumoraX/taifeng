@@ -38,7 +38,7 @@ EnginePool 订阅共享注册表，变更时向每个活跃 engine emit（`submi
 | `McpClient`（Protocol） | `list_tools` / `call_tool` / `server_info` / `add_tools_changed_listener` |
 | `McpStdioClient` | stdio 传输；reader 识别 `notifications/tools/list_changed` 并以 task 调度监听者 |
 | `McpHttpClient.connect(url, headers=, request_timeout_seconds=, listen_notifications=)` | streamable HTTP（2025-03-26）：POST JSON-RPC，响应 JSON 或 SSE；`Mcp-Session-Id` 带回；GET 推送流（405 = 不支持，不监听）；close 时 DELETE 会话 |
-| `bind_mcp_tools(client, registry, tool_prefix=, parallel_safe=, timeout_seconds=, watch=True) -> McpToolBinding` | 注册并随 list_changed 同步 |
+| `bind_mcp_tools(client, registry, tool_prefix=, parallel_safe=, timeout_seconds=, watch=True, trust_annotations=False) -> McpToolBinding` | 注册并随 list_changed 同步；`trust_annotations` 见下文「副作用分类」 |
 | `McpToolBinding.sync() -> (added, removed, replaced)` / `.detach()` | 手动同步 / 卸载本绑定拥有的全部工具 |
 | `register_mcp_tools_async(...)` | 一次性注册（旧接口；= `bind_mcp_tools(watch=False)`） |
 
@@ -64,6 +64,25 @@ prompt 结构指纹的 tools 分量 SHALL 覆盖每个可见工具的 **名称 +
 #### Scenario: server 工具集变化
 - **WHEN** 已绑定的 server 推 `notifications/tools/list_changed`，新列表新增 `beta`、`alpha` 描述变化
 - **THEN** 注册表新增 `beta`、替换 `alpha`，各 engine 收到两次 `tool_set_changed`，下一次采样可见 `beta`
+
+### Requirement: MCP 工具副作用分类默认保守
+
+桥接出的 ToolSpec SHALL 显式带 `effect_kind` / `reconciliation`（不得落 ToolSpec 默认的 `pure`）：
+
+| 条件 | `effect_kind` / `reconciliation` | `parallel_safe` |
+| --- | --- | --- |
+| `trust_annotations=False`（默认） | `external_non_idempotent` / `manual` | 绑定参数 |
+| 信任且 `annotations.readOnlyHint is true` | `pure` / `none` | `True` |
+| 信任且 `annotations.idempotentHint is true` | `idempotent` / `retry` | 绑定参数 |
+| 信任但未声明 / 值非字面 `true` / annotations 非对象 | `external_non_idempotent` / `manual` | 绑定参数 |
+
+默认不读 annotations：MCP 规范规定它们只是提示，不可信 server 的提示不得据以决策。分类决定崩溃恢复
+（[tool-crash-reconciliation](tool-crash-reconciliation.md)：pure / idempotent 告知可重发，其余挂起交人）
+与 strict audit 落账。重新同步时分类变化同样触发 `replace`。
+
+#### Scenario: 默认绑定的写工具崩溃
+- **WHEN** 以默认参数绑定的 MCP 工具执行途中进程崩溃
+- **THEN** 冷恢复 SHALL 挂起为 `TOOL_OUTCOME_UNKNOWN` 交人裁决，而非告知模型可安全重发
 
 ## R1–R5 影响
 

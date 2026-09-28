@@ -700,6 +700,10 @@ await binding.sync()   # 也可手动同步
 binding.detach()       # 卸载本绑定的全部工具
 ```
 
+`trust_annotations`（默认 `False`）：`True` 时按 server 声明的 `readOnlyHint` / `idempotentHint` 把工具分为
+`pure`（且可并行）/ `idempotent`，其余与默认一样按 `external_non_idempotent`（崩溃后挂起交人）。只对自己信任的
+server 打开。`register_mcp_tools_async` 同名参数语义相同。
+
 `bind_mcp_tools` 同样接受 `McpStdioClient`。运行时也可直接 `ToolRegistry.register / unregister / replace`，
 变更在下一次采样生效。
 

@@ -101,6 +101,38 @@ class _BridgeConfig:
     tool_prefix: str
     parallel_safe: bool
     timeout_seconds: float
+    trust_annotations: bool = False
+
+
+# 未信任 annotations 时的分类：远端工具一律假设有不可逆外部效果（崩溃恢复交人裁决）
+_UNTRUSTED_EFFECT = ("external_non_idempotent", "manual")
+
+
+def _classify_effect(meta: dict[str, Any], config: _BridgeConfig) -> tuple[str, str, bool]:
+    """据 MCP tool annotations 推出 ``(effect_kind, reconciliation, parallel_safe)``。
+
+    MCP 规范明言 annotations 只是提示、不可信 server 的提示不得据以决策；故默认
+    （``trust_annotations=False``）不读，一律按外部不可幂等处理——以前这里落 ToolSpec
+    默认的 ``pure``，崩溃恢复会告诉模型「可安全重发」，对写操作是错误的。
+
+    业务信任该 server 时（``trust_annotations=True``）按规范语义细分，只认显式 ``true``：
+    ``readOnlyHint`` → pure（且可与其他读类并行）；``idempotentHint`` → idempotent（可重发）；
+    其余（含未声明，规范默认 readOnly=false / idempotent=false）→ 外部不可幂等。
+    """
+    if not config.trust_annotations:
+        return (*_UNTRUSTED_EFFECT, config.parallel_safe)
+    annotations = meta.get("annotations")
+    if annotations is None:
+        return (*_UNTRUSTED_EFFECT, config.parallel_safe)
+    if not isinstance(annotations, dict):
+        # 形状不对的提示按「未声明」处理并告警：保守分类本就是规范缺省值
+        logger.warning("mcp tool %s has non-object annotations; treated as absent", meta.get("name"))
+        return (*_UNTRUSTED_EFFECT, config.parallel_safe)
+    if annotations.get("readOnlyHint") is True:
+        return "pure", "none", True
+    if annotations.get("idempotentHint") is True:
+        return "idempotent", "retry", config.parallel_safe
+    return (*_UNTRUSTED_EFFECT, config.parallel_safe)
 
 
 def _specs_from_listing(
@@ -115,12 +147,15 @@ def _specs_from_listing(
         if not name or not isinstance(name, str):
             continue
         local_name = f"{config.tool_prefix}{name}"
+        effect_kind, reconciliation, parallel_safe = _classify_effect(meta, config)
         specs[local_name] = ToolSpec(
             name=local_name,
             description=f"[MCP] {meta.get('description', '')}",
             input_schema=meta.get("inputSchema") or {"type": "object"},
             handler=_make_handler(client, name, config.timeout_seconds),
-            parallel_safe=config.parallel_safe,
+            parallel_safe=parallel_safe,
+            effect_kind=effect_kind,
+            reconciliation=reconciliation,
             timeout_seconds=config.timeout_seconds + 5.0,
         )
     return specs
@@ -162,9 +197,12 @@ class McpToolBinding:
             for name, spec in desired.items():
                 if name in self.owned:
                     current = self.registry.get(name)
+                    # annotations 变化（如 readOnly → 可写）同样要替换：分类决定恢复与并发语义
                     if current is not None and (
                         current.description != spec.description
                         or current.input_schema != spec.input_schema
+                        or current.effect_kind != spec.effect_kind
+                        or current.parallel_safe != spec.parallel_safe
                     ):
                         self.registry.replace(spec)
                         replaced.append(name)
@@ -201,6 +239,7 @@ async def bind_mcp_tools(
     parallel_safe: bool = False,
     timeout_seconds: float = 60.0,
     watch: bool = True,
+    trust_annotations: bool = False,
 ) -> McpToolBinding:
     """注册 MCP server 的全部工具，并（默认）随 ``tools/list_changed`` 持续同步。
 
@@ -211,10 +250,13 @@ async def bind_mcp_tools(
         parallel_safe: 默认 False（MCP 工具通常有副作用）。
         timeout_seconds: 单次 tools/call 超时。
         watch: True → 登记 list_changed 监听，变更时自动重新同步。
+        trust_annotations: True → 按 server 声明的 ``readOnlyHint`` / ``idempotentHint``
+            细分副作用类型（只读工具另可并行）；默认 False 一律按外部不可幂等处理
+            （MCP 规范：不可信 server 的提示不得据以决策）。
     """
     binding = McpToolBinding(
         client=client, registry=registry,
-        config=_BridgeConfig(tool_prefix, parallel_safe, timeout_seconds))
+        config=_BridgeConfig(tool_prefix, parallel_safe, timeout_seconds, trust_annotations))
     await binding.sync()
     if watch:
         client.add_tools_changed_listener(binding._on_list_changed)
@@ -228,14 +270,15 @@ async def register_mcp_tools_async(
     tool_prefix: str = "",
     parallel_safe: bool = False,
     timeout_seconds: float = 60.0,
+    trust_annotations: bool = False,
 ) -> list[ToolSpec]:
     """一次性把 MCP server 的所有工具注册为 ToolSpec（不随 list_changed 同步）。
 
-    需要持续同步请用 ``bind_mcp_tools``。
+    需要持续同步请用 ``bind_mcp_tools``；``trust_annotations`` 语义同该函数。
     """
     binding = await bind_mcp_tools(
         client, registry, tool_prefix=tool_prefix, parallel_safe=parallel_safe,
-        timeout_seconds=timeout_seconds, watch=False)
+        timeout_seconds=timeout_seconds, watch=False, trust_annotations=trust_annotations)
     registered = [spec for name in sorted(binding.owned)
                   if (spec := registry.get(name)) is not None]
     logger.info("registered %d MCP tool(s) from %s", len(registered), client.server_info.get("name"))
