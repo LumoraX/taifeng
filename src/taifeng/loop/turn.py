@@ -481,6 +481,9 @@ class TurnRunner:
 
                     # pre-turn 压缩判断
                     await self._maybe_compress(phase="pre_turn")
+                    # pinned-periodic：每 turn 首轮检查一次周期重注（压缩后钉回已重置计数）
+                    if rounds == 1:
+                        await self._ctxload.maybe_reinject_pinned_periodic()
 
                     # 单轮采样
                     round_text, had_tool_calls = await self._sample_once(rounds)

@@ -100,6 +100,7 @@ Later ADRs:
 60. [ADR 0060: read_skill 读取 skill 目录内附属文件](decisions/0060-read-skill-auxiliary-files.md): 渐进加载缺第三层，正文引用的 references 无从读取。决策：`read_skill(skill_id, path)`，路径限定 skill 目录（含符号链接）、UTF-8、≤256KiB；否决把 `allowed-tools` 当 `tool_names` 别名（免审批 ≠ 可见白名单，工具名不通用）。
 61. [ADR 0061: PostToolUse 可改写工具输出 + 工具结果统一字节上限](decisions/0061-post-tool-output-override-and-result-cap.md): PostToolUse 返回值被丢弃，宿主无处清洗工具输出；MCP / 业务工具输出无上限进入历史。决策：`output_override` 链式改写并打事件标记；`ContextBudget.max_tool_result_bytes` 默认 128KiB 保头尾截断，配 offload 时让位；否决钩子异常 fail-closed 与逐工具上限。
 62. [ADR 0062: Anthropic 尾部滚动缓存断点 + TTL 透传](decisions/0062-anthropic-rolling-cache-breakpoint-and-ttl.md): 只在 cache anchor 打一个标记，工具循环的尾部每轮全价重复计费；`ttl_seconds` 是死字段。决策：客户端默认在最后一条消息再打标记；300 / 3600 映射 5m / 1h，其他值报错；否决在 `build_api_request` 加断点与默认 1h。
+65. [ADR 0065: pinned 状态周期重注](decisions/0065-pinned-state-periodic-reinjection.md): 清单只在压缩后钉回，未压缩的长会话里工作记忆失焦。决策：`PeriodicPinnedStateSource.reinject_every_turns` 按 source 声明节奏，计数从 history 推导，pre-turn 压缩后尾追加；否决 engine 级全局旋钮与按迭代计数。
 
 ### Fourth Pass: Gap Tracking
 

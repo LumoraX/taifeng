@@ -37,6 +37,19 @@
 - 两个「压缩瞬间钩子」相邻可见：K3 salvage digest 插在 summary 之后，pinned 项追加在最尾，顺序稳定（`memory_pre_evict` 先于 `pinned:*`）。
 - 注：manual `CompactNow` 路径既有设计不带 `memory_store`（K3 salvage 只在 turn 内压缩接缝生效），但 pinned 注入两条路径均覆盖。
 
+### Requirement: 周期重注（pinned-periodic，ADR 0065）
+- 实现 `PeriodicPinnedStateSource`（在 `PinnedStateSource` 之上多一个 `reinject_every_turns: int | None`）的 source，
+  距上次注入满 N 条用户消息时 SHALL 在 turn 首轮迭代的 pre-turn 压缩判断之后重注一次（`registry.render_due`）；
+  `None` / `<= 0` 只在压缩后钉回。
+- 计数由 `turns_since_injection(history, name)` 从 history 推导（上次 `source="pinned:<name>"` 注入项之后的
+  user_message 数；从未注入则为全部用户消息数），不另存状态，resume 后天然延续；压缩后钉回的注入项同样重置计数。
+- 注入形态、护栏、渲染异常处置与压缩后钉回相同；事件 `phase="periodic"`。R2：pre-turn 边界尾追加，不动已缓存前缀。
+- `TodoStore(reinject_every_turns=N)` 即为范例。
+
+#### Scenario: 每两轮重注清单
+- **WHEN** `TodoStore(reinject_every_turns=2)` 已有清单、连续 4 轮用户输入且未压缩
+- **THEN** 第 2、4 轮用户消息之后 SHALL 各追加一条 `pinned:todo` 注入项，并各 emit 一次 `phase="periodic"` 的 `pinned_state_reinjected`
+
 ### Requirement: 双层护栏与显式丢弃
 - per-source 超 `max_chars` → `truncate_middle` 截断；registry 总预算装不下 → 整 source 跳过 + 事件 `dropped` 如实记录。
 

@@ -12,6 +12,11 @@
 
 渲染异常由 ``render_all`` 捕获进 ``errors`` 返回(调用方负责 emit 告警事件),
 压缩主流程不被业务渲染炸掉;有事件、非 silent fallback。
+
+**周期重注(pinned-periodic)**:只在压缩后钉回时,长会话里清单早已淹没在历史中段,
+模型的「工作记忆」逐渐失焦。source 额外声明 ``reinject_every_turns``(即实现
+``PeriodicPinnedStateSource``)后,距上次注入满 N 轮用户消息即在 pre-turn 重注一次。
+计数从 history 推导(``turns_since_injection``),不另存状态,resume 后天然延续。
 """
 
 from __future__ import annotations
@@ -20,7 +25,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterable, Iterator, Sequence
+
+    from taifeng.conversation.models import ResponseItem
 
 from taifeng.context.truncate import truncate_middle
 
@@ -45,6 +52,34 @@ class PinnedStateSource(Protocol):
     def format_for_injection(self) -> str | None:
         """渲染当前状态为注入文本;返回 ``None`` 表示本次不注入。"""
         ...
+
+
+@runtime_checkable
+class PeriodicPinnedStateSource(PinnedStateSource, Protocol):
+    """声明了周期重注节奏的 pinned 源(可选能力,在 ``PinnedStateSource`` 之上)。"""
+
+    reinject_every_turns: int | None
+    """距上次注入满多少轮用户消息即 pre-turn 重注;None / <=0 = 只在压缩后钉回。"""
+
+
+def pinned_injection_source(name: str) -> str:
+    """pinned 注入项的 ``system_injection.source`` 值(压缩后与周期重注共用)。"""
+    return f"pinned:{name}"
+
+
+def turns_since_injection(history: Iterable[ResponseItem], name: str) -> int:
+    """从 history 尾部往回数:距该 source 上次注入经过了几条用户消息。
+
+    从未注入过 → 返回 history 中全部用户消息数。
+    """
+    marker = pinned_injection_source(name)
+    turns = 0
+    for item in reversed(list(history)):
+        if item.kind == "system_injection" and item.payload.get("source") == marker:
+            return turns
+        if item.kind == "user_message":
+            turns += 1
+    return turns
 
 
 @dataclass(frozen=True)
@@ -113,7 +148,26 @@ class PinnedStateRegistry:
         return len(self._sources)
 
     def render_all(self) -> PinnedRenderResult:
-        """按注册序渲染全部 source,应用双层护栏。
+        """按注册序渲染全部 source,应用双层护栏(压缩后钉回用)。"""
+        return self._render(list(self._sources.values()))
+
+    def render_due(self, turns_since: Callable[[str], int]) -> PinnedRenderResult:
+        """只渲染周期到期的 source(pinned-periodic)。
+
+        Args:
+            turns_since: ``source 名 → 距上次注入的用户消息轮数``(调用方从 history 推导)。
+        """
+        due = [
+            src for src in self._sources.values()
+            if isinstance(src, PeriodicPinnedStateSource)
+            and src.reinject_every_turns is not None
+            and src.reinject_every_turns > 0
+            and turns_since(src.name) >= src.reinject_every_turns
+        ]
+        return self._render(due)
+
+    def _render(self, sources: Sequence[PinnedStateSource]) -> PinnedRenderResult:
+        """按给定顺序渲染,应用双层护栏。
 
         流程(每 source):渲染 → ``None`` 跳过 → 异常捕获进 errors →
         per-source ``truncate_middle(max_chars)`` → 总预算累计判断,
@@ -126,7 +180,7 @@ class PinnedStateRegistry:
         dropped: list[str] = []
         errors: list[tuple[str, str]] = []
         used = 0
-        for src in self._sources.values():
+        for src in sources:
             try:
                 raw = src.format_for_injection()
             except Exception as exc:  # 业务渲染崩溃不传染压缩主流程

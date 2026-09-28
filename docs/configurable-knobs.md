@@ -908,6 +908,7 @@ pool = await EnginePool.create(
 
 ```python
 store = TodoStore()                       # max_chars 可调（默认 2000）
+# 可选：reinject_every_turns=N → 距上次注入满 N 轮用户消息即 pre-turn 重注清单（默认 None = 只在压缩后钉回，ADR 0065）
 pool = await EnginePool.create(
     ...,
     extra_tools=[make_todo_write_tool(store)],

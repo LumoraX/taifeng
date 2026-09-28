@@ -36,12 +36,15 @@ class TodoStore:
     name = "todo"
     """PinnedStateSource 标识(registry 内唯一;事件/审计用)。"""
 
-    def __init__(self, *, max_chars: int = 2000) -> None:
+    def __init__(self, *, max_chars: int = 2000, reinject_every_turns: int | None = None) -> None:
         """
         Args:
             max_chars: pinned 渲染上限(超出由 E1 的 truncate_middle 截断)。
+            reinject_every_turns: 周期重注节奏(pinned-periodic):距上次注入满 N 轮用户
+                消息即在 pre-turn 重注清单;None = 只在压缩后钉回(默认)。
         """
         self.max_chars = max_chars
+        self.reinject_every_turns = reinject_every_turns
         self._items: list[dict[str, str]] = []
 
     @property

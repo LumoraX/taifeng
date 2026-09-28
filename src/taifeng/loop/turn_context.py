@@ -17,10 +17,12 @@ from taifeng.context.budget import (
     estimate_history_tokens,
 )
 from taifeng.context.budget_hint import evaluate_budget_hint, render_budget_hint
+from taifeng.context.pinned_state import pinned_injection_source, turns_since_injection
 from taifeng.loop.event import BudgetHintInjected, EngineLog, PinnedStateReinjected
 from taifeng.loop.turn_helpers import _latest_user_text
 
 if TYPE_CHECKING:
+    from taifeng.context.pinned_state import PinnedRenderResult
     from taifeng.conversation.models import ResponseItem
     from taifeng.loop.turn import TurnRunner
 
@@ -122,12 +124,35 @@ class TurnContextLoad:
         全部 source（双层护栏在 registry 内完成），每条以 ``system_injection``
         （source="pinned:<name>"）追加尾部并经 store 持久化（R5）。
 
-        渲染异常 → EngineLog 告警后跳过该 source（壳层隔离业务渲染崩溃，
-        有事件、非 silent fallback）。无注入且无丢弃 → 不 emit（零噪声）。
         """
         if self.__ctxload_owner.pinned_states is None or len(self.__ctxload_owner.pinned_states) == 0:
             return history
-        rendered = self.__ctxload_owner.pinned_states.render_all()
+        new_history = list(history)
+        await self._append_pinned(
+            new_history, self.__ctxload_owner.pinned_states.render_all(), phase)
+        return new_history
+
+    async def maybe_reinject_pinned_periodic(self) -> None:
+        """pinned-periodic：距上次注入满 N 轮用户消息的 source 在 pre-turn 重注一次。
+
+        只追加尾部（R2：pre-turn 边界、不动已缓存前缀）；计数从 history 推导，
+        压缩后钉回的注入项同样重置计数，故压缩与周期重注不会连着重复注入。
+        """
+        registry = self.__ctxload_owner.pinned_states
+        if registry is None or len(registry) == 0:
+            return
+        history = self.__ctxload_owner.history_buffer
+        rendered = registry.render_due(lambda name: turns_since_injection(history, name))
+        await self._append_pinned(history, rendered, "periodic")
+
+    async def _append_pinned(
+        self, history: list[ResponseItem], rendered: PinnedRenderResult, phase: str,
+    ) -> None:
+        """把一次渲染结果追加到 ``history`` 尾部（原地）、落 store 并 emit 事件。
+
+        渲染异常 → EngineLog 告警后跳过该 source（壳层隔离业务渲染崩溃，
+        有事件、非 silent fallback）。无注入且无丢弃 → 不 emit（零噪声）。
+        """
         for name, err in rendered.errors:
             await self.__ctxload_owner._emit(EngineLog(data={
                 "level": "warning",
@@ -135,16 +160,15 @@ class TurnContextLoad:
                 "extra": {"source": name},
             }))
         if not rendered.entries and not rendered.dropped:
-            return history
+            return
         from taifeng.conversation.models import system_injection
 
-        new_history = list(history)
         for entry in rendered.entries:
             note = system_injection(
                 entry.text, thread_id=self.__ctxload_owner.thread_id,
-                source=f"pinned:{entry.name}",
+                source=pinned_injection_source(entry.name),
             )
-            new_history.append(note)
+            history.append(note)
             await self.__ctxload_owner.store.append(note)
         await self.__ctxload_owner._emit(PinnedStateReinjected(data={
             "sources": [
@@ -154,7 +178,6 @@ class TurnContextLoad:
             "dropped": rendered.dropped,
             "phase": phase,
         }))
-        return new_history
 
     def estimate_items(self, items: list[ResponseItem]) -> int:
         """本地粗估一段 items 的 token（按本 turn 的图片策略与业务估算器）。"""
