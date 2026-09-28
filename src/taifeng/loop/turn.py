@@ -471,19 +471,8 @@ class TurnRunner:
                     # 同步当前迭代序号 → 挂起时落 SuspensionRecord.turn_index
                     self._current_iteration = rounds
 
-                    # B1 midturn-input-steering：迭代边界排空注入队列（成对 fc/output
-                    # 已闭合的安全点），把运行中收到的用户输入并入 history 再采样。
-                    await self._drain_pending_input()
-
-                    # budget-awareness：压缩前按高水位用量判定是否注预算提示
-                    # （穿越 soft 一次注一次）。放在压缩前，使提示反映承压瞬间。
-                    await self._maybe_inject_budget_hint()
-
-                    # pre-turn 压缩判断
-                    await self._maybe_compress(phase="pre_turn")
-                    # pinned-periodic：每 turn 首轮检查一次周期重注（压缩后钉回已重置计数）
-                    if rounds == 1:
-                        await self._ctxload.maybe_reinject_pinned_periodic()
+                    # 采样前上下文维护：排空注入 → 预算提示 → pre-turn 压缩 → pinned 周期重注
+                    await self._ctxload.pre_sample_upkeep(rounds)
 
                     # 单轮采样
                     round_text, had_tool_calls = await self._sample_once(rounds)

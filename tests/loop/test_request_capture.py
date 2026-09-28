@@ -101,7 +101,7 @@ async def test_request_captured_in_call_skill_sub_runner(
                     {
                         "id": "c0",
                         "name": "call_skill",
-                        "arguments": '{"skill_id":"style-checker","arguments":{"x":1}}',
+                        "arguments": '{"skill_id":"style-checker","args":{"x":1},"reason":"审查风格"}',
                     }
                 ],
             ),

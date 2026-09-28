@@ -115,6 +115,28 @@ class TurnContextLoad:
         await self.__ctxload_owner.store.append(note)
         return new_history
 
+    async def pre_sample_upkeep(self, rounds: int) -> None:
+        """每轮采样前的上下文维护，顺序固定（从 ``TurnRunner.run`` 迭代循环下沉）。
+
+        兄弟调用经 owner 回弹（``_drain_pending_input`` / ``_maybe_compress``），保住
+        TurnRunner 上的白盒注入点。
+
+        Args:
+            rounds: 本 turn 的迭代序号（1 起）。
+        """
+        owner = self.__ctxload_owner
+        # B1 midturn-input-steering：迭代边界排空注入队列（成对 fc/output
+        # 已闭合的安全点），把运行中收到的用户输入并入 history 再采样。
+        await owner._drain_pending_input()
+        # budget-awareness：压缩前按高水位用量判定是否注预算提示
+        # （穿越 soft 一次注一次）。放在压缩前，使提示反映承压瞬间。
+        await owner._maybe_inject_budget_hint()
+        # pre-turn 压缩判断
+        await owner._maybe_compress(phase="pre_turn")
+        # pinned-periodic：每 turn 首轮检查一次周期重注（压缩后钉回已重置计数）
+        if rounds == 1:
+            await self.maybe_reinject_pinned_periodic()
+
     async def reinject_pinned_state(
         self, history: list[ResponseItem], phase: str
     ) -> list[ResponseItem]:
