@@ -3,6 +3,9 @@
 让 LLM 自主调度文档化 skill 的 Python agent 微内核 —— 动 agent 的"天地气"。
 
 设计文档：docs/architecture/overview.md
+
+公共 API 分层（ADR 0066，docs/architecture/public-api.md）：本模块 ``__all__`` 是稳定层；
+契约仍在演进的入口见 ``taifeng.experimental``；其余子模块符号属内部实现。
 """
 
 __version__ = "2026.9.17.23"
@@ -199,7 +202,6 @@ from taifeng.tool.command_executor import (
     CommandSpec,
     LocalCommandExecutor,
 )
-from taifeng.tool.spec import ReconcileVerdict
 
 __all__ = [
     "AgentEngine",
@@ -215,7 +217,6 @@ __all__ = [
     "CommandProcess",
     "CommandSpec",
     "LocalCommandExecutor",
-    "ReconcileVerdict",
     "CompressionContext",
     "CompressionOrchestrator",
     "CompressionResult",
@@ -367,7 +368,9 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    """PEP 562 lazy attribute：``OtelSinkConfig`` / ``OtelTelemetrySink`` 走 optional extra。
+    """PEP 562 lazy attribute：optional extra 的 OTel 符号 + 弃用期旧名。
+
+    ``OtelSinkConfig`` / ``OtelTelemetrySink`` 走 optional extra：
 
     未装 ``taifeng[telemetry-otel]`` 时，``from taifeng import *`` 不报错；
     只有真访问这两个名字时才触发 OTel SDK import 链，缺包则在 ``OtelTelemetrySink.__init__``
@@ -377,4 +380,9 @@ def __getattr__(name: str) -> Any:
         from taifeng.telemetry import otel_sink
 
         return getattr(otel_sink, name)
+    # 弃用期内的旧名：照常可用但发 DeprecationWarning（ADR 0066）
+    from taifeng._deprecation import DEPRECATED_ALIASES, resolve_deprecated
+
+    if name in DEPRECATED_ALIASES:
+        return resolve_deprecated(name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

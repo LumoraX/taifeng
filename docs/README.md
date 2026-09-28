@@ -20,6 +20,7 @@ If you are integrating Taifeng into a host system rather than changing the kerne
 ### First Pass: What Taifeng Is and Why
 
 1. [Architecture overview](architecture/overview.md): the five-dimensional abstraction, six core packages, and infrastructure packages.
+   - [Public API tiers](architecture/public-api.md): stable (`taifeng.__all__`) / experimental (`taifeng.experimental`) / internal, and the deprecation policy.
 2. [ADR 0001: Naming Taifeng](decisions/0001-naming-taifeng.md).
 3. [ADR 0002: Choosing Python](decisions/0002-python-language.md).
 
@@ -101,6 +102,7 @@ Later ADRs:
 61. [ADR 0061: PostToolUse 可改写工具输出 + 工具结果统一字节上限](decisions/0061-post-tool-output-override-and-result-cap.md): PostToolUse 返回值被丢弃，宿主无处清洗工具输出；MCP / 业务工具输出无上限进入历史。决策：`output_override` 链式改写并打事件标记；`ContextBudget.max_tool_result_bytes` 默认 128KiB 保头尾截断，配 offload 时让位；否决钩子异常 fail-closed 与逐工具上限。
 62. [ADR 0062: Anthropic 尾部滚动缓存断点 + TTL 透传](decisions/0062-anthropic-rolling-cache-breakpoint-and-ttl.md): 只在 cache anchor 打一个标记，工具循环的尾部每轮全价重复计费；`ttl_seconds` 是死字段。决策：客户端默认在最后一条消息再打标记；300 / 3600 映射 5m / 1h，其他值报错；否决在 `build_api_request` 加断点与默认 1h。
 65. [ADR 0065: pinned 状态周期重注](decisions/0065-pinned-state-periodic-reinjection.md): 清单只在压缩后钉回，未压缩的长会话里工作记忆失焦。决策：`PeriodicPinnedStateSource.reinject_every_turns` 按 source 声明节奏，计数从 history 推导，pre-turn 压缩后尾追加；否决 engine 级全局旋钮与按迭代计数。
+66. [ADR 0066: 公共 API 分稳定 / 实验 / 内部三层 + 弃用策略](decisions/0066-public-api-tiers-and-deprecation.md): 顶层 ~160 个符号无分层、零弃用机制。决策：顶层 `__all__` 为稳定层并以快照守护；`taifeng.experimental` 承载 🧪 入口；`DEPRECATED_ALIASES` + `__getattr__` 发 `DeprecationWarning`，弃用期 ≥ 两个版本且 ≥ 30 天；否决挪动已发布符号。
 
 ### Fourth Pass: Gap Tracking
 

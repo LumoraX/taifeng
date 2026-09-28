@@ -182,7 +182,7 @@ Submission(UserMessage) → AgentEngine 入队 → TurnRunner.run_turn
 | 多 provider 适配 | `src/taifeng/llm/providers/` |
 | 主循环 / Engine / Pool | `src/taifeng/loop/engine.py` + `turn.py` + `pool.py` |
 | 业务可配置参数全清单 | `docs/configurable-knobs.md`（构造时参数 + 运行时 Op + Engine 公开属性）|
-| 公共 API 一览 | `src/taifeng/__init__.py` 的 `__all__` |
+| 公共 API 一览 | `src/taifeng/__init__.py` 的 `__all__`（稳定层，快照 `tests/public_api_snapshot.txt`）+ `src/taifeng/experimental.py`（实验层）；分层与弃用策略见 `docs/architecture/public-api.md` |
 
 ## 能力契约工作流（contract-first）
 
