@@ -47,6 +47,7 @@ from taifeng.llm.providers._shared import (
     extract_rate_limit_snapshot,
     extract_request_id,
     extract_usage_anthropic,
+    mid_history_system_text,
     parse_sse_event,
     transport_error,
 )
@@ -124,10 +125,10 @@ def _to_anthropic_messages(
 
     out: list[dict[str, Any]] = []
     for idx, msg in enumerate(req.messages):
-        anth_role = "user" if msg.role == "tool" else msg.role
-        if anth_role == "system":
-            # system 已合并到 top-level，跳过
-            continue
+        # 顶层 system prompt 在 req.system_prompt；messages 里的 system 都是历史中段的
+        # 注记（压缩摘要 / pinned / 预算提示 / 记忆 / 业务注入）→ 原位改写为 user 文本，
+        # 不得丢弃（mid-history-system）
+        anth_role = "user" if msg.role in ("tool", "system") else msg.role
 
         content_blocks: list[dict[str, Any]] = []
         # thinking-passback：assistant 消息必须以上一轮的 thinking 块（含签名）原样开头，
@@ -135,8 +136,10 @@ def _to_anthropic_messages(
         if msg.role == "assistant":
             content_blocks.extend(thinking_blocks_from_state(msg.reasoning_state))
 
+        if msg.role == "system":
+            content_blocks.append({"type": "text", "text": mid_history_system_text(msg.content)})
         # tool role → tool_result block
-        if msg.role == "tool":
+        elif msg.role == "tool":
             tool_use_id = msg.tool_call_id or ""
             raw_content = (
                 msg.content

@@ -358,6 +358,21 @@ native client SHALL 在 `api_key` 为空或纯空白时**省略**鉴权头/参�
 - **WHEN** 模型因 max_tokens 截断
 - **THEN** `completed.data.stop_reason` SHALL 为该 provider 的原生截断标识（`length` / `MAX_TOKENS` / `max_tokens`），与自然结束取值不同
 
+### Requirement: 历史中段 system 消息不得丢失（mid-history-system）
+
+`ApiRequest.system_prompt` 承载顶层 system；`messages` 里的 `role="system"` 都是**历史中段注记**（压缩摘要、
+压缩后 pinned 重注、预算提示、长期记忆预取、业务 `InjectSystemMessage`）。原生 API 只有顶层 system 字段的
+provider（Anthropic / Gemini）SHALL 把它们**原位**改写为 user 文本 `<system-reminder>\n…\n</system-reminder>`
+（`_shared.mid_history_system_text`），SHALL NOT 丢弃，也 SHALL NOT 并入顶层 system（会让每次注入改写 cache 前缀）：
+
+- Anthropic：作为 user 文本块，与相邻 user 消息合并；位于 `tool_result` 之后时追加在其后（`tool_result` 仍居首）。
+- Gemini：作为 user part，与相邻 user content 合并，不产生连续同角色 content。
+- OpenAI 系（openai_compat / DeepSeek / LiteLLM）原样透传 `role="system"`。
+
+#### Scenario: 压缩摘要跨 provider 保留
+- **WHEN** 请求 messages 以压缩摘要（role=system）开头，后接用户消息
+- **THEN** Anthropic / Gemini / OpenAI 系的 wire payload SHALL 都包含摘要文本
+
 ### Requirement: thinking 块与签名回传（thinking-passback）
 
 Anthropic 与 Gemini 原生 client SHALL 保留续传所需的思考签名，决策见 ADR 0046：

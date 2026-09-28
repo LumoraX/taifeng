@@ -335,6 +335,12 @@ native provider 实现可在请求里带额外 header（如 `extra_headers`）�
 **这些 header 不是 `ModelClientSession` 协议的一部分**——协议只约定 `stream(request)`；header 由具体 provider
 实现或业务侧注入（保持协议层 R1-clean）。
 
+### 历史中段 system 消息（mid-history-system，ADR 0055）
+
+内核在历史中段放 system 消息（压缩摘要 / pinned 重注 / 预算提示 / 记忆预取 / 业务注入）。Anthropic / Gemini 原生 API
+只有顶层 system 字段：两家 provider 把这些消息**原位**改写为 `<system-reminder>` 包裹的 user 文本并与相邻 user 合并；
+OpenAI 系原样透传 `role="system"`。契约见 `capabilities/llm-provider-native.md`。
+
 ## Journal 确定性回放（journal-replay，ADR 0054）
 
 `JournalReplayClient.from_records(records)` 把 strict audit Journal 录下的 LLM 调用反过来当成 `ModelClient`：

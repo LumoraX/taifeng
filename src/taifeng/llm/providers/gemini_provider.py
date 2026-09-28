@@ -43,6 +43,7 @@ from taifeng.llm.providers._shared import (
     extract_rate_limit_snapshot,
     extract_request_id,
     extract_usage_gemini,
+    mid_history_system_text,
     parse_sse_data,
     transport_error,
 )
@@ -142,7 +143,15 @@ def _to_gemini_contents(
     contents: list[dict[str, Any]] = []
     for msg in req.messages:
         if msg.role == "system":
-            continue  # 已合并到 systemInstruction
+            # 顶层 system prompt 在 systemInstruction；这里是历史中段的注记（压缩摘要 /
+            # pinned / 预算提示 / 记忆 / 业务注入）→ 原位改写为 user 文本，不得丢弃；
+            # 与相邻 user 内容合并，避免连续同角色 content（mid-history-system）
+            note = {"text": mid_history_system_text(msg.content)}
+            if contents and contents[-1]["role"] == "user":
+                contents[-1]["parts"].append(note)
+            else:
+                contents.append({"role": "user", "parts": [note]})
+            continue
 
         gem_role = _ROLE_MAP.get(msg.role, "user")
         parts: list[dict[str, Any]] = []
@@ -205,6 +214,10 @@ def _to_gemini_contents(
                     parts.append(fc_part)
 
         if not parts:
+            continue
+        # 相邻 user content 合并（中段 system 注记改写为 user 后可能与真实 user 相邻）
+        if gem_role == "user" and contents and contents[-1]["role"] == "user":
+            contents[-1]["parts"].extend(parts)
             continue
         contents.append({"role": gem_role, "parts": parts})
 

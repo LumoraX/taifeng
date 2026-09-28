@@ -282,7 +282,8 @@ def _item_to_api_message(
         # suspend_resolved 是 resume 的幂等记账 marker（engine._find_active_suspension
         # 据它跳过已消费的挂起），非 LLM-facing；若渲染成对话中段的 role="system"，
         # openai_compat 会原样透传 → 严格 OpenAI-compat 代理拒绝中段 system → 400
-        # （anthropic/gemini provider 各自特判丢弃/转 user，openai_compat 不处理）。故跳过。
+        # （anthropic/gemini provider 把中段 system 原位改写为带标签的 user 文本，
+        # openai_compat 原样透传 role=system）。故跳过。
         # 业务/记忆类 system_injection（business / memory_pre_evict / rollback 等）保留。
         if it.payload.get("source") == "suspend_resolved":
             return None
