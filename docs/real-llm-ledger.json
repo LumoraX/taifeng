@@ -1,7 +1,7 @@
 {
   "run": {
-    "timestamp_utc": "2026-09-28 09:21:45 UTC",
-    "commit": "23d78e0",
+    "timestamp_utc": "2026-09-28 10:22:37 UTC",
+    "commit": "ba1144e",
     "provider": "codex",
     "model": "gpt-5.6-luna",
     "scenarios_run": [
@@ -49,13 +49,13 @@
         "turn_started": 1,
         "budget_hint_injected": 1,
         "rewind_checkpoint_recorded": 1,
-        "assistant_text": 459,
+        "assistant_text": 472,
         "turn_completed": 1
       },
       "grants": 0,
-      "duration_s": 13.909477750072256,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 11.592767000081949,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "codex_encrypted_state_hot_replay": {
       "scenario_id": "codex_encrypted_state_hot_replay",
@@ -83,16 +83,16 @@
         "tool_call_started": 1,
         "tool_batch_dispatched": 1,
         "tool_call_completed": 1,
-        "assistant_text": 19,
+        "assistant_text": 18,
         "turn_completed": 1,
         "provider_codex": 1,
         "image_tool_executed": 1,
         "encrypted_state_hot_replayed": 1
       },
       "grants": 0,
-      "duration_s": 10.488768499926664,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 6.913572792080231,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "codex_image_order": {
       "scenario_id": "codex_image_order",
@@ -125,9 +125,9 @@
         "ordered_multi_image_verified": 1
       },
       "grants": 0,
-      "duration_s": 3.983402832993306,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 4.3149232499999925,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "codex_image_single": {
       "scenario_id": "codex_image_single",
@@ -160,9 +160,9 @@
         "single_image_verified": 1
       },
       "grants": 0,
-      "duration_s": 3.3431345419958234,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 4.090559000032954,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "codex_image_tool_call": {
       "scenario_id": "codex_image_tool_call",
@@ -195,9 +195,9 @@
         "image_tool_call_verified": 1
       },
       "grants": 0,
-      "duration_s": 3.7753241669852287,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 3.1959880829090253,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "codex_instructions": {
       "scenario_id": "codex_instructions",
@@ -230,9 +230,9 @@
         "instructions_verified": 1
       },
       "grants": 0,
-      "duration_s": 2.2891396249178797,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 2.4308140409411862,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "codex_legacy_jsonl_cold_resume": {
       "scenario_id": "codex_legacy_jsonl_cold_resume",
@@ -259,9 +259,9 @@
         "legacy_jsonl_cold_resume": 1
       },
       "grants": 0,
-      "duration_s": 10.488773832912557,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 6.91357583401259,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "codex_tool_image_output": {
       "scenario_id": "codex_tool_image_output",
@@ -294,9 +294,9 @@
         "tool_image_output_verified": 1
       },
       "grants": 0,
-      "duration_s": 5.102375500020571,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 2.7485393749084324,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "composite_dispatch": {
       "scenario_id": "composite_dispatch",
@@ -316,13 +316,13 @@
         "skill_dispatched": 1,
         "engine_log": 2,
         "tool_call_completed": 1,
-        "assistant_text": 486,
+        "assistant_text": 461,
         "turn_completed": 1
       },
       "grants": 2,
-      "duration_s": 36.98490233300254,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 32.040605917107314,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "compression": {
       "scenario_id": "compression",
@@ -336,13 +336,13 @@
       "kinds": {
         "turn_started": 1,
         "rewind_checkpoint_recorded": 1,
-        "assistant_text": 4244,
+        "assistant_text": 4914,
         "turn_completed": 1
       },
       "grants": 0,
-      "duration_s": 82.45994874997996,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 93.95883100002538,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "concurrent_fanout": {
       "scenario_id": "concurrent_fanout",
@@ -360,13 +360,13 @@
         "tool_call_started": 3,
         "tool_batch_dispatched": 1,
         "skill_dispatched": 1,
-        "assistant_text": 689,
+        "assistant_text": 1904,
         "turn_completed": 1
       },
       "grants": 1,
-      "duration_s": 28.452559166937135,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 83.9300877499627,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "kernel_knobs": {
       "scenario_id": "kernel_knobs",
@@ -387,9 +387,9 @@
         "turn_completed": 1
       },
       "grants": 0,
-      "duration_s": 11.805560417007655,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 2.132679000031203,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "numeric_loop": {
       "scenario_id": "numeric_loop",
@@ -403,18 +403,18 @@
       "missing": [],
       "kinds": {
         "turn_started": 1,
-        "rewind_checkpoint_recorded": 15,
-        "tool_call_started": 7,
-        "tool_batch_dispatched": 7,
-        "engine_log": 14,
-        "tool_call_completed": 7,
-        "assistant_text": 104,
+        "rewind_checkpoint_recorded": 19,
+        "tool_call_started": 9,
+        "tool_batch_dispatched": 9,
+        "engine_log": 18,
+        "tool_call_completed": 9,
+        "assistant_text": 114,
         "turn_completed": 1
       },
-      "grants": 7,
-      "duration_s": 28.9488632499706,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "grants": 9,
+      "duration_s": 49.87176079209894,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "orchestration": {
       "scenario_id": "orchestration",
@@ -431,13 +431,13 @@
         "orchestration_plan_resolved": 1,
         "tool_batch_dispatched": 1,
         "skill_dispatched": 1,
-        "assistant_text": 1008,
+        "assistant_text": 168,
         "turn_completed": 1
       },
       "grants": 1,
-      "duration_s": 26.817649916978553,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 9.471994249965064,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "peer_messaging": {
       "scenario_id": "peer_messaging",
@@ -458,16 +458,16 @@
         "tool_batch_dispatched": 2,
         "spawn_started": 1,
         "tool_call_completed": 2,
-        "assistant_text": 115,
+        "assistant_text": 121,
         "peer_message_sent": 1,
         "user_input_injected": 1,
         "turn_completed": 1,
         "spawn_completed": 1
       },
       "grants": 0,
-      "duration_s": 10.887927958974615,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 88.99882770795375,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "post_turn_review": {
       "scenario_id": "post_turn_review",
@@ -482,14 +482,14 @@
       "kinds": {
         "turn_started": 2,
         "rewind_checkpoint_recorded": 2,
-        "assistant_text": 191,
+        "assistant_text": 90,
         "turn_completed": 2,
         "post_turn_hook_fired": 2
       },
       "grants": 0,
-      "duration_s": 11.06815058295615,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 7.471732332953252,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "product_review": {
       "scenario_id": "product_review",
@@ -504,18 +504,18 @@
       "kinds": {
         "turn_started": 2,
         "rewind_checkpoint_recorded": 1,
-        "tool_call_started": 2,
+        "tool_call_started": 4,
         "tool_batch_dispatched": 2,
         "skill_dispatched": 1,
         "engine_log": 2,
         "tool_call_completed": 1,
-        "assistant_text": 104,
+        "assistant_text": 102,
         "turn_completed": 1
       },
       "grants": 2,
-      "duration_s": 14.401312540983781,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 25.193373290938325,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "read_skill_lazy": {
       "scenario_id": "read_skill_lazy",
@@ -533,13 +533,13 @@
         "tool_call_started": 1,
         "tool_batch_dispatched": 1,
         "tool_call_completed": 1,
-        "assistant_text": 501,
+        "assistant_text": 664,
         "turn_completed": 1
       },
       "grants": 0,
-      "duration_s": 29.54870033392217,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 19.937149042030796,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "research_pipeline": {
       "scenario_id": "research_pipeline",
@@ -563,9 +563,9 @@
         "turn_completed": 1
       },
       "grants": 2,
-      "duration_s": 25.14249787502922,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 39.821859166026115,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "selective_approval": {
       "scenario_id": "selective_approval",
@@ -585,13 +585,13 @@
         "skill_dispatched": 1,
         "engine_log": 2,
         "tool_call_completed": 1,
-        "assistant_text": 105,
+        "assistant_text": 152,
         "turn_completed": 1
       },
       "grants": 2,
-      "duration_s": 13.652250042068772,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 14.410030542057939,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "spawn_join": {
       "scenario_id": "spawn_join",
@@ -616,15 +616,15 @@
         "turn_suspended": 2,
         "spawn_suspended": 2,
         "suspension_resolved": 2,
-        "assistant_text": 2101,
+        "assistant_text": 2137,
         "turn_completed": 3,
         "spawn_completed": 2,
         "join_barrier_fired": 1
       },
       "grants": 0,
-      "duration_s": 49.144790334044956,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 37.30956845800392,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "suspend_resume": {
       "scenario_id": "suspend_resume",
@@ -644,13 +644,13 @@
         "tool_batch_dispatched": 1,
         "turn_suspended": 1,
         "suspension_resolved": 1,
-        "assistant_text": 79,
+        "assistant_text": 77,
         "turn_completed": 1
       },
       "grants": 0,
-      "duration_s": 13.758752166992053,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 8.55560224992223,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "thread_rewind": {
       "scenario_id": "thread_rewind",
@@ -668,15 +668,15 @@
         "spawn_started": 1,
         "turn_started": 2,
         "rewind_checkpoint_recorded": 2,
-        "assistant_text": 96,
+        "assistant_text": 95,
         "turn_completed": 2,
         "spawn_completed": 2,
         "turn_rewound": 1
       },
       "grants": 0,
-      "duration_s": 7.559362999978475,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 7.3264396250015125,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "token_calibration": {
       "scenario_id": "token_calibration",
@@ -690,13 +690,13 @@
       "kinds": {
         "turn_started": 2,
         "rewind_checkpoint_recorded": 2,
-        "assistant_text": 65,
+        "assistant_text": 70,
         "turn_completed": 2
       },
       "grants": 0,
-      "duration_s": 8.079799124971032,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 8.16831649991218,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "travel_planner": {
       "scenario_id": "travel_planner",
@@ -716,13 +716,13 @@
         "skill_dispatched": 1,
         "engine_log": 2,
         "tool_call_completed": 1,
-        "assistant_text": 147,
+        "assistant_text": 145,
         "turn_completed": 1
       },
       "grants": 2,
-      "duration_s": 13.880958958063275,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 16.773883625050075,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "turn_rewind": {
       "scenario_id": "turn_rewind",
@@ -740,7 +740,7 @@
         "tool_call_started": 2,
         "tool_batch_dispatched": 2,
         "skill_dispatched": 2,
-        "assistant_text": 5294,
+        "assistant_text": 2217,
         "turn_completed": 4,
         "skill_returned": 2,
         "skill_outcome_recorded": 2,
@@ -748,9 +748,9 @@
         "turn_rewound": 1
       },
       "grants": 2,
-      "duration_s": 146.85732737497892,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 57.93483099993318,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     },
     "wait_any": {
       "scenario_id": "wait_any",
@@ -766,21 +766,21 @@
       "missing": [],
       "kinds": {
         "turn_started": 3,
-        "rewind_checkpoint_recorded": 8,
+        "rewind_checkpoint_recorded": 9,
         "tool_call_started": 3,
-        "tool_batch_dispatched": 2,
+        "tool_batch_dispatched": 3,
         "spawn_started": 2,
         "tool_call_completed": 3,
-        "assistant_text": 600,
-        "turn_completed": 2,
-        "spawn_completed": 2,
+        "assistant_text": 55,
+        "turn_completed": 1,
+        "spawn_completed": 1,
         "peer_wait_any_started": 1,
         "peer_wait_any_resolved": 1
       },
       "grants": 0,
-      "duration_s": 44.40513095795177,
-      "commit": "23d78e0",
-      "timestamp_utc": "2026-09-28 09:21:45 UTC"
+      "duration_s": 9.562557416968048,
+      "commit": "ba1144e",
+      "timestamp_utc": "2026-09-28 10:22:37 UTC"
     }
   },
   "not_executed": {

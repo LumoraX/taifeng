@@ -3,7 +3,7 @@
 > **本文件由 `examples/real_llm/capability_matrix.py` 自动生成（数据源 `real-llm-ledger.json`），勿手编辑。**
 > 回归红线：基础层（`src/taifeng/{llm,loop,context,conversation}/`）变更必须全量重跑并提交本台账；详见 CLAUDE.md §测试约束。
 
-- **最近一次回归**：2026-09-28 09:21:45 UTC @ `23d78e0`
+- **最近一次回归**：2026-09-28 10:22:37 UTC @ `ba1144e`
 - **Provider / Model**：codex / gpt-5.6-luna
 - **本次跑测场景**：composite_dispatch, read_skill_lazy, orchestration, concurrent_fanout, research_pipeline, product_review, numeric_loop, compression, selective_approval, travel_planner, suspend_resume, turn_rewind, thread_rewind, spawn_join, peer_messaging, wait_any, kernel_knobs, post_turn_review, budget_awareness, token_calibration, codex_instructions, codex_image_single, codex_image_order, codex_image_tool_call, codex_tool_image_output, codex_encrypted_state_hot_replay, codex_legacy_jsonl_cold_resume
 
@@ -11,33 +11,33 @@
 
 | 场景 | 能力 | 结果 | 日期 @ commit | 耗时 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `budget_awareness` | 预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020） | ✅PASS | 2026-09-28 @ `23d78e0` | 14s |  |
-| `codex_encrypted_state_hot_replay` | Codex encrypted state 热重放 | ✅PASS | 2026-09-28 @ `23d78e0` | 10s |  |
-| `codex_image_order` | Codex 有序多图片语义 | ✅PASS | 2026-09-28 @ `23d78e0` | 4s |  |
-| `codex_image_single` | Codex 单图片语义 | ✅PASS | 2026-09-28 @ `23d78e0` | 3s |  |
-| `codex_image_tool_call` | Codex 图片驱动 function call | ✅PASS | 2026-09-28 @ `23d78e0` | 4s |  |
-| `codex_instructions` | Codex 顶层 instructions | ✅PASS | 2026-09-28 @ `23d78e0` | 2s |  |
-| `codex_legacy_jsonl_cold_resume` | Codex 图片/state legacy JSONL 冷恢复 | ✅PASS | 2026-09-28 @ `23d78e0` | 10s |  |
-| `codex_tool_image_output` | Codex 工具返回图片（function_call_output 带 input_image） | ✅PASS | 2026-09-28 @ `23d78e0` | 5s |  |
-| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-09-28 @ `23d78e0` | 37s |  |
-| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-09-28 @ `23d78e0` | 82s |  |
-| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-09-28 @ `23d78e0` | 28s |  |
-| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-09-28 @ `23d78e0` | 12s |  |
-| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-09-28 @ `23d78e0` | 29s |  |
-| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-09-28 @ `23d78e0` | 27s |  |
-| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-09-28 @ `23d78e0` | 11s |  |
-| `post_turn_review` | post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序） | ✅PASS | 2026-09-28 @ `23d78e0` | 11s |  |
-| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-09-28 @ `23d78e0` | 14s |  |
-| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-09-28 @ `23d78e0` | 30s |  |
-| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-09-28 @ `23d78e0` | 25s |  |
-| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-09-28 @ `23d78e0` | 14s |  |
-| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-09-28 @ `23d78e0` | 49s |  |
-| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-09-28 @ `23d78e0` | 14s |  |
-| `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-09-28 @ `23d78e0` | 8s |  |
-| `token_calibration` | 上下文 token 实测校准（预测下一轮 prompt，ADR 0043） | ✅PASS | 2026-09-28 @ `23d78e0` | 8s |  |
-| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-09-28 @ `23d78e0` | 14s |  |
-| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-09-28 @ `23d78e0` | 147s |  |
-| `wait_any` | any-of-N 等待(wait_any:先到先处理,不等最慢的) | ✅PASS | 2026-09-28 @ `23d78e0` | 44s |  |
+| `budget_awareness` | 预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020） | ✅PASS | 2026-09-28 @ `ba1144e` | 12s |  |
+| `codex_encrypted_state_hot_replay` | Codex encrypted state 热重放 | ✅PASS | 2026-09-28 @ `ba1144e` | 7s |  |
+| `codex_image_order` | Codex 有序多图片语义 | ✅PASS | 2026-09-28 @ `ba1144e` | 4s |  |
+| `codex_image_single` | Codex 单图片语义 | ✅PASS | 2026-09-28 @ `ba1144e` | 4s |  |
+| `codex_image_tool_call` | Codex 图片驱动 function call | ✅PASS | 2026-09-28 @ `ba1144e` | 3s |  |
+| `codex_instructions` | Codex 顶层 instructions | ✅PASS | 2026-09-28 @ `ba1144e` | 2s |  |
+| `codex_legacy_jsonl_cold_resume` | Codex 图片/state legacy JSONL 冷恢复 | ✅PASS | 2026-09-28 @ `ba1144e` | 7s |  |
+| `codex_tool_image_output` | Codex 工具返回图片（function_call_output 带 input_image） | ✅PASS | 2026-09-28 @ `ba1144e` | 3s |  |
+| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-09-28 @ `ba1144e` | 32s |  |
+| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-09-28 @ `ba1144e` | 94s |  |
+| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-09-28 @ `ba1144e` | 84s |  |
+| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-09-28 @ `ba1144e` | 2s |  |
+| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-09-28 @ `ba1144e` | 50s |  |
+| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-09-28 @ `ba1144e` | 9s |  |
+| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-09-28 @ `ba1144e` | 89s |  |
+| `post_turn_review` | post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序） | ✅PASS | 2026-09-28 @ `ba1144e` | 7s |  |
+| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-09-28 @ `ba1144e` | 25s |  |
+| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-09-28 @ `ba1144e` | 20s |  |
+| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-09-28 @ `ba1144e` | 40s |  |
+| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-09-28 @ `ba1144e` | 14s |  |
+| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-09-28 @ `ba1144e` | 37s |  |
+| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-09-28 @ `ba1144e` | 9s |  |
+| `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-09-28 @ `ba1144e` | 7s |  |
+| `token_calibration` | 上下文 token 实测校准（预测下一轮 prompt，ADR 0043） | ✅PASS | 2026-09-28 @ `ba1144e` | 8s |  |
+| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-09-28 @ `ba1144e` | 17s |  |
+| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-09-28 @ `ba1144e` | 58s |  |
+| `wait_any` | any-of-N 等待(wait_any:先到先处理,不等最慢的) | ✅PASS | 2026-09-28 @ `ba1144e` | 10s |  |
 
 ## 未执行验证
 
