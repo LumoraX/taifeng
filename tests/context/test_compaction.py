@@ -175,7 +175,9 @@ async def test_handoff_regenerates_when_identifier_dropped() -> None:
         SimTurn(text="## 进度\n- 处理中（这版丢了 ID）", usage=_usage),
         SimTurn(text=f"## 进度\n- 处理中\n## 引用\n- {_UUID}", usage=_usage),
     ])
-    strategy = HandoffCompactionStrategy(model_client=client, model="mock-model")
+    # 关闭用户原话保留：否则 UUID 随原话原样保留，走不到摘要审计重生成路径
+    strategy = HandoffCompactionStrategy(
+        model_client=client, model="mock-model", preserve_user_message_tokens=0)
     items = _items_with_identifier()
     result = await strategy.compress(
         _ctx_for(items), InitialContextInjection.BEFORE_LAST_USER_MESSAGE
@@ -194,7 +196,9 @@ async def test_handoff_fails_preserve_when_identifier_still_missing() -> None:
         SimTurn(text="## 进度\n- 丢了 ID 第 1 版", usage=_usage),
         SimTurn(text="## 进度\n- 丢了 ID 第 2 版", usage=_usage),
     ])
-    strategy = HandoffCompactionStrategy(model_client=client, model="mock-model")
+    # 关闭用户原话保留：否则 UUID 随原话原样保留，走不到摘要审计重生成路径
+    strategy = HandoffCompactionStrategy(
+        model_client=client, model="mock-model", preserve_user_message_tokens=0)
     items = _items_with_identifier()
     result = await strategy.compress(
         _ctx_for(items), InitialContextInjection.BEFORE_LAST_USER_MESSAGE

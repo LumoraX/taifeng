@@ -161,27 +161,36 @@ class HandoffCompactionStrategy:
         )
 ```
 
-四段接力提示词（中文化的 codex `templates/compact/prompt.md`）：
+摘要提示词（中文化的 codex `templates/compact/prompt.md`，`HANDOFF_SYSTEM_PROMPT_ZH`）要求 LLM 按以下分段输出：
+进度 / **当前工作**（压缩前最后在做的具体事情与下一步）/ 决策 / **错误与修复**（遇到的错误、修复方式、用户纠正过的做法，
+无则写「无」）/ 待办 / 引用 / 工具结果摘要。前六段缺失记为非致命 `quality_warnings`。
+
+#### 压缩条目的组装（compaction-continuity，ADR 0059）
+
+`compacted` item 的 `summary` 不是 LLM 原文，而是三段组装（`context/strategies/handoff_continuity.py`）：
 
 ```
-你正在接手一段被压缩的对话。请基于以下结构化摘要继续。
+The conversation before this point was compacted to save context. Continue the work directly
+from the material below: do not acknowledge the summary, do not restate progress, and ask the
+user only if the pending work genuinely needs it.
 
-## 进度 (Progress)
-{进行中任务的当前状态、批量操作进度 N/M}
+<recent_user_messages>
+Most recent user messages from the compacted span, verbatim, oldest first:
+<user_message>
+…被压缩区间里的用户消息原文…
+</user_message>
+</recent_user_messages>
 
-## 决策 (Decisions)
-{已做出的决策及理由、已确认的约束}
-
-## 待办 (TODO)
-{未完成的任务、用户提出但未回应的请求、已承诺的后续操作}
-
-## 引用 (References)
-{所有不可缩写的标识符：UUID / hash / ID / API Key / 文件路径 / 分支名}
-
----
-
-请直接继续工作。**不要**确认收到摘要，**不要**复述当前进度，**不要**询问用户任何问题。
+<summary>
+…LLM 摘要…
+</summary>
 ```
+
+- **用户原话不经转述**：从被压缩区间最新的 user_message 往回取，总量受 `preserve_user_message_tokens`（默认 20k，
+  与 codex 同值；0 = 关闭）约束，按原顺序排列；最新一条单独超预算时中段截断保留。尾部保留段的用户消息不重复收录。
+- **续接前言**用英文：与 `[Compacted history summary]` 渲染标签一致，且不带偏回复语言（摘要本身按原对话语言生成）。
+- **质量审计作用于组装后的正文**：原话里原样保留的标识符不算丢失，不会因此触发重生成。
+- 全部内容在同一个 `compacted` item 内：冷加载 `replaced_range` 折叠、token 估算、各 provider 的中段 system 渲染均不变。
 
 #### G1a 摘要质量审计 + 有界重生成（compaction-hardening P0）
 

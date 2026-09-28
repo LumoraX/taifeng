@@ -4,7 +4,9 @@
     1. mid-turn 模式：从 cache_anchor_index 开始压缩 tail，不动 head
     2. pre-turn / manual：可以动 head
     3. tool_use / tool_result 配对边界保护（claw-code 实测发现）
-    4. 调用 LLM 生成结构化 4 段摘要（进度 / 决策 / 待办 / 引用）
+    4. 调用 LLM 生成结构化摘要（进度 / 当前工作 / 决策 / 错误与修复 / 待办 / 引用 / 工具结果）
+    5. 压缩条目 = 续接前言 + 被压缩区间最近用户原话 + 摘要（compaction-continuity，
+       见 handoff_continuity.py）
 
 参照：
     - codex templates/compact/prompt.md
@@ -27,6 +29,11 @@ from taifeng.context.compressor import (
     CompressionTrigger,
 )
 from taifeng.context.injection import InitialContextInjection
+from taifeng.context.strategies.handoff_continuity import (
+    DEFAULT_PRESERVED_USER_TOKENS,
+    compose_handoff_summary,
+    select_recent_user_messages,
+)
 from taifeng.conversation.models import ResponseItem, compacted
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
@@ -59,8 +66,14 @@ HANDOFF_SYSTEM_PROMPT_ZH = """你正在接手一段被压缩的对话历史。�
 ## 进度 (Progress)
 - [当前任务及其状态]
 
+## 当前工作 (Current Work)
+- [压缩前最后正在做的具体事情：操作对象、做到哪一步、下一步动作]
+
 ## 决策 (Decisions)
 - [已做出的决策及理由]
+
+## 错误与修复 (Errors & Fixes)
+- [遇到的错误、原因与修复方式；用户纠正过的做法。没有则写「无」]
 
 ## 待办 (TODO)
 - [未完成的任务、用户提出但未回应的请求]
@@ -125,7 +138,7 @@ def _format_messages_for_summary(items: list[ResponseItem]) -> str:
 # === 摘要质量审计（G1a；参照 openclaw compaction-safeguard-quality.ts）===
 
 # 必备分段标题 —— 缺失视为「非致命」质量警告（仅记录，不强制重生成）。
-_REQUIRED_SECTIONS: tuple[str, ...] = ("进度", "决策", "待办", "引用")
+_REQUIRED_SECTIONS: tuple[str, ...] = ("进度", "当前工作", "决策", "错误与修复", "待办", "引用")
 
 # 不透明标识符模式 —— 这些一旦在摘要中丢失即不可恢复，视为「致命」缺陷。
 # 仅收高信号项（URL / UUID / 长 hex hash），避免把普通词误判为标识符触发误重生成。
@@ -214,6 +227,7 @@ class HandoffCompactionStrategy:
         model: str | None = None,
         thread_id_provider: object | None = None,
         quality_max_attempts: int = 2,
+        preserve_user_message_tokens: int = DEFAULT_PRESERVED_USER_TOKENS,
     ) -> None:
         """
         Args:
@@ -222,7 +236,10 @@ class HandoffCompactionStrategy:
             quality_max_attempts: 摘要质量审计的最大生成次数（含首轮）。
                 ≥2 时，首轮若丢失不透明标识符会带反馈重生成；耗尽仍丢失
                 则拒绝压缩（保留原历史）。设为 1 即关闭重生成。
+            preserve_user_message_tokens: 被压缩区间里最近用户消息原文的 token 预算，
+                原样放进压缩条目（默认 20k，与 codex 同值）；0 = 不保留原文。
         """
+        self._preserve_user_tokens = preserve_user_message_tokens
         self._client = model_client
         self._model = model
         self._quality_max_attempts = max(1, quality_max_attempts)
@@ -377,6 +394,8 @@ class HandoffCompactionStrategy:
             return bounds
         start, end = bounds
         to_compress = ctx.history[start:end]
+        # 用户原话不经 LLM 转述，原样保留（预算内最近的若干条）
+        user_messages = select_recent_user_messages(to_compress, self._preserve_user_tokens)
 
         # 质量审计 + 有界重生成：丢失不透明标识符（致命）才触发重生成 / 最终拒绝。
         audit: SummaryAudit | None = None
@@ -390,6 +409,8 @@ class HandoffCompactionStrategy:
                 return self._fail(ctx, err)
             if not summary_text:
                 return self._fail(ctx, "empty_summary")
+            # 审计组装后的条目：原样保留的用户原话里的标识符同样算「未丢失」
+            summary_text = compose_handoff_summary(summary_text, user_messages)
             audit = _audit_summary_quality(summary_text, to_compress)
             if audit.ok:
                 break
