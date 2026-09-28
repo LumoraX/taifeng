@@ -20,6 +20,7 @@ from taifeng.conversation.journal.errors import (
     NonCanonicalValueError,
 )
 from taifeng.conversation.journal.models import (
+    WRITER_TAKEOVER_RECORD_TYPE,
     Durability,
     JournalAck,
     JournalEnvelope,
@@ -27,6 +28,7 @@ from taifeng.conversation.journal.models import (
     JournalModel,
     JournalRecord,
     JournalVerification,
+    WriterTakeoverV1,
 )
 
 if TYPE_CHECKING:
@@ -322,14 +324,111 @@ def _committed_batch(
     return CommittedBatch(begin.batch_id, envelopes, fingerprints, ack)
 
 
+def _validate_takeover(
+    envelope: JournalEnvelope,
+    *,
+    committed_epoch: int,
+    line_no: int,
+) -> None:
+    """校验接管记录单步递增 epoch，且 payload 精确指向接管前 committed tail。"""
+    if envelope.writer_epoch != committed_epoch + 1:
+        raise JournalIntegrityError("writer_epoch must increase by one", line_no=line_no)
+    try:
+        payload = WriterTakeoverV1.model_validate(envelope.payload, strict=True)
+    except ValidationError as exc:
+        raise JournalIntegrityError("invalid writer_takeover payload", line_no=line_no) from exc
+    if (
+        payload.previous_epoch != committed_epoch
+        or payload.previous_tail_seq != envelope.seq - 1
+        or payload.previous_tail_hash != envelope.previous_hash
+    ):
+        raise JournalIntegrityError("writer_takeover lineage mismatch", line_no=line_no)
+
+
+def _check_envelope_epoch(
+    envelope: JournalEnvelope,
+    *,
+    batch_epoch: int | None,
+    committed_epoch: int | None,
+    line_no: int,
+) -> None:
+    """强制 writer epoch 单调：batch 内恒定、跨 batch 只能经 writer_takeover 单步递增。
+
+    ``committed_epoch`` 为 ``None`` 表示从中段解码、前缀 epoch 未知，此时首个 batch
+    的 epoch 作为基线；为 ``0`` 表示 Session 起点，首个 epoch 必须是 1。
+    """
+    is_takeover = envelope.record_type == WRITER_TAKEOVER_RECORD_TYPE
+    if batch_epoch is not None:
+        # batch 内：epoch 必须与首条一致，接管记录只能是 batch 首条
+        if envelope.writer_epoch != batch_epoch:
+            raise JournalIntegrityError("writer_epoch changed within batch", line_no=line_no)
+        if is_takeover:
+            raise JournalIntegrityError("writer_takeover must open its batch", line_no=line_no)
+        return
+    if committed_epoch is None:
+        return
+    if envelope.writer_epoch < committed_epoch:
+        raise JournalIntegrityError("writer_epoch regression", line_no=line_no)
+    if committed_epoch == 0:
+        # Session 起点：初始化 batch 固定 epoch 1，且不可能是接管
+        if envelope.writer_epoch != 1 or is_takeover:
+            raise JournalIntegrityError("session must start at writer_epoch 1", line_no=line_no)
+        return
+    if envelope.writer_epoch == committed_epoch:
+        if is_takeover:
+            raise JournalIntegrityError(
+                "writer_takeover without epoch increase", line_no=line_no
+            )
+        return
+    # epoch 上升：必须恰好由一条 writer_takeover 开启
+    if not is_takeover:
+        raise JournalIntegrityError(
+            "writer_epoch increase without writer_takeover", line_no=line_no
+        )
+    _validate_takeover(envelope, committed_epoch=committed_epoch, line_no=line_no)
+
+
+def _decode_pending_envelope(
+    value: dict[str, object],
+    pending: list[JournalEnvelope],
+    *,
+    session_id: str,
+    tail_seq: int,
+    tail_hash: str,
+    committed_epoch: int | None,
+    line_no: int,
+) -> tuple[JournalEnvelope, str]:
+    """解析 batch 内一条 envelope：epoch 单调、seq/hash chain 接续当前 pending 尾。"""
+    envelope = _parse_model(JournalEnvelope, value, line_no=line_no)
+    _check_envelope_epoch(
+        envelope,
+        batch_epoch=pending[0].writer_epoch if pending else None,
+        committed_epoch=committed_epoch,
+        line_no=line_no,
+    )
+    fingerprint = _validate_envelope(
+        envelope,
+        session_id=session_id,
+        expected_seq=tail_seq + len(pending) + 1,
+        expected_previous_hash=pending[-1].record_hash if pending else tail_hash,
+        line_no=line_no,
+    )
+    return envelope, fingerprint
+
+
 def decode_committed_lines(
     lines: Sequence[bytes | str],
     *,
     session_id: str,
     initial_seq: int = 0,
     initial_hash: str = _ZERO_HASH,
+    initial_epoch: int | None = None,
 ) -> DecodedJournal:
-    """strict decode 多个 batch；未闭合的最终 batch 保持完全不可见。"""
+    """strict decode 多个 batch；未闭合的最终 batch 保持完全不可见。
+
+    ``initial_epoch`` 缺省时：``initial_seq == 0`` 视为 Session 起点（epoch 基线 0），
+    否则前缀 epoch 未知、以首个 batch 为基线。
+    """
     committed: list[JournalEnvelope] = []
     batches: list[CommittedBatch] = []
     pending_begin: BatchBegin | None = None
@@ -337,6 +436,7 @@ def decode_committed_lines(
     pending_fingerprints: list[str] = []
     tail_seq = initial_seq
     tail_hash = initial_hash
+    committed_epoch = initial_epoch if initial_epoch is not None or initial_seq else 0
 
     for line_no, raw in enumerate(lines, start=1):
         value = _parse_line(raw, line_no=line_no)
@@ -364,6 +464,7 @@ def decode_committed_lines(
             batch = _committed_batch(pending_begin, envelope_tuple, fingerprint_tuple, commit)
             batches.append(batch)
             committed.extend(envelope_tuple)
+            committed_epoch = envelope_tuple[0].writer_epoch
             tail_seq = commit.last_seq
             tail_hash = commit.tail_hash
             pending_begin = None
@@ -372,14 +473,13 @@ def decode_committed_lines(
             continue
         if pending_begin is None:
             raise JournalIntegrityError("envelope outside batch", line_no=line_no)
-        envelope = _parse_model(JournalEnvelope, value, line_no=line_no)
-        expected_seq = tail_seq + len(pending_envelopes) + 1
-        expected_hash = pending_envelopes[-1].record_hash if pending_envelopes else tail_hash
-        fingerprint = _validate_envelope(
-            envelope,
+        envelope, fingerprint = _decode_pending_envelope(
+            value,
+            pending_envelopes,
             session_id=session_id,
-            expected_seq=expected_seq,
-            expected_previous_hash=expected_hash,
+            tail_seq=tail_seq,
+            tail_hash=tail_hash,
+            committed_epoch=committed_epoch,
             line_no=line_no,
         )
         pending_envelopes.append(envelope)

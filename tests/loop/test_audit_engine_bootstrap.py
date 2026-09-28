@@ -31,6 +31,7 @@ from taifeng.loop.audit_config import (
     AuditCapabilityError,
     AuditConfig,
 )
+from taifeng.loop.audit_resume import AuditResumeError
 from taifeng.loop.pool import EnginePool
 from taifeng.skill.definition import SkillDefinition
 from taifeng.skill.registry import SkillSnapshot
@@ -357,13 +358,13 @@ async def test_audited_bootstrap_is_journal_first_and_injects_owned_state(
     assert engine._audit_state.coordinator.expected_seq == 3  # noqa: SLF001
     assert engine._audit_state.projector is not None  # noqa: SLF001
     assert pool._audit_sessions["ses-1"].thread_id == engine.thread_id  # noqa: SLF001
-    with pytest.raises(AuditCapabilityError) as caught:
+    with pytest.raises(AuditResumeError) as caught:
         await pool.get_or_create(
             session_id="ses-1",
             entry_skill_id="entry",
             resume_thread_id="rejected-on-audited-cache-hit",
         )
-    assert caught.value.code == "audit_resume_unsupported"
+    assert caught.value.code == "audit_resume_session_active"
     assert events.count("journal_create") == 1
     await pool.close()
     assert core.global_close_calls == 0
@@ -431,19 +432,19 @@ async def test_public_create_rejects_injected_suspending_tool(
 async def test_uncached_audited_resume_uses_independent_session_gate(
     tmp_path: Path,
 ) -> None:
-    """audit-required 新 Session 不允许绕过到 legacy resume bootstrap。"""
+    """audit resume 不得绕过到 legacy resume：非 audited thread 在任何 Journal 效果前拒绝。"""
     events: list[str] = []
     core = _JournalCore(events)
     pool = _pool(tmp_path, core, events)
 
-    with pytest.raises(AuditCapabilityError) as caught:
+    with pytest.raises(AuditResumeError) as caught:
         await pool.get_or_create(
             session_id="ses-resume",
             entry_skill_id="entry",
             resume_thread_id="legacy-thread",
         )
 
-    assert caught.value.code == "audit_resume_unsupported"
+    assert caught.value.code == "audit_resume_marker_missing"
     assert events == []
     await pool.close()
 

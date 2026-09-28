@@ -44,12 +44,47 @@ class JournalConflictError(JournalError):
 
 
 class JournalBusyError(JournalError):
-    """目标 Session 已由另一个 live writer 持有。"""
+    """目标 Session 已由另一个 live writer 持有。
 
-    def __init__(self, session_id: str, writer_id: str) -> None:
-        super().__init__(f"journal busy: session={session_id}, writer={writer_id}")
+    ``writer_id`` 为 ``None`` 表示持有者是另一个进程 / core 实例（仅由 OS 级写者锁
+    观察到，本实例无法得知其 writer 身份）。
+    """
+
+    def __init__(self, session_id: str, writer_id: str | None) -> None:
+        holder = writer_id if writer_id is not None else "<external>"
+        super().__init__(f"journal busy: session={session_id}, writer={holder}")
         self.session_id = session_id
         self.writer_id = writer_id
+
+
+class JournalSessionNotFoundError(JournalError):
+    """open_existing 的目标 Session Journal 文件不存在。"""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"journal session not found: {session_id}")
+        self.session_id = session_id
+
+
+class JournalSessionEndedError(JournalError):
+    """目标 Session 已有 durable ``session_ended``，终结的 Session 不可重开。"""
+
+    def __init__(self, session_id: str, ended_record_id: str) -> None:
+        super().__init__(
+            f"journal session ended: session={session_id}, record={ended_record_id}"
+        )
+        self.session_id = session_id
+        self.ended_record_id = ended_record_id
+
+
+class JournalLockUnsupportedError(JournalError):
+    """当前平台不提供跨进程写者互斥所需的 POSIX ``flock``。
+
+    显式失败而不是静默不加锁：无互斥的 writer 会让两个进程同时追加同一 Journal。
+    """
+
+    def __init__(self, platform: str) -> None:
+        super().__init__(f"journal writer lock unsupported on platform: {platform}")
+        self.platform = platform
 
 
 class JournalAlreadyExistsError(JournalError):

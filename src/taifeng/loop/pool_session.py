@@ -12,6 +12,7 @@ from taifeng.loop.audit_bootstrap import (
     bootstrap_audited_session,
     fail_audited_bootstrap,
 )
+from taifeng.loop.audit_resume import resume_audited_session
 from taifeng.loop.tool_recovery import (
     RecoveredCall,
     ToolRecoveryMode,
@@ -67,6 +68,8 @@ def _bind_audited_finish_owner(
 
     engine._audit_state = state  # noqa: SLF001
     engine._audit_finish_owner = finish_owner  # noqa: SLF001
+    # resume 时 audited turn index 接续 Journal 已 durable 的最大值，保持单调
+    engine._next_audited_turn_index = state.next_turn_index  # noqa: SLF001
 
 
 async def prepare_pool_session(
@@ -85,8 +88,17 @@ async def prepare_pool_session(
     """按 pool 模式准备 audited bootstrap、legacy resume 或新 thread。
 
     legacy resume 路径先收敛崩溃遗留的悬空工具调用（tool-crash-reconciliation），
-    再把 history 交给 engine；strict audit 路径由 Journal 自身的 UNKNOWN 语义负责。
+    再把 history 交给 engine；strict audit resume 从 Journal 重建 history，存在未结算
+    effect（UNKNOWN）时 fail closed，不做自动收敛。
     """
+    if audit is not None and resume_thread_id is not None:
+        state, history = await resume_audited_session(
+            config=audit,
+            projection_store=projection_store,
+            session_id=session_id,
+            resume_thread_id=resume_thread_id,
+        )
+        return PreparedPoolSession(state.thread_id, history, state)
     if audit is not None:
         state = await bootstrap_audited_session(
             config=audit,

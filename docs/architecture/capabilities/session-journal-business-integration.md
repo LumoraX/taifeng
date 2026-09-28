@@ -1,10 +1,10 @@
 # SessionJournal 普通业务主链接入能力契约
 
-> 状态：Experimental。关联 ADR 0025。依赖 `session-journal-core` Phase 1。
+> 状态：Experimental。关联 ADR 0025、ADR 0053。依赖 `session-journal-core`（Phase 1 + Phase 2 写者接管）。
 
 ## 1. 范围
 
-本能力只覆盖显式启用审计的新 Session：
+本能力覆盖显式启用审计的新 Session，以及从 Journal 接管恢复、且不存在未结算 effect 的已有 Session（§13）：
 
 ```text
 UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
@@ -13,9 +13,9 @@ UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
 SessionJournal 是执行事实和对话项的唯一可靠事实源。hot history、MessageStore 和 EventMsg 都是
 Journal durable ack 之后的内存态或可重建投影，不得领先 Journal，也不得被声明为第二事实源。
 
-未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。本阶段不支持已有 Journal、resume、
-HITL/审批、suspend、compaction/rewind、memory、instruction 更新、hooks、orchestration、detached spawn、
-barrier、peer、跨进程 recovery、Timeline/export 通用 redaction、加密、WORM 或外置 blob。LLM request intent
+未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。本阶段不支持 HITL/审批、suspend、
+compaction/rewind、memory、instruction 更新、hooks、orchestration、detached spawn、barrier、peer、
+未结算 effect 的 repair/reconcile/unfreeze、Timeline/export 通用 redaction、加密、WORM 或外置 blob。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
 
 ## 2. 唯一事实源与提交顺序
@@ -315,7 +315,7 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
 | 维度 | 允许 | 拒绝 |
 | --- | --- | --- |
 | Op | UserMessage、CancelTurn、Shutdown | 其他 Op |
-| Session | 新建 | resume、已有 Journal |
+| Session | 新建；resume（Journal 接管，§13） | 已终结 Session、存在未结算 effect、writer 仍存活 |
 | Store | 默认 JSONL 可重建投影 | custom store/directory、IndexHook |
 | Hook/approval | 无 | hooks、permission、HITL |
 | Context | 无 compressor/memory/instruction update | compaction、rewind、memory、instruction |
@@ -327,11 +327,61 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
 静态配置在 EnginePool 构造期验证，Op 在 submission gateway 验证，动态 effect 在 TurnRunner gate 再验证。
 拒绝必须发生在 effect 前。
 
-## 13. 验收门槛
+## 13. Resume（Journal 接管恢复）
+
+`EnginePool.get_or_create(session_id, entry_skill_id, resume_thread_id=...)` 在 audit 模式下按固定顺序恢复；
+任一步失败都不构造 Engine、不产生 effect：
+
+1. metadata-only 读取 `resume_thread_id` 投影的 audited marker，取得 `journal_session_id`；必须等于请求的
+   `session_id`；
+2. 只读预检（不持锁）：strict 读取 committed envelopes，做下述第 4 步校验——注定被拒的请求不写接管记录；
+3. `open_existing(journal_session_id, writer_id=AuditConfig.writer_id, operation_id="<session>:resume:<随机>")`
+   以 epoch+1 接管（跨进程写者锁保证原 writer 仍存活时 Busy）；
+4. 持锁后权威重读：初始化 batch 的 root thread 必须等于 `resume_thread_id`；存在任一**未结算 effect** 即
+   fail closed——`llm_request_committed` 无对应 `llm_response_checkpoint`、`tool_intent_committed` 无对应
+   `tool_outcome_committed`、`skill_selected` 无同 operation 的 `skill_dispatch_finished`、
+   `submission_accepted` 无对应 `submission_applied`，或任一终态已 durable 为 `unknown`（ADR 0025：未匹配
+   intent 一律 UNKNOWN，恢复不自动重复任何 effect）；
+5. 用 root thread 已提交 `conversation_item` 按 seq 重建 initial history；audited turn index 从 Journal 已
+   accepted 的最大值 +1 续编；
+6. coordinator 使用新 lease 与 `expected_seq = 接管 ack.last_seq`；projector 复用既有投影 thread，并以
+   Journal 为真相核对：投影是 Journal items 的前缀（含相等）则补齐缺失后缀、watermark = 最后 conversation
+   seq，并关闭 generation replay 窗口；投影领先 / 分叉只标 stale（不改写、不冻结，可删除重放）；Session
+   identity 不符按 audited 不变量违约拒绝；
+7. 构造并启动 Engine，发 `thread_resumed`。
+
+第 3 步之后的任何失败（含 Engine 构造 / warmup 失败）只释放 lease，**不写** `thread_terminal` /
+`session_ended`——resume 失败不是 Session 的终结，之后可再次接管（epoch 继续递增）。resumed Session 的正常
+release 与新建 Session 相同：terminal batch + `session_ended` + `close_session`。
+
+audited Session 已在本 pool live 时，`resume_thread_id` 等于其 root thread 则返回缓存 Engine，否则拒绝。
+
+所有拒绝抛 `AuditResumeError`（`code` 稳定，`record_ids` 仅 recovery_required 时非空，不携带底层异常文本）：
+
+| code | 含义 |
+| --- | --- |
+| `audit_resume_projection_unavailable` | pool 无默认 JSONL 投影 store |
+| `audit_resume_marker_missing` | thread 不存在或不是 audited 投影（禁止把 legacy thread 升级为审计） |
+| `audit_resume_marker_invalid` | marker 读取失败或 directory / 文件 marker 不一致 |
+| `audit_resume_session_mismatch` | marker 的 `journal_session_id` 不等于请求 Session |
+| `audit_resume_journal_missing` | Journal 文件不存在 |
+| `audit_resume_journal_invalid` | Journal 完整性 / 解码违约，或缺初始化 batch |
+| `audit_resume_busy` | 另一进程 / 实例仍持有 writer |
+| `audit_resume_session_ended` | Journal 已有 `session_ended`，终结 Session 不可重开 |
+| `audit_resume_recovery_required` | 物理尾损，或存在未结算 effect（`record_ids` 列出需人工对账的 record） |
+| `audit_resume_thread_mismatch` | Journal root thread 与 `resume_thread_id` 不符 |
+| `audit_resume_projection_conflict` | 投影 Session identity 不变量违约 |
+| `audit_resume_open_failed` | 其他 core 错误或 core 返回值不满足 trust boundary |
+| `audit_resume_session_active` | 同一 Session 已 live 且绑定另一 thread |
+
+## 14. 验收门槛
 
 - records/core/projector/coordinator/Engine/LLM/Tool/Skill focused tests 全绿；
 - cancel 四窗口、并行部分完成、projection stale、Session 隔离和 lifecycle race 全覆盖；
 - legacy mode 回归不变；
+- resume 端到端：崩溃（writer 消失、无 `session_ended`）后新 pool 接管，history 与投影一致、续跑新 turn、
+  verify 通过且含 epoch 2 接管记录；正常关停后拒绝；未结算 tool intent 拒绝并列出 record 且不写接管；
+  writer 存活 Busy；resume 后 Engine 失败只释放 lease、可再次接管；
 - full Ruff changed-files、full mypy、full pytest、Sim selfcheck、OpenSpec strict validation 全绿；
 - living architecture 与 `docs/capability-matrix.md` 同步；
 - 获得明确外部 provider 授权后运行真实 LLM capability matrix，并在最终代码 head 刷新两份 ledger。

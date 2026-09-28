@@ -1,4 +1,4 @@
-"""实验性 SessionJournal durable core（Phase 1）。
+"""实验性 SessionJournal durable core（Phase 1 + Phase 2 跨进程写者互斥 / 接管）。
 
 本包尚未接入 Engine / MessageStore，也不从 ``taifeng.conversation`` 顶层导出。
 """
@@ -13,10 +13,15 @@ from taifeng.conversation.journal.errors import (
     JournalError,
     JournalIntegrityError,
     JournalLeaseError,
+    JournalLockUnsupportedError,
     JournalRecoveryRequiredError,
+    JournalSessionEndedError,
+    JournalSessionNotFoundError,
     NonCanonicalValueError,
 )
 from taifeng.conversation.journal.models import (
+    SESSION_ENDED_RECORD_TYPE,
+    WRITER_TAKEOVER_RECORD_TYPE,
     ActorRef,
     Durability,
     JournalAck,
@@ -28,7 +33,10 @@ from taifeng.conversation.journal.models import (
     SessionCreateResult,
     SessionDescriptor,
     SessionLease,
+    SessionOpenResult,
+    WriterTakeoverV1,
     build_initialization_records,
+    build_takeover_record,
 )
 from taifeng.conversation.journal.projector import (
     JournalConversationProjector,
@@ -77,14 +85,22 @@ from taifeng.conversation.journal.records import (
     stable_error,
     validate_attachments,
 )
+from taifeng.conversation.journal.writer_lock import (
+    FcntlWriterLockAdapter,
+    WriterLockAdapter,
+    WriterLockBusyError,
+)
 
 __all__ = [
+    "SESSION_ENDED_RECORD_TYPE",
+    "WRITER_TAKEOVER_RECORD_TYPE",
     "ActorRef",
     "ApprovedSafeMessage",
     "AttachmentV1",
     "ConversationItemV1",
     "CommitNotStartedError",
     "Durability",
+    "FcntlWriterLockAdapter",
     "JournalAck",
     "JournalAlreadyExistsError",
     "JournalBusyError",
@@ -98,7 +114,10 @@ __all__ = [
     "JournalIdentities",
     "JournalRecord",
     "JournalRecordFactory",
+    "JournalLockUnsupportedError",
     "JournalRecoveryRequiredError",
+    "JournalSessionEndedError",
+    "JournalSessionNotFoundError",
     "JournalVerification",
     "NonCanonicalValueError",
     "LlmRequestCommittedV1",
@@ -116,6 +135,7 @@ __all__ = [
     "SessionDescriptor",
     "SessionEndedV1",
     "SessionLease",
+    "SessionOpenResult",
     "SkillDispatchFinishedV1",
     "SkillDispatchStartedV1",
     "SkillSelectedV1",
@@ -135,7 +155,11 @@ __all__ = [
     "TurnFailedV1",
     "TurnStartedV1",
     "UnsupportedConversationItemError",
+    "WriterLockAdapter",
+    "WriterLockBusyError",
+    "WriterTakeoverV1",
     "build_initialization_records",
+    "build_takeover_record",
     "conversation_item_record",
     "deserialize_response_item",
     "record_id",
