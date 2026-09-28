@@ -196,6 +196,7 @@ reasoning provider state、function call 和后续 `origin_llm_sample_id` 工具
 | `compacted`（带 `replaced_range=(s, e)`） | 把 `logical[s:e]` 折叠掉：`logical = logical[:s] + [placeholder] + ([salvage] if salvage else []) + logical[e:]` |
 | `system_injection`，`source ∈ {rewind, rollback}` | 截断信号：`logical = logical[:cut_index]`（`cut_index` 从 payload 读），**marker 本身不进 logical** |
 | `skill_outcome`（战绩旁路记账） | `logical.append(item)`（正常追加，保留在 logical history 供后续相位读取）；但 `build_api_request` 在构建 LLM 消息序列时**跳过**此 kind——旁路语义，不进 LLM 视图 |
+| `tool_intent`（工具派发前的 write-ahead 意图，Chat 协议路径） | `logical.append(item)`；`build_api_request` 跳过；冷恢复据「有意图、无 output」识别在飞调用（见 [tool-crash-reconciliation](capabilities/tool-crash-reconciliation.md)） |
 | `spawn_settled`（spawn 句柄终态锚，落子 thread） | `logical.append(item)`；`build_api_request` 同样跳过（与 `spawn` / `suspension` 等记账 item 同类）；rewind 截断时随 `cut_index` 一并折叠，重推后由新终态再落一条（冷推断取最后一条） |
 | 其余所有 item | `logical.append(item)` |
 

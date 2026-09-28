@@ -60,10 +60,11 @@ async def test_reasoning_persisted_before_assistant(
     await pool.close()
 
     kinds = [it.kind for it in items]
-    # 第一轮:reasoning 紧邻其配对 assistant message 之前,fc/fco 在其后
-    assert kinds[:5] == [
+    # 第一轮:reasoning 紧邻其配对 assistant message 之前,派发前的 write-ahead
+    # 意图(tool_intent,记账项)与 fc/fco 在其后
+    assert kinds[:6] == [
         "user_message", "reasoning", "assistant_message",
-        "function_call", "function_call_output",
+        "tool_intent", "function_call", "function_call_output",
     ]
     # 第二轮同样配对;reasoning 全文 = 全部 delta 拼接
     r_items = [it for it in items if it.kind == "reasoning"]

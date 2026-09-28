@@ -146,6 +146,10 @@ class SuspensionAccess:
 
         pend = next(
             (p for p in record.pending if p.related_call_id == call_id), None)
+        # 崩溃后结果未知的调用：人工中止 / 到期都明确说「结局未知」，避免模型误以为
+        # 这次调用确定没执行而放心重发
+        if pend is not None and pend.reason is SuspendReason.TOOL_OUTCOME_UNKNOWN:
+            return f"tool_outcome_unknown: {reason_text}"
         if pend is not None and pend.reason is not SuspendReason.PERMISSION:
             return f"suspension_expired: {reason_text}"
         return f"permission_denied: {reason_text}"

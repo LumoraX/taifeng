@@ -305,7 +305,11 @@ async def test_cold_resume_settles_orphan_response_call_as_unknown_without_retry
     skills_dir: Path,
     threads_dir: Path,
 ) -> None:
-    """冷恢复只追加稳定 unknown output，绝不重放结果未知的工具调用。"""
+    """report 模式：冷恢复只追加稳定 unknown output，绝不重放结果未知的工具调用。
+
+    ``inspect`` 未注册（副作用类型不可知）→ 默认 suspend 模式会挂起交人裁决；
+    本用例钉住 ``tool_recovery="report"`` 下的旧语义（见 tool-crash-reconciliation）。
+    """
     client = OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6")
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir,
@@ -333,6 +337,7 @@ async def test_cold_resume_settles_orphan_response_call_as_unknown_without_retry
         threads_dir=threads_dir,
         model_client=OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6"),
         compressors=[],
+        tool_recovery="report",
     )
     cold_engine = await cold_pool.get_or_create(
         session_id="orphan-call-cold",
@@ -359,6 +364,7 @@ async def test_cold_resume_settles_orphan_response_call_as_unknown_without_retry
         threads_dir=threads_dir,
         model_client=OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6"),
         compressors=[],
+        tool_recovery="report",
     )
     second_engine = await second_pool.get_or_create(
         session_id="orphan-call-cold-again",

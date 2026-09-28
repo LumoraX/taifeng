@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -50,6 +51,7 @@ from taifeng.loop.pool_session import (
     prepare_pool_session,
     start_skill_watcher,
 )
+from taifeng.loop.tool_recovery import validate_tool_recovery_mode
 from taifeng.skill.dispatch import DispatchPolicy
 from taifeng.skill.recall import LlmSkillRecall, SkillRecall
 from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry
@@ -313,6 +315,7 @@ class EnginePool:
         auto_retry: bool = True,
         retry_config: RetryConfig | None = None,
         now_factory: Any = None,
+        tool_recovery: Literal["suspend", "report"] = "suspend",
         max_parallel_tool_calls: int = 1,
         reasoning_passback: bool = True,
         enable_request_capture: bool = False,
@@ -390,6 +393,8 @@ class EnginePool:
         self._failure_suspend_on_expire = failure_suspend_on_expire
         # suspension-ttl：壁钟工厂(测试可注入固定时钟),透传到每个 AgentEngine。
         self._now_factory = now_factory
+        # tool-crash-reconciliation：冷恢复时非幂等悬空调用的处置（suspend 交人 / report）
+        self._tool_recovery = validate_tool_recovery_mode(tool_recovery)
         # 单 turn 内一批 tool call 的最大并发；默认 1=串行。透传到 AgentEngine。
         self._max_parallel_tool_calls = max_parallel_tool_calls
         # reasoning-content-passback：thinking 模型 reasoning 回传开关，透传到 AgentEngine。
@@ -541,6 +546,7 @@ class EnginePool:
         auto_retry: bool = True,
         retry_config: RetryConfig | None = None,
         now_factory: Any = None,
+        tool_recovery: Literal["suspend", "report"] = "suspend",
         max_parallel_tool_calls: int = 1,
         reasoning_passback: bool = True,
         enable_request_capture: bool = False,
@@ -672,6 +678,7 @@ class EnginePool:
                 auto_retry=auto_retry,
                 retry_config=retry_config,
                 now_factory=now_factory,
+                tool_recovery=tool_recovery,
                 max_parallel_tool_calls=max_parallel_tool_calls,
                 reasoning_passback=reasoning_passback,
                 enable_request_capture=enable_request_capture,
@@ -798,9 +805,9 @@ class EnginePool:
                 entry_skill_id=entry_skill_id,
                 cwd=cwd,
                 resume_thread_id=resume_thread_id,
-                recover_unknown_response_calls=(
-                    model_capabilities(self._model_client).protocol == "responses"
-                ),
+                tool_registry=self._tool_runtime._registry,  # noqa: SLF001
+                tool_recovery=self._tool_recovery,
+                now_factory=self._now_factory or (lambda: int(time.time())),
             )
             audit_state = prepared.audit_state
             initial_history = prepared.initial_history
@@ -824,7 +831,7 @@ class EnginePool:
                 resume_thread_id=resume_thread_id,
                 entry_skill_id=entry_skill_id,
                 initial_history=initial_history,
-                recovered_unknown_call_ids=prepared.recovered_unknown_call_ids,
+                recovered_tool_calls=prepared.recovered_tool_calls,
             )
             return engine
 

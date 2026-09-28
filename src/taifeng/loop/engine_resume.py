@@ -109,6 +109,13 @@ class EngineResume:
                     thread_id=self._engine._thread_id, is_error=False)
                 self._engine._history.append(out)
                 await self._engine._store.append(out)
+            # 3a'. tool_outcome_unknown 的 provide 裁决：人给出的真实结局原样回填
+            for call_id, (text, is_error) in plan.provided_outputs.items():
+                out = function_call_output(
+                    call_id=call_id, output=text,
+                    thread_id=self._engine._thread_id, is_error=is_error)
+                self._engine._history.append(out)
+                await self._engine._store.append(out)
             # 3b. deny / 到期 → error output(前缀按 pending reason 渲染)
             for call_id, reason in plan.deny_outputs.items():
                 out = function_call_output(

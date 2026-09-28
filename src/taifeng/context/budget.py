@@ -103,6 +103,11 @@ def estimate_item_tokens(
         return estimate_text_tokens(str(payload.get("text", "")))
     if item.kind == "compacted":
         return estimate_text_tokens(str(payload.get("summary", "")))
+    from taifeng.conversation.models import BOOKKEEPING_ITEM_KINDS
+
+    # 记账类 item（挂起 / spawn 锚 / 战绩 / 工具意图等）不进 LLM 视图，不占上下文
+    if item.kind in BOOKKEEPING_ITEM_KINDS:
+        return 0
     return 50
 
 

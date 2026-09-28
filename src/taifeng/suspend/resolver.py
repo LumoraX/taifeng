@@ -51,6 +51,9 @@ class ResolvePlan:
     execute_tool_call_ids: list[str] = field(default_factory=list)  # permission allow → 执行 tool
     direct_outputs: dict[str, Any] = field(default_factory=dict)  # call_id → output(form/data)
     deny_outputs: dict[str, str] = field(default_factory=dict)  # call_id → deny reason(permission)
+    # tool_outcome_unknown 的 provide 裁决:call_id → (output 原文, is_error);
+    # 与 direct_outputs 区分——后者 JSON 序列化 payload,这里原样回填并保留 is_error
+    provided_outputs: dict[str, tuple[str, bool]] = field(default_factory=dict)
     abort: bool = False  # system_retry / resource_limit 的 action=abort
     # K2(会话 token 硬顶)retry 携带的预算增额;engine 应用到 _max_session_tokens
     extend_session_tokens: int = 0
@@ -100,7 +103,8 @@ class SuspensionResolver:
             # 结构化 payload 的 reason:非 dict 形态显式拒绝(禁 AttributeError 逃逸
             # 致 resume 任务静默崩溃——create_task 派发的异常无人消费)
             if (p.reason in (SuspendReason.PERMISSION, SuspendReason.SYSTEM_RETRY,
-                             SuspendReason.RESOURCE_LIMIT)
+                             SuspendReason.RESOURCE_LIMIT,
+                             SuspendReason.TOOL_OUTCOME_UNKNOWN)
                     and not isinstance(payload, dict)):
                 raise ResolveError(
                     f"invalid_payload_shape: {p.request_id} (want dict, "
@@ -123,6 +127,8 @@ class SuspensionResolver:
                         f"form/data pending missing related_call_id: {p.request_id}"
                     )
                 plan.direct_outputs[p.related_call_id] = payload
+            elif p.reason is SuspendReason.TOOL_OUTCOME_UNKNOWN:
+                self._plan_tool_outcome_unknown(plan, p, payload)
             elif p.reason is SuspendReason.SYSTEM_RETRY:
                 if payload.get("action") == "abort":
                     plan.abort = True
@@ -153,6 +159,34 @@ class SuspensionResolver:
                 # 未知 reason:禁静默丢弃(CLAUDE.md 禁 silent fallback)
                 raise ResolveError(f"unhandled_suspend_reason: {p.reason}")
         return plan
+
+    @staticmethod
+    def _plan_tool_outcome_unknown(plan: ResolvePlan, p: Any, payload: dict[str, Any]) -> None:
+        """把「崩溃后结果未知的工具调用」的人工裁决并入 plan。
+
+        Raises:
+            ResolveError: 缺 related_call_id、未知 action、provide 缺 output 字符串。
+        """
+        call_id = p.related_call_id
+        if call_id is None:
+            raise ResolveError(
+                f"tool_outcome_unknown pending missing related_call_id: {p.request_id}")
+        action = payload.get("action")
+        if action == "retry":
+            plan.execute_tool_call_ids.append(call_id)
+        elif action == "provide":
+            output = payload.get("output")
+            if not isinstance(output, str):
+                raise ResolveError(
+                    f"tool_outcome_provide_requires_output: {p.request_id} "
+                    "(provide payload 需带 output: str)")
+            plan.provided_outputs[call_id] = (output, bool(payload.get("is_error", False)))
+        elif action == "abort":
+            plan.deny_outputs[call_id] = "aborted by operator after crash recovery"
+            plan.abort = True
+        else:
+            raise ResolveError(
+                f"invalid_tool_outcome_action: {action!r} (want retry|provide|abort)")
 
     @staticmethod
     def _apply_expiry(plan: ResolvePlan, p: Any, *, exhausted: bool = False) -> None:

@@ -23,6 +23,13 @@ class SuspendReason(StrEnum):
     # 内部核销 —— 先续跑子 thread 拿到结果，再回填父 call_skill 的 output。
     # detail 携带 sub_thread_id（子 thread）；related_call_id = 父 call_skill 的 call_id。
     CHILD_SKILL = "child_skill"
+    # 进程崩溃时工具正在执行、结果未落盘，且工具有非幂等副作用、无法自动回查 →
+    # 冷恢复挂起交人裁决(tool-crash-reconciliation)。resolutions payload:
+    #   {"action": "retry"}                                  → 内核重新执行该调用
+    #   {"action": "provide", "output": str, "is_error": bool} → 以人提供的真实结局回填
+    #   {"action": "abort"}                                  → 回填中止说明并终止续跑
+    # detail 携带 tool / arguments / effect_kind / reconciliation 供业务渲染裁决 UI。
+    TOOL_OUTCOME_UNKNOWN = "tool_outcome_unknown"
 
 
 # 到期可自动 retry 的 reason —— 其余(人类输入类 / 内核派发态)到期只能 abort:

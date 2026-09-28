@@ -13,9 +13,9 @@
 
 ## 数据契约
 
-### Requirement: `SuspendReason` 六值枚举
+### Requirement: `SuspendReason` 七值枚举
 
-`SuspendReason` SHALL 是 `enum.StrEnum`，取且仅取以下六值（决定 resume 续跑语义）：
+`SuspendReason` SHALL 是 `enum.StrEnum`，取且仅取以下七值（决定 resume 续跑语义）：
 
 | 值 | 语义 | resume 续跑动作 |
 | --- | --- | --- |
@@ -25,6 +25,7 @@
 | `system_retry` | 限流 / 配额 / 余额 / 鉴权 / 可恢复网络错 | `action=retry`（默认）→ 重跑同次 sample；`action=abort` → turn 终止不续跑 |
 | `resource_limit` | 资源护栏触顶（`max_iterations` / `resource_limit_exceeded` / `denial_circuit_open`）被失败处置 policy 裁决为挂起 | `action=retry` → 重建 runner 自迭代边界**继续采样循环**（无悬空 fc；IterationBudget / DenialBreaker 随重建按原 cap 重置）；`action=abort` → 与 system_retry abort 同语义。非法 action 显式 `ResolveError`。`detail` 携带 `{end_reason, guard_snapshot?}` |
 | `child_skill` | `call_skill` 派发的子 skill 内部挂起 → 父的 `call_skill` 随之挂起 | **非用户可直接 resolve**：由 engine 续跑链内部核销——先续跑子 thread 拿结果，再回填本 `call_skill` 的 `function_call_output`（见下「子 thread resume 续跑链」） |
+| `tool_outcome_unknown` | 冷恢复发现工具执行途中崩溃、结果未落盘，且工具非幂等、无法回查 | `action=retry` → 重新执行该调用；`action=provide` → 原样回填 `output`（保留 `is_error`）；`action=abort` → 回填 `tool_outcome_unknown: ...` 并终止。到期只能 abort。见 [tool-crash-reconciliation](tool-crash-reconciliation.md) |
 
 `StrEnum` 保证 JSON 序列化为字符串（`reason.value`），跨进程 `from_item` 还原稳定。`child_skill` pending 的 `related_call_id` = 父 `call_skill` 的 call_id，`detail` 携带 `{sub_thread_id, skill_id}`（子 thread + 子 entry skill）。
 

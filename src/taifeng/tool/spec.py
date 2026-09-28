@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from taifeng.llm.types import ToolSpecRef
 
@@ -80,6 +80,30 @@ ToolFunc = Callable[[dict[str, Any], ToolContext], Awaitable[ToolResult]]
 
 
 @dataclass(frozen=True)
+class ReconcileVerdict:
+    """崩溃恢复时对一次结果未知的工具调用的回查结论（tool-crash-reconciliation）。
+
+    Attributes:
+        status: ``completed`` = 副作用已发生，``output`` 是其结果；
+            ``not_executed`` = 确认没执行，可安全重发；
+            ``unknown`` = 查不清，交人裁决。
+        output: ``completed`` 时回填给模型的工具结果文本。
+        is_error: ``completed`` 时该结果是否为错误结果。
+    """
+
+    status: Literal["completed", "not_executed", "unknown"]
+    output: str = ""
+    is_error: bool = False
+
+
+ReconcileFunc = Callable[[dict[str, Any], str], Awaitable[ReconcileVerdict]]
+"""回查函数签名：``(arguments, call_id) -> ReconcileVerdict``。
+
+``reconciliation="query"`` 的工具提供它，让内核在冷恢复时向外部系统查询「这次调用
+到底有没有生效」（按 ``idempotency_key`` / 参数定位）。抛异常视同 ``unknown``。"""
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     """工具完整描述 —— LLM 可见 schema + 本地 handler。"""
 
@@ -117,6 +141,13 @@ class ToolSpec:
 
     can_suspend: bool = False
     """该工具是否可能抛 SuspendSignal（HITL/长挂起）。strict audit 只接受 False。"""
+
+    reconcile: ReconcileFunc | None = None
+    """崩溃恢复回查函数（tool-crash-reconciliation）。None = 不支持回查。
+
+    进程在该工具执行途中崩溃、结果未落盘时，冷恢复按副作用类型分流：
+    ``pure`` / ``idempotent`` → 告知模型可安全重发；提供了 ``reconcile`` → 调它查清
+    真实结局；其余（``external_non_idempotent`` 等）→ 挂起交人裁决。"""
 
     def to_ref(self) -> ToolSpecRef:
         return ToolSpecRef(

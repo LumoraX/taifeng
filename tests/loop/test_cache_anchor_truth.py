@@ -226,7 +226,10 @@ def _summary_compressor() -> CompressionOrchestrator:
 
 async def test_anchor_advances_after_successful_sample(sim_client: Any) -> None:
     """a) 首采样发出 [user] 成功 → anchor=0;第二次请求打点在 user 消息;turn 结束
-    anchor = 第二次发出长度([user, assistant, fc, fco]) - 1 = 3。"""
+    anchor = 第二次发出长度([user, assistant, tool_intent, fc, fco]) - 1 = 4。
+
+    tool_intent 是派发前的 write-ahead 记账项(tool-crash-reconciliation),进 hot
+    history 但不进 LLM 视图,故不影响打点位置,只让 history 下标 +1。"""
     calls: list[dict[str, Any]] = []
     client = sim_client(turns=[
         SimTurn(tool_calls=[{"id": "c1", "name": "echo", "arguments": "{}"}]),
@@ -244,12 +247,12 @@ async def test_anchor_advances_after_successful_sample(sim_client: Any) -> None:
     assert [bp.index for bp in reqs[1].request.cache_breakpoints] == [0], (
         "第二次请求应在上次发出的末条消息(user@m0)打 cache 点"
     )
-    assert runner.cache_anchor_index == 3
+    assert runner.cache_anchor_index == 4
 
 
 async def test_mid_turn_compaction_sees_advanced_anchor(sim_client: Any) -> None:
     """b) 工具回填后的 mid_turn 压缩,ctx.anchor 必须等于首采样发出长度 - 1
-    (= 当时 history 长度 - [assistant, fc, fco] 三条 - 1),而不是 -1。"""
+    (= 当时 history 长度 - [assistant, tool_intent, fc, fco] 四条 - 1),而不是 -1。"""
     calls: list[dict[str, Any]] = []
     probe = _ProbeStrategy()
     client = sim_client(turns=[
@@ -267,7 +270,7 @@ async def test_mid_turn_compaction_sees_advanced_anchor(sim_client: Any) -> None
     mid = [(anchor, n) for phase, anchor, n in probe.seen if phase == "mid_turn"]
     assert len(mid) == 1, probe.seen
     anchor, n = mid[0]
-    assert anchor == n - 3 - 1, f"mid_turn anchor 应为首采样发出长度-1,实得 {anchor}(len={n})"
+    assert anchor == n - 4 - 1, f"mid_turn anchor 应为首采样发出长度-1,实得 {anchor}(len={n})"
 
 
 # ───────────────────────── c / d / e:策略窗口 anchor+1 ─────────────────────────

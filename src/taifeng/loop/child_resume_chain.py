@@ -510,6 +510,11 @@ class ChildResumeChain:
                 call_id=call_id, output=json.dumps(payload, ensure_ascii=False),
                 thread_id=thread_id, is_error=False)
             await self._engine._store.append(out)
+        # tool_outcome_unknown 的 provide 裁决：人给出的真实结局原样回填
+        for call_id, (text, is_error) in plan.provided_outputs.items():
+            out = function_call_output(
+                call_id=call_id, output=text, thread_id=thread_id, is_error=is_error)
+            await self._engine._store.append(out)
         for call_id, reason in plan.deny_outputs.items():
             out = function_call_output(
                 call_id=call_id,

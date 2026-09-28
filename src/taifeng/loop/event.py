@@ -641,14 +641,21 @@ class ThreadResumed(_Msg):
         "item_count": int,
         "entry_skill_id_at_resume": str,
         "entry_skill_id_recorded": str | None,
-        "recovered_unknown_call_ids": list[str],
+        "recovered_unknown_call_ids": list[str],   # 结局仍未知（交人 / report 回填）
+        "recovered_tool_calls": list[{"call_id", "name", "disposition"}],
+            # tool-crash-reconciliation：崩溃遗留悬空调用的逐条处置；disposition ∈
+            # safe_to_retry / reconciled / awaiting_operator / reported_unknown
     }"""
 
 
 class TurnCompleted(_Msg):
     kind: Literal["turn_completed"] = "turn_completed"
     """data = {"iterations": int, "duration_ms": int, "usage": dict,
+              "subtree_usage": dict, "thread_id": str, "skill_id": str,
               "end_reason": str, "success": bool, "is_root": bool}
+
+    ``usage`` 是本 turn 自身采样用量；``subtree_usage`` 另含阻塞式 call_skill 子树
+    （usage-tree-accounting，ADR 0044）。
 
     ``is_root`` —— 本 turn 是否是根 turn（从 Engine 直接派发，不是 ``call_skill``
     派发出来的子 turn）。订阅 ``engine.subscribe(submission_id)`` 的业务桥接层

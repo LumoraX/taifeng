@@ -14,7 +14,12 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from taifeng.context.budget import estimate_history_bytes
-from taifeng.conversation.models import assistant_message, function_call, reasoning
+from taifeng.conversation.models import (
+    assistant_message,
+    function_call,
+    reasoning,
+    tool_intent_item,
+)
 from taifeng.conversation.store import AtomicBatchMessageStore
 from taifeng.llm.client import model_capabilities
 from taifeng.llm.errors import (
@@ -713,6 +718,21 @@ class TurnSample:
             )
             self.__sample_owner.history_buffer.extend(fco_items)
             return assistant_text, True
+
+        # tool-crash-reconciliation：Chat 路径的 function_call 要等执行完才与 output
+        # 成对落盘（保交错 transcript 结构）；执行期间崩溃则调用意图整个丢失，resume 后
+        # 模型不知情地重发 = 副作用静默重复。派发前先落 write-ahead 意图（记账类 item，
+        # 不进 LLM 视图；同时进 hot history 保持与 store 逐项一致，rewind 下标不漂移）。
+        # Responses 路径的 function_call 已随最终响应原子落盘，无需另记。
+        if not is_responses:
+            for req in requests:
+                intent = tool_intent_item(
+                    req.call_id, req.name, req.arguments_raw,
+                    thread_id=self.__sample_owner.thread_id,
+                    extra_content=req.extra_content,
+                )
+                self.__sample_owner.history_buffer.append(intent)
+                await self.__sample_owner.store.append(intent)
 
         outcomes = await _run_dispatch()
 

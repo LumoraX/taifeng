@@ -26,7 +26,14 @@ ItemKind = Literal[
     "join_barrier_fired",  # 新增:barrier 已触发的幂等标记(重载时不重复触发)
     "skill_outcome",     # 新增:单次 skill 执行的战绩记账(认知回路 ⑦ 地基);旁路,不进 LLM 视图
     "spawn_settled",     # 新增(wave2b):spawn 句柄终态锚,落子 thread(冷推断真相);不进 LLM 视图
+    "tool_intent",       # 新增(tool-crash-reconciliation):工具派发前的 write-ahead 意图;不进 LLM 视图
 ]
+
+# 只做记账、不进 LLM 视图的 kind（估算 token 时计 0；prompt 渲染时跳过）
+BOOKKEEPING_ITEM_KINDS: frozenset[str] = frozenset({
+    "suspension", "spawn", "join_barrier", "join_barrier_fired",
+    "skill_outcome", "spawn_settled", "tool_intent",
+})
 
 
 def _generate_id(prefix: str = "item") -> str:
@@ -48,6 +55,8 @@ class ResponseItem(BaseModel):
     - system_injection:       {"text": str, "source": str}
     - suspension:             {"record_id": str, "submission_id": str, "turn_index": int,
                                "pending": list[dict], "created_at": int, "resolved": bool}
+    - tool_intent:            {"call_id": str, "name": str, "arguments": str,
+                               "extra_content"?: dict}  # 派发前落盘；冷恢复据此识别在飞调用
     """
 
     kind: ItemKind
@@ -111,6 +120,34 @@ def function_call(
         thread_id=thread_id,
         payload=payload,
     )
+
+
+def tool_intent_item(
+    call_id: str,
+    name: str,
+    arguments: str,
+    *,
+    thread_id: str,
+    extra_content: dict[str, Any] | None = None,
+) -> ResponseItem:
+    """构造工具派发前的 write-ahead 意图 item（tool-crash-reconciliation）。
+
+    Chat 协议路径在工具**执行前**落这一条（function_call 要等执行完才与 output 成对
+    落盘）；进程若在执行途中崩溃，冷恢复据「有意图、无 output」识别在飞调用，按工具
+    声明的副作用类型分流处置，而不是让模型在不知情的情况下重发一遍。记账类 item，
+    不进 LLM 视图。
+
+    Args:
+        call_id: 与后续 function_call / output 配对的调用 id。
+        name: 工具名。
+        arguments: LLM 产出的原始参数串。
+        thread_id: 所属 thread。
+        extra_content: provider 专有的调用附加内容（如 Gemini thought signature）。
+    """
+    payload: dict[str, Any] = {"call_id": call_id, "name": name, "arguments": arguments}
+    if extra_content is not None:
+        payload["extra_content"] = extra_content
+    return ResponseItem(kind="tool_intent", thread_id=thread_id, payload=payload)
 
 
 def function_call_output(
