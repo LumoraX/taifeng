@@ -100,6 +100,7 @@ running → done | error | cancelled
 | --- | --- | --- |
 | 未知 skill_id | `SpawnRejectedError("unknown_skill: <id>")` | `unknown_skill` |
 | 非白名单 / 超深度 / 成环 | `SpawnRejectedError("dispatch_rejected: <reason>")` | `not_in_whitelist` / `max_depth_exceeded` / `cycle_detected` |
+| 种子输入进不了 Journal（仅审计模式） | `SpawnRejectedError("dispatch_rejected: arguments_not_canonical")` | `arguments_not_canonical` |
 | K1 并发超限 | `SpawnLimitError(kind="concurrent")` | `spawn_limit_concurrent` |
 | K1 累计超限 | `SpawnLimitError(kind="total")` | `spawn_limit_total` |
 
@@ -382,6 +383,22 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 5. 句柄表就绪后武装挂起态 spawn 子 thread 的 TTL（`_rearm_spawn_ttl_timers_cold`；`run()` 起跑时句柄表尚空，只武装根 record）
 
 **v1 限制**：mid-flight 中断（重启时 status 推为 running）的 spawn 不自动重驱动，需业务侧干预。
+
+### Requirement: 审计模式下的分离式派发
+
+注入 `AuditConfig` 的 Session 里，发起与终态记在 Journal 的记录里（`spawn_started` / `spawn_settled`），
+不写 `spawn` 与 `spawn_settled` 锚点条目；完整契约见
+[session-journal-business-integration §18](session-journal-business-integration.md)。与非审计模式的差异：
+
+- 可用的操作是发起、终止、查询、等待；join-barrier、peer 消息不可用（静态门拒绝）。
+- 子 thread 上的调用不能停下等人作答：错峰 HITL 在审计模式下不可用。
+- 接管时句柄表由记录重建；进程死的时候还在运行的派发落 `cancelled`（`end_reason = process_recovery`），
+  不会停在 `running`。
+- `wait_peer` / `wait_any` 的等待时长有上限（工具收敛期限的一半）。
+
+#### Scenario: 崩溃时仍在运行的派发
+- **WHEN** 审计 Session 里一个派发正在运行时进程退出；新进程以 `resume_thread_id` 接管
+- **THEN** 该句柄的状态为 `cancelled`；Journal 里它的终态记录 `end_reason = process_recovery`
 
 ## R1–R5 影响
 

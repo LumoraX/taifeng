@@ -399,13 +399,23 @@ async def test_explicit_audited_shutdown_forces_live_spawn_convergence(
         assert session_id not in pool._engine_tasks  # noqa: SLF001
         assert session_id not in pool._audit_sessions  # noqa: SLF001
         committed = [envelope async for envelope in real_core.load(session_id)]
+        # 派发的发起与终态都在 Journal 里（ADR 0098）；终态先于 Session 的 terminal batch
         assert [envelope.record_type for envelope in committed[3:]] == [
+            "spawn_started",
+            "thread_created",
+            "thread_bound",
+            "conversation_item",
             "submission_accepted",
+            "spawn_settled",
+            "thread_terminal",
             "submission_applied",
             "thread_terminal",
             "session_ended",
         ]
-        assert committed[3].submission_id == shutdown_id
+        assert committed[7].submission_id == shutdown_id
+        assert committed[8].payload["status"] == "cancelled"
+        assert committed[9].thread_id == committed[5].thread_id
+        assert committed[11].thread_id == engine.thread_id
         assert core.close_calls == 1
     finally:
         allow_spawn_terminal.set()

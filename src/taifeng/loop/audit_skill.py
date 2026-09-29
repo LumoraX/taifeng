@@ -299,6 +299,7 @@ class AuditedSkillDispatch:
             projector=self._state.projector,
             max_attachment_bytes=self._state.max_attachment_bytes,
             max_total_attachment_bytes=self._state.max_total_attachment_bytes,
+            root=False,
         )
         return ChildSkillContext(
             child_state=child_state,

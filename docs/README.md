@@ -136,6 +136,7 @@ Later ADRs:
 95. [ADR 0095: 审计模式接受文件附件与工具结果里的图片](decisions/0095-audit-mode-attachments.md): 带文件的用户消息在审计模式被拒，工具返回图片会冻结 Session。决策：文件附件另立 DTO（不改图片附件的字节形状），按 `kind` 区分；准入与非审计路径同一口径外加 Session 字节上限；工具图片随结果对话项落账、outcome 只记摘要；不合格时结果变成错误而不冻结。
 96. [ADR 0096: 审计模式放开 hook 与不挂起的权限裁决](decisions/0096-audit-mode-hooks-and-permission.md): 审计模式拒绝任何 hook 与权限策略，而需要审计的部署最需要它们。决策：业务的 handler 与策略原样运行，内核按 turn 绑定一层，裁决先落账再生效；每个 handler 每次裁决一条 `hook_evaluated`，改写内容落账、其余 metadata 只记键名；`permission_decided` 记请求与裁决；上下文无法落账的请求被拒；挂起式审批另行立项。
 97. [ADR 0097: 审计模式放开挂起与恢复](decisions/0097-audit-mode-suspension-and-resume.md): 需要审计的部署里审批人很少在线等着，而审计模式拒绝一切挂起。决策：只放开「在工具调用处停下等人作答」的挂起（挂起式审批，及声明 `can_suspend` 的工具发问）；等人的调用保持未结算，结果记在原来的 operation 下；`Resume` 先准入落账再入队，且须答复全部请求；`resume_applied` 写在续跑之前；等待期间释放写 `session_detached` 而不终结，可被接管；子 skill 内的挂起、带到期时间的挂起不做。
+98. [ADR 0098: 审计模式放开分离式派发](decisions/0098-audit-mode-detached-spawn.md): 审计 Session 里直接调 `engine.spawn_skill()` 时子 skill 照常运行却不进 Journal。决策：发起是 `spawn_started` 与子 thread 创建、种子同批，终态是 `spawn_settled` 与 `thread_terminal`；不写锚点条目（避免两个写者打乱投影顺序）；句柄表由记录重建；接管时没有终态的派发落 `cancelled` 不续跑；子 thread 上的调用不能停下等人；等待工具的时长设上限；barrier 与 peer 消息另行立项。
 
 ### Fourth Pass: Gap Tracking
 

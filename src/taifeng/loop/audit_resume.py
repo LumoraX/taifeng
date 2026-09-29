@@ -55,6 +55,7 @@ from taifeng.loop.audit_resume_scan import (
     rebuild_root_history,
     root_thread_id,
 )
+from taifeng.loop.audit_spawn import remember_spawns, spawn_handles_from_journal
 
 if TYPE_CHECKING:
     from taifeng.conversation.journal.models import JournalEnvelope, JournalRecord
@@ -316,6 +317,8 @@ async def resume_audited_session(
             config, projection_store, opened.lease, expected_seq, resume_thread_id, history,
             children,
         )
+        # 句柄表是运行态：由派发记录重建，交给新 Engine
+        remember_spawns(state, spawn_handles_from_journal(envelopes))
         for suspension in active_suspensions(envelopes):
             # 接管的 Session 仍在等人作答：再次释放时照样只是离开，不是终结
             mark_awaiting(state, suspension.suspension_id)

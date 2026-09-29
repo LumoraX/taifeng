@@ -118,7 +118,7 @@ def _awaits_human(
     - 等填表 / 等数据：由工具自己发起，工具须声明 ``can_suspend=True``。
 
     其余情形（未声明的工具自行挂起、子 skill 挂起、失败处置、资源护栏、带到期时间的挂起）
-    在审计模式下仍是能力违约。
+    在审计模式下仍是能力违约。调用方另须确认这是 root thread 上的调用。
     """
     pending = outcome.suspend
     if not isinstance(pending, PendingRequest) or pending.related_call_id != req.call_id:
@@ -242,7 +242,7 @@ class _AuditedToolConvergence:
         for req in self._requests:
             outcome = by_call[req.call_id]
             spec = self._registry.get(req.name)  # type: ignore[attr-defined]  # noqa: SLF001
-            if _awaits_human(outcome, req, spec):
+            if self._state.root and _awaits_human(outcome, req, spec):
                 self.awaited.append(
                     AwaitedCall(outcome.suspend, self._intent_ids[req.call_id])
                 )

@@ -44,6 +44,8 @@ class AuditedSessionState:
     ``next_turn_index``：新 Engine 的 audited turn index 起点（resume 时接续 Journal）。
     ``abort_resume``：仅 resume 路径设置；Engine 启动失败时只释放接管的 lease、不写
     ``session_ended``（resume 失败不是 Session 的终结）。新建路径为 None，走唯一 finish。
+    ``root``：是不是 Session 的 root thread。只有 root thread 上的 turn 可以停下等人作答
+    （``Resume`` 只认 root thread）；子 thread 上的挂起是能力违约。
     """
 
     thread_id: str
@@ -53,6 +55,7 @@ class AuditedSessionState:
     max_total_attachment_bytes: int
     next_turn_index: int = 0
     abort_resume: Callable[[], Awaitable[None]] | None = None
+    root: bool = True
 
 
 @dataclass(frozen=True, slots=True)

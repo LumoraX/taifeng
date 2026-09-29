@@ -31,6 +31,10 @@ from taifeng.conversation.journal.recovery_records import (
     ToolCallUndispatchedV1,
     ToolRecoveryCommittedV1,
 )
+from taifeng.conversation.journal.spawn_records import (
+    SPAWN_SETTLED_RECORD_TYPE,
+    SPAWN_STARTED_RECORD_TYPE,
+)
 from taifeng.conversation.journal.suspension_records import (
     SUSPENSION_RESOLVED_RECORD_TYPE,
     TURN_SUSPENDED_RECORD_TYPE,
@@ -74,6 +78,7 @@ class _Settlement:
     llm: set[str] = field(default_factory=set)
     tool: set[str] = field(default_factory=set)
     skill: set[str] = field(default_factory=set)
+    spawn: set[str] = field(default_factory=set)
     applied: set[str] = field(default_factory=set)
     unknown: set[str] = field(default_factory=set)
     recovered_outcomes: set[str] = field(default_factory=set)
@@ -105,6 +110,9 @@ def _settled_references(envelopes: Sequence[JournalEnvelope]) -> _Settlement:
             settled.skill.add(envelope.operation_id)
         elif kind == "submission_applied":
             settled.applied.add(_payload_ref(envelope, "accepted_record_id"))
+        elif kind == SPAWN_SETTLED_RECORD_TYPE:
+            settled.spawn.add(_payload_ref(envelope, "started_record_id"))
+            continue
         else:
             continue
         # 已 durable 的 unknown 终态同样不可自动续跑
@@ -120,6 +128,7 @@ def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, .
     - ``llm_request_committed`` 没有对应 ``llm_response_checkpoint``；
     - ``tool_intent_committed`` 没有对应 ``tool_outcome_committed`` / ``tool_recovery_committed``；
     - ``skill_selected`` 没有同 operation 的 ``skill_dispatch_finished``；
+    - ``spawn_started`` 没有对应 ``spawn_settled``（ADR 0098）；
     - ``submission_accepted`` 没有对应 ``submission_applied``；
     - 任一终态 record 的 ``status`` 为 ``unknown``，且未被 ``tool_recovery_committed`` 改判。
 
@@ -140,6 +149,7 @@ def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, .
                 and envelope.record_id not in awaited
             )
             or (kind == "skill_selected" and envelope.operation_id not in settled.skill)
+            or (kind == SPAWN_STARTED_RECORD_TYPE and envelope.record_id not in settled.spawn)
             or (kind == "submission_accepted" and envelope.record_id not in settled.applied)
             or envelope.record_id in settled.unknown
         )

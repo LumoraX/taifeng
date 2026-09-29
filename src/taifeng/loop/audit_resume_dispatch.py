@@ -46,6 +46,11 @@ from taifeng.conversation.journal.records import (
     ThreadTerminalV1,
 )
 from taifeng.loop.audit_resume_scan import find_undispatched_calls
+from taifeng.loop.audit_resume_spawn import (
+    InterruptedSpawn,
+    interrupted_spawn_records,
+    interrupted_spawns,
+)
 from taifeng.loop.audit_resume_tools import (
     ToolCallDecision,
     UnresolvedToolCall,
@@ -123,6 +128,7 @@ class RecoveryScope:
         dispatches: 悬空的 ``call_skill`` 调用。
         undispatched: 从未登记意图的调用。
         others: 其余未结算 record（仍一律 fail closed）。
+        spawns: 没有终态的分离式派发（ADR 0098）。
     """
 
     root_thread_id: str
@@ -131,11 +137,12 @@ class RecoveryScope:
     dispatches: tuple[DispatchCall, ...]
     undispatched: tuple[UndispatchedCall, ...]
     others: tuple[str, ...]
+    spawns: tuple[InterruptedSpawn, ...] = ()
 
     @property
     def empty(self) -> bool:
         """没有任何可收敛项。"""
-        return not (self.tool_calls or self.dispatches or self.undispatched)
+        return not (self.tool_calls or self.dispatches or self.undispatched or self.spawns)
 
     @property
     def child_threads(self) -> tuple[str, ...]:
@@ -191,10 +198,19 @@ class _Lineage:
 
 
 def _eligible_threads(
-    lineage: _Lineage, pending: frozenset[str], root_thread_id: str,
+    lineage: _Lineage,
+    pending: frozenset[str],
+    root_thread_id: str,
+    spawns: tuple[InterruptedSpawn, ...] = (),
 ) -> frozenset[str]:
-    """root + 被中断派发的子 thread；父 thread 可收敛时子 thread 才可收敛（逐层传递）。"""
-    threads = {root_thread_id}
+    """root + 被中断派发的子 thread；父 thread 可收敛时子 thread 才可收敛（逐层传递）。
+
+    分离式派发由 root thread 名下的记录发起，其子 thread 直接可收敛。
+    """
+    threads = {root_thread_id} | {
+        spawn.child_thread_id for spawn in spawns
+        if spawn.started.thread_id == root_thread_id
+    }
     grown = True
     while grown:
         grown = False
@@ -224,13 +240,16 @@ def build_recovery_scope(
         ValueError / pydantic.ValidationError: 相关 record 形状违约（Journal 不可信）。
     """
     lineage = _Lineage.index(envelopes)
-    threads = _eligible_threads(lineage, frozenset(pending), root_thread_id)
+    spawns = interrupted_spawns(envelopes, frozenset(pending))
+    threads = _eligible_threads(lineage, frozenset(pending), root_thread_id, spawns)
     calls, leftover = split_unsettled(
         envelopes, pending, root_thread_id, eligible_threads=threads
     )
     tool_calls: list[UnresolvedToolCall] = []
     dispatches: list[DispatchCall] = []
-    owned: set[str] = set()
+    owned: set[str] = {
+        spawn.started.record_id for spawn in spawns if spawn.child_thread_id in threads
+    }
     for call in calls:
         is_dispatch = (
             call.intent_payload.name == CALL_SKILL_TOOL_NAME
@@ -261,8 +280,9 @@ def build_recovery_scope(
         tool_calls=tuple(tool_calls),
         dispatches=tuple(dispatches),
         undispatched=undispatched,
-        # 已由某个悬空 call_skill 认领的 skill_selected 随派发一起结算
+        # 已由某个悬空 call_skill 认领的 skill_selected 随派发一起结算；没有终态的派发同理
         others=tuple(record_id for record_id in leftover if record_id not in owned),
+        spawns=tuple(spawn for spawn in spawns if spawn.started.record_id in owned),
     )
 
 
@@ -515,6 +535,16 @@ async def plan_recovery(
         recovery_operation_id=recovery_operation_id,
     )
     root = await planner.settle_thread(scope.root_thread_id)
+    for spawn in scope.spawns:
+        # 分离式派发：先收敛子 thread 上的调用，再落这次派发的终态
+        child = await planner.settle_thread(spawn.child_thread_id)
+        root.pending.extend(child.pending)
+        if child.pending:
+            continue
+        root.records.extend(child.records)
+        root.records.extend(interrupted_spawn_records(
+            spawn, session_id=session_id, recovery_operation_id=recovery_operation_id,
+        ))
     return RecoveryPlan(tuple(root.records), tuple(root.recovered), tuple(root.pending))
 
 

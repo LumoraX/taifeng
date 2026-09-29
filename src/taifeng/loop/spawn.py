@@ -29,12 +29,14 @@ SpawnRejectReason = Literal[
     "cycle_detected",
     "not_in_whitelist",
     "cannot_call_entry_skill",
+    "arguments_not_canonical",
     "spawn_limit_concurrent",
     "spawn_limit_total",
 ]
 """子 skill 派发 / 分离发起被准入拒绝的稳定分类（spawn-reject 分类，ADR 0078）。
 
-前五个来自 ``DispatchPolicy``（结构性门控），后两个来自 K1 配额。"""
+前五个来自 ``DispatchPolicy``（结构性门控），后两个来自 K1 配额。
+``arguments_not_canonical`` 只出现在审计模式：种子输入进不了 Journal（ADR 0098）。"""
 
 _LIMIT_REASONS: dict[str, SpawnRejectReason] = {
     "concurrent": "spawn_limit_concurrent",
@@ -46,6 +48,7 @@ _POLICY_REASONS: frozenset[str] = frozenset({
     "cycle_detected",
     "not_in_whitelist",
     "cannot_call_entry_skill",
+    "arguments_not_canonical",
 })
 
 

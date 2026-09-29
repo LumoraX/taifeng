@@ -401,21 +401,17 @@ def test_official_adapter_subclass_cannot_override_and_drop_observer() -> None:
 @pytest.mark.parametrize(
     ("tool_name", "expected_code"),
     [
-        ("spawn_skill", "audit_spawn_unsupported"),
-        ("kill_skill", "audit_spawn_unsupported"),
         ("run_in_background", "audit_spawn_unsupported"),
         ("await_skills", "audit_barrier_unsupported"),
-        ("join_skill", "audit_barrier_unsupported"),
         ("wait_for_task", "audit_barrier_unsupported"),
         ("send_message", "audit_peer_unsupported"),
-        ("wait_peer", "audit_peer_unsupported"),
     ],
 )
 def test_registered_unsupported_tools_are_rejected(
     tool_name: str,
     expected_code: str,
 ) -> None:
-    """已注册 Tool 名称足以暴露 detached/barrier/peer 能力。"""
+    """已注册 Tool 名称足以暴露后台任务 / barrier / peer 消息能力。"""
     inputs = replace(
         _static_inputs(),
         tools=(_AuditedTool(name=tool_name),),
@@ -486,6 +482,17 @@ def test_complete_non_suspending_tool_metadata_view_passes() -> None:
     validate_audit_config(
         _config(),
         static_inputs=replace(_static_inputs(), tools=(_AuditedTool(),)),
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_name", ["spawn_skill", "kill_skill", "join_skill", "wait_peer", "wait_any"],
+)
+def test_detached_spawn_tools_are_admitted(tool_name: str) -> None:
+    """分离式派发的发起、终止、查询与等待可以进审计 Session（ADR 0098）。"""
+    validate_audit_config(
+        _config(),
+        static_inputs=replace(_static_inputs(), tools=(_AuditedTool(name=tool_name),)),
     )
 
 

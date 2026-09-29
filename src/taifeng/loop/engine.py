@@ -1698,6 +1698,7 @@ class AgentEngine:
         history: list[ResponseItem] | None = None,
         auto_retry_count: int = 0,
         sample_scope_id: str | None = None,
+        audit_state: AuditedSessionState | None = None,
     ) -> TurnRunner:
         """构造 detached spawn 的子 TurnRunner（镜像 turn.py::_spawn_sub_runner 的 kwargs）。
 
@@ -1736,7 +1737,9 @@ class AgentEngine:
             hooks=self._hooks,
             permission_policy=self._permission_policy,
             request_metadata=self._request_metadata,
-            turn_index=self._turn_index,
+            # 审计：子 thread 自己的 turn 从 0 编号，效果记在子 thread 名下（ADR 0098）
+            turn_index=self._turn_index if audit_state is None else 0,
+            audit_state=audit_state,
             script_executors=self._script_executors,
             max_iterations=self._max_iterations,
             denial_breaker_config=self._denial_breaker_config,

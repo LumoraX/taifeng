@@ -12,15 +12,16 @@
 UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
 采样之间：折叠式上下文压缩 / 预算提示（§15）
 工具调用处停下等人（审批 / 填表 / 给数据）→ Resume → 续跑（§17）
+分离式派发：子 skill 在独立子 thread 上后台运行（§18）
 ```
 
 SessionJournal 是执行事实和对话项的唯一可靠事实源。hot history、MessageStore 和 EventMsg 都是
 Journal durable ack 之后的内存态或可重建投影，不得领先 Journal，也不得被声明为第二事实源。
 
 未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。hook 与权限裁决见 §16，
-在工具调用处停下等人作答的挂起与恢复见 §17。
+在工具调用处停下等人作答的挂起与恢复见 §17，分离式派发见 §18。
 本阶段不支持其余原因的挂起（子 skill 挂起、失败处置、资源护栏、带到期时间的挂起）、手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
-detached spawn、barrier、peer、
+join-barrier、peer 消息、后台 shell 任务、
 LLM attempt / submission 未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
 加密、WORM 或外置 blob。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
@@ -354,7 +355,7 @@ LLM request 落账时图片与文件的正文都按 §8 脱敏（`image_base64` 
 | Hook/approval | 内核的 `HookRunner`；内核的 `PermissionPolicy`（规则、可复用授权、当场作答或挂起式的 prompter）（§16、§17） | 其他类型的 hook 运行器 / 权限策略对象 |
 | Context | 无压缩策略，或全部策略声明 `audit_support` 为 `fold` / `fold_model`（§15） | 未声明或原地改写条目的压缩策略、ContextEngine、rewind、memory、instruction |
 | Skill | atomic/composite、同步 call_skill | orchestration、子 skill 内的挂起 |
-| Spawn/peer | 无 | detached spawn、barrier、peer |
+| Spawn/peer | 分离式派发：`spawn_skill` / `kill_skill` / `join_skill` / `wait_peer` / `wait_any`（§18） | join-barrier（`await_skills`）、peer 消息（`send_message`）、后台 shell 任务（`run_in_background` / `wait_for_task`） |
 | LLM | attempt-observable | opaque attempt/retry |
 | Tool | audit metadata 完整；结果可带图片附件；声明 `can_suspend=True` 的工具可以停下等人（§17） | metadata 缺失；未声明却自行挂起（运行期冻结） |
 | 附件 | 用户消息里的图片与文件（PDF）、工具结果里的图片 | 引用型输入、Data URL、超限、策略未启用或模型不支持的模态 |
@@ -636,8 +637,9 @@ Session 可以在等待期间被释放，由另一个进程接管后继续。
 | `permission` | 权限策略（`SuspendingPrompter`） | 任何工具调用都可能遇到 |
 | `form` / `data` | 工具自己（抛 `SuspendSignal`） | 工具声明 `can_suspend=True`（内置的 `request_user_input` 已声明） |
 
-待答请求必须指向发起它的那次调用（`related_call_id` 等于调用 id），且不带到期时间。其余情形是能力违约，
-处置同 §9：未声明的工具自行挂起、子 skill 内的挂起、失败处置、资源护栏、带 `ttl_seconds` 的挂起。
+待答请求必须指向发起它的那次调用（`related_call_id` 等于调用 id），且不带到期时间，并且调用发生在
+root thread 上。其余情形是能力违约，处置同 §9：未声明的工具自行挂起、子 thread 上的调用停下等人
+（同步 `call_skill` 的子 skill、分离式派发的子 skill）、失败处置、资源护栏、带 `ttl_seconds` 的挂起。
 
 ### 17.2 记录
 
@@ -715,3 +717,92 @@ llm_request_committed …                             续跑照常采样
 五类不适用的 `Resume` 被拒且状态不变；没有挂起时的 `Resume` 被拒；等待期间释放写 `session_detached`、
 接管后继续、最终正常终结；等待期间崩溃后接管；处置到一半中断后重新提交不重复结算；
 `CancelTurn` 不核销挂起；strict verify 通过。
+
+## 18. 分离式派发（ADR 0098）
+
+`spawn_skill` 把子 skill 放到独立的子 thread 上后台运行，发起方不等它结束。子 thread 上的 LLM 调用、
+工具调用、hook 与权限裁决都按本契约落账，记在子 thread 名下。
+
+### 18.1 允许的操作
+
+| 操作 | 入口 | 落账 |
+| --- | --- | --- |
+| 发起 | `spawn_skill` 工具、`engine.spawn_skill()` | `spawn_started` 批次 |
+| 终止 | `kill_skill` 工具、`engine.kill_spawn()` | 子 turn 以 cancelled 结束后落 `spawn_settled` |
+| 查询 | `join_skill` 工具、`engine.spawn_status()` | 只读；经工具调用时结果在该调用的 outcome 里 |
+| 等待 | `wait_peer` / `wait_any` 工具 | 同上 |
+
+### 18.2 记录
+
+两条记录共用一个 operation：句柄 id。
+
+`SpawnStartedV1`（record type `spawn_started`）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `handle_id` | 句柄 id |
+| `skill_id` | 被派发的 skill |
+| `child_thread_id` | 子 thread；由 Session id 与句柄 id 确定性派生 |
+| `parent_thread_id` | Session 的 root thread |
+| `reason` | 发起方自陈的理由 |
+| `arguments` | 交给子 skill 的种子输入 |
+| `definition_hash` / `body_hash` | 派发时该 skill 定义与正文的摘要 |
+| `deadline_seconds` | 墙钟上限；没有为空 |
+
+`SpawnSettledV1`（record type `spawn_settled`）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `handle_id` / `child_thread_id` | 句柄与子 thread |
+| `started_record_id` | 对应的 `spawn_started` record |
+| `status` | `done` / `error` / `cancelled` |
+| `end_reason` | 子 turn 的结束方式；接管时补写的为 `process_recovery` |
+| `result` | `done` 时是子 skill 的最终文本，`error` 时是错误说明，`cancelled` 时为空 |
+
+### 18.3 顺序
+
+```text
+tool_intent_committed（spawn_skill）                经工具发起时
+spawn_started + thread_created + thread_bound + conversation_item（种子，子 thread）
+tool_outcome_committed（spawn_skill）               结果含 handle_id 与 child_thread_id
+    ── 子 thread：llm_request_committed … tool_intent_committed … ──
+spawn_settled + thread_terminal（子 thread）
+```
+
+- 发起批次 ack 之后子 skill 才开始运行。
+- 种子输入无法规范化时拒绝发起（`SpawnRejectedError`，分类 `arguments_not_canonical`），什么都不写，
+  不占配额。
+- 子 thread 的 turn 从 0 编号，submission id 取子 thread id。
+- 终态记录先于 `spawn_completed` / `spawn_failed` / `spawn_cancelled` 事件。
+- Session 已冻结或已封口时终态不写；这次派发在接管时按 18.5 处置。
+
+### 18.4 对话项
+
+写进 thread 的对话项只有子 thread 的种子消息。非审计模式下落在父 thread 的 `spawn` 锚、落在子 thread 的
+`spawn_settled` 锚在审计模式下都不写：句柄表是运行态，它的事实在记录里；子 skill 结束的时刻父 thread
+上可能正有 turn 在写，往父 thread 追加条目会让两个写者交错。
+
+### 18.5 释放与接管
+
+- 释放 Session 时仍在运行的派发被取消，各自落 `spawn_settled(cancelled)`，之后才是 Session 的
+  terminal batch。
+- 接管时句柄表由 `spawn_started` / `spawn_settled` 记录重建，已结束的派发可以继续查询结果。
+- 接管时没有终态的派发（进程死的时候还在运行）不续跑：子 thread 上的工具调用按 §13.1–13.3 结算，
+  然后落 `spawn_settled(cancelled, process_recovery)` 与子 thread 的 `thread_terminal`，同属一个恢复批次。
+  子 thread 上仍有调用需要人裁决时整批不写，resume 被拒。
+
+### 18.6 边界
+
+- 子 thread 上的调用不能停下等人作答（§17.1）：那次调用记 error 终态，Session 冻结。
+- 审计模式下一次工具调用必须在收敛期限内给出结果（§9）。`wait_peer` / `wait_any` 的等待时长因此
+  不超过收敛期限的一半；到点返回 `timeout`，可以再等一次。
+- 发起它的工具调用与这次派发经 outcome 里的 `handle_id` 关联，记录之间没有直接的引用字段。
+- join-barrier、peer 消息、被唤醒重跑、子 thread 的 rewind 不在范围内。
+
+### 18.7 验收
+
+静态门放行五个工具、拒绝 barrier 与 peer 消息；发起批次先于发起它的工具调用结算、子 skill 的 LLM
+调用记在子 thread 名下且在发起批次之后；终态记录与子 thread 的 `thread_terminal` 相邻；任何 thread
+上都没有锚点条目；查询与等待工具读回结果；两个派发并行；kill 落 `cancelled`；无法规范化的种子输入
+被拒且不占配额；子 thread 停下等人冻结 Session；等待时长有上限；释放时取消仍在运行的派发并正常
+终结；接管后由 Journal 重建句柄表；崩溃时仍在运行的派发在接管时落终态；strict verify 通过。

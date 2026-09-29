@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 from taifeng.conversation.models import user_message
+from taifeng.loop.audit_spawn import take_spawns
 from taifeng.loop.event import (
     EventMsg,
     JoinBarrierFired,
@@ -275,6 +276,21 @@ class JoinBarrierCoordinator:
         # run() 可能尚未被调度（_root_cancel 未赋值）——故先有界让步等其就绪再继续，
         # 不依赖偶然的 await 时序（与 spawn_skill 同一就绪保障）。
         await drv._await_root_cancel_ready()  # noqa: SLF001
+        if eng._audit_state is not None:  # noqa: SLF001
+            # 审计模式:运行态由 Journal 的记录重建,不看对话项(ADR 0098)
+            for spawn in take_spawns(eng._audit_state):  # noqa: SLF001
+                drv._spawn_handles.register(  # noqa: SLF001
+                    handle_id=spawn.handle_id, skill_id=spawn.skill_id,
+                    child_thread_id=spawn.child_thread_id,
+                )
+                # 接管时没有终态的派发已由恢复落为 cancelled;读不到终态即 Journal 不一致
+                assert spawn.status is not None, spawn.handle_id
+                drv._spawn_handles.set_result(  # noqa: SLF001
+                    spawn.handle_id, status=cast("SpawnStatus", spawn.status),
+                    result=spawn.result,
+                )
+            await drv._check_barriers()  # noqa: SLF001
+            return
         # 扫一遍 parent history,按 kind 分类处理三类锚
         for item in list(eng._history):  # noqa: SLF001
             if item.kind == "spawn":

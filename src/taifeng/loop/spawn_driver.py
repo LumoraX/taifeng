@@ -23,11 +23,6 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from taifeng.conversation.models import (
-    ResponseItem,
-    spawn_settled_item,
-    user_message,
-)
 from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.event import (
     EventMsg,
@@ -45,12 +40,14 @@ from taifeng.loop.spawn_handle import (
     SpawnHandle,
     SpawnHandleRegistry,
 )
+from taifeng.loop.spawn_ledger import anchor_spawn, open_spawn, settle_spawn
 from taifeng.loop.spawn_resume import SpawnResumeChain
 from taifeng.loop.spawn_rewind import SpawnRewindChain
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
+    from taifeng.conversation.models import ResponseItem
     from taifeng.conversation.origin import InputOrigin
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
@@ -101,6 +98,8 @@ class SpawnDriver:
         # history → 登记 live runner」段与 peer 投递的「非 live 判定 → 落史 / 唤醒」
         # 段互斥,杜绝消息落在「已重载、未登记」窗口只存 store 不进 buffer(热冷分叉)。
         self._thread_locks: dict[str, asyncio.Lock] = {}
+        # 审计模式：handle_id → 子 thread 的审计状态（子 runner 的效果记在子 thread 名下）。
+        self._audit_children: dict[str, Any] = {}
         # 子协调器（spawn-module-structure 契约:无自有状态,经本 driver 访问
         # 上述运行态表;公共入口由本类同名转发器暴露,外部契约不变）。
         self._peers = PeerMailbox(self)
@@ -159,7 +158,6 @@ class SpawnDriver:
             SpawnLimitError: K1 spawn 配额超限。
             RuntimeError: engine.run 尚未启动（根取消 token 未就绪）。
         """
-        import json
         import secrets
 
         eng = self._engine
@@ -201,24 +199,17 @@ class SpawnDriver:
         # 一旦 create_task 成功，子 task 的 finally 负责释放，本路径不再释放。
         try:
             # 4. 建 child thread + 落种子 user_message（与 turn.py::_spawn_sub_runner 对账）
+            #    C1 修复：seed 只创建一次，落盘后传递给 _drive_spawn，不再重建。
             handle_id = f"sp_{secrets.token_hex(4)}"
-            child_thread_id = await eng._store.create_thread(  # noqa: SLF001
-                cwd=None,
-                entry_skill_id=skill_id,
-                source=f"spawn:{eng._entry_skill.id}",  # noqa: SLF001
-                extra={
-                    "parent_thread_id": eng._thread_id,  # noqa: SLF001
-                    "spawn_handle_id": handle_id,
-                    "reason": reason,
-                },
+            while self._spawn_handles.get(handle_id) is not None:
+                handle_id = f"sp_{secrets.token_hex(4)}"
+            opened = await open_spawn(
+                eng, handle_id=handle_id, target=target, args=args, reason=reason,
+                deadline_seconds=deadline_seconds,
             )
-            # C1 修复：seed 只创建一次，此处落盘并传递给 _drive_spawn。
-            # _drive_spawn 不再重建 seed（那会产生新 id，导致 store 里的 id 与
-            # 内存中 history_buffer[0].id 不一致，冷恢复时会重建出不同的消息图谱）。
-            seed = user_message(
-                json.dumps(args, ensure_ascii=False), thread_id=child_thread_id
-            )
-            await eng._store.append(seed)  # noqa: SLF001
+            child_thread_id, seed = opened.child_thread_id, opened.seed
+            if opened.audit_state is not None:
+                self._audit_children[handle_id] = opened.audit_state
 
             # 5. 登记句柄 + 在 parent thread 落 spawn 锚（冷恢复可重建 registry）+ emit
             self._spawn_handles.register(
@@ -231,17 +222,10 @@ class SpawnDriver:
             cancel = eng._root_cancel.child(  # noqa: SLF001
                 f"spawn:{handle_id}", deadline_seconds=deadline_seconds)
             self._spawn_cancels[handle_id] = cancel
-            from taifeng.conversation.models import spawn_item
-
-            anchor = spawn_item(
-                handle_id=handle_id,
-                skill_id=skill_id,
+            await anchor_spawn(
+                eng, handle_id=handle_id, skill_id=skill_id,
                 child_thread_id=child_thread_id,
-                thread_id=eng._thread_id,  # noqa: SLF001
             )
-            async with eng._lock:  # noqa: SLF001
-                eng._history.append(anchor)  # noqa: SLF001
-            await eng._store.append(anchor)  # noqa: SLF001
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnStarted(data={
@@ -430,6 +414,7 @@ class SpawnDriver:
                     history=plan.history,
                     auto_retry_count=plan.auto_retry_count,
                     sample_scope_id=plan.sample_scope_id,
+                    audit_state=self._audit_children.get(handle_id),
                 )
                 if plan.seed_pending_call_id is not None:
                     # rewind retry_tool:采样前先补跑被保留的悬空 call
@@ -481,7 +466,7 @@ class SpawnDriver:
             self._spawn_handles.set_result(
                 handle_id, status="done", result=outcome.final_text
             )
-            await self._persist_settled(child_thread_id, "done", outcome.final_text)
+            await self._persist_settled(child_thread_id, "done", outcome.final_text, end)
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnCompleted(data={
@@ -519,7 +504,7 @@ class SpawnDriver:
             self._spawn_handles.set_result(
                 handle_id, status="cancelled", result=outcome.error
             )
-            await self._persist_settled(child_thread_id, "cancelled", outcome.error)
+            await self._persist_settled(child_thread_id, "cancelled", outcome.error, end)
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnCancelled(data={"handle_id": handle_id}),
@@ -530,7 +515,7 @@ class SpawnDriver:
             self._spawn_handles.set_result(
                 handle_id, status="error", result=err
             )
-            await self._persist_settled(child_thread_id, "error", err)
+            await self._persist_settled(child_thread_id, "error", err, end)
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnFailed(data={"handle_id": handle_id, "error": err}),
@@ -592,8 +577,10 @@ class SpawnDriver:
 
     async def _persist_settled(
         self, child_thread_id: str, status: str, result: str | None,
+        end_reason: str | None = None,
     ) -> None:
-        """终态持久锚:向子 thread append ``spawn_settled``(三个收敛点共用)。
+        """终态持久化(三个收敛点共用):非审计落子 thread 的 ``spawn_settled`` 锚,
+        审计落 ``spawn_settled`` 记录(见 spawn_ledger)。
 
         冷恢复 ``_infer_spawn_status_from_child`` 据此得到与热状态一致的终态,不再
         凭「有无 assistant 文本」猜 done(wave2b 复现 f)。durable 先于 emit。
@@ -602,10 +589,10 @@ class SpawnDriver:
             h.handle_id for h in self._spawn_handles.handles.values()
             if h.child_thread_id == child_thread_id
         )
-        await self._engine._store.append(spawn_settled_item(  # noqa: SLF001
-            handle_id=handle_id, status=status, result=result,
-            thread_id=child_thread_id,
-        ))
+        await settle_spawn(
+            self._engine, handle_id=handle_id, child_thread_id=child_thread_id,
+            status=status, result=result, end_reason=end_reason or status,
+        )
 
     async def _settle_cancelled_suspended(self, handle: SpawnHandle) -> None:
         """挂起句柄的 cancelled 收敛(kill / 续跑链取消共用):落盘 + 撤销 TTL + emit + barrier。
@@ -804,7 +791,19 @@ class SpawnDriver:
     ) -> dict[str, Any]:
         """转发到 ``PeerMailbox.wait_spawn_terminal``（``wait_peer`` 工具实现体）。"""
         return await self._peers.wait_spawn_terminal(
-            handle_id=handle_id, timeout_seconds=timeout_seconds, cancel=cancel)
+            handle_id=handle_id, timeout_seconds=self._bounded_wait(timeout_seconds),
+            cancel=cancel)
+
+    def _bounded_wait(self, timeout_seconds: float) -> float:
+        """审计模式下等待时长不超过工具收敛期限的一半；非审计原样返回。
+
+        审计模式里一次工具调用必须在收敛期限内给出结果，否则 Session 冻结。等待到点返回
+        ``timeout`` 是正常结果，模型可以再等一次。
+        """
+        state = self._engine._audit_state  # noqa: SLF001
+        if state is None:
+            return timeout_seconds
+        return min(timeout_seconds, state.coordinator.finalization_timeout / 2)
 
     async def wait_spawn_any(
         self,
@@ -815,7 +814,8 @@ class SpawnDriver:
     ) -> dict[str, Any]:
         """转发到 ``PeerMailbox.wait_spawn_any``（``wait_any`` 工具实现体）。"""
         return await self._peers.wait_spawn_any(
-            handle_ids=handle_ids, timeout_seconds=timeout_seconds, cancel=cancel)
+            handle_ids=handle_ids, timeout_seconds=self._bounded_wait(timeout_seconds),
+            cancel=cancel)
 
 
     # -----------------------------------------------------------------

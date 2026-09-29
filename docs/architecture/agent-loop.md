@@ -769,6 +769,12 @@ Resume(thread_id, resolutions)
   child `audit_state`（child thread、共享根 coordinator、同一 projector）→ 子 turn 的 LLM/Tool/Skill 效果
   递归走同一审计路径 → 原子 `skill_dispatch_finished`+`thread_terminal`+`skill_outcome`，先于外层 Tool
   outcome。嵌套 call_skill 天然形成三级谱系；子 turn 若挂起属 capability 违约 → freeze。
+- **分离式派发**（`spawn_ledger` / `audit_spawn`）：`SpawnDriver` 的持久化经 `spawn_ledger` 分流——
+  非审计写 store（建子 thread、种子、`spawn` / `spawn_settled` 锚），审计写 Journal（`spawn_started`
+  批次、`spawn_settled` + `thread_terminal`），不写锚点条目。子 runner 由 `_build_child_runner(audit_state=)`
+  带上子 thread 的审计状态（`root=False`，turn 从 0 编号）。接管时 `audit_resume` 把 Journal 里的派发
+  交给 `remember_spawns`，`rebuild_from_history` 据此重建句柄表；没有终态的派发由
+  `audit_resume_spawn` 在恢复批次里落 `cancelled`。
 - **cancellation**：每个 active turn 有目标取消子树（CancelTurn 只取消其目标 turn/子树），Session root 取消
   保留给 freeze 与 Shutdown；LLM checkpoint 与 Tool outcome 的落账均为取消无关（shield）。
 - **Session isolation**：coordinator/writer 健康态每 Session 独立；一个 Session freeze 不影响其他 Session 的
