@@ -16,6 +16,11 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
 （`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）。
 
+## 类型标记
+
+包内带 `py.typed`（PEP 561），下游 mypy / pyright 直接使用 taifeng 的类型注解，实现 taifeng 协议的适配包可以在 strict 模式下检查。
+`tests/test_package_metadata.py` 守护源码中的标记；`scripts/verify_release_artifacts.py` 在干净环境安装 wheel 与 sdist 后再验一次，保证发出去的产物里也有。
+
 ## 弃用流程
 
 1. 在 `src/taifeng/_deprecation.py` 的 `DEPRECATED_ALIASES` 登记旧名 → `DeprecatedAlias(target="模块:属性", since, removal_not_before, replacement)`，

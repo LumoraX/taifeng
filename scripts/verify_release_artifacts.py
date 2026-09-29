@@ -159,6 +159,8 @@ expected = sys.argv[1]
 assert taifeng.__version__ == version("taifeng") == expected
 assert CodexResponsesClient.__name__ == "CodexResponsesClient"
 assert Path(taifeng.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+# PEP 561 类型标记必须随产物发出，否则下游 mypy 视 taifeng 为无类型包
+assert (Path(taifeng.__file__).parent / "py.typed").is_file()
 """
         _run(
             [str(python), "-I", "-c", "import sys\n" + smoke, expected_version],
