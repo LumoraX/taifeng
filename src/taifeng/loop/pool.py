@@ -66,6 +66,7 @@ from taifeng.tool.runtime import ToolCallRuntime
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+    from taifeng.context.engine import ContextEngine
     from taifeng.llm.client import ModelClient
     from taifeng.llm.prewarm import ModelPrewarmer
     from taifeng.llm.retry import RetryConfig
@@ -351,6 +352,7 @@ class EnginePool:
         input_cost_estimator: InputCostEstimator | None = None,
         file_input_policy: FileInputPolicy | None = None,
         model_prewarmer: ModelPrewarmer | None = None,
+        context_engine: ContextEngine | None = None,
     ) -> None:
         self._registry = skill_registry
         # 模型侧预热器（ADR 0092）：注入到每个 engine，供 Prewarm 的 model 步骤使用
@@ -367,8 +369,10 @@ class EnginePool:
         self._store = store
         self._tool_registry = tool_registry
         self._tool_runtime = ToolCallRuntime(tool_registry)
+        # 注入了 ContextEngine（ADR 0093）时即便没有压缩策略也要有协调器：引擎随它到达各 runner
         self._compressors = (
-            CompressionOrchestrator(compressors) if compressors else None
+            CompressionOrchestrator(list(compressors or []), context_engine=context_engine)
+            if compressors or context_engine is not None else None
         )
         self._budget = budget or ContextBudget()
         self._dispatch_policy = dispatch_policy or DispatchPolicy()
@@ -515,6 +519,7 @@ class EnginePool:
             failure_suspend_on_expire=self._failure_suspend_on_expire,
             skill_authorization=self._dispatch_policy.authorization,
             skill_working_set=self._dispatch_policy.working_set,
+            context_engine=context_engine,
         )
 
         self._engines: dict[str, AgentEngine] = {}
@@ -602,6 +607,7 @@ class EnginePool:
         file_input_policy: FileInputPolicy | None = None,
         selection_gate: SkillSelectionGate | None = None,
         model_prewarmer: ModelPrewarmer | None = None,
+        context_engine: ContextEngine | None = None,
     ) -> EnginePool:
         """便捷构造。
 
@@ -725,6 +731,7 @@ class EnginePool:
                 audit=audit,
                 image_input_policy=image_input_policy, file_input_policy=file_input_policy,
                 input_cost_estimator=input_cost_estimator, model_prewarmer=model_prewarmer,
+                context_engine=context_engine,
             )
             pool._owned_directory = owned_directory
             await start_skill_watcher(

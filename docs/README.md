@@ -131,6 +131,7 @@ Later ADRs:
 90. [ADR 0090: 按战绩规划的工作集生效，并引入 skill 来源信任分层](decisions/0090-working-set-enforcement-and-trust-tiers.md): ADR 0077 的结论只记录不生效，`trust_tier` 自 v1 起恒为空。决策：`DispatchPolicy.working_set` 注入 `SkillWorkingSet`，战绩落定后直接重算；结论在 turn 开始时取快照；召回模式下直接列出工作集里的 child；隔离作用范围 `flag` / `hide` / `block`；来源信任三层由加载目录决定，只调门槛不进战绩分，同时供分流门与授权使用。
 91. [ADR 0091: peer 拓扑路径寻址——按对方跑的 skill 指代它](decisions/0091-peer-topology-addressing.md): peer 消息只能按运行时才产生的 id 寻址，兄弟专家互发消息得靠协调者转告句柄。决策：`sibling:<skill_id>` / `child:<skill_id>` 可加 `#<n>`；关系名须与发送方相符；多实例不猜；失败实例不参与；解析是读句柄表的纯函数；事件留痕原始地址。
 92. [ADR 0092: 预热——在用户输入到来之前做掉首轮采样的准备工作](decisions/0092-prewarm.md): 首轮采样承担全部冷启动开销，内核没有入口利用用户开口前的空闲。决策：`Prewarm` Op 三步（指令层 / 工作集 / 模型侧）；模型侧是协议 `ModelPrewarmer`，参考实现用一次输出极短的采样；预热请求与真实采样同一套组装；持 root gate 但给用户消息让路；不留痕迹；失败不传染；消耗记进会话账。
+93. [ADR 0093: ContextEngine 可插拔槽位——history 不动，只改发出去的视图](decisions/0093-context-engine-slot.md): 发给模型的内容恒等于 history，非破坏性的上下文管理没有入口。决策：槽位只管视图装配与轮后通知，不接管压缩；视图可含 history 外的条目；内核只做结构校验，不合法即失败不退回；预算与压缩触发按视图估算；同一 history 版本只装配一次；缓存影响由引擎声明；引擎挂在压缩协调器上。
 
 ### Fourth Pass: Gap Tracking
 

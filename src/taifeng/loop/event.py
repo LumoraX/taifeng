@@ -57,6 +57,7 @@ MsgKind = Literal[
     "skill_selection_gated",
     "skill_authorization_granted",
     "skill_authorization_denied",
+    "context_assembled",
     "prewarm_started",
     "prewarm_completed",
     "skill_promoted",
@@ -281,6 +282,18 @@ class SkillAuthorizationDenied(_Msg):
     """相位 4 准入：一次白名单外派发被授权策略拒绝。data 同 ``SkillAuthorizationGranted``。"""
 
     kind: Literal["skill_authorization_denied"] = "skill_authorization_denied"
+
+
+class ContextAssembled(_Msg):
+    """ContextEngine 为一次采样装配了不同于完整 history 的视图（ADR 0093）。
+
+    data = {"engine": str, "history_items": int, "view_items": int, "view_tokens": int,
+            "cache_invalidated": bool, "anchor_preserved_until": int, "detail": dict[str, int]}
+    同一 history 版本只发一次。引擎决定原样发送完整 history 时不发。
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["context_assembled"] = "context_assembled"
 
 
 class PrewarmStarted(_Msg):
@@ -1131,6 +1144,7 @@ Msg = Union[
     SkillSelectionGated,
     SkillAuthorizationGranted,
     SkillAuthorizationDenied,
+    ContextAssembled,
     PrewarmStarted,
     PrewarmCompleted,
     SkillPromoted,

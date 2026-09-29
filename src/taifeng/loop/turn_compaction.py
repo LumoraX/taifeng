@@ -63,8 +63,11 @@ class TurnCompaction:
             本轮是否**应用**了压缩结果（history 已改写）。无压缩器 / 阈值未达 / hook
             拒绝 / 策略失败 / 完整性回滚均为 False——overflow 自愈据此决定是否进第二档。
         """
-        if self.__compaction_owner.compressors is None:
+        compressors = self.__compaction_owner.compressors
+        if compressors is None or not compressors.strategies:
             return False
+        # 注入了 ContextEngine 时，阈值判定看的是视图的占用（ADR 0093）
+        await self.__compaction_owner._ctxload.view.refresh()  # noqa: SLF001
         tokens = self.__compaction_owner._history_token_estimate()
         # 生效预算：输出预留已按 entry skill 的 max_output_tokens 放大（ADR 0071），
         # 阈值判定与交给策略的 CompressionContext 用同一份
@@ -139,9 +142,9 @@ class TurnCompaction:
         )
         # bypass_trigger：overflow 自愈走强制路径（绕过 should_trigger）
         if bypass_trigger:
-            result = await self.__compaction_owner.compressors.force_compress(ctx, injection)
+            result = await compressors.force_compress(ctx, injection)
         else:
-            result = await self.__compaction_owner.compressors.maybe_compress(ctx, injection)
+            result = await compressors.maybe_compress(ctx, injection)
         if result is None:
             return False
         # G1b：压缩成功，但若产物相对原 history 引入了新的 tool 配对孤儿 → 回滚

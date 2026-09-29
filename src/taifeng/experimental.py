@@ -13,6 +13,14 @@
 
 from __future__ import annotations
 
+from taifeng.context.engine import (
+    AssembledContext,
+    AssembleRequest,
+    ContextEngine,
+    ContextEngineError,
+    TailWindowContextEngine,
+    TurnUpdate,
+)
 from taifeng.context.strategies import (
     BackgroundCompactionStrategy,
     MultimodalEvictionStrategy,
@@ -132,6 +140,13 @@ __all__ = [
     "WorkingSetPlan",
     "WorkingSetPolicy",
     "plan_working_set",
+    # 上下文引擎（context-engine，🧪）
+    "AssembleRequest",
+    "AssembledContext",
+    "ContextEngine",
+    "ContextEngineError",
+    "TailWindowContextEngine",
+    "TurnUpdate",
     # 预热（prewarm，🧪）
     "CachePrimingPrewarmer",
     "ModelPrewarmer",

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from taifeng.context.budget import ContextBudget
+    from taifeng.context.engine import ContextEngine
     from taifeng.context.injection import InitialContextInjection
     from taifeng.conversation.models import ResponseItem
 
@@ -80,8 +81,20 @@ class CompressionStrategy(Protocol):
 class CompressionOrchestrator:
     """按优先级倒序尝试多策略；第一个返回 trigger 的策略执行。"""
 
-    def __init__(self, strategies: list[CompressionStrategy]) -> None:
+    def __init__(
+        self,
+        strategies: list[CompressionStrategy],
+        *,
+        context_engine: ContextEngine | None = None,
+    ) -> None:
+        """
+        Args:
+            strategies: 压缩策略，按 priority 倒序尝试。
+            context_engine: 上下文引擎（ADR 0093）；None = 每次采样发送完整 history。
+                随协调器到达每一个 runner（根 turn、子 skill、分离派发的 child）。
+        """
         self._strategies = sorted(strategies, key=lambda s: -s.priority)
+        self.context_engine = context_engine
 
     @property
     def strategies(self) -> tuple[CompressionStrategy, ...]:

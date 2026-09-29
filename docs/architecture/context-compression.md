@@ -557,6 +557,25 @@ _sample_once 采样 → provider 抛 ContextOverflowError
 - 契约见 [`capabilities/reactive-compaction-recovery.md`](capabilities/reactive-compaction-recovery.md)。
 ```
 
+## 上下文视图（ContextEngine，ADR 0093）
+
+压缩改写 history；ContextEngine 不改 history，只决定每次采样发出去的**视图**：
+
+```
+history ──(压缩策略：超阈值时改写，破坏性)──► history'
+   │
+   └──(ContextEngine.assemble：每个 history 版本一次，非破坏性)──► 视图 ──► build_api_request
+```
+
+- 未注入引擎时视图就是 history，以上链路不存在。
+- 注入后，预算提示、压缩触发、发送前预检的占用都按视图估算；引擎把视图压在预算之内，压缩就不会被触发。
+- 视图可以比 history 短，也可以包含 history 里没有的条目（检索召回的片段）。内核只校验工具调用与结果成对。
+- 引擎声明 `cache_invalidated` 与 `anchor_preserved_until`，缓存断点按视图里的稳定前缀放置；
+  cache 失效归因为 `context_engine`。
+- 视图不落盘、不进回访节点；视图不合法或引擎出错使 turn 失败，不退回完整 history。
+
+参考实现 `TailWindowContextEngine`（开头 + 最近几轮）。契约见 `capabilities/context-engine.md`。
+
 ## K3 长期记忆 swap 接口（MemoryStore）
 
 压缩把上下文移出窗口后默认**直接丢**（只在 append-only JSONL，不可按需换回）。`context/memory.py::MemoryStore`

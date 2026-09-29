@@ -144,18 +144,26 @@ class TurnSample:
                 tools.append(search_spec.to_ref())
         return tools, working_set, outside_discovery
 
-    def _assemble_request(
+    async def _assemble_request(
         self, tools: list[Any], working_set: WorkingSetView, outside_discovery: bool,
     ) -> Any:
-        """由 runner 当前状态组装请求；不登记回访节点、不更新指纹、不发事件。"""
+        """由 runner 当前状态组装请求；不登记回访节点、不更新指纹。"""
+        # 注入了 ContextEngine 时发的是它装配的视图，缓存断点按视图里的前缀放（ADR 0093）
+        assembled = await self.__sample_owner._ctxload.view.refresh()  # noqa: SLF001
         return build_api_request(
             entry=self.__sample_owner.entry_skill,
             snapshot=self.__sample_owner.snapshot,
-            history=self.__sample_owner.history_buffer,
+            history=(
+                self.__sample_owner.history_buffer if assembled is None
+                else list(assembled.items)
+            ),
             tools=tools,
             # 空字符串 → 让 provider 用其自身配置的 default_model（避免业务覆盖）
             model=self.__sample_owner.entry_skill.model or "",
-            cache_anchor_index=self.__sample_owner.cache_anchor_index,
+            cache_anchor_index=(
+                self.__sample_owner.cache_anchor_index if assembled is None
+                else assembled.anchor_preserved_until
+            ),
             # T3: 已 resolve 的指令；空 list 时 render 不出现 <system_instructions>
             instructions=self.__sample_owner.instructions if self.__sample_owner.instructions else None,
             # G4a: 运行时能力快照（None → 不做资格过滤）
@@ -176,7 +184,7 @@ class TurnSample:
 
     async def preview_request(self) -> Any:
         """下一次采样会发出的请求（预热用，ADR 0092）：与真实采样同一套组装，无副作用。"""
-        return self._assemble_request(*await self._assemble_tools())
+        return await self._assemble_request(*await self._assemble_tools())
 
     async def _prepare_request(self, iteration: int) -> _SamplePrep:
         """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检。
@@ -215,7 +223,7 @@ class TurnSample:
         is_responses = input_capabilities.protocol == "responses"
         # cache-anchor:记发出时 history 长度——流成功完成后 anchor 推进到此处的末项
         sent_history_len = len(self.__sample_owner.history_buffer)
-        request = self._assemble_request(tools, working_set, outside_discovery)
+        request = await self._assemble_request(tools, working_set, outside_discovery)
 
         max_bytes = self.__sample_owner.budget.max_request_bytes
         if max_bytes is not None:

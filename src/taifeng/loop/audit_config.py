@@ -135,6 +135,7 @@ class AuditStaticInputs:
     skill_suspension_enabled: bool = True
     skill_authorization: object | None = None
     skill_working_set: object | None = None
+    context_engine: object | None = None
 
 
 class AuditCapabilityError(ValueError):
@@ -188,6 +189,7 @@ _OBJECT_CAPABILITY_RULES = (
     ("hooks", "audit_hooks_unsupported"),
     ("permission_policy", "audit_permission_unsupported"),
     ("permission_prompter", "audit_hitl_unsupported"),
+    ("context_engine", "audit_context_engine_unsupported"),
     ("compressor", "audit_compressor_unsupported"),
     ("memory_store", "audit_memory_unsupported"),
     ("memory_query_builder", "audit_memory_query_builder_unsupported"),
