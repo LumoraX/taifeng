@@ -1,6 +1,6 @@
 ---
 name: race-coordinator
-description: 错峰会诊协调人（spawn 两路 + wait_any 先到先处理 真实链路验证）
+description: 错峰评审协调人（spawn 两路 + wait_any 先到先处理 真实链路验证）
 version: 1.0.0
 type: composite
 entry: true

@@ -149,7 +149,7 @@ async def test_queue_only_idle_child_persists(peer_skills, threads_dir) -> None:
     task = asyncio.create_task(watch())
     await asyncio.sleep(0)
     out = await engine.deliver_peer_message(
-        target=child_tid, text="A 的关键发现:血糖异常", mode="queue_only",
+        target=child_tid, text="A 的关键发现:压测连接池耗尽", mode="queue_only",
         from_thread_id=engine.thread_id)
     assert out["delivered_via"] == "history"
     assert out["mode_downgraded"] is False
@@ -160,14 +160,14 @@ async def test_queue_only_idle_child_persists(peer_skills, threads_dir) -> None:
             and it.payload.get("source") == "peer"]
     assert len(peer) == 1
     assert peer[0].payload["from_thread"] == engine.thread_id
-    assert "血糖异常" in peer[0].payload["text"]
+    assert "连接池耗尽" in peer[0].payload["text"]
 
     assert await _wait(lambda: any(
         m.kind == "peer_message_sent" for m in events))
     ev = next(m for m in events if m.kind == "peer_message_sent")
     assert ev.data["to"] == child_tid
     assert ev.data["mode"] == "queue_only"
-    assert "血糖异常" not in str({k: v for k, v in ev.data.items()
+    assert "连接池耗尽" not in str({k: v for k, v in ev.data.items()
                               if k != "text_preview"})  # 正文不进事件(仅预览)
     task.cancel()
     await pool.close()
@@ -485,11 +485,11 @@ async def test_llm_sibling_messaging_e2e(peer_skills, threads_dir) -> None:
             # 第二 turn:迭代1 send_message(占位符在提交前替换),迭代2 收尾
             SimTurn(text="专家已完成,推送发现并唤醒", tool_calls=[
                 {"id": "m1", "name": "send_message", "arguments":
-                 '{"target":"__CHILD_TID__","text":"补充:患者有家族史",'
+                 '{"target":"__CHILD_TID__","text":"补充:压测发现连接池耗尽",'
                  '"mode":"trigger_turn"}'}]),
             SimTurn(text="协调完毕"),
         ],
-        "EXPERT_MARK": [SimTurn(text="初步结论"), SimTurn(text="结合家族史的补充结论")],
+        "EXPERT_MARK": [SimTurn(text="初步结论"), SimTurn(text="结合压测发现的补充结论")],
     })
     pool, engine = await _make_engine(peer_skills, threads_dir, client)
 
@@ -530,7 +530,7 @@ async def test_llm_sibling_messaging_e2e(peer_skills, threads_dir) -> None:
     assert await _wait(lambda: any(
         m.kind == "peer_agent_woken" for m in events))
     assert await _wait(
-        lambda: engine.spawn_status([hid])[hid]["result"] == "结合家族史的补充结论")
+        lambda: engine.spawn_status([hid])[hid]["result"] == "结合压测发现的补充结论")
     task.cancel()
     await pool.close()
 

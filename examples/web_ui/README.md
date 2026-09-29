@@ -48,7 +48,7 @@ web_ui 的设计原则：**它只是一个「基础能力」展台 —— 不重
 
 | Demo | 入口 skill | 演示什么 | HITL? |
 | --- | --- | --- | --- |
-| 🏥 **multi_expert_consult** | `orchestrator` | detached-spawn 完整闭环：一个 turn 内并发 spawn 多个专家 + join-barrier；各专家**错峰独立 HITL**；全终态后 barrier 自动触发联合会诊聚合 | ✅ 各专家独立 |
+| 🔍 **multi_expert_consult** | `orchestrator` | detached-spawn 完整闭环（多专家并行评审上线方案）：一个 turn 内并发 spawn 多个专家 + join-barrier；各专家**错峰独立 HITL**；全终态后 barrier 自动触发联合评审聚合 | ✅ 各专家独立 |
 | ⏪ **turn_rewind** | `orchestrator` | 自治链跑完后拉**回访节点表**；`re_reason` 截到某圈采样前重判；`retry_tool` 保留派发决定仅重跑该 call_skill；重跑事件实时回流 | ❌ 静默 |
 
 **覆盖的 agent pattern**：
@@ -160,7 +160,7 @@ PYTHONPATH=src uv run python examples/web_ui/server.py
 # 浏览器 → 顶部下拉选 "🧩 <你的 entry skill>（外部）" → 发消息跑链路
 
 # 可选：只注册指定 entry（逗号分隔），不写则全部 entry 都注册
-TAIFENG_WEBUI_EXTRA_ENTRY=lung-nodule,metabolic \
+TAIFENG_WEBUI_EXTRA_ENTRY=release-review,report-writer \
 TAIFENG_WEBUI_EXTRA_SKILLS_DIR=/abs/path/to/agent_skills \
 PYTHONPATH=src uv run python examples/web_ui/server.py
 ```
@@ -236,7 +236,7 @@ skills 目录满足 SKILL.md 标准（至少一个 `entry: true`）即可 ——
 | 历史会话续接（resume）| 聊完 → 「历史」下拉选该 thread → 载入对话续聊（server 重启后仍可恢复，证明持久化）|
 | 跨 session 隔离 | 改 session id 输入框 → 同 demo 不同 session 各自维护独立对话历史 |
 | 跨 demo 隔离 | 切换下拉 → 各 demo 用独立 EnginePool + storage（`.runs/<demo_id>/`） |
-| 并发多专家+错峰 HITL | multi_expert_consult → 看 spawn 卡片各自挂起/恢复，时间轴 `spawn_suspended/completed` 交错；两专家全终态后 `join_barrier_fired` → 联合会诊报告出现 |
+| 并发多专家+错峰 HITL | multi_expert_consult → 看 spawn 卡片各自挂起/恢复，时间轴 `spawn_suspended/completed` 交错；两专家全终态后 `join_barrier_fired` → 联合评审报告出现 |
 | turn rewind re_reason | turn_rewind → 自治链跑完后点某 iteration 节点"重推理"→ 新路径事件追加时间轴，旧路径保留 |
 | turn rewind retry_tool | turn_rewind → 点某 dispatch 节点"重跑工具"→ 该工具被重跑，output 替换，LLM 从新结果续推 |
 
@@ -272,7 +272,7 @@ skills 目录满足 SKILL.md 标准（至少一个 `entry: true`）即可 ——
 - **每专家一张卡**：orchestrator 发出 `spawn_started` 后前端为每个 spawn 渲染独立卡片，卡片内显示 `handle_id / skill_id / child_thread_id` 及实时状态徽章（running / suspended / done）。
 - **卡内并发独立表单**：每张卡内嵌一个独立 HITL 表单，某专家挂起时只有该卡内弹出 Resume 按钮，另一专家不受影响（错峰 HITL）。
 - **spawn / barrier 事件时间线**：右侧事件流对 `spawn_started / spawn_suspended / spawn_completed / join_barrier_registered / join_barrier_fired` 分色标注，完整展现并发与聚合过程。
-- **联合会诊报告区**：`join_barrier_fired` 后 `joint-consult` skill 产出的 assistant 消息单独渲染在报告区，与各专家卡区分。
+- **联合评审报告区**：`join_barrier_fired` 后 `joint-review` skill 产出的 assistant 消息单独渲染在报告区，与各专家卡区分。
 
 ### turn_rewind —— 前端交互
 

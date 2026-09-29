@@ -1,11 +1,11 @@
 """真实 LLM 验证：detached spawn 嵌套 CHILD_SKILL 错峰 HITL 续跑（resume_spawn_nested）。
 
 补 capability_matrix.py 的盲区——真实 key 此前完全不覆盖 spawn + 挂起 + 续跑。本脚本用
-真实 LLM 驱动「被 spawn 的 composite 专科 → call_skill 子 skill → 子 skill
+真实 LLM 驱动「被 spawn 的 composite 专家 → call_skill 子 skill → 子 skill
 request_user_input 挂起（嵌套 CHILD_SKILL）→ Resume → 续跑链跑到终态」整条路径。
 
 真实 LLM 自主决策点（与 mock 强制回放不同，真验遵循度）：
-  1. 专科 top turn 是否真的 call_skill(nested-step)；
+  1. 专家 top turn 是否真的 call_skill(nested-step)；
   2. nested-step 是否真的 request_user_input 挂起；
   3. Resume 后两层是否都能续跑到终态。
 
@@ -38,10 +38,10 @@ from taifeng.tool.builtins.request_user_input import (  # noqa: E402
     make_request_user_input_tool,
 )
 
-# 编排器（entry）：白名单含嵌套专科。
+# 编排器（entry）：白名单含嵌套专家。
 _ORCH = """---
 name: orchestrator
-description: MDT 编排器
+description: 多专家评审编排器
 version: 1.0.0
 type: composite
 entry: true
@@ -49,25 +49,25 @@ child_skills: [nested-expert]
 tool_names: [spawn_skill, await_skills, join_skill, kill_skill]
 max_call_depth: 4
 ---
-# MDT 编排器
-spawn 嵌套专科做会诊。
+# 多专家评审编排器
+spawn 嵌套专家做评审。
 """
 
-# 专科（composite）：**必须**先 call_skill 调子步骤，再据其结论给最终诊断。
+# 专家（composite）：**必须**先 call_skill 调子步骤，再据其结论给最终评审结论。
 _EXPERT = """---
 name: nested-expert
-description: 嵌套专科
+description: 嵌套专家
 version: 1.0.0
 type: composite
 child_skills: [nested-step]
 max_call_depth: 3
 ---
-# 嵌套专科
+# 嵌套专家
 
-你是内分泌专科医生。**严格按以下流程，不要跳步**：
+你是性能评审专家。**严格按以下流程，不要跳步**：
 1. **第一步必须调用工具 `call_skill`**，参数 `{"skill_id": "nested-step", "args": {}}`，
-   把「采集患者补充信息」这一步交给子技能 nested-step。**不要自己直接问用户**。
-2. 等 nested-step 返回结论后，结合它给出**最终诊断**，回复里包含标记 `EXPERT_DONE`。
+   把「采集上线方案补充信息」这一步交给子技能 nested-step。**不要自己直接问用户**。
+2. 等 nested-step 返回结论后，结合它给出**最终评审结论**，回复里包含标记 `EXPERT_DONE`。
 """
 
 # 子步骤（leaf）：**必须** request_user_input 向用户补料，再给结论。
@@ -82,7 +82,7 @@ max_call_depth: 2
 # 信息采集子步骤
 
 你负责向用户采集一项关键补充信息。**严格按流程**：
-1. **第一步必须调用工具 `request_user_input`**，prompt 写「请提供患者近期空腹血糖值」。
+1. **第一步必须调用工具 `request_user_input`**，prompt 写「请提供该接口预估峰值 QPS 与数据量」。
    **不要凭空假设数值**，必须发起这次询问（这会挂起等待用户）。
 2. 收到用户答复后，给出一句结论，包含标记 `STEP_DONE`。
 """
@@ -134,13 +134,13 @@ async def main() -> None:
         task = asyncio.create_task(collect())
         await asyncio.sleep(0)
 
-        # 1. spawn 嵌套专科（真实 LLM 驱动其 turn）
+        # 1. spawn 嵌套专家（真实 LLM 驱动其 turn）
         sp = await engine.spawn_skill(
-            skill_id="nested-expert", args={"patient": "55 岁男性，体检异常"},
-            reason="嵌套专科会诊")
+            skill_id="nested-expert", args={"proposal": "新订单接口上线方案，压测指标待补"},
+            reason="嵌套专家评审")
         hid, child_tid = sp["handle_id"], sp["child_thread_id"]
 
-        # 2. 等专科句柄因子 skill 的 CHILD_SKILL 挂起
+        # 2. 等专家句柄因子 skill 的 CHILD_SKILL 挂起
         suspended = await _wait(
             lambda: engine.spawn_status([hid])[hid]["status"] == "suspended",
             tries=900)
@@ -148,7 +148,7 @@ async def main() -> None:
             ev.msg.kind == "skill_dispatched" for ev in events)
         leaf_req = _leaf_data_req(events)
 
-        print(f"\n[1] 专科是否 call_skill 子步骤 = {called_skill}")
+        print(f"\n[1] 专家是否 call_skill 子步骤 = {called_skill}")
         print(f"[2] 子步骤是否 request_user_input 挂起（嵌套）= {suspended}")
         print(f"[3] leaf DATA request_id = {leaf_req}")
 
@@ -164,9 +164,9 @@ async def main() -> None:
         # 3. Resume(spawn 子 thread, leaf request_id) → 真实续跑链
         await engine.submit(Resume(
             thread_id=child_tid,
-            resolutions={leaf_req: {"answer": "空腹血糖 7.1 mmol/L"}}))
+            resolutions={leaf_req: {"answer": "峰值约 3000 QPS，日增数据约 50 万行"}}))
 
-        # 4. 续跑链应让专科跑到终态
+        # 4. 续跑链应让专家跑到终态
         await _wait(
             lambda: engine.spawn_status([hid])[hid]["status"] in ("done", "error"),
             tries=900)

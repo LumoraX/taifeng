@@ -124,7 +124,7 @@ running → done | error | cancelled
 
 #### Requirement: 嵌套挂起（CHILD_SKILL）经 `resume_spawn_nested` 续跑
 
-被 spawn 的专科是 **composite 且通过 `call_skill` 编排子 skill** 时，其**子 skill** 在执行中 `request_user_input` 挂起 → spawn 子 thread 自身的活跃挂起 `reason==CHILD_SKILL`（内核内部态、非用户可直接 resolve），用户可答的 DATA/FORM 挂起埋在更深的 leaf 子 thread。
+被 spawn 的专家是 **composite 且通过 `call_skill` 编排子 skill** 时，其**子 skill** 在执行中 `request_user_input` 挂起 → spawn 子 thread 自身的活跃挂起 `reason==CHILD_SKILL`（内核内部态、非用户可直接 resolve），用户可答的 DATA/FORM 挂起埋在更深的 leaf 子 thread。
 
 此时 `resume_spawn` 经 `_next_child_link(record)` 检测到本层是 CHILD_SKILL → 转 `resume_spawn_nested`，走「以 spawn 子 thread 为根的续跑链」：
 1. `_build_spawn_resume_chain`：自 spawn 子 thread 沿 CHILD_SKILL pending 下探到持有用户挂起的 leaf（深度守卫 1024，坏数据/断链 → None 不静默兜底）。
@@ -134,7 +134,7 @@ running → done | error | cancelled
 
 **归因（R3 分轨）**：第 2–4 步续跑事件显式归到 **spawn 子 thread submission**（非本次 Resume `sub.id`），与首发一致——业务侧按 submission_id 分轨，否则 leaf 子步文本会错挂到 Resume 轨。Responses durable identity 与事件归因解耦：续跑/rewind 的 `sample_scope_id` 使用本次操作 `sub.id`，因此新采样不会与同一 child thread 的首轮 `llm_sample_id` 冲突。
 
-> 缺这条会导致：`resume_spawn` 把 CHILD_SKILL record 直接交 `SuspensionResolver` → `unhandled_suspend_reason: child_skill` → Rejected → 句柄永久卡 suspended（嵌套错峰 HITL 死锁）。是真实 MDT 拓扑（专科=编排子 skill 的 composite）的硬伤。
+> 缺这条会导致：`resume_spawn` 把 CHILD_SKILL record 直接交 `SuspensionResolver` → `unhandled_suspend_reason: child_skill` → Rejected → 句柄永久卡 suspended（嵌套错峰 HITL 死锁）。是真实多专家评审拓扑（专家=编排子 skill 的 composite）的硬伤。
 
 #### Scenario: 错峰 HITL
 
@@ -260,7 +260,7 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 
 ### Requirement: 终态写入单点收敛
 
-句柄终态写入必须经唯一收敛点完成「状态回写 + 子 thread `spawn_settled` 锚 + 终态事件 emit + barrier 重查」四件套，禁止任何路径手写其中一件（历史事故：abort 裁决分支漏调 barrier 重查 → 被等待句柄虽落终态但聚合 turn 永不触发、会诊挂死）：
+句柄终态写入必须经唯一收敛点完成「状态回写 + 子 thread `spawn_settled` 锚 + 终态事件 emit + barrier 重查」四件套，禁止任何路径手写其中一件（历史事故：abort 裁决分支漏调 barrier 重查 → 被等待句柄虽落终态但聚合 turn 永不触发、联合评审挂死）：
 
 | 终态 | 唯一收敛点 | 覆盖路径 |
 | --- | --- | --- |
@@ -361,7 +361,7 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 
 ## 演示 / 参考实现
 
-`examples/web_ui/`（demo_id `multi_expert_consult`）提供浏览器可交互的完整演示：orchestrator 一个 turn 内并发 spawn 多专家、错峰 HITL、join-barrier 自动触发联合会诊。无 key 自动化 smoke：`examples/web_ui/smoke_detached.py`。
+`examples/web_ui/`（demo_id `multi_expert_consult`）提供浏览器可交互的完整演示：orchestrator 一个 turn 内并发 spawn 多专家、错峰 HITL、join-barrier 自动触发联合评审。无 key 自动化 smoke：`examples/web_ui/smoke_detached.py`。
 
 ## v1 边界
 

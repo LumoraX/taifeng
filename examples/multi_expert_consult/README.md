@@ -1,17 +1,17 @@
-# multi_expert_consult —— 并发多专家 + 错峰 HITL + 联合会诊聚合
+# multi_expert_consult —— 并发多专家 + 错峰 HITL + 联合评审聚合
 
-演示内核 **detached-spawn** 能力的完整闭环：主编排在一个 turn 内**并发分离发起**多个专科专家，每个专家在**独立 child thread** 上各自**错峰 HITL**、各自完成，最终由 **join-barrier** 收齐自动起「联合会诊」聚合。
+演示内核 **detached-spawn** 能力的完整闭环：场景是**多专家并行评审一份上线方案**。主编排在一个 turn 内**并发分离发起**多个评审专家，每个专家在**独立 child thread** 上各自**错峰 HITL**、各自完成，最终由 **join-barrier** 收齐自动起「联合评审」聚合。
 
 ```
-用户主诉（血压高 + 体重涨）
+用户评审请求（新订单接口上线，要安全 + 性能两方面把关）
   → orchestrator 一个 turn：
-       ├─ spawn_skill(cardio-expert)      ┐ 立即返回句柄、后台 child thread 独立推进
-       ├─ spawn_skill(metabolic-expert)   ┘ 不阻塞编排 turn
-       └─ await_skills([两句柄], then=joint-consult)   登记 join-barrier
+       ├─ spawn_skill(security-expert)    ┐ 立即返回句柄、后台 child thread 独立推进
+       ├─ spawn_skill(perf-expert)        ┘ 不阻塞编排 turn
+       └─ await_skills([两句柄], then=joint-review)   登记 join-barrier
   → 错峰 HITL：
-       cardio  挂起 → Resume(cardio child thread) → 完成
-       （过一会）metabolic 才挂起 → Resume(metabolic child thread) → 完成
-  → 两句柄全终态 → join-barrier 自动触发 → joint-consult 聚合 turn → 最终会诊报告
+       security 挂起 → Resume(security child thread) → 完成
+       （过一会）perf 才挂起 → Resume(perf child thread) → 完成
+  → 两句柄全终态 → join-barrier 自动触发 → joint-review 聚合 turn → 最终联合评审报告
 ```
 
 ## 运行（SimClient，无需 API key）
@@ -21,16 +21,16 @@ cd taifeng
 PYTHONPATH=src uv run python examples/multi_expert_consult/demo.py
 ```
 
-输出是一条清晰的事件时间线：`spawn_started ×2` → `cardio spawn_suspended → spawn_completed` → `metabolic spawn_suspended → spawn_completed` → `join_barrier_fired` → 联合会诊报告。
+输出是一条清晰的事件时间线：`spawn_started ×2` → `security spawn_suspended → spawn_completed` → `perf spawn_suspended → spawn_completed` → `join_barrier_fired` → 联合评审报告。
 
 ## 结构
 
 | 文件 | 角色 |
 | --- | --- |
-| `skills/orchestrator/SKILL.md` | composite **entry**：child_skills 含两个专家 + joint-consult；tool_names 含 `spawn_skill / await_skills / join_skill / kill_skill` |
-| `skills/cardio-expert/SKILL.md` | composite **非 entry**：tool_names=[request_user_input]，先 HITL 问诊再下结论 |
-| `skills/metabolic-expert/SKILL.md` | 同上，独立节奏 |
-| `skills/joint-consult/SKILL.md` | atomic 聚合器：种子参数带**全部专家句柄终态**（含取消 / 失败，不静默丢），综合成最终报告 |
+| `skills/orchestrator/SKILL.md` | composite **entry**：child_skills 含两个专家 + joint-review；tool_names 含 `spawn_skill / await_skills / join_skill / kill_skill` |
+| `skills/security-expert/SKILL.md` | composite **非 entry**：tool_names=[request_user_input]，先 HITL 补问再下结论 |
+| `skills/perf-expert/SKILL.md` | 同上，独立节奏 |
+| `skills/joint-review/SKILL.md` | atomic 聚合器：种子参数带**全部专家句柄终态**（含取消 / 失败，不静默丢），综合成最终报告 |
 | `demo.py` | 用 `RoutingSimClient` 按 body 标记路由，串行 staggered resume 两个专家，订阅 `subscribe_all` 打印时间线 |
 
 > 本 demo 专家 / 聚合器用**非 entry**（一种设计选择，非硬性要求）。注意 spawn 与 call_skill 不同：**spawn 目标可为 entry skill**（spawn 把目标作为独立根分离发起，`DispatchPolicy.check(allow_entry_target=True)` 跳过「不可调 entry」门，与 `set_join_barrier` 的 then_skill 同理）。两者仍要求 target 在 caller 白名单内。
