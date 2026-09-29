@@ -121,6 +121,7 @@ Later ADRs:
 80. [ADR 0080: 挂起态下允许 rewind，挂起随截断一并作废](decisions/0080-rewind-while-suspended.md) (Amends #0014, #0018): 挂起时 rewind 一律被拒，人想改主意只能取消整个 turn。决策：截断把挂起 record 连同等待的调用一起带出逻辑 history；守卫判定截断后是否自洽——同批还有调用等人时对已结算调用的 `retry_tool` 被拒（`sibling_calls_pending`）；被拒的 rewind 不改动状态。
 81. [ADR 0081: 压缩作为回访节点——可回到某次压缩之前](decisions/0081-compaction-as-rewind-node.md) (Amends #0014, #0016): 压缩是对 history 影响最大的内核动作却不可寻址，摘要有损时无法回头。决策：每个仍在的 `compacted` 条目是 `compaction` 节点；rewind 它 = 从 transcript 重放还原到压缩之前（去掉压缩写下的旁路项）；新增 `restore` 模式只还原不重推，`re_reason` 仅在轮到模型说话时可用；仅 root thread。
 82. [ADR 0082: 多模态重载荷驱逐——旧附件换成描述](decisions/0082-multimodal-payload-eviction.md): 用户消息上的附件没有任何压缩策略处理，带图会话在文本远未触顶时就被迫整体摘要。决策：独立策略 `MultimodalEvictionStrategy`，只看附件不动文本，用含类型 / 大小 / 文件名 / sha256 前缀的描述替换；「最近」按带附件的条目计数；无候选不触发；实验层。
+83. [ADR 0083: 压缩增量基线——上次压缩后没长多少就不再压](decisions/0083-compaction-growth-baseline.md): 压缩腾不出多少空间时估算停在软阈值之上，每次预算检查都再压一次，反复破坏缓存、对摘要再做摘要。决策：基线记在 `compacted` 条目的 metadata 并随条目落 transcript；`recompact_min_growth_ratio` 设闸，到硬阈值、手动与 overflow 压缩不设闸；默认关闭。
 
 ### Fourth Pass: Gap Tracking
 

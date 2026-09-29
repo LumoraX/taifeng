@@ -101,6 +101,7 @@ ContextBudget(
     output_reserve_tokens=0,     # 输出预留下限：soft/hard 按「窗口 - 生效预留」计算（ADR 0043）；
                                  # 生效预留 = max(本值, entry skill 的 inference.max_output_tokens)（ADR 0071）
     max_tool_result_bytes=128 * 1024,  # 单条工具结果进历史前的字节上限，超限保头尾；None=不限；配 OffloadStrategy 时不生效（ADR 0061）
+    recompact_min_growth_ratio=0.0,    # 压缩增量基线：上次压缩后估算未增长到「基线 × (1 + 本值)」且未到硬阈值时不再压缩；0=不设闸（ADR 0083）
 )
 ```
 
@@ -240,7 +241,7 @@ class TenantPolicySource:
 | `InjectSystemMessage` | 注入业务 system 消息 | `text`, `source` |
 | **`ThreadRollback`** | 回滚最近 N 轮对话 | `num_turns` |
 | **`UserMessage(deadline_seconds=)`** | 本 turn 墙钟上限（含其全部 call_skill 子 turn）；到点 `cancel_reason="deadline_exceeded"`（ADR 0049） | `deadline_seconds: float > 0` |
-| **`UpdateBudget`** | 运行时调整 ContextBudget（只覆盖显式字段，其余保留；非法组合拒绝并保持原值） | `context_window` / `soft_limit_ratio` / `hard_limit_ratio` / `preserve_tail_messages` / `output_reserve_tokens` |
+| **`UpdateBudget`** | 运行时调整 ContextBudget（只覆盖显式字段，其余保留；非法组合拒绝并保持原值） | `context_window` / `soft_limit_ratio` / `hard_limit_ratio` / `preserve_tail_messages` / `output_reserve_tokens` / `recompact_min_growth_ratio` |
 | **`RefreshSnapshot`** | 拉最新 SkillSnapshot | — |
 | **`UpdateInstructions`** | 热更指定 layer 的 source；缓存立即失效；下个 turn 生效 | `layer_name`, `new_source` (str 或 `InstructionSource`) |
 | **`Resume`** | 续跑一个挂起的 thread（`end_reason="suspended"` 的 turn）。配对 `resolutions` → 补齐 history-gap → 续采样。详见 §8 与 [suspend-resume 契约](architecture/capabilities/suspend-resume.md) | `thread_id`, `resolutions: {request_id: payload}` |

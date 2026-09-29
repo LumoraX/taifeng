@@ -398,6 +398,7 @@ def handle_update_budget(engine: AgentEngine, submission_id: str, op: UpdateBudg
         for name in (
             "context_window", "soft_limit_ratio", "hard_limit_ratio",
             "preserve_tail_messages", "output_reserve_tokens",
+            "recompact_min_growth_ratio",
         )
         if getattr(op, name) is not None
     }
@@ -407,12 +408,13 @@ def handle_update_budget(engine: AgentEngine, submission_id: str, op: UpdateBudg
         logger.exception("budget update rejected (kept previous budget): %s", changes)
         return
     logger.info(
-        "budget updated: window=%d soft=%.2f hard=%.2f tail=%d reserve=%d",
+        "budget updated: window=%d soft=%.2f hard=%.2f tail=%d reserve=%d regrowth=%.2f",
         engine._budget.context_window,
         engine._budget.soft_limit_ratio,
         engine._budget.hard_limit_ratio,
         engine._budget.preserve_tail_messages,
         engine._budget.output_reserve_tokens,
+        engine._budget.recompact_min_growth_ratio,
     )
 
 async def handle_update_instructions(

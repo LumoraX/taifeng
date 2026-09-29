@@ -51,6 +51,7 @@ MsgKind = Literal[
     "pre_turn_hook_denied",
     "post_turn_hook_fired",
     "pre_compact_hook_skipped",
+    "compaction_deferred",
     "thread_resumed",
     "subagent_policy_overridden",
     "turn_completed",
@@ -588,6 +589,19 @@ class PreCompactHookSkipped(_Msg):
               "history_length": int}"""
 
 
+class CompactionDeferred(_Msg):
+    """压缩增量基线推迟了本轮压缩（ADR 0083）—— history / cache_anchor 保持不变。
+
+    上次压缩后上下文没长多少：再压一次只会破坏缓存、对摘要再做摘要，却腾不出空间。
+    本事件与 ``compaction_started`` 互斥（同一次 ``_maybe_compress`` 调用内）。
+
+    data = {"phase": str, "reason": "below_growth_baseline", "token_estimate": int,
+            "baseline_tokens": int, "required_tokens": int}
+    """
+
+    kind: Literal["compaction_deferred"] = "compaction_deferred"
+
+
 class SubagentPolicyOverridden(_Msg):
     """G3 subagent-isolation-policy: 子 turn 派发时 PermissionPolicy 被包装。
 
@@ -983,6 +997,7 @@ Msg = Union[
     PreTurnHookDenied,
     PostTurnHookFired,
     PreCompactHookSkipped,
+    CompactionDeferred,
     TurnSuspended,
     SuspensionResolved,
     SuspensionPartiallyResolved,

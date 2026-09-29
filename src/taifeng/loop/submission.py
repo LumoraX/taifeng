@@ -109,6 +109,8 @@ class UpdateBudget(BaseModel):
     preserve_tail_messages: int | None = None
     output_reserve_tokens: int | None = None
     """输出预留 token（token-accounting-calibration）；None = 保持原值。"""
+    recompact_min_growth_ratio: float | None = None
+    """压缩增量基线比例（ADR 0083）；0 = 不设闸；None = 保持原值。"""
 
 
 class RefreshSnapshot(BaseModel):

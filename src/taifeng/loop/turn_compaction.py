@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from taifeng.context.budget import POST_COMPACTION_TOKENS_KEY, recompaction_blocked
 from taifeng.context.compressor import CompressionContext
 from taifeng.context.injection import InitialContextInjection
 from taifeng.loop.event import (
     CompactionCompleted,
+    CompactionDeferred,
     CompactionDegradationWarning,
     CompactionIntegrityRolledBack,
     CompactionStarted,
@@ -65,8 +67,22 @@ class TurnCompaction:
         # 生效预算：输出预留已按 entry skill 的 max_output_tokens 放大（ADR 0071），
         # 阈值判定与交给策略的 CompressionContext 用同一份
         budget = self.__compaction_owner.effective_budget
-        if not force and phase in ("pre_turn", "mid_turn") and not budget.is_soft_exceeded(tokens):
-            return False
+        if not force and phase in ("pre_turn", "mid_turn"):
+            if not budget.is_soft_exceeded(tokens):
+                return False
+            # 压缩增量基线（ADR 0083）：上次压缩后没长多少就不再压；到硬阈值不设闸
+            blocked = recompaction_blocked(
+                self.__compaction_owner.history_buffer, tokens, budget
+            )
+            if blocked is not None:
+                await self.__compaction_owner._emit(CompactionDeferred(data={
+                    "phase": phase,
+                    "reason": "below_growth_baseline",
+                    "token_estimate": tokens,
+                    "baseline_tokens": blocked.baseline_tokens,
+                    "required_tokens": blocked.required_tokens,
+                }))
+                return False
 
         # === pre_compact hook ===
         # 业务侧拦截点：在 strategy 执行前可拒绝本轮压缩。
@@ -171,12 +187,10 @@ class TurnCompaction:
                 or result.anchor_preserved_until < cal.anchor_len - 1
             ):
                 self.__compaction_owner.token_calibration = cal.invalidated()
-            # 持久化新的 compacted item
+            # 持久化新的 compacted item，并在其上记下压缩刚结束时的估算（增量基线，
+            # ADR 0083）。基线随条目落 transcript，冷加载后仍可读；是否设闸由预算决定
             if result.summary_item_id:
-                for it in new_history:
-                    if it.id == result.summary_item_id:
-                        await self.__compaction_owner.store.append(it)
-                        break
+                await self._persist_summary_with_baseline(result.summary_item_id)
             # 如果压缩破坏了 cache，标记下一次 LLM 调用的 break 为预期内
             if result.cache_invalidated:
                 self.__compaction_owner._next_cache_break_expected = True
@@ -215,5 +229,19 @@ class TurnCompaction:
             )
         )
         return result.success
+
+    async def _persist_summary_with_baseline(self, summary_item_id: str) -> None:
+        """给压缩条目记上基线并落 store；history 里的同一条目同步替换（身份不变）。"""
+        owner = self.__compaction_owner
+        baseline = owner._history_token_estimate()
+        for index, item in enumerate(owner.history_buffer):
+            if item.id != summary_item_id:
+                continue
+            stamped = item.model_copy(update={
+                "metadata": {**item.metadata, POST_COMPACTION_TOKENS_KEY: baseline},
+            })
+            owner.history_buffer[index] = stamped
+            await owner.store.append(stamped)
+            return
 
     # ---- dispatcher 接口（供 call_skill tool 调用）----

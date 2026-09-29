@@ -282,6 +282,25 @@ class MultimodalEvictionStrategy:
 契约：[capabilities/compaction-multimodal-eviction.md](capabilities/compaction-multimodal-eviction.md)。实验层导出。
 
 > `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim / Offload / MultimodalEviction 五档谱系**。
+
+### 压缩增量基线（A5，ADR 0083）
+
+压缩腾出的空间有限时，估算会停在软阈值之上，之后每次预算检查都再压一次：每次都破坏缓存、每次都对摘要再做摘要。
+`ContextBudget.recompact_min_growth_ratio`（默认 0 = 关闭）打开后：
+
+```
+_maybe_compress(pre_turn | mid_turn)
+  ├─ 估算 < soft_limit                       → 不压
+  ├─ 估算 ≥ hard_limit                       → 照常压（不设闸）
+  ├─ 上次压缩有基线 且 估算 < 基线 + ceil(基线 × ratio)
+  │     → emit compaction_deferred，不压，缓存前缀保住
+  └─ 其余                                    → pre_compact hook → 策略
+```
+
+基线 = 压缩应用完成时的上下文估算，记在 `compacted` 条目的 `metadata["post_compaction_tokens"]` 里并随条目落
+transcript——冷加载后闸门状态与热内存一致，不需要额外的运行态。`CompactNow` 与 overflow 自愈不受闸门约束。
+
+契约：[capabilities/compaction-growth-baseline.md](capabilities/compaction-growth-baseline.md)。
 > 占位符前缀（`[duplicate` / `[pruned:` / `[offloaded:`）统一在 `context/placeholders.py`，被 SurgicalTrim 与 Offload 共用为幂等守卫。
 
 ### 工具图片附件的处置
