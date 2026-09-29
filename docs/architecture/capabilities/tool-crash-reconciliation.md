@@ -117,7 +117,9 @@ Chat 路径 SHALL 在调用 `dispatch_batch` 之前把本批全部意图 `store.
 
 ### 待收敛的调用
 
-resume 持写者锁后 strict 读取 Journal，root thread 上满足以下任一条件的调用参与收敛：
+resume 持写者锁后 strict 读取 Journal，**可收敛 thread** 上满足以下任一条件的调用参与收敛。可收敛 thread =
+root thread + 被中断的同步 `call_skill` 派发的子 thread（父 thread 可收敛时子 thread 才可收敛，逐层传递，
+见下文「沿 skill 派发树收敛」）：
 
 - **悬空 intent**：`tool_intent_committed` 没有 `tool_outcome_committed`，也没有 `tool_recovery_committed`
   （崩溃在执行途中，模型看不到任何结果）；
@@ -128,8 +130,9 @@ resume 持写者锁后 strict 读取 Journal，root thread 上满足以下任一
   `tool_intent_committed`、`function_call_output` 会话项或 `tool_call_undispatched`（崩溃在模型回复落账与意图
   batch 落账之间）。这类调用的结局是确定的，见下文「从未登记意图的调用」。
 
-子 thread 的调用、引用缺失的 outcome、缺 operation lineage 的 intent 不参与，连同 LLM / skill / submission 未结算项
-一律 fail closed。
+不在可收敛 thread 上的调用、引用缺失的 outcome、缺 operation lineage 的 intent 不参与，连同 LLM attempt /
+submission 未结算项、无法归属到悬空 `call_skill` 调用的 skill 派发一律 fail closed。`call_skill` 自身的悬空意图
+不走下表，按派发谱系结算。
 
 ### 分流
 
@@ -156,7 +159,7 @@ record id `{tool operation}:tool_recovery_committed:none:0`，挂在原 intent �
 | --- | --- |
 | `intent_record_id` / `outcome_record_id?` | 被结算的 intent；改判 unknown outcome 时指向该 outcome |
 | `call_id` / `name` / `effect_kind` | 调用标识与 intent 落账时的副作用声明 |
-| `basis` / `verdict` | 依据 ∈ {reconcile, effect_kind, operator}；结论与依据的合法组合见上表，错配即拒 |
+| `basis` / `verdict` | 依据 ∈ {reconcile, effect_kind, operator, dispatch}；结论与依据的合法组合见「分流」与「沿 skill 派发树收敛」两表，错配即拒 |
 | `reconcile_status?` | 回查原始结论 ∈ {completed, not_executed, unknown, failed}；无回查函数为 null |
 | `output?` / `is_error?` | 补写给模型的内容；改判已有 outcome 时二者皆 null |
 | `recovery_operation_id` | 接管 operation id（与 `writer_takeover` 同源） |
@@ -203,6 +206,49 @@ strict audit 下整批意图先于任何派发原子落账，所以**没有意�
 - **GIVEN** 上述 resume 之后进程再次死亡
 - **WHEN** 再次 resume
 - **THEN** 不再追加 `tool_call_undispatched`，history 中每个调用仍只有一条结果
+
+### 沿 skill 派发树收敛（ADR 0076）
+
+同步 `call_skill` 的子 skill 在独立子 thread 上运行。进程死在子 skill 执行途中时，Journal 留下一条链：父 thread
+悬空的 `call_skill` 意图 → 未结算的 `skill_selected` → 子 thread 上待收敛的调用（可以更深）。恢复从 root thread 起
+深度优先、自底向上收敛，全部结论同属一个恢复 batch，记录按因果顺序排列（子调用 → 派发终态 → 父调用）。
+
+悬空 `call_skill` 意图的结局只由已 durable 的派发谱系决定，不看其 `effect_kind` 声明、不回查、不征求人裁决：
+
+| 谱系形态 | `tool_recovery_committed` | 补写的派发记录 | 补写给模型的 `function_call_output` |
+| --- | --- | --- | --- |
+| 没有 `skill_selected` | `dispatch` / `not_started` | 无 | `not_executed: ...`（`is_error=true`） |
+| 有 selected，无 started、无 finished | `dispatch` / `not_started` | `skill_dispatch_finished(rejected, process_recovery_before_start)`，不带子谱系 | 同上 |
+| 有 finished | `dispatch` / `completed` | 无 | 成功：已落账的 `final_text`；否则 `sub_skill_failed: <end_reason>`（`is_error=true`） |
+| 有 started，无 finished | `dispatch` / `interrupted` | `skill_dispatch_finished(cancelled, process_recovery)` + 子 thread `thread_terminal(cancelled, process_recovery)` | `skill_dispatch_interrupted: ...` + 子 skill 内各调用的处置清单（`is_error=true`） |
+
+- 被中断的派发先收敛其子 thread：结果未知的调用按上文「分流」、从未登记意图的调用按上文规则、嵌套的
+  `call_skill` 递归处理。子 thread 上任一调用仍需人裁决时，该派发与其父调用都不落结论，整批不写。
+- 补写的派发记录与 live 路径同 record id（`{skill operation}:skill_dispatch_finished:none:0` /
+  `{skill operation}:thread_terminal:none:0`），actor 为 `system/recovery`，`correlation_id` = 接管 operation id，
+  `stable_error.code = "skill_dispatch_interrupted"`（`retryable=true`）。
+- 被中断的执行**不记战绩**：不写 `skill_outcome` 会话项。执行没有跑完，不是 skill 的成败。
+- 父调用结果里的处置清单只列**直接子层**的调用（`<工具名> (<call_id>): <处置>`）；更深层的结论 durable 在
+  Journal 各自的 thread 上。
+- 交人裁决的请求 `AuditToolOutcomeRequest.thread_id` 为该调用所在的 thread（子 thread 的调用即子 thread id）。
+- 恢复不续跑子 skill、不执行工具。需要重做由模型在续跑的 turn 里重新派发。
+- `thread_resumed.recovered_tool_calls` 只列 root thread 上的调用；`call_skill` 的处置为 `not_dispatched` /
+  `reconciled` / `dispatch_interrupted`。
+- resume 对恢复写过记录的子 thread 同样核对 transcript 投影（缺后缀补齐，分叉只标 stale）。
+
+#### Scenario: 子 skill 的工具执行途中崩溃
+- **GIVEN** 审计会话里入口 skill 经 `call_skill` 派发子 skill，子 skill 的 `remote_write`（提供 `reconcile`）执行途中
+  进程死亡
+- **WHEN** 另一进程 resume，回查返回 `completed`
+- **THEN** Journal 原子追加：子 thread 上的 `tool_recovery_committed(reconcile/completed)` + 结果会话项 →
+  `skill_dispatch_finished(cancelled)` + 子 thread `thread_terminal` → 父 thread 上的
+  `tool_recovery_committed(dispatch/interrupted)` + 结果会话项；strict verify 为 HEALTHY
+- **AND** root history 末项是 `call_skill` 的结果，正文含 `remote_write (...): reconciled`
+
+#### Scenario: 子 thread 的调用只能交人而无人可问
+- **GIVEN** 上述崩溃，但 `remote_write` 非幂等、无回查，且未配置 resolver
+- **WHEN** resume
+- **THEN** 只读预检即以 `audit_resume_recovery_required` 拒绝，`record_ids` 只含子 thread 的那条意图，Journal 无新增
 
 ### 行为契约
 

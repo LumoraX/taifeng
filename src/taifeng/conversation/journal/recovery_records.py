@@ -24,21 +24,26 @@ from taifeng.conversation.journal.records import PayloadModel
 TOOL_RECOVERY_RECORD_TYPE = "tool_recovery_committed"
 """恢复收敛结论的 record_type。"""
 
-type RecoveryBasis = Literal["reconcile", "effect_kind", "operator"]
-"""结论依据：工具回查 / 副作用声明 / 人裁决。"""
+type RecoveryBasis = Literal["reconcile", "effect_kind", "operator", "dispatch"]
+"""结论依据：工具回查 / 副作用声明 / 人裁决 / skill 派发谱系（仅 ``call_skill``，ADR 0076）。"""
 
-type RecoveryVerdict = Literal["completed", "not_executed", "retry_safe", "provided", "aborted"]
+type RecoveryVerdict = Literal[
+    "completed", "not_executed", "retry_safe", "provided", "aborted",
+    "not_started", "interrupted",
+]
 """结论本身；与依据的合法组合见 ``_ALLOWED_VERDICTS``。"""
 
 type ReconcileStatus = Literal["completed", "not_executed", "unknown", "failed"]
 """回查函数的原始结论；``failed`` = 抛异常 / 超时 / 返回值违约。"""
 
 # 依据 → 允许的结论：回查只能给出「已完成 / 未执行」，副作用声明只能给出「可安全重发」，
-# 人裁决只能「给出真实结果 / 接受未知并继续」。其余组合都是写入方违约。
+# 人裁决只能「给出真实结果 / 接受未知并继续」，派发谱系只能给出「从未启动 / 子 skill 已落终态 /
+# 被中断」。其余组合都是写入方违约。
 _ALLOWED_VERDICTS: dict[str, frozenset[str]] = {
     "reconcile": frozenset({"completed", "not_executed"}),
     "effect_kind": frozenset({"retry_safe"}),
     "operator": frozenset({"provided", "aborted"}),
+    "dispatch": frozenset({"not_started", "completed", "interrupted"}),
 }
 
 # 改判已 durable 的 unknown outcome 时，模型早已看到那条结果（function_call_output 不可重写），

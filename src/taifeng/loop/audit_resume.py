@@ -6,14 +6,14 @@
 2. 只读预检（不持锁）：注定被拒的请求不写接管记录；
 3. ``open_existing`` 以更高 writer epoch 接管 Journal（跨进程 flock 互斥）；
 4. 持锁后 strict 重读全部 committed envelopes：root thread 必须等于 ``resume_thread_id``；
-   root thread 上「结果未知」的工具调用按副作用分流收敛（``audit_resume_tools``，ADR 0070），
-   结论作为 ``tool_recovery_committed``（+ output 会话项）；从未登记意图的调用确定未执行
-   （``audit_resume_undispatched``，ADR 0075），结论作为 ``tool_call_undispatched``（+ output
-   会话项）；两类结论同一 batch 原子追加。其余未结算 effect、以及无法自动收敛且无人裁决的调用
-   一律 fail closed（``audit_resume_recovery_required`` + record id）；
+   待收敛项沿 skill 派发树自底向上收敛（``audit_resume_dispatch``，ADR 0076）——
+   「结果未知」的工具调用按副作用分流（``audit_resume_tools``，ADR 0070），从未登记意图的调用
+   确定未执行（``audit_resume_undispatched``，ADR 0075），被中断的同步 ``call_skill`` 派发落
+   终态并向父调用说明——全部结论同一 batch 原子追加。其余未结算 effect、以及无法自动收敛且
+   无人裁决的调用一律 fail closed（``audit_resume_recovery_required`` + record id）；
 5. 用 root thread 已提交 ``conversation_item`` 重建 initial history；
 6. coordinator 用新 lease / expected_seq，projector 复用既有投影 thread 并以 Journal 为
-   真相核对（缺后缀补齐，分叉只标 stale）。
+   真相核对（缺后缀补齐，分叉只标 stale）；恢复写过记录的子 thread 同样核对其投影。
 
 步骤 3 之后的失败只释放 lease，不写 ``session_ended``——resume 失败不是 Session 的终结。
 """
@@ -40,25 +40,18 @@ from taifeng.conversation.journal.projector import (
 )
 from taifeng.loop.audit import SessionAuditCoordinator
 from taifeng.loop.audit_bootstrap import AuditedSessionState, _emergency_close
+from taifeng.loop.audit_resume_dispatch import (
+    RecoveryScope,
+    build_recovery_scope,
+    hopeless_without_lock,
+    plan_recovery,
+)
 from taifeng.loop.audit_resume_resolution import AuditToolResolutionError
 from taifeng.loop.audit_resume_scan import (
     ResumedHistory,
-    find_undispatched_calls,
     find_unsettled_effects,
     rebuild_root_history,
     root_thread_id,
-)
-from taifeng.loop.audit_resume_tools import (
-    UnresolvedToolCall,
-    needs_operator_without_lock,
-    plan_audited_tool_recovery,
-    split_unsettled,
-)
-from taifeng.loop.audit_resume_undispatched import (
-    UndispatchedCall,
-    needs_operator,
-    plan_undispatched_recovery,
-    undispatched_call,
 )
 
 if TYPE_CHECKING:
@@ -189,14 +182,11 @@ async def _open_journal(
 
 @dataclass(frozen=True, slots=True)
 class _Triage:
-    """一次 strict 读取的分拣结果：可按工具恢复收敛的调用 vs 其余未结算 record。"""
+    """一次 strict 读取的分拣结果：可收敛项（``scope``）vs 其余未结算 record。"""
 
     envelopes: tuple[JournalEnvelope, ...]
     pending: tuple[str, ...]
-    tool_calls: tuple[UnresolvedToolCall, ...]
-    others: tuple[str, ...]
-    undispatched: tuple[UndispatchedCall, ...] = ()
-    """已随模型回复落账、但从未登记意图的调用（确定未执行，ADR 0075）。"""
+    scope: RecoveryScope
 
     def ordered(self, record_ids: tuple[str, ...]) -> tuple[str, ...]:
         """按 Journal seq 顺序输出给定 record id。"""
@@ -233,17 +223,13 @@ async def _read_triage(
                 "audit_resume_thread_mismatch", session_id=session_id, thread_id=thread_id
             )
         pending = find_unsettled_effects(envelopes)
-        tool_calls, others = split_unsettled(envelopes, pending, thread_id)
-        undispatched = tuple(
-            undispatched_call(envelope)
-            for envelope in find_undispatched_calls(envelopes, thread_id)
-        )
+        scope = build_recovery_scope(envelopes, pending, thread_id)
     except (JournalError, ValidationError, ValueError) as exc:
         # 完整性 / 解码违约：Journal 不可信，不得续跑
         raise AuditResumeError(
             "audit_resume_journal_invalid", session_id=session_id, thread_id=thread_id
         ) from exc
-    return _Triage(envelopes, pending, tool_calls, others, undispatched)
+    return _Triage(envelopes, pending, scope)
 
 
 def _refuse(triage: _Triage, record_ids: tuple[str, ...], *, session_id: str,
@@ -267,16 +253,14 @@ def _precheck(
 ) -> None:
     """只读预检：不持锁、不回查即可断定会被拒的请求直接拒绝，不写接管记录。
 
-    存在工具以外的未结算 effect 时恢复不会运行，列出全部未结算 record；否则只列出无回查、
+    存在无法收敛的未结算 effect 时恢复不会运行，列出全部未结算 record；否则只列出无回查、
     不可安全重发、又没有 resolver 可问的调用（需回查 / 可问人的留到持锁后判定）。
     """
-    if triage.others:
+    if triage.scope.others:
         raise _refuse(triage, triage.pending, session_id=session_id, thread_id=thread_id)
-    hopeless = tuple(
-        call.record_id
-        for call in triage.tool_calls
-        if needs_operator_without_lock(call, tool_registry, config.tool_outcome_resolver)
-    ) + tuple(call.record_id for call in triage.undispatched if needs_operator(call))
+    hopeless = hopeless_without_lock(
+        triage.scope, tool_registry, config.tool_outcome_resolver
+    )
     if hopeless:
         raise _refuse(triage, hopeless, session_id=session_id, thread_id=thread_id)
 
@@ -315,15 +299,20 @@ async def resume_audited_session(
                 session_id=journal_session_id,
                 thread_id=resume_thread_id,
             )
-        if triage.others:
+        if triage.scope.others:
             raise _refuse(triage, triage.pending, **ids)
         envelopes, expected_seq, recovered = await _recover_tool_calls(
             config, opened, triage, tool_registry=tool_registry, operation_id=operation_id,
             **ids,
         )
         history = _rebuild_history(envelopes, **ids)
+        children = tuple(
+            (child, _rebuild_history(envelopes, session_id=journal_session_id, thread_id=child))
+            for child in triage.scope.child_threads
+        )
         state = await _resumed_state(
             config, projection_store, opened.lease, expected_seq, resume_thread_id, history,
+            children,
         )
     except BaseException:
         await _emergency_close(config, opened.lease)
@@ -341,18 +330,17 @@ async def _recover_tool_calls(
     session_id: str,
     thread_id: str,
 ) -> tuple[tuple[JournalEnvelope, ...], int, tuple[RecoveredCall, ...]]:
-    """持锁收敛 root thread 的待收敛工具调用；返回 (envelopes, expected_seq, 处置结论)。
+    """持锁沿派发树收敛全部待收敛项；返回 (envelopes, expected_seq, root 调用的处置结论)。
 
-    待收敛的调用有两类：结果未知（有意图）与从未登记意图。全部调用都得出结论才原子追加
-    一个 batch；任一仍需人裁决即整批不写并拒绝。追加后 strict 重读，确认已无待收敛项且 tail
-    与 ack 一致。
+    全部调用都得出结论才原子追加一个 batch；任一仍需人裁决即整批不写并拒绝。追加后 strict
+    重读，确认已无待收敛项且 tail 与 ack 一致。
     """
     ids = {"session_id": session_id, "thread_id": thread_id}
-    if not triage.tool_calls and not triage.undispatched:
+    if triage.scope.empty:
         return triage.envelopes, opened.ack.last_seq, ()
     try:
-        plan = await plan_audited_tool_recovery(
-            triage.tool_calls,
+        plan = await plan_recovery(
+            triage.scope,
             registry=tool_registry,
             resolver=config.tool_outcome_resolver,
             session_id=session_id,
@@ -365,27 +353,21 @@ async def _recover_tool_calls(
             thread_id=thread_id,
             record_ids=(exc.record_id,),
         ) from exc
-    undispatched = plan_undispatched_recovery(
-        triage.undispatched, session_id=session_id, recovery_operation_id=operation_id
-    )
-    pending = plan.pending + undispatched.pending
-    if pending:
-        raise _refuse(triage, pending, **ids)
-    last_seq = await _append_recovery(
-        config, opened, plan.records + undispatched.records, **ids
-    )
+    if plan.pending:
+        raise _refuse(triage, plan.pending, **ids)
+    last_seq = await _append_recovery(config, opened, plan.records, **ids)
     reread = await _read_triage(config, **ids)
     if (
         reread is None
         or reread.pending
-        or reread.undispatched
+        or not reread.scope.empty
         or reread.envelopes[-1].seq != last_seq
     ):
         # 恢复记录已 durable 却读不回一致状态：core 返回值不满足 trust boundary
         raise AuditResumeError(
             "audit_resume_open_failed", session_id=session_id, thread_id=thread_id
         )
-    return reread.envelopes, last_seq, plan.recovered + undispatched.recovered
+    return reread.envelopes, last_seq, plan.recovered
 
 
 async def _append_recovery(
@@ -425,27 +407,32 @@ async def _resumed_state(
     expected_seq: int,
     thread_id: str,
     history: ResumedHistory,
+    children: tuple[tuple[str, ResumedHistory], ...] = (),
 ) -> AuditedSessionState:
-    """构造新 lease 的 coordinator，并让 projector 复用、核对既有投影 thread。"""
+    """构造新 lease 的 coordinator，并让 projector 复用、核对既有投影 thread。
+
+    ``children`` 是恢复写过记录的子 thread：它们的投影同样以 Journal 为真相补齐后缀。
+    """
     coordinator = SessionAuditCoordinator(
         core=config.journal_core, lease=lease, expected_seq=expected_seq
     )
     projector = JournalConversationProjector(projection_store)
     try:
-        projection = await projector.reconcile_resumed_thread(
-            thread_id=thread_id,
-            session_id=lease.session_id,
-            items=history.items,
-            first_seq=history.first_seq,
-            last_seq=history.last_seq,
-        )
+        for projected_thread, projected in ((thread_id, history), *children):
+            projection = await projector.reconcile_resumed_thread(
+                thread_id=projected_thread,
+                session_id=lease.session_id,
+                items=projected.items,
+                first_seq=projected.first_seq,
+                last_seq=projected.last_seq,
+            )
+            coordinator.update_projection(projection)
     except ProjectionOrderError as exc:
         raise AuditResumeError(
             "audit_resume_projection_conflict",
             session_id=lease.session_id,
             thread_id=thread_id,
         ) from exc
-    coordinator.update_projection(projection)
 
     async def abort_resume() -> None:
         """Engine 启动失败：只释放本次接管的 lease，不写 session_ended。"""

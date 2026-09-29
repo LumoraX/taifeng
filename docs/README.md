@@ -114,6 +114,7 @@ Later ADRs:
 73. [ADR 0073: apply_patch 按路径申请 file_write；`ApplyPatch` 别名并入 `FileWrite`](decisions/0073-apply-patch-file-write-permission.md) (Amends #0028): `apply_patch` 以 `tool_use` 申请权限且不带路径，按路径写的写禁令拦不住它。决策：每个被改动的路径一条 `file_write`（含删除），解析 → 审批 → 内容校验 → 应用，任一被拒整组不执行；`ApplyPatch` 成为 `FileWrite` 的同义别名。
 74. [ADR 0074: Anthropic / Gemini 回放写坏的 tool call 参数时用显式标记，不静默改成 `{}`](decisions/0074-tool-arguments-replay-marker.md) (Amends #0036, #0037): 回放历史 tool call 时非法 JSON 被静默改成 `{}`，非对象 JSON 原样穿透被 provider 以 400 拒绝。决策：统一入口 `replay_tool_arguments`，解析失败回放带错误分类与原始文本的标记对象并记 warning，不抛异常、输出确定。
 75. [ADR 0075: 审计 resume 收敛「模型回复已落账、意图尚未登记」的工具调用](decisions/0075-audit-resume-undispatched-tool-calls.md) (Amends #0070): 进程死在模型回复与意图两个 batch 之间时，resume 能通过但 history 末尾留着没有结果的 `function_call`。决策：没有意图即没有执行，恢复时追加 `tool_call_undispatched` + 「未执行」结果，不回查、不征求人裁决；无法构成 identity 的 call id 交人。
+76. [ADR 0076: 审计 resume 沿 skill 派发树自底向上收敛子 thread 的工具调用](decisions/0076-audit-resume-dispatch-tree-recovery.md) (Amends #0070): 崩溃发生在同步 `call_skill` 的子 skill 执行途中时 Session 只能废弃。决策：把派发层的未结算拆解到其内部的工具调用，子调用 → 派发终态 → 父调用同批自底向上收敛；悬空 `call_skill` 意图按派发谱系结算；被中断的执行不记战绩、不续跑。
 
 ### Fourth Pass: Gap Tracking
 

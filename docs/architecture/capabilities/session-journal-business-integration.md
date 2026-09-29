@@ -4,8 +4,9 @@
 
 ## 1. 范围
 
-本能力覆盖显式启用审计的新 Session，以及从 Journal 接管恢复的已有 Session（§13）：root thread 上结果未知的工具调用
-在接管时按副作用分流收敛（§13.1），其余未结算 effect 仍 fail closed：
+本能力覆盖显式启用审计的新 Session，以及从 Journal 接管恢复的已有 Session（§13）：结果未知的工具调用在接管时
+按副作用分流收敛（§13.1），从未登记意图的调用判未执行（§13.2），被中断的同步 `call_skill` 派发沿派发树自底向上
+收敛（§13.3），其余未结算 effect 仍 fail closed：
 
 ```text
 UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
@@ -16,7 +17,7 @@ Journal durable ack 之后的内存态或可重建投影，不得领先 Journal�
 
 未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。本阶段不支持 HITL/审批、suspend、
 compaction/rewind、memory、instruction 更新、hooks、orchestration、detached spawn、barrier、peer、
-工具以外（LLM attempt / skill 派发 / submission）未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
+LLM attempt / submission 未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
 加密、WORM 或外置 blob。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
 
@@ -344,8 +345,9 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
    `tool_outcome_committed` / `tool_recovery_committed`、`skill_selected` 无同 operation 的
    `skill_dispatch_finished`、`submission_accepted` 无对应 `submission_applied`，或任一终态已 durable 为
    `unknown` 且未被 `tool_recovery_committed` 改判（ADR 0025：未匹配 intent 一律 UNKNOWN）。root thread 的工具
-   调用按 §13.1 收敛并把结论原子追加；已随模型回复落账、却从未登记意图的调用按 §13.2 收敛；其余任一未结算
-   effect，或任一工具调用仍需人裁决，即 fail closed。恢复从不自动重复任何 effect；
+   调用按 §13.1 收敛并把结论原子追加；已随模型回复落账、却从未登记意图的调用按 §13.2 收敛；被中断的同步
+   `call_skill` 派发连同其子 thread 上的调用按 §13.3 收敛；其余任一未结算 effect，或任一工具调用仍需人裁决，
+   即 fail closed。恢复从不自动重复任何 effect；
 5. 用 root thread 已提交 `conversation_item`（含 §13.1 补写的 output）按 seq 重建 initial history；audited turn
    index 从 Journal 已 accepted 的最大值 +1 续编；
 6. coordinator 使用新 lease 与 `expected_seq` = 最后一次 ack 的 `last_seq`（有恢复 batch 时为它，否则为接管 ack）；projector 复用既有投影 thread，并以
@@ -410,6 +412,21 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
 - call id 无法构成 operation identity 的调用交人：预检即拒，`record_ids` 为该 `function_call` record。
 - 处置结论以 `not_dispatched` 随 `thread_resumed.recovered_tool_calls` 透出。
 
+### 13.3 被中断的同步 call_skill 派发收敛（ADR 0076）
+
+子 skill 执行途中崩溃留下「父 thread 悬空 `call_skill` 意图 → 未结算 `skill_selected` → 子 thread 待收敛调用」
+的链。恢复沿派发树自底向上收敛：子 thread 的调用按 §13.1 / §13.2 结算 → 派发落
+`skill_dispatch_finished(cancelled, process_recovery)` + 子 thread `thread_terminal` → 父调用落
+`tool_recovery_committed(basis=dispatch)` 并补一条列出子调用处置的结果。数据契约与谱系形态表见
+[tool-crash-reconciliation § 沿 skill 派发树收敛](tool-crash-reconciliation.md)。
+
+- 可收敛 thread = root + 被中断派发的子 thread（逐层传递）；不属于任何被中断派发的子 thread 上的未结算项仍 fail closed。
+- 派发从未启动（无 `skill_selected`，或有 selected 无 started）判未执行；子 skill 已 durable 结束而父调用结果未落账
+  时用已落账的终态结算父调用。
+- 全有或全无覆盖整棵树：任一层有调用仍需人裁决，整批不写。
+- 被中断的执行不写 `skill_outcome`；恢复不续跑子 skill。
+- 未结算的 LLM attempt（请求已落账、无 checkpoint）仍不在收敛范围，出现在任一 thread 上都 fail closed。
+
 ## 14. 验收门槛
 
 - records/core/projector/coordinator/Engine/LLM/Tool/Skill focused tests 全绿；
@@ -422,6 +439,9 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
   resolver 返回 None / 抛错 / 裁决不适用、durable unknown outcome 只落结论、二次崩溃冷读恢复记录视为已结算；
 - 从未登记意图的调用（§13.2）：单个 / 并行批次全部收敛且顺序一致、结论 durable 且 verify 通过、二次崩溃不重复
   收敛、call id 无法构成 identity 时预检即拒且不写接管、正常跑完的调用不被误判；
+- 派发树收敛（§13.3）：子 thread 调用回查完成 / 未执行 / 人裁决、无人可问时预检即拒且只列子 thread 调用、selected
+  未 started、意图未 selected、子 skill 已结束父结果缺失、两层嵌套逐层收敛、二次崩溃不重复收敛、子 thread 投影补齐、
+  不属于被中断派发的子 thread 仍 fail closed；
 - full Ruff changed-files、full mypy、full pytest、Sim selfcheck、OpenSpec strict validation 全绿；
 - living architecture 与 `docs/capability-matrix.md` 同步；
 - 获得明确外部 provider 授权后运行真实 LLM capability matrix，并在最终代码 head 刷新两份 ledger。
