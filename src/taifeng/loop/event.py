@@ -57,6 +57,8 @@ MsgKind = Literal[
     "skill_selection_gated",
     "skill_authorization_granted",
     "skill_authorization_denied",
+    "prewarm_started",
+    "prewarm_completed",
     "skill_promoted",
     "skill_evicted",
     "skill_quarantined",
@@ -279,6 +281,28 @@ class SkillAuthorizationDenied(_Msg):
     """相位 4 准入：一次白名单外派发被授权策略拒绝。data 同 ``SkillAuthorizationGranted``。"""
 
     kind: Literal["skill_authorization_denied"] = "skill_authorization_denied"
+
+
+class PrewarmStarted(_Msg):
+    """预热开始（prewarm，ADR 0092）。data = {"steps": list[str]}"""
+
+    kind: Literal["prewarm_started"] = "prewarm_started"
+
+
+class PrewarmCompleted(_Msg):
+    """预热结束：无论成功、失败还是被取消都发这一条。
+
+    data = {"steps": dict[str, str], "errors": dict[str, str], "cancelled": bool,
+            "duration_ms": int, "usage": dict | None}
+    - steps: 步骤 → 结果。``instructions``: resolved / skipped；``working_set``: restored /
+      skipped；``model``: primed / unsupported / skipped；任一步还可能是 failed / cancelled
+    - errors: 失败步骤 → 错误说明
+    - cancelled: 是否被取消（用户消息到达或显式 CancelTurn）
+    - usage: 模型侧预热消耗的 token；没有消耗为 None
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["prewarm_completed"] = "prewarm_completed"
 
 
 class SkillPromoted(_Msg):
@@ -1107,6 +1131,8 @@ Msg = Union[
     SkillSelectionGated,
     SkillAuthorizationGranted,
     SkillAuthorizationDenied,
+    PrewarmStarted,
+    PrewarmCompleted,
     SkillPromoted,
     SkillEvicted,
     SkillQuarantined,

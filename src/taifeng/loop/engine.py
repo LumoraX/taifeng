@@ -29,7 +29,7 @@ from taifeng.instructions.types import (
 )
 from taifeng.llm.errors import LLMError
 from taifeng.llm.retrying import with_default_retry
-from taifeng.loop import engine_ops
+from taifeng.loop import engine_ops, engine_prewarm
 from taifeng.loop.attachment_parts import admit_user_attachments
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
@@ -85,6 +85,7 @@ from taifeng.loop.submission import (
     InjectSystemMessage,
     InjectUserInput,
     Op,
+    Prewarm,
     RefreshSnapshot,
     Resume,
     Rewind,
@@ -108,6 +109,7 @@ if TYPE_CHECKING:
     from taifeng.context.compressor import CompressionOrchestrator
     from taifeng.conversation.store import MessageStore
     from taifeng.llm.client import ModelClient
+    from taifeng.llm.prewarm import ModelPrewarmer
     from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.cancellation import CancellationToken
@@ -142,6 +144,9 @@ class AgentEngine:
         4. `async for ev in engine.subscribe(sub_id): ...`
         5. `await engine.submit(Shutdown())` + `await task`
     """
+
+    # 模型侧预热器（ADR 0092）；pool 构造 engine 后注入，None = Prewarm 的 model 步骤不可用
+    _model_prewarmer: ModelPrewarmer | None = None
 
     def __init__(
         self,
@@ -1179,6 +1184,12 @@ class AgentEngine:
                         ),
                         name=f"rollback:{sub.id}",
                         submission_id=sub.id,
+                    )
+                    continue
+                if isinstance(sub.op, Prewarm):
+                    self._start_operation(
+                        engine_prewarm.run_prewarm(self, sub.id, sub.op, cancel),
+                        name=f"prewarm:{sub.id}", submission_id=sub.id,
                     )
                     continue
                 if isinstance(sub.op, UpdateBudget):

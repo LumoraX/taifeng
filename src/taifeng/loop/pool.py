@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from taifeng.llm.client import ModelClient
+    from taifeng.llm.prewarm import ModelPrewarmer
     from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.audit_config import AuditConfig
@@ -349,8 +350,11 @@ class EnginePool:
         image_input_policy: ImageInputPolicy | None = None,
         input_cost_estimator: InputCostEstimator | None = None,
         file_input_policy: FileInputPolicy | None = None,
+        model_prewarmer: ModelPrewarmer | None = None,
     ) -> None:
         self._registry = skill_registry
+        # 模型侧预热器（ADR 0092）：注入到每个 engine，供 Prewarm 的 model 步骤使用
+        self._model_prewarmer = model_prewarmer
         # ADR 0041：池级默认套有界重试，recall / verifier / 引擎共用同一包装（幂等）
         self._model_client = with_default_retry(
             model_client, config=retry_config, enabled=auto_retry,
@@ -597,6 +601,7 @@ class EnginePool:
         input_cost_estimator: InputCostEstimator | None = None,
         file_input_policy: FileInputPolicy | None = None,
         selection_gate: SkillSelectionGate | None = None,
+        model_prewarmer: ModelPrewarmer | None = None,
     ) -> EnginePool:
         """便捷构造。
 
@@ -719,7 +724,7 @@ class EnginePool:
                 skill_verifier=resolved_verifier,
                 audit=audit,
                 image_input_policy=image_input_policy, file_input_policy=file_input_policy,
-                input_cost_estimator=input_cost_estimator,
+                input_cost_estimator=input_cost_estimator, model_prewarmer=model_prewarmer,
             )
             pool._owned_directory = owned_directory
             await start_skill_watcher(

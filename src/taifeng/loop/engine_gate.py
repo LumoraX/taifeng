@@ -18,6 +18,7 @@ from taifeng.conversation.origin import tag_origin
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext, ResolvedInstruction
 from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
+from taifeng.loop.engine_prewarm import yield_to_turn
 from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EventMsg,
@@ -162,6 +163,8 @@ class EngineGate:
         """
         # cancel-reason-deadline：UserMessage 可带墙钟上限，挂在本 turn 子树根上
         # （级联覆盖其全部 call_skill 子 turn 与工具调用）
+        # 用户消息到达：未完成的预热让路（ADR 0092）
+        yield_to_turn(self._engine)
         turn_cancel = root_cancel.child(f"sub:{sub.id}", deadline_seconds=_turn_deadline(sub))
         self._engine._pending[sub.id] = _PendingTurn(sub.id, turn_cancel, audited_turn_index(sub))
         if gate_held:

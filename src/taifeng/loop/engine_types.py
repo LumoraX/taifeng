@@ -77,3 +77,6 @@ class _PendingTurn:
     # 是否根 thread 的 turn：InjectSystemMessage 只投给根 turn；子 thread 续跑登记
     # `_pending`（供 CancelTurn 触达）时置 False。
     is_root: bool = True
+    # 登记的是哪一类在飞操作：``turn``（含 gated op）或 ``prewarm``。用户消息到达时
+    # 据此找到未完成的预热并取消（ADR 0092）。
+    kind: str = "turn"

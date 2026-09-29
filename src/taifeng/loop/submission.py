@@ -218,6 +218,27 @@ class SendToPeer(BaseModel):
     """这条消息的来源标记（input-origin，ADR 0085）；None = 未声明。"""
 
 
+PrewarmStep = Literal["instructions", "working_set", "model"]
+"""预热的一个步骤。"""
+
+
+class Prewarm(BaseModel):
+    """在用户输入到来之前做掉首轮采样的准备工作（prewarm，ADR 0092）。
+
+    不改 history、不占用 turn 序号、不产生 turn 事件。用户消息到达时未完成的预热被取消，
+    不让真实的 turn 等它。预热失败只体现在 ``prewarm_completed`` 事件里，不影响之后的 turn。
+
+    Attributes:
+        steps: 要做的步骤，按给定顺序执行：
+            - ``instructions``：解析指令层（首轮解析命中解析器的缓存）；
+            - ``working_set``：由已有战绩重算工作集（ADR 0090）；
+            - ``model``：把下一次采样会发出的请求交给 ``ModelPrewarmer``。
+    """
+
+    kind: Literal["prewarm"] = "prewarm"
+    steps: tuple[PrewarmStep, ...] = ("instructions", "working_set", "model")
+
+
 class Shutdown(BaseModel):
     kind: Literal["shutdown"] = "shutdown"
 
@@ -235,6 +256,7 @@ Op = Union[
     Resume,
     Rewind,
     SendToPeer,
+    Prewarm,
     Shutdown,
 ]
 

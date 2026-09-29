@@ -402,7 +402,7 @@ async with interrupt_on_cancel(token): ...                    # 取消原地打�
 | Rust `tokio::mpsc` unbounded | Python `asyncio.Queue`（默认 bounded=1024，可配） |
 | `Submission` 含 `id: SubmissionId` | 同 |
 | `Event` 含 `id: EventId` + `submission_id` | 简化为 `EventMsg(submission_id, msg)` |
-| `Op::*` 枚举 ~20 种 | 实现 13 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / InjectUserInput / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Rewind / SendToPeer / Shutdown），见 `loop/submission.py` |
+| `Op::*` 枚举 ~20 种 | 实现 14 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / InjectUserInput / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Rewind / SendToPeer / Prewarm / Shutdown），见 `loop/submission.py` |
 
 ## 测试用例（M3 验收）
 
@@ -485,6 +485,7 @@ post_turn hook ───────────────── 仅审计（r
 
 - **排队可观测**：gate 被占时 emit `submission_queued{submission_id, waiting_on}`。
 - **排队中可取消**：`_pending` 在排队前登记，`CancelTurn` 命中 → `turn_failed{kind: cancelled}`，不起 turn。
+- **预热（`Prewarm`，[capabilities/prewarm.md](capabilities/prewarm.md)）**：持有 root gate 执行，但不是 turn——不改 history、不占 turn 序号。用户消息开始排队前先取消在飞的预热，真实的 turn 不等它。
 - **不排队的 Op**：`CancelTurn` / `InjectUserInput` / `InjectSystemMessage` / `SendToPeer` / `UpdateBudget` / `RefreshSnapshot` / `UpdateInstructions` / `Shutdown`；命中 spawn 句柄的 `Resume` 与 child thread 的 `Rewind` 作用于子 thread，不排队。
 - **`CompactNow` / `ThreadRollback` 是 operation**：以 `_run_gated_op` 派成 task 排队，不再内联在 actor 循环里（否则饿死 CancelTurn / Shutdown）。
 - **在飞期间 root history 单写者**：turn 在飞时只有 runner 写 root history；`InjectSystemMessage` 与 `InjectUserInput` 同走 runner 的 pending 队列，热 == 冷由构造保证（见下节）。
@@ -687,7 +688,7 @@ K1（广度）/ K2（token）之外，turn 级还有两条 opt-in 护栏（默�
 
 steering 解决「用户 → 运行中 turn」；peer-mailbox 把同一 seam 推广到「agent → agent」（同 engine 谱系内 sibling↔sibling / child→parent）：
 
-- **Op + 工具同路径**：`SendToPeer{target_thread_id, text, mode}` 与 `send_message` 工具都收敛到 `engine.deliver_peer_message`（SpawnDriver 实现）。寻址 = child_thread_id / handle_id / `"parent"`（解析为谱系 root）；未知目标显式 error。
+- **Op + 工具同路径**：`SendToPeer{target_thread_id, text, mode}` 与 `send_message` 工具都收敛到 `engine.deliver_peer_message`（SpawnDriver 实现）。寻址 = child_thread_id / handle_id / `"parent"`（解析为谱系 root）/ 拓扑地址 `sibling:<skill_id>`、`child:<skill_id>`（按对方跑的 skill 指代，ADR 0091）；未知目标显式 error。
 - **双模式**：`queue_only`（运行中投目标 runner 的 `pending_input`——B1 同一队列；空闲即时 `store.append` 落史，R5）；`trigger_turn`（空闲 spawn child 落史后以续跑范式唤醒新 detached turn，emit `peer_agent_woken`；运行中自动降级 `mode_downgraded=true`；root 拒绝；suspended 只落史——挂起只能由 Resume 解除）。
 - **消息形态**：`user_message` + payload `source="peer", from_thread`（不新增 kind）；事件 `peer_message_sent` 不含正文。
 - **wait_peer / wait_any**：turn 内轮询句柄表等终态——前者等**一个**、后者等**任一**（唤醒时收走当时全部已终态），与 `await_skills`（barrier，turn 结束后等**全部**再聚合）构成「等一个 / 等任一 / 等全部」三档。中间那档对标 codex `wait_agent`：缺它则错峰完成的 N 个子任务只能盯死一个或等最慢的。

@@ -26,6 +26,7 @@ from taifeng.conversation.origin import (
     taint_from_extras,
 )
 from taifeng.llm.file_input import FileAttachmentV1, FileInputPolicy
+from taifeng.llm.prewarm import CachePrimingPrewarmer, ModelPrewarmer, PrewarmOutcome
 from taifeng.llm.providers.replay import (
     JournalReplayClient,
     RecordedCall,
@@ -44,6 +45,7 @@ from taifeng.loop.failure_policy import (
     RecipeDeclaringPolicy,
     RecoveryRecipeProvider,
 )
+from taifeng.loop.submission import Prewarm
 from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
 from taifeng.mcp.http_client import McpHttpClient
 from taifeng.skill.authorization import (
@@ -130,6 +132,11 @@ __all__ = [
     "WorkingSetPlan",
     "WorkingSetPolicy",
     "plan_working_set",
+    # 预热（prewarm，🧪）
+    "CachePrimingPrewarmer",
+    "ModelPrewarmer",
+    "Prewarm",
+    "PrewarmOutcome",
     # 白名单外 skill 的派发授权（skill-authorization，🧪）
     "CallbackSkillAuthorization",
     "PermissionSkillAuthorization",

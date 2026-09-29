@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from taifeng.llm.breaker import CircuitTransition
     from taifeng.llm.retrying import RetryAttempt
     from taifeng.loop.turn import TurnRunner
+    from taifeng.skill.working_set_runtime import WorkingSetView
     from taifeng.tool.spec import ToolContext
 
 
@@ -115,30 +116,8 @@ class TurnSample:
         return detect_structural_break_reason(
             self.__sample_owner.last_prompt_fingerprint, current, self.__sample_owner.history_buffer)
 
-    async def _prepare_request(self, iteration: int) -> _SamplePrep:
-        """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检。
-
-        原为 ``sample_once`` 的前半段，行为逐字不变；抽出后只经 `_SamplePrep`
-        向后传递 6 个真正跨段的局部量。
-        """
-
-        # turn-rewind：记本圈 iteration 回访节点(采样前的 history 长度 = re_reason 截点)。
-        # 同一长度供本圈所有 dispatch 节点复用为 re_reason 切点(assistant 消息原子)。
-        # 仅 root turn 入表；子 turn 节点 v1 不可寻址。
-        iteration_history_len = len(self.__sample_owner.history_buffer)
-        if self.__sample_owner._is_root:
-            cp = self.__sample_owner.rewind_log.record_iteration(
-                turn_index=count_turns(self.__sample_owner.history_buffer),
-                iteration_index=iteration,
-                history_len=iteration_history_len,
-                cache_anchor=self.__sample_owner.cache_anchor_index,
-            )
-            await self.__sample_owner._emit(RewindCheckpointRecorded(data={
-                "node_id": cp.node_id, "kind": cp.kind,
-                "iteration_index": cp.iteration_index,
-                "history_len": cp.history_len, "target_id": None,
-            }))
-
+    async def _assemble_tools(self) -> tuple[list[Any], WorkingSetView, bool]:
+        """本次采样的工具清单，连同决定它的工作集快照与白名单外发现判定。"""
         # 取可用 tool 集合：声明层可见集（单一真相，含 scripts 自动并入 run_script，
         # 见 SkillDefinition.visible_tool_names）∩ registry 已注册（未注册静默不可见，现状保留）
         tools = []
@@ -163,19 +142,13 @@ class TurnSample:
             already_added = {ref.name for ref in tools}
             if search_spec is not None and "search_skills" not in already_added:
                 tools.append(search_spec.to_ref())
+        return tools, working_set, outside_discovery
 
-        # G-CACHE：算本轮 prompt 结构指纹 + 归因结构性 cache 失效原因，再更新指纹
-        prompt_fingerprint = self.__sample_owner._compute_prompt_fingerprint(tools)
-        structural_break_reason = self.__sample_owner._detect_structural_break_reason(
-            prompt_fingerprint
-        )
-        self.__sample_owner.last_prompt_fingerprint = prompt_fingerprint
-
-        input_capabilities = model_capabilities(self.__sample_owner.model_client)
-        is_responses = input_capabilities.protocol == "responses"
-        # cache-anchor:记发出时 history 长度——流成功完成后 anchor 推进到此处的末项
-        sent_history_len = len(self.__sample_owner.history_buffer)
-        request = build_api_request(
+    def _assemble_request(
+        self, tools: list[Any], working_set: WorkingSetView, outside_discovery: bool,
+    ) -> Any:
+        """由 runner 当前状态组装请求；不登记回访节点、不更新指纹、不发事件。"""
+        return build_api_request(
             entry=self.__sample_owner.entry_skill,
             snapshot=self.__sample_owner.snapshot,
             history=self.__sample_owner.history_buffer,
@@ -197,9 +170,52 @@ class TurnSample:
             has_recall_backend=self.__sample_owner.has_recall_backend,
             outside_discovery=outside_discovery, working_set=working_set,
             image_input_policy=self.__sample_owner.image_input_policy,
-            model_input_capabilities=input_capabilities,
+            model_input_capabilities=model_capabilities(self.__sample_owner.model_client),
             file_input_policy=self.__sample_owner.file_input_policy,
         )
+
+    async def preview_request(self) -> Any:
+        """下一次采样会发出的请求（预热用，ADR 0092）：与真实采样同一套组装，无副作用。"""
+        return self._assemble_request(*await self._assemble_tools())
+
+    async def _prepare_request(self, iteration: int) -> _SamplePrep:
+        """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检。
+
+        原为 ``sample_once`` 的前半段，行为逐字不变；抽出后只经 `_SamplePrep`
+        向后传递 6 个真正跨段的局部量。
+        """
+
+        # turn-rewind：记本圈 iteration 回访节点(采样前的 history 长度 = re_reason 截点)。
+        # 同一长度供本圈所有 dispatch 节点复用为 re_reason 切点(assistant 消息原子)。
+        # 仅 root turn 入表；子 turn 节点 v1 不可寻址。
+        iteration_history_len = len(self.__sample_owner.history_buffer)
+        if self.__sample_owner._is_root:
+            cp = self.__sample_owner.rewind_log.record_iteration(
+                turn_index=count_turns(self.__sample_owner.history_buffer),
+                iteration_index=iteration,
+                history_len=iteration_history_len,
+                cache_anchor=self.__sample_owner.cache_anchor_index,
+            )
+            await self.__sample_owner._emit(RewindCheckpointRecorded(data={
+                "node_id": cp.node_id, "kind": cp.kind,
+                "iteration_index": cp.iteration_index,
+                "history_len": cp.history_len, "target_id": None,
+            }))
+
+        tools, working_set, outside_discovery = await self._assemble_tools()
+
+        # G-CACHE：算本轮 prompt 结构指纹 + 归因结构性 cache 失效原因，再更新指纹
+        prompt_fingerprint = self.__sample_owner._compute_prompt_fingerprint(tools)
+        structural_break_reason = self.__sample_owner._detect_structural_break_reason(
+            prompt_fingerprint
+        )
+        self.__sample_owner.last_prompt_fingerprint = prompt_fingerprint
+
+        input_capabilities = model_capabilities(self.__sample_owner.model_client)
+        is_responses = input_capabilities.protocol == "responses"
+        # cache-anchor:记发出时 history 长度——流成功完成后 anchor 推进到此处的末项
+        sent_history_len = len(self.__sample_owner.history_buffer)
+        request = self._assemble_request(tools, working_set, outside_discovery)
 
         max_bytes = self.__sample_owner.budget.max_request_bytes
         if max_bytes is not None:
