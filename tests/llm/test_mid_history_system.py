@@ -19,7 +19,7 @@ from taifeng.llm.providers.anthropic_provider import AnthropicClient, _to_anthro
 from taifeng.llm.providers.gemini_provider import _to_gemini_contents
 from taifeng.llm.providers.openai_compat import OpenAICompatSession
 from taifeng.llm.providers.sim import SimClient, SimTurn
-from taifeng.llm.types import ApiMessage, ApiRequest, TextPart
+from taifeng.llm.types import ApiMessage, ApiMessageItem, ApiRequest, TextPart
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.submission import CompactNow
 
@@ -44,6 +44,17 @@ def _gemini_texts(req: ApiRequest) -> list[str]:
     return [p.get("text", "") for c in contents for p in c["parts"] if "text" in p]
 
 
+def _codex_texts(req: ApiRequest) -> list[str]:
+    from taifeng.llm.providers.codex.wire import build_codex_payload
+
+    ordered = ApiRequest(model="m", system_prompt=req.system_prompt,
+                         input_items=[ApiMessageItem(role=m.role, content=m.content)
+                                      for m in req.messages])
+    payload = build_codex_payload(ordered, default_model="m")
+    return [part["text"] for item in payload["input"] for part in item.get("content", [])
+            if isinstance(part, dict) and "text" in part]
+
+
 def _openai_texts(req: ApiRequest) -> list[str]:
     session = OpenAICompatSession(base_url="https://x", api_key="k", model="m",
                                   cancel=CancellationToken())
@@ -51,8 +62,8 @@ def _openai_texts(req: ApiRequest) -> list[str]:
     return [str(m.get("content", "")) for m in payload["messages"]]
 
 
-@pytest.mark.parametrize("texts_of", [_anthropic_texts, _gemini_texts, _openai_texts],
-                         ids=["anthropic", "gemini", "openai_compat"])
+@pytest.mark.parametrize("texts_of", [_anthropic_texts, _gemini_texts, _openai_texts, _codex_texts],
+                         ids=["anthropic", "gemini", "openai_compat", "codex"])
 def test_mid_history_system_text_reaches_wire_on_every_provider(
     texts_of: Callable[[ApiRequest], list[str]],
 ) -> None:

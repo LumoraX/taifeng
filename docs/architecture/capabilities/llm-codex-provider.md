@@ -61,10 +61,11 @@ LLM_BOOTSTRAP_BASE_URL=https://your-codex-proxy.example/v1
   `instructions`。
 - 若过滤后无元素，请求必须省略 `instructions`；不得发送空字符串，也不得在 `input` 中生成 synthetic
   `role=system` message。
-- history 中 budget hint、memory page-in、compaction summary 等运行时 `role=system` text item 必须按
-  canonical 遍历顺序从 `input` 移除，并追加到静态 system prompt 之后的顶层 `instructions`；非文本
-  system content 网络前拒绝。该折叠保持 instruction authority，同时兼容不接受 input system item 的
-  `codex-responses-v1` 代理。
+- history 中 budget hint、memory page-in、compaction summary、pinned 重注等运行时 `role=system` item
+  必须**原位**改写为 `role=user` 的 message，内容为单个 `input_text`，文本以 `<system-reminder>` 标签包裹
+  （只取文本部分，与 Anthropic / Gemini 同一 `mid_history_system_text`，ADR 0055 / 0072）；顶层
+  `instructions` 只含 `ApiRequest.system_prompt`。理由：代理不接受 input system item（ADR 0026），而折叠进
+  `instructions` 会丢失注记位置（尾部注记排到对话之前）并使每次注入都改写缓存前缀（R2）。
 - user/assistant message、function call、function output 与 reasoning state 必须按 canonical 顺序作为
   typed items 放入 `input`。
 
