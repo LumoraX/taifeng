@@ -3,15 +3,15 @@
 ⚠️ 需要真实 LLM key（读 ``.env`` 的 ``LLM_BOOTSTRAP_*``），**不进 CI**。
 
 验证手法（追踪标记法，杜绝缓存/训练记忆干扰）：
-  1. seed 里塞一个**本次运行随机生成的病例号** ``CASE-XXXX``；
+  1. seed 里塞一个**本次运行随机生成的申请编号** ``REQ-XXXX``；
   2. 每步 skill 被要求：**先原样复述你在【前序结论】里看到的所有 ``⟦...⟧`` 标记**，
      再在末尾追加自己这一步的标记 ``⟦STEPk:随机码⟧``；
   3. 关键：**下游 skill 的 body 完全不写上游标记长什么样** —— 它只可能从 pipeline
      拼进去的「上游输出」里读到。下游输出若出现上游标记，即铁证它用到了 session 内容。
 
 断言：
-  - s2 输出含 s1 的标记 + 病例号  → s2 用到了 s1 的输出（session 串联正确）；
-  - s3 输出含 s1、s2 两个标记 + 病例号 → s3 用到了全部上游输出；
+  - s2 输出含 s1 的标记 + 申请编号  → s2 用到了 s1 的输出（session 串联正确）；
+  - s3 输出含 s1、s2 两个标记 + 申请编号 → s3 用到了全部上游输出；
   - retry 中间步 s2 后：s2 复跑仍含 s1 标记（重放上游正确），s3 级联重跑含 s2 **新**标记。
 
 运行：PYTHONPATH=src uv run python examples/step_pipeline/verify_real_llm.py
@@ -47,15 +47,15 @@ entry: true
 tool_names: [request_user_input]
 description: {title}（真实 LLM session 串联验证步骤）
 ---
-你是功能医学分析流水线中的「{title}」步骤。
+你是供应商准入评估流水线中的「{title}」步骤。
 
-你会收到【患者数据】，以及可能存在的【前序结论】（上游步骤的输出）。
+你会收到【申请资料】，以及可能存在的【前序结论】（上游步骤的输出）。
 
 严格按以下要求输出：
-1. **第一行**：先原样写出【患者数据】里的病例号（形如 CASE-XXXXXX），再把你在
+1. **第一行**：先原样写出【申请资料】里的申请编号（形如 REQ-XXXXXX），再把你在
    【前序结论】里看到的所有形如 ⟦...⟧ 的标记**原样逐一复述**（用空格分隔；
-   若没有前序结论就只写病例号）。
-2. 然后用 3~5 句话完成「{title}」的专业分析（基于患者数据与前序结论）。
+   若没有前序结论就只写申请编号）。
+2. 然后用 3~5 句话完成「{title}」的专业分析（基于申请资料与前序结论）。
 3. **最后一行**：输出本步骤标记 ⟦{tag}⟧
 
 不要调用任何工具，直接给出文本结论。
@@ -68,7 +68,7 @@ def _bar(t: str) -> None:
 
 def _write_skills(root: Path, tags: dict[str, str]) -> None:
     """生成 s1/s2/s3 三个 atomic+entry 步骤 skill，各自带唯一标记 tag。"""
-    titles = {"s1": "信息采集", "s2": "风险评估", "s3": "干预计划"}
+    titles = {"s1": "信息采集", "s2": "风险评估", "s3": "准入方案"}
     for sid, title in titles.items():
         (root / sid).mkdir(parents=True)
         (root / sid / "SKILL.md").write_text(
@@ -82,14 +82,14 @@ async def main() -> None:
     print(f"provider={meta['provider']} model={meta['model']} "
           f"base_url={meta.get('base_url', '')}")
 
-    # 本次运行的随机标识：病例号 + 每步唯一标记（杜绝缓存命中）
-    case_id = f"CASE-{secrets.token_hex(3).upper()}"
+    # 本次运行的随机标识：申请编号 + 每步唯一标记（杜绝缓存命中）
+    req_id = f"REQ-{secrets.token_hex(3).upper()}"
     tags = {
         "s1": f"STEP1:{secrets.token_hex(3).upper()}",
         "s2": f"STEP2:{secrets.token_hex(3).upper()}",
         "s3": f"STEP3:{secrets.token_hex(3).upper()}",
     }
-    print(f"本次随机 案例号={case_id}  标记={tags}")
+    print(f"本次随机 申请编号={req_id}  标记={tags}")
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td) / "skills"
@@ -101,11 +101,11 @@ async def main() -> None:
             model_client=client, compressors=[],
             extra_tools=[make_request_user_input_tool()], max_iterations=12)
 
-        seed = (f"病例号 {case_id}。男 58 岁，体检发现右肺上叶磨玻璃结节 9mm，"
-                "既往磺胺类药物过敏，长期夜班工作，无吸烟史。")
+        seed = (f"申请编号 {req_id}。某零部件供应商申请进入采购名录，成立 6 年、员工 120 人，"
+                "近两年有一次交付延期记录，关键原材料单一来源，已通过 ISO 9001 认证。")
         pipe = Pipeline(
             pool,
-            steps=[("s1", "信息采集"), ("s2", "风险评估"), ("s3", "干预计划")],
+            steps=[("s1", "信息采集"), ("s2", "风险评估"), ("s3", "准入方案")],
             seed=seed, base_session="real")
 
         # ── 阶段 1：顺跑三步 ───────────────────────────────────────────
@@ -127,12 +127,12 @@ async def main() -> None:
         _bar("阶段 2：断言下游回复确实用到了上游 session 内容")
         s1_out, s2_out, s3_out = (s.output_text for s in pipe.steps)
         checks = [
-            (case_id in s1_out, f"s1 输出含案例号 {case_id}"),
+            (req_id in s1_out, f"s1 输出含申请编号 {req_id}"),
             (tags["s1"] in s2_out, f"s2 输出复述了 s1 标记 ⟦{tags['s1']}⟧（用到 s1 输出）"),
-            (case_id in s2_out, f"s2 输出含案例号 {case_id}（seed 串联）"),
+            (req_id in s2_out, f"s2 输出含申请编号 {req_id}（seed 串联）"),
             (tags["s1"] in s3_out, f"s3 输出复述了 s1 标记 ⟦{tags['s1']}⟧（用到 s1 输出）"),
             (tags["s2"] in s3_out, f"s3 输出复述了 s2 标记 ⟦{tags['s2']}⟧（用到 s2 输出）"),
-            (case_id in s3_out, f"s3 输出含案例号 {case_id}（seed 全链串联）"),
+            (req_id in s3_out, f"s3 输出含申请编号 {req_id}（seed 全链串联）"),
         ]
         ok = True
         for passed, desc in checks:
@@ -155,7 +155,7 @@ async def main() -> None:
             (pipe.steps[1].attempt == 2, "s2 重跑（尝试号→2）"),
             (tags["s1"] in r2,
              f"s2 重跑输出仍复述 s1 标记 ⟦{tags['s1']}⟧（重放上游 session 正确）"),
-            (case_id in r2, f"s2 重跑输出仍含案例号 {case_id}"),
+            (req_id in r2, f"s2 重跑输出仍含申请编号 {req_id}"),
             (s2_tag_before in r3,
              f"s3 级联重跑输出含 s2 标记 ⟦{s2_tag_before}⟧（用到重跑后的 s2 输出）"),
         ]
@@ -170,7 +170,7 @@ async def main() -> None:
     _bar("结论")
     print("🎉 真实 LLM 验证通过：")
     print("   • 下游每步回复都正确复述了上游步骤的唯一标记 → session 内容确实被使用")
-    print("   • seed（病例号）贯穿全链 → 患者数据正确串联")
+    print("   • seed（申请编号）贯穿全链 → 申请资料正确串联")
     print("   • retry 中间步：上游不动、重放上游 session 正确、下游级联用到新上游输出")
 
 

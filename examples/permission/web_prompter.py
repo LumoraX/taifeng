@@ -6,7 +6,7 @@
     - pre_skill_dispatch / post_skill_dispatch hook lifecycle
     - skill_dispatch_permission_denied / skill_dispatch_hook_denied 事件
 
-业务侧场景：在医疗后端，free tier 用户不允许 dispatch 到 oncology-deep-analysis；
+业务侧场景：在 SaaS 后端，free tier 用户不允许 dispatch 到 premium-deep-analysis；
 prompter 通过 Web SSE 把请求推给前端，前端弹审批框；用户 60s 没响应 → timeout deny。
 
 运行：
@@ -64,7 +64,7 @@ async def telemetry_sink(kind: str, payload: dict) -> None:
 
 async def main() -> None:
     # 1. 业务侧构造 PermissionPolicy
-    #    - rules：黑名单 'oncology-deep-analysis'（free tier）
+    #    - rules：黑名单 'premium-deep-analysis'（free tier）
     #    - default_mode=ask：未知 target 走 prompter
     #    - prompter_timeout_seconds=2：2 秒未响应自动 deny
     #    - telemetry：超时事件推到业务监控
@@ -72,7 +72,7 @@ async def main() -> None:
         rules=[
             PermissionRule(
                 scope="skill_dispatch",
-                target_pattern="oncology-deep-analysis",
+                target_pattern="premium-deep-analysis",
                 mode="deny",
                 reason="free_tier_blocked",
             ),
@@ -86,12 +86,12 @@ async def main() -> None:
     # 2. 演示三种典型请求
     print("\n--- 案例 1：白名单内的 child skill (走 prompter，用户允许) ---")
     req1 = PermissionRequest.for_skill_dispatch(
-        "metabolic-detailed",
-        caller_skill_id="general-fm",
-        call_chain=("general-fm",),
+        "standard-detailed",
+        caller_skill_id="general-analysis",
+        call_chain=("general-analysis",),
         thread_id="th-001",
         submission_id="sub-aaa",
-        entry_skill_id="general-fm",
+        entry_skill_id="general-analysis",
         turn_index=2,
         extra_metadata={"tenant": "demo-7"},  # 业务侧不透明上下文，合并进 metadata
     )
@@ -100,12 +100,12 @@ async def main() -> None:
 
     print("\n--- 案例 2：黑名单内的 child skill (规则 deny，不走 prompter) ---")
     req2 = PermissionRequest.for_skill_dispatch(
-        "oncology-deep-analysis",
-        caller_skill_id="general-fm",
-        call_chain=("general-fm",),
+        "premium-deep-analysis",
+        caller_skill_id="general-analysis",
+        call_chain=("general-analysis",),
         thread_id="th-001",
         submission_id="sub-bbb",
-        entry_skill_id="general-fm",
+        entry_skill_id="general-analysis",
         turn_index=3,
         extra_metadata={"tenant": "demo-7"},  # 业务侧不透明上下文，合并进 metadata
     )

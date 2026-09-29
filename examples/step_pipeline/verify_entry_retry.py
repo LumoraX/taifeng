@@ -47,7 +47,7 @@ entry: true
 tool_names: [request_user_input]
 description: {title}（双重身份：main 的 child + 自身 entry）
 ---
-你将收到【患者数据 + 上游结论】。完成「{title}」并给出结论。
+你将收到【申请资料 + 上游结论】。完成「{title}」并给出结论。
 """
 
 
@@ -55,7 +55,7 @@ def _write_skills(root: Path) -> None:
     """在 root 下生成 main + s1/s2/s3 四个 SKILL.md。"""
     (root / "main").mkdir(parents=True)
     (root / "main" / "SKILL.md").write_text(_ORCH, encoding="utf-8")
-    for sid, title in [("s1", "信息采集"), ("s2", "风险评估"), ("s3", "干预计划")]:
+    for sid, title in [("s1", "信息采集"), ("s2", "风险评估"), ("s3", "准入方案")]:
         (root / sid).mkdir(parents=True)
         (root / sid / "SKILL.md").write_text(
             _STEP.format(sid=sid, title=title), encoding="utf-8")
@@ -63,14 +63,14 @@ def _write_skills(root: Path) -> None:
 
 # ── 2. SimClient：RoutingSimClient 按 <entry_skill id="X"> 标记路由脚本，每标记一个游标 ───────
 ROUTES: dict[str, list[SimTurn]] = {
-    "s1": [SimTurn(text="### 采集结论：55岁/右肺结节8mm S1_OUT")],
+    "s1": [SimTurn(text="### 采集结论：成立6年/单一来源 S1_OUT")],
     "s2": [
         SimTurn(text="### 风险评估 v1：基于[采集] → 中风险 S2_V1"),
         SimTurn(text="### 风险评估 v2（重试）：复核后 → 低风险 S2_V2"),
     ],
     "s3": [
-        SimTurn(text="### 干预计划 v1 S3_V1"),
-        SimTurn(text="### 干预计划 v2（级联重跑） S3_V2"),
+        SimTurn(text="### 准入方案 v1 S3_V1"),
+        SimTurn(text="### 准入方案 v2（级联重跑） S3_V2"),
     ],
 }
 
@@ -124,8 +124,8 @@ async def main() -> None:
         # 用 s1/s2/s3 作为业务编排的三步（每步 entry 单独跑）
         pipe = Pipeline(
             pool,
-            steps=[("s1", "信息采集"), ("s2", "风险评估"), ("s3", "干预计划")],
-            seed="男 55 岁，体检发现右肺结节 8mm",
+            steps=[("s1", "信息采集"), ("s2", "风险评估"), ("s3", "准入方案")],
+            seed="零部件供应商，成立 6 年，关键原材料单一来源",
             base_session="verify")
 
         _bar("验证 2/2：顺跑 s1→s2→s3，再【只 retry 中间步 s2】，断言上游不动 + 下游级联")
@@ -162,8 +162,8 @@ async def main() -> None:
         assert "S2_V1" not in pipe.steps[2].input_text, "s3 重试输入不应再含旧 v1"
         print("  ✓ 下游 s3 级联重跑，输入语义随上游更新（含 S2_V2、不含 S2_V1）")
         # D) seed 始终保留在每步输入（session 语义保持）
-        assert all("男 55 岁" in s.input_text for s in pipe.steps), "每步输入都应含 seed"
-        print("  ✓ seed（患者数据）始终保留在每步输入中（session 语义保持）")
+        assert all("零部件供应商" in s.input_text for s in pipe.steps), "每步输入都应含 seed"
+        print("  ✓ seed（申请资料）始终保留在每步输入中（session 语义保持）")
 
         await pool.close()
         print("\n🎉 entry:true 双重身份 + retry 中间步级联：全部断言通过")

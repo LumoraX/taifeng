@@ -53,7 +53,7 @@ logger = logging.getLogger("step_pipeline")
 STEPS: list[tuple[str, str]] = [
     ("intake", "步骤1·信息采集"),
     ("risk", "步骤2·风险评估"),
-    ("plan", "步骤3·干预计划"),
+    ("plan", "步骤3·准入方案"),
 ]
 SKILLS_DIR = HERE / "skills"
 

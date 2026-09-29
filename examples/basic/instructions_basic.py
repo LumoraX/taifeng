@@ -170,7 +170,7 @@ async def main() -> None:
                 break
 
         # 第二 turn ----------------------------------------------------
-        kind2 = await _drive_turn(engine, "另一个结节。")
+        kind2 = await _drive_turn(engine, "另一个问题。")
         assert kind2 == "turn_completed"
         sp2 = client.captured[1].system_prompt[0]
         print("\n=== Turn 2 system prompt (after hot-swap) ===")

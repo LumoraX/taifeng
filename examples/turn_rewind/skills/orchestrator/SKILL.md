@@ -9,4 +9,4 @@ tool_names: []
 max_call_depth: 4
 ---
 # 编排器
-你先 call_skill("analyzer", ...) 取专科结论,再综合给最终建议。
+你先 call_skill("analyzer", ...) 取专项结论,再综合给最终建议。

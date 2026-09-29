@@ -1,7 +1,7 @@
 # Dual Track —— 自治链 + 业务编排 retry 在同一批核心上共存（wrapper 双轨）
 
 解决 `examples/step_pipeline/README.md`「三条路」之②：让**同一批核心步骤 skill**
-**既能**被 `lung-nodule` 式自治链一键跑完，**又能**被业务编排单独拉起 / 步级 retry。
+**既能**被自治链 skill（如 `supplier-review`）一键跑完，**又能**被业务编排单独拉起 / 步级 retry。
 
 ## 为什么需要 wrapper（不是纯加法的根因）
 
@@ -34,7 +34,7 @@ cd taifeng
 PYTHONPATH=src uv run python examples/dual_track/demo.py
 ```
 
-demo 用「随机病例号 + 每核心唯一 ⟦标记⟧」证明两条轨道都真实跑通同一批核心：
+demo 用「随机申请编号 + 每核心唯一 ⟦标记⟧」证明两条轨道都真实跑通同一批核心：
 
 - **轨道 A**：用 `skill_dispatched` 事件证明 3 核心都被 `main` `call_skill` 派发
   （`stack=['main','intake_core']` …），且 `main` 终报合并了三步结论（含各 ⟦...⟧ 标记）。

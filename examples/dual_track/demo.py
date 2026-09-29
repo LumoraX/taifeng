@@ -43,7 +43,7 @@ from taifeng.tool.builtins.request_user_input import (  # noqa: E402
 TRIPLES = [
     ("intake_core", "intake", "信息采集"),
     ("risk_core", "risk", "风险评估"),
-    ("plan_core", "plan", "干预计划"),
+    ("plan_core", "plan", "准入方案"),
 ]
 
 # ── 核心步骤模板（entry:false，atomic）：真正的分析逻辑 + 唯一标记 ───────────
@@ -53,12 +53,12 @@ name: {title}·核心
 type: atomic
 description: {title}的核心分析逻辑（供自治链与 wrapper 复用，单一真相）
 ---
-你是肺结节功能医学分析的「{title}」核心单元。会收到【患者数据】，
+你是供应商准入评估的「{title}」核心单元。会收到【申请资料】，
 以及可能存在的【前序结论】（上游步骤的输出）。
 
 严格输出：
-1. **第一行**：原样写出【患者数据】里的病例号（形如 CASE-XXXXXX）。
-2. 然后用 3~4 句话完成「{title}」的专业分析（结合患者数据与前序结论）。
+1. **第一行**：原样写出【申请资料】里的申请编号（形如 REQ-XXXXXX）。
+2. 然后用 3~4 句话完成「{title}」的专业分析（结合申请资料与前序结论）。
 3. **最后一行**：输出本步骤标记 ⟦{tag}⟧
 
 不要调用任何工具，直接输出文本结论。
@@ -67,17 +67,17 @@ description: {title}的核心分析逻辑（供自治链与 wrapper 复用，单
 # ── 自治编排器（entry:true，composite）：一键依次 call_skill 三核心 ──────────
 _MAIN = """---
 id: main
-name: 肺结节自治编排器
+name: 准入评估自治编排器
 type: composite
 entry: true
 child_skills: [intake_core, risk_core, plan_core]
 description: 一键自治链——依次派发 intake_core / risk_core / plan_core
 ---
-你是肺结节分析的自治编排器。收到患者数据后，**必须依次**调用工具 call_skill：
+你是供应商准入评估的自治编排器。收到申请资料后，**必须依次**调用工具 call_skill：
 
-1. call_skill(skill_id="intake_core", args=<患者数据原文>)
-2. call_skill(skill_id="risk_core", args=<患者数据 + intake_core 的结论>)
-3. call_skill(skill_id="plan_core", args=<患者数据 + 前两步结论>)
+1. call_skill(skill_id="intake_core", args=<申请资料原文>)
+2. call_skill(skill_id="risk_core", args=<申请资料 + intake_core 的结论>)
+3. call_skill(skill_id="plan_core", args=<申请资料 + 前两步结论>)
 
 三步全部完成后，把三步结论合并成一份最终报告，
 **务必原样保留每步结论里出现的所有 ⟦...⟧ 标记**（逐字复制，不要改写）。
@@ -96,7 +96,7 @@ description: 业务编排入口——转调 {cid} 并原样回流其结论（供
 调用工具 call_skill(skill_id="{cid}", args=<你收到的全部输入>)。
 
 拿到 {cid} 返回的结论后，**原封不动**地把它作为你的最终回复输出
-（包含其中的 ⟦...⟧ 标记与病例号），不要增删、不要改写、不要补充评论。
+（包含其中的 ⟦...⟧ 标记与申请编号），不要增删、不要改写、不要补充评论。
 """
 
 
@@ -196,15 +196,15 @@ async def main() -> None:
     client, meta = build_model_client(require_api_key=True)
     print(f"provider={meta['provider']} model={meta['model']}")
 
-    case_id = f"CASE-{secrets.token_hex(3).upper()}"
+    req_id = f"REQ-{secrets.token_hex(3).upper()}"
     tags = {
         "intake_core": f"INTAKE:{secrets.token_hex(3).upper()}",
         "risk_core": f"RISK:{secrets.token_hex(3).upper()}",
         "plan_core": f"PLAN:{secrets.token_hex(3).upper()}",
     }
-    print(f"本次随机 案例号={case_id}  核心标记={tags}")
-    seed = (f"病例号 {case_id}。男 58 岁，体检发现右肺上叶磨玻璃结节 9mm，"
-            "既往磺胺类药物过敏，长期夜班工作，无吸烟史。")
+    print(f"本次随机 申请编号={req_id}  核心标记={tags}")
+    seed = (f"申请编号 {req_id}。某零部件供应商申请进入采购名录，成立 6 年、员工 120 人，"
+            "近两年有一次交付延期记录，关键原材料单一来源，已通过 ISO 9001 认证。")
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td) / "skills"

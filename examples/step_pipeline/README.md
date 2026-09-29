@@ -6,12 +6,12 @@ turn / thread。换来的是**每一步都可调试式重试，且输入语义�
 
 ## 为什么要这样（解决什么）
 
-自治链（如 `examples/web_ui` 的 lung-nodule）一句话跑完 6 步很爽，但**没法外科手术式
+自治链 skill（如 `supplier-review`：一个 entry 依次 `call_skill` 各步骤）一句话跑完 6 步很爽，但**没法外科手术式
 重跑中间某一步**——6 步活在一个根 turn 里，步不是独立可寻址 / 可回滚的单元。
 
 本范式把步拆成独立单元：
 
-- **输入语义可控**：每步输入 = `seed（患者数据）+ 前序步骤输出`，由业务**显式构造并持久化**
+- **输入语义可控**：每步输入 = `seed（申请资料）+ 前序步骤输出`，由业务**显式构造并持久化**
   （`Step.input_text`）。重试时**原样重放**该输入 —— 不是把 skill 需要的参数盲目重填一遍。
 - **步级级联重试**：`retry(k)` 作废 `k..N` 旧结果，用各自**重新构造的输入**从 `k` 往后重跑
   （下游依赖上游，上游变了下游必须重算）。
@@ -38,13 +38,13 @@ PYTHONPATH=src uv run python examples/step_pipeline/demo.py
 # 2) Web（需 .env 配 LLM，同 examples/web_ui）
 PYTHONPATH=src uv run python examples/step_pipeline/server.py
 # 浏览器 http://localhost:8766
-#   输入患者数据 → 开始 → 步1 弹表单 → 填写 → 步2/3 自动跑
+#   输入申请资料 → 开始 → 步1 弹表单 → 填写 → 步2/3 自动跑
 #   任一已完成步点「🔄 重试此步」→ 用其持久化输入重放 + 级联重跑下游
 ```
 
 ## 这套范式对你的真实 skill 要改什么
 
-> ⚠️ **重要更正（替代旧版「纯加法」说法）**：本范式与「`lung-nodule` 自治链一键跑完」
+> ⚠️ **重要更正（替代旧版「纯加法」说法）**：本范式与「自治链 skill（如 `supplier-review`）一键跑完」
 > **不是叠加，是二选一**。原因是 taifeng 的运行时硬约束——
 > **`entry: true` 与「可被 `call_skill` 派发」在同一个 skill 上互斥**：
 >
@@ -53,18 +53,18 @@ PYTHONPATH=src uv run python examples/step_pipeline/server.py
 > | 被业务编排 / retry 单独拉起（作 session root） | **必须 `entry: true`** | `loop/pool.py:389` `loop/engine.py:127`（非 entry 报 `not entry-eligible`） |
 > | 被自治链 `call_skill` 派发（作子 routine） | **必须 `entry: false`** | `skill/dispatch.py:175`（entry 一律拒 `cannot_call_entry_skill`） |
 >
-> 所以**给步骤 skill 加 `entry: true` 会让 `lung-nodule` 的 `call_skill(step)` 在运行时被拒**，
+> 所以**给步骤 skill 加 `entry: true` 会让自治链 skill（如 `supplier-review`）的 `call_skill(step)` 在运行时被拒**，
 > 自治链就断了。采用本范式 = **用业务编排替换自治编排**（不是额外叠加）。
 
 ### 你有三条路（按推荐度）
 
 **① 只用业务编排（推荐，零核心改动）**——把 6 步都标 `entry: true`，由业务层（`pipeline.py`）
-顺序驱动；不再依赖 `lung-nodule` 的 `call_skill` 自治链。「一键跑完」用 `run_from(0)`
+顺序驱动；不再依赖自治链 skill（如 `supplier-review`）的 `call_skill` 自治链。「一键跑完」用 `run_from(0)`
 一次跑到底即可模拟。**换来步级 retry，代价是放弃 `call_skill` 自治链**。
 → 改动：6 个步骤 skill 各加 `entry: true`；`server.py` 的 `STEPS` / `SKILLS_DIR` 换成你的 6 步。
 
 **② wrapper 双轨（想两种模式都保留时）**——核心步骤 skill 保持 `entry: false`（供
-`lung-nodule` 自治链 `call_skill`）；**另给每步加一个薄 entry 包装** `step_xxx`
+自治链 skill（如 `supplier-review`）`call_skill`）；**另给每步加一个薄 entry 包装** `step_xxx`
 （`entry: true, child_skills: [核心步骤]`），业务编排拉起包装、包装内 `call_skill` 核心步骤。
 两种模式共存。代价：6 个包装 skill + 包装需把输入透传给核心、把核心结论原样回流（多一跳
 LLM 成本）。已实测 `wrapper(entry)→call_skill(core 非 entry) = ALLOW`。
@@ -74,7 +74,7 @@ LLM 成本）。已实测 `wrapper(entry)→call_skill(core 非 entry) = ALLOW`�
 必须走 ADR**（评估对 R1–R5 影响）。非必要不走这条。
 
 **④ turn-rewind（想保住自治「一键跑完」+ 又能重跑中间步时，已实现，推荐）**——
-**不碰 entry 约束**：子 skill 全程 `entry: false`，继续被 `lung-nodule` 自治链 `call_skill`
+**不碰 entry 约束**：子 skill 全程 `entry: false`，继续被自治链 skill（如 `supplier-review`）`call_skill`
 一键跑完；内核把一次 turn 拆成**可寻址回访节点表**(每圈 LLM 采样 = iteration 节点、每次
 `call_skill`/工具派发 = dispatch 节点)。业务侧 `engine.rewind_nodes()` 取节点、提交
 `Rewind(node_id, mode)` 回退到**任意节点重推**(`re_reason` 让 LLM 重决下游、`retry_tool`
@@ -82,6 +82,6 @@ LLM 成本）。已实测 `wrapper(entry)→call_skill(core 非 entry) = ALLOW`�
 → 契约见 [`docs/architecture/capabilities/turn-rewind.md`](../../docs/architecture/capabilities/turn-rewind.md)；
 与本 demo 的关系：**step_pipeline = 确定性业务编排范式；turn-rewind = 自治链内的节点级重试**。
 
-> 无论选哪条，**body 基本不用动**：每步本就写「你将收到患者数据 + 上一步结论」，天然是
-> 「给定输入即可独立跑」的契约——只要它**只认传入的 `{患者数据 + 上游结论}`**、不依赖
+> 无论选哪条，**body 基本不用动**：每步本就写「你将收到申请资料 + 上一步结论」，天然是
+> 「给定输入即可独立跑」的契约——只要它**只认传入的 `{申请资料 + 上游结论}`**、不依赖
 > 自治链隐式上下文即可。

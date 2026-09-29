@@ -39,29 +39,29 @@ from taifeng.tool.builtins.request_user_input import make_request_user_input_too
 
 # 一个最小的 atomic 子 skill：composite skill 必须声明非空 child_skills 才能通过校验。
 CHILD_SKILL = """---
-name: vitals-checker
-description: 体征指标核对
+name: field-checker
+description: 工单字段核对
 version: 1.0.0
 type: atomic
 ---
-# 体征核对
-按年龄段核对各项体征指标是否正常。
+# 字段核对
+按工单类型核对各项必填字段是否齐全。
 """
 
 # entry composite skill：声明 tool_names 含 request_user_input，否则会被
 # turn.py 的工具白名单过滤掉。body 不决定何时调工具 —— 那由 SimClient 脚本决定。
 ENTRY_SKILL = """---
 name: intake-assistant
-description: 问诊信息采集助手
+description: 工单信息采集助手
 version: 1.0.0
 type: composite
 entry: true
 model: mock-model
-child_skills: [vitals-checker]
+child_skills: [field-checker]
 tool_names: [request_user_input]
 max_call_depth: 2
 ---
-# 信息采集助手
+# 工单信息采集助手
 
 你负责在分析前补齐缺失信息。缺信息时调用 `request_user_input(prompt, response_schema)`
 向用户发问；拿到回答后给出最终结论。
@@ -74,8 +74,8 @@ FORM_CALL_ID = "call_intake_1"
 
 def _build_skill(skills_dir: Path) -> None:
     """把 entry skill 写入磁盘（重建实例时直接复用同一份）。"""
-    (skills_dir / "vitals-checker").mkdir(parents=True)
-    (skills_dir / "vitals-checker" / "SKILL.md").write_text(
+    (skills_dir / "field-checker").mkdir(parents=True)
+    (skills_dir / "field-checker" / "SKILL.md").write_text(
         CHILD_SKILL, encoding="utf-8",
     )
     (skills_dir / "intake-assistant").mkdir(parents=True)
@@ -91,15 +91,15 @@ def _suspending_client() -> SimClient:
     """
     return SimClient(turns=[
         SimTurn(
-            text="为完成评估，我需要先采集您的年龄。",
+            text="为完成定级，我需要先采集受影响的用户数。",
             tool_calls=[{
                 "id": FORM_CALL_ID,
                 "name": "request_user_input",
                 "arguments": (
-                    '{"prompt": "请问您的年龄是多少？", '
+                    '{"prompt": "请问本次故障受影响的用户数是多少？", '
                     '"response_schema": {"type": "object", '
-                    '"properties": {"age": {"type": "integer"}}, '
-                    '"required": ["age"]}}'
+                    '"properties": {"affected_users": {"type": "integer"}}, '
+                    '"required": ["affected_users"]}}'
                 ),
             }],
             usage=TokenUsage(input_tokens=120, output_tokens=20),
@@ -111,7 +111,7 @@ def _resuming_client() -> SimClient:
     """实例#2 的脚本：resume 续跑只需一轮成功完成（纯文本，无新工具调用）。"""
     return SimClient(turns=[
         SimTurn(
-            text="收到，您今年 35 岁。结论：各项指标在该年龄段属正常范围。",
+            text="收到，受影响用户 35 人。结论：按该影响面归入 P2 优先级处理。",
             usage=TokenUsage(input_tokens=90, output_tokens=24),
         ),
     ])
@@ -160,8 +160,8 @@ async def main() -> None:
         thread_id = engine1.thread_id
         print(f"  engine#1 已就绪  thread_id={thread_id}")
 
-        sub_id = await engine1.submit(taifeng.UserMessage(text="帮我做个健康评估"))
-        print("  已提交 UserMessage：'帮我做个健康评估'\n")
+        sub_id = await engine1.submit(taifeng.UserMessage(text="帮我登记一个故障工单"))
+        print("  已提交 UserMessage：'帮我登记一个故障工单'\n")
 
         # ============================================================
         # 步骤 2：turn 在 request_user_input 处挂起，subscribe 自然结束
@@ -240,7 +240,7 @@ async def main() -> None:
         print("=" * 64)
         # 表单答案直接进 resolutions[req_id]，由 resolver 回填成该 call 的
         # function_call_output（gap 补齐）
-        answer = {"age": 35}
+        answer = {"affected_users": 35}
         print(f"  提交 Resume(thread_id={thread_id}, resolutions={{{req_id!r}: {answer}}})")
         resume_sub = await engine2.submit(taifeng.Resume(
             thread_id=thread_id,

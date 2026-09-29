@@ -3,7 +3,7 @@
 与「entry skill 自治 call_skill 跑完整链」相对：这里把**编排（何时跑下一步）下沉到
 业务层**，每个步骤 skill 作为**独立 entry** 单独跑一个 turn / thread。好处：
 
-- **输入语义可控**：每步输入 = ``seed（患者数据）+ 前序步骤输出``，由业务**显式构造并
+- **输入语义可控**：每步输入 = ``seed（申请资料）+ 前序步骤输出``，由业务**显式构造并
   持久化**（见 ``Step.input_text``），重试时**原样重放**该输入 —— 不是参数盲覆盖。
 - **步级重试（cascade）**：``retry(k)`` 作废 ``k..N`` 的旧结果，用各自重新构造的输入从
   ``k`` 往后重跑（下游依赖上游，上游变了下游必须重算）。
@@ -70,8 +70,8 @@ class Pipeline:
 
     # ── 输入构造（核心：显式 seed + 前序输出，可重放）──────────────────
     def _input_for(self, index: int) -> str:
-        """构造第 ``index`` 步的输入文本 = 患者数据 + 已完成前序步骤的结论。"""
-        parts = [f"【患者数据】\n{self.seed}"]
+        """构造第 ``index`` 步的输入文本 = 申请资料 + 已完成前序步骤的结论。"""
+        parts = [f"【申请资料】\n{self.seed}"]
         prior = [
             f"【步骤{j + 1}·{self.steps[j].title} 结论】\n{self.steps[j].output_text}"
             for j in range(index) if self.steps[j].status == "done"
