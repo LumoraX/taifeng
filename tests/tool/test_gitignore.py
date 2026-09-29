@@ -116,9 +116,9 @@ def test_deeper_level_overrides_parent() -> None:
     assert is_ignored(levels[:1], ("keep.txt",), is_dir=False) is True
 
 
-@pytest.mark.parametrize("line", ["[[:alpha:]].txt", "[abc", "foo\\"])
+@pytest.mark.parametrize("line", ["[[:alpha:]].txt", "[abc", "foo\\", "[z-a].txt"])
 def test_unsupported_syntax_is_reported(line: str) -> None:
-    """POSIX 字符类 / 未闭合 [ / 行尾孤立反斜杠：抛不支持，解析时计数而非静默。"""
+    """POSIX 字符类 / 未闭合 [ / 行尾孤立反斜杠 / 倒序区间：抛不支持，解析时计数而非静默。"""
     with pytest.raises(UnsupportedIgnorePattern):
         compile_rule(line)
     rules, unsupported = parse_gitignore(f"{line}\n*.ok")

@@ -12,7 +12,8 @@
   开头 ``**/x`` = 任意深度的 x，结尾 ``x/**`` = x 内的一切，中间 ``a/**/b`` = 零或多层目录；
 - 目录被忽略后整棵子树不再下探，因此「父目录被忽略的文件无法经 ``!`` 重新纳入」与 git 一致。
 
-**不支持**（如实记录）：POSIX 字符类（``[[:alpha:]]`` 等）——含它的行跳过并计数，在工具输出尾注告知，
+**不支持**（如实记录）：POSIX 字符类（``[[:alpha:]]`` 等）与译出非法正则的写法（如倒序区间
+``[z-a]``）——含它们的行跳过并计数，在工具输出尾注告知，
 规则对应的路径**不会**被跳过；``.git/info/exclude``、全局 ``core.excludesFile``、``.ignore`` /
 ``.rgignore``；沙盒根之上的 ``.gitignore``；``core.ignorecase``（一律大小写敏感）；
 「已被 git 跟踪的文件不受忽略规则影响」（本实现不读 git 索引）；符号链接形式的 ``.gitignore``
@@ -168,7 +169,7 @@ def compile_rule(line: str) -> IgnoreRule | None:
     """编译一行 gitignore；空行 / 注释 / 空模式返回 None。
 
     Raises:
-        UnsupportedIgnorePattern: 该行语法不受支持（调用方跳过并计数，不静默）。
+        UnsupportedIgnorePattern: 该行语法不受支持或译出的正则非法（调用方跳过并计数，不静默）。
     """
     line = _strip_trailing_spaces(line)
     if not line or line.startswith("#"):
@@ -186,7 +187,12 @@ def compile_rule(line: str) -> IgnoreRule | None:
         return None
     body = _translate(line)
     source = body if anchored else f"(?:.*/)?{body}"
-    return IgnoreRule(regex=re.compile(source, re.DOTALL), negated=negated, dir_only=dir_only)
+    try:
+        regex = re.compile(source, re.DOTALL)
+    except re.error as exc:
+        # 如倒序区间 [z-a]：git 视为无效模式，这里同样不生效并计数告知
+        raise UnsupportedIgnorePattern(f"invalid pattern: {exc}") from exc
+    return IgnoreRule(regex=regex, negated=negated, dir_only=dir_only)
 
 
 def parse_gitignore(text: str) -> tuple[tuple[IgnoreRule, ...], int]:

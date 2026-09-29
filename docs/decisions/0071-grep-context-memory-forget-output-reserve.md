@@ -90,10 +90,10 @@
 
 - `tests/tool/test_grep_scan.py`（23 例）：上下文合并 / 相邻不分隔 / 单侧覆盖 / 截断与残组 / 参数拒绝，跨行起止行号、片段、
   CRLF、count / files 模式、片段截断、空匹配行号、停止信号。
-- `tests/tool/test_gitignore.py`（46 例）：31 条语法用例、否定与层级优先序、不支持语法计数、读取边界（符号链接 / 超大 /
+- `tests/tool/test_gitignore.py`（47 例）：31 条语法用例、否定与层级优先序、不支持语法计数、读取边界（符号链接 / 超大 /
   非 UTF-8）、遍历剪枝与祖先规则、显式基点、父目录被忽略不可重新纳入、glob / grep 默认开关与尾注。
-- `tests/tool/test_memory.py`（+16 例）与 `tests/context/test_memory_composite.py`（+4 例）：delete 按能力出现、副作用分类、
-  委托与计数、0 条、非法计数、参数拒绝、后端异常、取消、EnginePool 端到端；组合器可遗忘判定、求和、部分失败显式报错。
+- `tests/tool/test_memory.py`（+16 例）与 `tests/context/test_memory_composite.py`（+5 例）：delete 按能力出现、副作用分类、
+  委托与计数、0 条、非法计数、参数拒绝、后端异常、取消、EnginePool 端到端；组合器可遗忘判定、求和、部分失败显式报错、copy 后保留能力。
 - `tests/context/test_token_calibration.py`（+6 例）与 `tests/loop/test_output_reserve_turn.py`（7 例）：`with_output_reserve`
   语义；真实 EnginePool + SimClient 下声明值收紧 soft / hard（压缩咨询、预算提示、hard 预检）、call_skill 子 turn 双向不继承、
   spawn 子 turn 用自己的声明、预留不小于窗口时 `turn_failed` 且零请求、CompactNow target 精确。把 `effective_budget`

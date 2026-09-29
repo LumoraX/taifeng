@@ -157,10 +157,12 @@ class CompositeMemoryStore:
     不带 ``forget``,memory 工具也就不会提供 delete——不会出现「给了入口却什么都删不掉」。
     """
 
-    def __new__(cls, stores: Sequence[MemoryStore]) -> CompositeMemoryStore:
+    def __new__(cls, stores: Sequence[MemoryStore] = ()) -> CompositeMemoryStore:
         """按子 store 能力选择实例类型:有可遗忘的子 → 带 ``forget`` 的私有子类。
 
         只在直接构造 ``CompositeMemoryStore`` 时切换;业务自定义子类保持原样。
+        ``stores`` 的空缺省只服务 copy / pickle 协议(它们以 ``cls.__new__(cls)`` 重建实例
+        再恢复 ``__dict__``);正常构造的空序列仍由 ``__init__`` 显式拒绝。
         """
         if cls is CompositeMemoryStore and any(
             isinstance(s, ForgettableMemoryStore) for s in stores

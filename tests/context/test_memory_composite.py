@@ -149,3 +149,13 @@ async def test_composite_forget_partial_failure_is_explicit():
     assert "ConnectionError: kv down" in message
     assert "invalid forget count -3" in message
     assert ok.targets == [("x", "t")]  # 失败的子不挡住后续子
+
+
+def test_composite_copy_keeps_capability():
+    """copy 协议以 cls.__new__(cls) 重建:两种组合器都能复制且保留是否可遗忘。"""
+    import copy
+
+    plain = copy.copy(CompositeMemoryStore([_Src()]))
+    forgetful = copy.copy(CompositeMemoryStore([_Forgetful()]))
+    assert not isinstance(plain, ForgettableMemoryStore)
+    assert isinstance(forgetful, ForgettableMemoryStore)
