@@ -82,6 +82,10 @@ class ToolSpecRef(BaseModel):
 
 type ImageMediaType = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
 type ImageDetail = Literal["auto", "low", "high", "original"]
+type FileMediaType = Literal["application/pdf"]
+
+# 文件 MIME → provider wire 默认文件名的扩展名（未提供 filename 时确定性生成）
+FILE_EXTENSIONS: dict[str, str] = {"application/pdf": "pdf"}
 
 
 class _FrozenPart(BaseModel):
@@ -116,6 +120,43 @@ class ImagePart(_FrozenPart):
         return value
 
 
+class FilePart(_FrozenPart):
+    """canonical base64 文档文件（首批仅 PDF）；wire 层才临时构造 Data URL。
+
+    与 ``ImagePart`` 同构：只承载完整内联正文，不接受 Data URL / URL / 路径 / file id。
+    ``filename`` 仅作展示与 provider 必填字段，缺省时由 ``wire_filename`` 确定性补齐。
+    """
+
+    type: Literal["file"] = "file"
+    media_type: FileMediaType
+    base64_data: str = Field(min_length=1)
+    size: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    filename: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("base64_data")
+    @classmethod
+    def _reject_data_url(cls, value: str) -> str:
+        """禁止把 provider wire 形态渗入核心契约。"""
+        if value.startswith("data:"):
+            raise ValueError("file part must contain canonical base64, not a Data URL")
+        return value
+
+    def data_url(self) -> str:
+        """构造 provider wire 用的临时 Data URL（只在网络边界调用，绝不持久化）。"""
+        return f"data:{self.media_type};base64,{self.base64_data}"
+
+    def wire_filename(self) -> str:
+        """provider wire 的文件名：有 ``filename`` 用之，否则按 sha256 前缀确定性生成。
+
+        OpenAI 系的 ``file_data`` 形态要求随附文件名；确定性默认值保证同一文件
+        每轮重建出逐位相同的 wire（R2 前缀缓存稳定）。
+        """
+        if self.filename is not None:
+            return self.filename
+        return f"attachment-{self.sha256[:12]}.{FILE_EXTENSIONS[self.media_type]}"
+
+
 class ProviderStateEnvelope(_FrozenPart):
     """可恢复但不可解释的 provider 专属状态。"""
 
@@ -125,7 +166,7 @@ class ProviderStateEnvelope(_FrozenPart):
     payload: dict[str, Any]
 
 
-type PartContent = str | list[TextPart | ImagePart]
+type PartContent = str | list[TextPart | ImagePart | FilePart]
 
 
 class ApiMessageItem(_FrozenPart):

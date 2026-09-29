@@ -42,6 +42,7 @@ def derive_modality_tags(capabilities: ModelCapabilities) -> frozenset[str]:
     标签词表（内核拥有，与 ``SkillRequirements.modalities`` 的声明面一一对应）：
         - ``text``：恒有。
         - ``input_image``：user 消息能承载图片。
+        - ``input_file``：user 消息能承载文档文件（首批 PDF）。
         - ``tool_output_image``：``function_call_output`` 能承载图片。
 
     R1：只读注入对象**自己的声明**，不做任何模型名 / 域名推断——这与「任何
@@ -56,6 +57,8 @@ def derive_modality_tags(capabilities: ModelCapabilities) -> frozenset[str]:
     tags = {"text"}
     if "image" in capabilities.input_modalities:
         tags.add("input_image")
+    if "file" in capabilities.input_modalities:
+        tags.add("input_file")
     if "image" in capabilities.tool_output_modalities:
         tags.add("tool_output_image")
     return frozenset(tags)

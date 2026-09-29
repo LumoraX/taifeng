@@ -41,6 +41,7 @@ from taifeng.llm.providers.openai._shared import (
     OPENAI_DEFAULT_BASE_URL,
     build_openai_headers,
     enforce_openai_wire_size,
+    responses_input_file,
     tool_output_content,
 )
 from taifeng.llm.responses_types import (
@@ -56,6 +57,7 @@ from taifeng.llm.types import (
     ApiMessageItem,
     ApiProviderStateItem,
     ApiRequest,
+    FilePart,
     ImagePart,
     ProviderStateEnvelope,
     TextPart,
@@ -89,6 +91,10 @@ def _input_content(
                     "detail": part.detail,
                 }
             )
+        elif isinstance(part, FilePart):
+            if item.role != "user":
+                raise InvalidHistoryError("Responses files are only valid in user messages")
+            content.append(responses_input_file(part))
     return content
 
 
@@ -517,7 +523,7 @@ class OpenAIResponsesClient(OneNetworkAttemptModelClient, ModelClient):
     """OpenAI 官方 Responses 客户端；手工重放 Taifeng durable history。"""
 
     capabilities = ModelCapabilities(
-        input_modalities=frozenset({"text", "image"}),
+        input_modalities=frozenset({"text", "image", "file"}),
         provider="openai",
         protocol="responses",
         accepts_provider_state=True,

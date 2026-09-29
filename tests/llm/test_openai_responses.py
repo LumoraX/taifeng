@@ -60,11 +60,11 @@ def _session(cancel: CancellationToken | None = None) -> OpenAIResponsesSession:
 
 
 def test_responses_declares_stateful_image_capabilities() -> None:
-    """Responses client 必须显式声明协议、图片与 provider-state 能力。"""
+    """Responses client 必须显式声明协议、图片 / 文件与 provider-state 能力。"""
     client = OpenAIResponsesClient(api_key="sk-test", model="gpt-5.6")
 
     assert client.capabilities == ModelCapabilities(
-        input_modalities=frozenset({"text", "image"}),
+        input_modalities=frozenset({"text", "image", "file"}),
         provider="openai",
         protocol="responses",
         accepts_provider_state=True,

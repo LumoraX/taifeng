@@ -10,12 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.client import TEXT_ONLY_CAPABILITIES, ModelCapabilities
 from taifeng.llm.errors import InvalidHistoryError
-from taifeng.llm.image_input import (
-    DISABLED_IMAGE_POLICY,
-    ImageAttachmentV1,
-    ImageInputPolicy,
-    admit_image_attachments,
-)
+from taifeng.llm.file_input import DISABLED_FILE_POLICY, FileInputPolicy
+from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, ImageInputPolicy
 from taifeng.llm.types import (
     ApiFunctionCallItem,
     ApiFunctionCallOutputItem,
@@ -25,9 +21,15 @@ from taifeng.llm.types import (
     ApiProviderStateItem,
     ApiRequest,
     CacheBreakpoint,
+    FilePart,
     ImagePart,
     ProviderStateEnvelope,
     TextPart,
+)
+from taifeng.loop.attachment_parts import (
+    extract_attachments,
+    to_image_parts,
+    user_attachment_parts,
 )
 
 if TYPE_CHECKING:
@@ -194,41 +196,12 @@ TOOL_IMAGE_OMITTED_TEMPLATE = (
 """
 
 
-def _extract_images(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """从 item payload 取出 kind=="image" 的附件，非法形状按无附件处理。"""
-    raw = payload.get("attachments", [])
-    if not isinstance(raw, list):
-        return []
-    return [
-        attachment
-        for attachment in raw
-        if isinstance(attachment, dict) and attachment.get("kind") == "image"
-    ]
-
-
-def _to_image_parts(
-    images: list[dict[str, Any]], policy: ImageInputPolicy
-) -> list[ImagePart]:
-    """canonical attachment payload → provider-neutral ImagePart（含 admission）。"""
-    attachments = [ImageAttachmentV1.model_validate(image) for image in images]
-    return [
-        ImagePart(
-            media_type=image.attachment.media_type,
-            base64_data=image.attachment.content,
-            size=image.attachment.size,
-            sha256=image.attachment.sha256,
-            detail=image.attachment.detail,
-        )
-        for image in admit_image_attachments(attachments, policy)
-    ]
-
-
 def _tool_output_content(
     it: ResponseItem,
     *,
     image_input_policy: ImageInputPolicy,
     model_capabilities: ModelCapabilities,
-) -> str | list[TextPart | ImagePart]:
+) -> str | list[TextPart | ImagePart | FilePart]:
     """``function_call_output`` 的内容投影（Chat / Responses 两条路径共用）。
 
     - 无附件 → 裸字符串（与既有逐位一致）
@@ -236,17 +209,17 @@ def _tool_output_content(
     - 有附件但能力不足 → 文本 + in-band 占位符（见 ``TOOL_IMAGE_OMITTED_TEMPLATE``）
     """
     text = str(it.payload.get("output", ""))
-    images = _extract_images(it.payload)
+    images = extract_attachments(it.payload, "image")
     if not images:
         return text
     if "image" not in model_capabilities.tool_output_modalities:
         notice = TOOL_IMAGE_OMITTED_TEMPLATE.format(count=len(images))
         return f"{text}\n{notice}" if text else notice
-    parts: list[TextPart | ImagePart] = []
+    parts: list[TextPart | ImagePart | FilePart] = []
     if text:
         # 空文本不生成 TextPart —— 空项白占 API 数组槽位
         parts.append(TextPart(text=text))
-    parts.extend(_to_image_parts(images, image_input_policy))
+    parts.extend(to_image_parts(images, image_input_policy))
     return parts
 
 
@@ -255,6 +228,7 @@ def _item_to_api_message(
     *,
     image_input_policy: ImageInputPolicy,
     model_capabilities: ModelCapabilities,
+    file_input_policy: FileInputPolicy = DISABLED_FILE_POLICY,
 ) -> ApiMessage | None:
     """非采样产出的单条 ResponseItem → ApiMessage;记账类 kind 返回 None。
 
@@ -263,20 +237,21 @@ def _item_to_api_message(
     """
     if it.kind == "user_message":
         text = str(it.payload.get("text", ""))
-        images = _extract_images(it.payload)
-        if not images:
-            return ApiMessage(role="user", content=text)
         # user 消息侧维持既有语义：能力不足**抛错**而非降级。与工具侧的差别是
-        # 有意的——用户明确塞了图却看不到，属输入被吞，必须让调用方知道；工具
-        # 侧的图是 agent 自己取的，降级留在轨内更合适。
-        if "image" not in model_capabilities.input_modalities:
-            from taifeng.llm.errors import UnsupportedModalityError
-
-            raise UnsupportedModalityError("model client does not support image input")
-        parts: list[TextPart | ImagePart] = []
+        # 有意的——用户明确塞了图 / 文件却看不到，属输入被吞，必须让调用方知道；
+        # 工具侧的图是 agent 自己取的，降级留在轨内更合适。
+        attachment_parts = user_attachment_parts(
+            it.payload,
+            image_input_policy=image_input_policy,
+            file_input_policy=file_input_policy,
+            model_capabilities=model_capabilities,
+        )
+        if not attachment_parts:
+            return ApiMessage(role="user", content=text)
+        parts: list[TextPart | ImagePart | FilePart] = []
         if text:
             parts.append(TextPart(text=text))
-        parts.extend(_to_image_parts(images, image_input_policy))
+        parts.extend(attachment_parts)
         return ApiMessage(role="user", content=parts)
     if it.kind == "system_injection":
         # suspend_resolved 是 resume 的幂等记账 marker（engine._find_active_suspension
@@ -319,6 +294,7 @@ def history_to_api_messages(
     *,
     include_reasoning: bool = True,
     image_input_policy: ImageInputPolicy | None = None,
+    file_input_policy: FileInputPolicy | None = None,
     model_capabilities: ModelCapabilities | None = None,
 ) -> list[ApiMessage]:
     """把 ResponseItem 序列转 ApiMessage 序列(同轮合并重建)。
@@ -340,6 +316,7 @@ def history_to_api_messages(
         items,
         include_reasoning=include_reasoning,
         image_input_policy=image_input_policy or DISABLED_IMAGE_POLICY,
+        file_input_policy=file_input_policy or DISABLED_FILE_POLICY,
         model_capabilities=model_capabilities or TEXT_ONLY_CAPABILITIES,
     )[0]
 
@@ -349,6 +326,7 @@ def _convert_history(
     *,
     include_reasoning: bool,
     image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY,
+    file_input_policy: FileInputPolicy = DISABLED_FILE_POLICY,
     model_capabilities: ModelCapabilities = TEXT_ONLY_CAPABILITIES,
 ) -> tuple[list[ApiMessage], list[int]]:
     """转换循环的单一来源:返回 ``(messages, source_indexes)``。
@@ -430,6 +408,7 @@ def _convert_history(
         msg = _item_to_api_message(
             it,
             image_input_policy=image_input_policy,
+            file_input_policy=file_input_policy,
             model_capabilities=model_capabilities,
         )
         if msg is None:
@@ -467,6 +446,7 @@ def _history_to_api_input_items(
     *,
     image_input_policy: ImageInputPolicy,
     model_capabilities: ModelCapabilities,
+    file_input_policy: FileInputPolicy = DISABLED_FILE_POLICY,
 ) -> tuple[list[ApiInputItem], list[int]]:
     """把 durable history 投影成 Responses/状态门禁使用的严格有序 Items。"""
     output: list[ApiInputItem] = []
@@ -543,6 +523,7 @@ def _history_to_api_input_items(
         message = _item_to_api_message(
             item,
             image_input_policy=image_input_policy,
+            file_input_policy=file_input_policy,
             model_capabilities=model_capabilities,
         )
         if message is not None and message.role != "tool":
@@ -568,8 +549,10 @@ def build_api_request(
     has_recall_backend: bool = False,
     image_input_policy: ImageInputPolicy | None = None,
     model_input_capabilities: ModelCapabilities | None = None,
+    file_input_policy: FileInputPolicy | None = None,
 ) -> ApiRequest:
     resolved_policy = image_input_policy or DISABLED_IMAGE_POLICY
+    resolved_file_policy = file_input_policy or DISABLED_FILE_POLICY
     resolved_capabilities = model_input_capabilities or TEXT_ONLY_CAPABILITIES
     system_prompt = render_system_prompt(
         entry,
@@ -596,6 +579,7 @@ def build_api_request(
         input_items, source_indexes = _history_to_api_input_items(
             history,
             image_input_policy=resolved_policy,
+            file_input_policy=resolved_file_policy,
             model_capabilities=resolved_capabilities,
         )
         messages = []
@@ -604,6 +588,7 @@ def build_api_request(
             history,
             include_reasoning=reasoning_passback,
             image_input_policy=resolved_policy,
+            file_input_policy=resolved_file_policy,
             model_capabilities=resolved_capabilities,
         )
 
