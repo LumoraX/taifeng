@@ -558,8 +558,10 @@ R2：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`re
 
 ```
 业务 / LLM 工具 spawn_skill(skill_id, args, reason)
-  → DispatchPolicy.check（白名单/深度/环/cannot_call_entry → ValueError）
-  → K1 SpawnSlotRegistry.reserve（超限 → SpawnLimitError）
+  → DispatchPolicy.check（未知 skill / 白名单 / 深度 / 环 → SpawnRejectedError，带稳定分类）
+  → K1 SpawnSlotRegistry.reserve（超限 → SpawnLimitError，分类 spawn_limit_concurrent / spawn_limit_total）
+      拒绝经 spawn_skill 工具时：emit skill_spawn_rejected{reason, origin, path, ...}
+      + ToolResult.error("spawn_rejected: <reason> ...")，不记异常日志（ADR 0078）
   → 建 child thread + detached asyncio task（cancel = root_cancel.child("spawn:xxx")）
   → 追加 spawn ResponseItem 到父 thread（R5）
   → emit spawn_started{handle_id, skill_id, child_thread_id}

@@ -379,6 +379,9 @@ class TurnDispatch:
                 await self.__dispatch_owner._emit(SkillSpawnRejected(data={
                     "skill_id": target.id,
                     "call_id": ctx.call_id,
+                    "reason": e.reject_reason,
+                    "origin": "call_skill",
+                    "path": list(parent_stack.path()),
                     "limit_kind": e.kind,
                     "limit": e.limit,
                 }))

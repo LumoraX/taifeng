@@ -228,10 +228,18 @@ class SkillCandidatesVerified(_Msg):
 
 
 class SkillSpawnRejected(_Msg):
-    """K1：子 skill 派发因 spawn 配额超限被拒（fork-bomb 防护）。"""
+    """子 skill 派发 / 分离发起被准入拒绝（K1 配额与 detached spawn 的结构性门控）。
+
+    data = {"skill_id": str, "call_id": str, "reason": SpawnRejectReason,
+            "origin": "call_skill" | "spawn_skill", "path": list[str],
+            "limit_kind"?: str, "limit"?: int}
+    - reason: 稳定分类（``loop/spawn.py::SpawnRejectReason``）
+    - origin: 发起拒绝的工具
+    - path: 裁决时的调用路径；无路径信息为空列表
+    - limit_kind / limit: 仅配额拒绝（``spawn_limit_*``）携带
+    """
 
     kind: Literal["skill_spawn_rejected"] = "skill_spawn_rejected"
-    """data = {"skill_id": str, "call_id": str, "limit_kind": str, "limit": int}"""
 
 
 class ResourceLimitExceeded(_Msg):

@@ -94,11 +94,43 @@ running → done | error | cancelled
 
 #### Scenario: 拒绝路径
 
-| 触发 | 拒绝原因 |
-| --- | --- |
-| 未知 skill_id | `ValueError`，不建 child thread |
-| 非白名单 / 超深度 / 成环 | `ValueError("dispatch_rejected: <reason>")` |
-| 并发 K1 超限 | `SpawnLimitError` → 上层转 `SkillSpawnRejected` 事件 |
+准入拒绝带稳定分类 `SpawnRejectReason`（`loop/spawn.py`）。任何拒绝都不建 child thread、不占配额。
+
+| 触发 | `engine.spawn_skill` 抛出 | 分类（`reject_reason`） |
+| --- | --- | --- |
+| 未知 skill_id | `SpawnRejectedError("unknown_skill: <id>")` | `unknown_skill` |
+| 非白名单 / 超深度 / 成环 | `SpawnRejectedError("dispatch_rejected: <reason>")` | `not_in_whitelist` / `max_depth_exceeded` / `cycle_detected` |
+| K1 并发超限 | `SpawnLimitError(kind="concurrent")` | `spawn_limit_concurrent` |
+| K1 累计超限 | `SpawnLimitError(kind="total")` | `spawn_limit_total` |
+
+- `SpawnRejectedError` 是 `ValueError` 子类，消息前缀不变；另带 `skill_id` 与裁决时的调用路径 `path`。
+- `SpawnLimitError` 带 `kind` / `limit` / `reject_reason`；`kind` 只接受 `concurrent` / `total`。
+
+### Requirement: 拒绝对模型与事件流可见（spawn-reject 分类，ADR 0078）
+
+`spawn_skill` 工具 SHALL 把准入拒绝作为**预期内的结果**处理，而不是工具故障：
+
+- 返回 `ToolResult.error("spawn_rejected: <reason> (skill '<id>'[, <kind> spawn limit <n> reached])")`，
+  `data = {reason, skill_id, origin: "spawn_skill", path, limit_kind?, limit?}`；
+- emit `skill_spawn_rejected{skill_id, call_id, reason, origin: "spawn_skill", path, limit_kind?, limit?}`；
+- SHALL NOT 记异常日志（无 traceback）；
+- 准入拒绝以外的异常（如 engine 未运行）照常上抛，由 tool runtime 落 `tool_error`（`reason="exception"`）。
+
+`call_skill` 的 K1 配额拒绝发出同一事件，`origin="call_skill"`，`path` 为父调用栈路径，并保留既有的
+`limit_kind` / `limit`。`call_skill` 的结构性拒绝（`dispatch_rejected: <reason>`）经工具结果回给模型，
+`data.reason` 即分类。
+
+#### Scenario: 模型分离发起白名单外的 skill
+- **WHEN** 模型调 `spawn_skill({"skill_id": "outsider", ...})`，`outsider` 不在入口 skill 的 `child_skills` 内
+- **THEN** 工具结果以 `spawn_rejected: not_in_whitelist` 开头且含 `outsider`，`is_error=true`
+- **AND** 事件流出现一条 `skill_spawn_rejected`，`reason="not_in_whitelist"`、`origin="spawn_skill"`
+- **AND** turn 正常继续，模型可据此改用其他办法
+
+#### Scenario: 并发配额已满
+- **GIVEN** `max_concurrent_spawns=1` 且已有一个 spawn 在飞
+- **WHEN** 模型再次调 `spawn_skill`
+- **THEN** 工具结果以 `spawn_rejected: spawn_limit_concurrent` 开头
+- **AND** `skill_spawn_rejected` 的 `limit_kind="concurrent"`、`limit=1`
 
 > 注：`call_skill` 的「不能 call entry skill」门**不**适用于 spawn（spawn 是独立根，调 entry 合法，见上 `allow_entry_target=True`）。
 

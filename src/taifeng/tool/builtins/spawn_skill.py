@@ -58,6 +58,45 @@ def _coordinator(ctx: ToolContext) -> SpawnCoordinator | None:
     return ctx.extras.get("spawn_coordinator")
 
 
+async def _rejected(
+    ctx: ToolContext,
+    skill_id: str,
+    reason: str,
+    *,
+    path: list[str] | None = None,
+    limit_kind: str | None = None,
+    limit: int | None = None,
+) -> ToolResult:
+    """分离发起被准入拒绝：打 ``skill_spawn_rejected`` 事件并返回分类后的错误结果。"""
+    data: dict[str, Any] = {
+        "skill_id": skill_id,
+        "call_id": ctx.call_id,
+        "reason": reason,
+        "origin": "spawn_skill",
+        "path": list(path or []),
+    }
+    detail = f"skill {skill_id!r}"
+    if limit_kind is not None and limit is not None:
+        data["limit_kind"] = limit_kind
+        data["limit"] = limit
+        detail = f"{detail}, {limit_kind} spawn limit {limit} reached"
+    await _emit_rejected(ctx, data)
+    extras = {key: value for key, value in data.items() if key not in {"reason", "call_id"}}
+    return ToolResult.error(f"spawn_rejected: {reason} ({detail})", reason=reason, **extras)
+
+
+async def _emit_rejected(ctx: ToolContext, data: dict[str, Any]) -> None:
+    """经 dispatcher（TurnRunner）打拒绝事件；无 dispatcher（裸 handler 单测）时不打。"""
+    dispatcher = ctx.extras.get("dispatcher")
+    emit = getattr(dispatcher, "_emit", None)
+    if emit is None:
+        return
+    # 延迟 import 防止 tool → loop 的 import 期循环依赖
+    from taifeng.loop.event import SkillSpawnRejected
+
+    await emit(SkillSpawnRejected(data=data))
+
+
 # ===========================================================================
 # spawn_skill —— 分离发起一个子 skill
 # ===========================================================================
@@ -87,11 +126,23 @@ def make_spawn_skill_tool() -> ToolSpec:
         if coordinator is None:
             return ToolResult.error("spawn_unavailable", reason="config_error")
         # 转发到 engine.spawn_skill（门控 / 配额 / detached task 启动均由 engine 负责）。
-        # engine 在准入失败时抛 ValueError / SpawnLimitError —— 让其上抛，由 tool_batch
-        # 统一捕获落 error（与 call_skill 一致，不在此层吞错）。
-        out = await coordinator.spawn_skill(
-            skill_id=skill_id, args=sub_args, reason=raw_reason
-        )
+        # 准入拒绝是预期内的结果而非工具故障：按稳定分类回给模型并打拒绝事件
+        # （ADR 0078）；其余异常照常上抛，由 tool runtime 统一落 tool_error。
+        from taifeng.loop.spawn import SpawnLimitError, SpawnRejectedError
+
+        try:
+            out = await coordinator.spawn_skill(
+                skill_id=skill_id, args=sub_args, reason=raw_reason
+            )
+        except SpawnRejectedError as rejected:
+            return await _rejected(
+                ctx, skill_id, rejected.reject_reason, path=list(rejected.path)
+            )
+        except SpawnLimitError as limited:
+            return await _rejected(
+                ctx, skill_id, limited.reject_reason,
+                limit_kind=limited.kind, limit=limited.limit,
+            )
         return ToolResult.ok(json.dumps(out, ensure_ascii=False))
 
     return ToolSpec(

@@ -38,6 +38,7 @@ from taifeng.loop.event import (
     SpawnSuspended,
 )
 from taifeng.loop.peer_mailbox import PeerMailbox
+from taifeng.loop.spawn import SpawnRejectedError
 from taifeng.loop.spawn_barrier import JoinBarrierCoordinator
 from taifeng.loop.spawn_handle import (
     SpawnDrivePlan,
@@ -139,10 +140,10 @@ class SpawnDriver:
         上的 detached ``asyncio.create_task`` 跑（非阻塞），登记句柄后立刻返回。
         后台 task（``_drive_spawn``）跑完后回写句柄状态并 emit 终态事件。
 
-        准入门控与 ``call_skill`` 一致（除 reject 分类细化留待后续 task）：
-          1. 目标 skill 必须存在（unknown_skill → ValueError）
-          2. ``DispatchPolicy.check``（深度 / 环 / 白名单 / 不可调 entry）→ 拒绝即抛错
-          3. K1 spawn 配额预留（``SpawnSlotRegistry`` 超限 → SpawnLimitError 上抛）
+        准入门控与 ``call_skill`` 一致，拒绝带稳定分类（``reject_reason``，ADR 0078）：
+          1. 目标 skill 必须存在（``SpawnRejectedError(unknown_skill)``）
+          2. ``DispatchPolicy.check``（深度 / 环 / 白名单）→ ``SpawnRejectedError(<reason>)``
+          3. K1 spawn 配额预留（``SpawnSlotRegistry`` 超限 → ``SpawnLimitError`` 上抛）
 
         Args:
             skill_id: 要分离发起的子 skill id（须在 entry skill 的 child_skills 白名单内）。
@@ -153,8 +154,7 @@ class SpawnDriver:
             ``{"handle_id": ..., "child_thread_id": ...}`` —— 立即可用于 ``spawn_status``。
 
         Raises:
-            ValueError: 目标 skill 不存在。
-            DispatchRejectedError 语义：派发被策略拒绝（此处直接抛 ValueError 带 reason）。
+            SpawnRejectedError: 目标 skill 不存在，或派发被策略拒绝（``ValueError`` 子类）。
             SpawnLimitError: K1 spawn 配额超限。
             RuntimeError: engine.run 尚未启动（根取消 token 未就绪）。
         """
@@ -165,7 +165,7 @@ class SpawnDriver:
         # 1. 目标 skill 必须存在
         target = eng._snapshot.get(skill_id)  # noqa: SLF001
         if target is None:
-            raise ValueError(f"unknown_skill: {skill_id}")
+            raise SpawnRejectedError("unknown_skill", skill_id=skill_id)
 
         # 2. DispatchPolicy 门控：以 entry skill 为唯一栈帧的调用栈做派发裁决
         from taifeng.skill.dispatch import CallStack
@@ -181,7 +181,9 @@ class SpawnDriver:
             allow_entry_target=True,
         )
         if not verdict.allowed:
-            raise ValueError(f"dispatch_rejected: {verdict.reason}")
+            raise SpawnRejectedError(
+                verdict.reason or "not_in_whitelist", skill_id=skill_id, path=verdict.path
+            )
 
         # spawn_skill 紧随 get_or_create 调用时可能 run() 尚未被调度 → 有界让步等待
         # 根取消 token 就绪（R4：分离 task 必须挂在根取消树上，不可凭空造游离 token）。
