@@ -14,6 +14,8 @@
 - 协商完成后每个请求（含 GET 推送流与关闭时的 DELETE）带 ``MCP-Protocol-Version: <协商版本>``；
 - GET 端点打开服务端推送流（接收 ``notifications/tools/list_changed`` 等），服务端不支持
   时回 405——此时不监听，工具只能在显式 ``sync`` 时刷新；
+- 本端请求超时 / 被取消而放弃时另发一次 POST 送 ``notifications/cancelled``——规范明言
+  断开连接不等于取消，要取消必须显式通知；
 - 关闭时 DELETE 结束会话（best-effort）。
 
 不含 OAuth：鉴权头由宿主通过 ``headers`` 注入（R1：内核不管凭据来源）。
@@ -29,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from taifeng.mcp.bridge import McpToolError
+from taifeng.mcp.cancellation import CancelNotifier, cancel_reason
 from taifeng.mcp.pagination import DEFAULT_MAX_LIST_PAGES, list_all_tools, validate_max_pages
 from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
 from taifeng.mcp.server_messages import ServerMessageRouter
@@ -116,6 +119,8 @@ class McpHttpClient:
             server_info=lambda: dict(self._server_info),
             elicitation_handler=elicitation_handler,
         )
+        # 放弃本端请求时的 notifications/cancelled 后台发送器（close 时收敛）
+        self._cancels = CancelNotifier(self._send_response)
 
     @classmethod
     async def connect(
@@ -177,24 +182,38 @@ class McpHttpClient:
         }
 
     async def _send_response(self, payload: dict[str, Any]) -> None:
-        """把对 server 请求的应答 POST 回端点（规范：server 接受则回 202 无 body）。"""
+        """把一条无需响应的消息（对 server 请求的应答 / 取消通知）POST 回端点。
+
+        规范：server 接受则回 202 无 body。
+        """
         await self._post(payload, expect_id=None)
 
     async def _post(self, payload: dict[str, Any], *, expect_id: int | None) -> Any:
-        """POST 一条 JSON-RPC 消息；``expect_id`` 为 None 表示通知（不等响应）。
+        """POST 一条 JSON-RPC 消息；``expect_id`` 为 None 表示通知 / 应答（不等响应）。
+
+        请求（``expect_id`` 非 None）因超时或被取消而放弃时，登记 ``notifications/cancelled``。
+        HTTP 无法确知 server 是否已收到请求体，放弃即通知——规范要求接收方忽略未知 id。
 
         Raises:
             McpToolError: HTTP 非 2xx、JSON-RPC error、超时、流结束仍无响应。
+            asyncio.CancelledError: 调用方取消（已登记取消通知）。
         """
         if self._closed:
             raise RuntimeError("client closed")
+        method = str(payload.get("method"))
         try:
             async with asyncio.timeout(self._timeout):
                 async with self._http.stream(
                         "POST", self._url, headers=self._headers(), json=payload) as resp:
                     return await self._read_response(resp, expect_id)
         except TimeoutError as e:
-            raise McpToolError(_TRANSPORT_ERROR, f"request timeout: {payload.get('method')}") from e
+            if expect_id is not None:
+                self._cancels.notify(expect_id, method, f"client timeout after {self._timeout:g}s")
+            raise McpToolError(_TRANSPORT_ERROR, f"request timeout: {method}") from e
+        except asyncio.CancelledError as e:
+            if expect_id is not None:
+                self._cancels.notify(expect_id, method, cancel_reason(e))
+            raise
         except httpx.TransportError as e:
             raise McpToolError(_TRANSPORT_ERROR, f"transport error: {type(e).__name__}") from e
 
@@ -317,7 +336,7 @@ class McpHttpClient:
         self._router.add_tools_changed_listener(listener)
 
     async def close(self) -> None:
-        """停止推送流、取消 server 请求的应答与监听任务、DELETE 结束会话（best-effort）。
+        """停止推送流、取消 server 请求的应答 / 监听任务与未发出的取消通知、DELETE 结束会话（best-effort）。
 
         在等用户的 elicitation handler 在这里被取消（不再 POST 任何应答）。
         """
@@ -325,6 +344,7 @@ class McpHttpClient:
             return
         self._closed = True
         await self._router.aclose()
+        await self._cancels.aclose()
         if self._listener_task is not None:
             self._listener_task.cancel()
             # 推送流任务的取消 / 异常属预期，由 gather 收集而非外抛

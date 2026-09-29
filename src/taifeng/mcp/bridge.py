@@ -20,6 +20,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from taifeng.mcp.cancellation import await_or_abandon
 from taifeng.mcp.content import McpContentError, convert_tool_result
 from taifeng.mcp.output_schema import (
     McpOutputSchemaError,
@@ -86,6 +87,8 @@ def _make_handler(
 ) -> Any:
     """构造调用远端工具的 handler（闭包绑定远端工具名与其 outputSchema）。
 
+    超时（``config.timeout_seconds``）→ ``mcp_timeout``；``ctx.cancel`` 取消 → 打断在飞调用后
+    抛 ``CancelledError``（运行时收敛为 cancelled）。两者都会让客户端发 ``notifications/cancelled``。
     结果投影见 ``convert_tool_result``：图片按 ``config.attach_images`` 进附件或占位；
     ``structuredContent`` 原对象进 ``data["structured_content"]``（保留 ``mcp_tool`` 键）。
     结果形状不合法 → 该次调用判错（``reason="mcp_invalid_content"``）；工具声明了
@@ -95,8 +98,11 @@ def _make_handler(
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:
-            result = await asyncio.wait_for(
-                client.call_tool(mcp_name, args), timeout=config.timeout_seconds)
+            # 超时或 turn 取消（ctx.cancel）时打断在飞调用，客户端据此向 server 发
+            # notifications/cancelled；token 取消以 CancelledError 交运行时收敛为 cancelled 结果
+            result = await await_or_abandon(
+                client.call_tool(mcp_name, args),
+                timeout_seconds=config.timeout_seconds, cancel=ctx.cancel)
         except McpToolError as e:
             return ToolResult.error(f"mcp_error: {e}", reason="mcp_error", code=e.code)
         except TimeoutError:
