@@ -22,6 +22,7 @@ from taifeng.context.compressor import (
 from taifeng.context.injection import InitialContextInjection
 from taifeng.context.memory import (
     CompositeMemoryStore,
+    ForgettableMemoryStore,
     MemoryStore,
     NullMemoryStore,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "CacheBreakEvent",
     "CacheBreakReason",
     "CompositeMemoryStore",
+    "ForgettableMemoryStore",
     "MemoryStore",
     "NullMemoryStore",
     "CompressionContext",
