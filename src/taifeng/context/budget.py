@@ -11,6 +11,11 @@
        每次采样成功后用 provider 回报的完整 prompt token 数建一个 ``TokenCalibration``
        锚点；此后估算 = 实测 prompt token + 锚点之后新增条目的本地估算。
        实测天然含 system prompt / 工具 schema / provider 模板开销，本地粗估看不到这些。
+
+输出预留（ADR 0043 / 0071）：窗口是输入 + 输出共用的，soft / hard 阈值按「窗口 - 输出预留」
+计算。本 turn 生效的预留 = max(``output_reserve_tokens``, entry skill 声明的
+``inference.max_output_tokens``)，由 ``ContextBudget.with_output_reserve`` 派生——TurnRunner
+的压缩触发、预算提示与发送前 hard 预检统一读这份生效预算。
 """
 
 from __future__ import annotations
@@ -246,6 +251,14 @@ def calibrated_history_tokens(
     return estimate(history) + calibration.overhead_tokens
 
 
+class OutputReserveExceedsWindowError(ValueError):
+    """声明的输出上限不小于上下文窗口：输入侧可用窗口为 0 / 负，任何请求都放不下。
+
+    由 ``ContextBudget.with_output_reserve`` 在派生本 turn 生效预算时抛出——TurnRunner 在第一次
+    判定预算时即失败（``turn_failed``），而不是带着失真的阈值继续跑到 provider 报超窗。
+    """
+
+
 @dataclass(frozen=True)
 class ContextBudget:
     """token 预算配置。
@@ -259,7 +272,8 @@ class ContextBudget:
             行为不变）；设值后超限在发送前抛 RequestTooLargeError 而非等 provider 4xx
         output_reserve_tokens: 为模型输出预留的 token 数。上下文窗口是输入 + 输出
             共用的，soft / hard 阈值按「窗口 - 预留」计算；0 = 不预留（默认，
-            行为不变）。典型取值 = 请求的 max_output_tokens。
+            行为不变）。它是**下限**：entry skill 声明了更大的 ``max_output_tokens`` 时，
+            该 turn 按声明值预留（见 ``with_output_reserve``）。
         max_tool_result_bytes: 单条工具结果文本进入历史前的 UTF-8 字节上限，超限保头尾、
             省中间并写明省略量；None = 不限。默认 128KiB（约 3–4 万 token）：防止 MCP /
             业务工具的超大输出一次吃掉大半窗口。配置了 OffloadStrategy 时不生效（大结果
@@ -287,6 +301,30 @@ class ContextBudget:
             raise ValueError(
                 "output_reserve_tokens must be < context_window, got "
                 f"{self.output_reserve_tokens} >= {self.context_window}")
+
+    def with_output_reserve(
+        self, max_output_tokens: int | None, *, source: str = "max_output_tokens",
+    ) -> ContextBudget:
+        """派生本次采样生效的预算：输出预留取 ``max(output_reserve_tokens, max_output_tokens)``。
+
+        未声明（None）或不大于既有预留时原样返回 ``self``——未声明 ``max_output_tokens`` 的
+        skill 与引入前完全一致。只放大预留、不缩小：业务显式配的预留是下限。
+
+        Args:
+            max_output_tokens: 本次采样请求的输出上限（通常是 entry skill 的
+                ``inference.max_output_tokens``）；None = 未声明。
+            source: 报错时说明上限来自哪里（如 ``skill 'x' inference.max_output_tokens``）。
+
+        Raises:
+            OutputReserveExceedsWindowError: ``max_output_tokens >= context_window``。
+        """
+        if max_output_tokens is None or max_output_tokens <= self.output_reserve_tokens:
+            return self
+        if max_output_tokens >= self.context_window:
+            raise OutputReserveExceedsWindowError(
+                f"{source} ({max_output_tokens}) must be < context_window "
+                f"({self.context_window}): no room left for the prompt")
+        return replace(self, output_reserve_tokens=max_output_tokens)
 
     @property
     def usable_input_window(self) -> int:

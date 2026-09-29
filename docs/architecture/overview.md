@@ -54,8 +54,9 @@ src/taifeng/
 │       │                 # core:   read_skill / call_skill（skill-as-context 范式）
 │       │                 # io:     file_io（read/write）/ shell / apply_patch
 │       │                 # net:    http_request（受 PermissionPolicy[scope=network] 审批）
-│       │                 # search: glob_search / grep_search（只读 pure；共用 search_walk 沙盒遍历）
-│       │                 # memory: memory（模型主动读写 K3 MemoryStore 的薄封装）
+│       │                 # search: glob_search / grep_search + grep_scan（只读 pure；共用 search_walk 沙盒遍历
+│       │                 #         与 gitignore 规则匹配）
+│       │                 # memory: memory（模型主动读写删 K3 MemoryStore 的薄封装；delete 需 ForgettableMemoryStore）
 │       │                 # bg:     background（run_in_background / wait_for_task）
 │       │                 # script: run_script（SKILL.md scripts 执行）
 │       └── ...           # 详见 docs/configurable-knobs.md §6

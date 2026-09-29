@@ -215,18 +215,16 @@ class TurnSample:
             )
 
         # G2b：发送前预检 —— 即便经过压缩，估算 token 仍超 hard limit 时 emit
-        # 非阻塞告警（估算偏粗，不据此拒发；供业务侧主动限流 / 排查 provider 400）
+        # 非阻塞告警（估算偏粗，不据此拒发；供业务侧主动限流 / 排查 provider 400）。
+        # 用生效预算：hard 阈值已扣除本次请求的 max_output_tokens 预留（ADR 0071）
         preflight_tokens = self.__sample_owner._history_token_estimate()
-        if self.__sample_owner.budget.is_hard_exceeded(preflight_tokens):
-            await self.__sample_owner._emit(
-                ContextBudgetExceeded(
-                    data={
-                        "token_estimate": preflight_tokens,
-                        "hard_limit": self.__sample_owner.budget.hard_limit,
-                        "context_window": self.__sample_owner.budget.context_window,
-                    }
-                )
-            )
+        budget = self.__sample_owner.effective_budget
+        if budget.is_hard_exceeded(preflight_tokens):
+            await self.__sample_owner._emit(ContextBudgetExceeded(data={
+                "token_estimate": preflight_tokens,
+                "hard_limit": budget.hard_limit,
+                "context_window": budget.context_window,
+            }))
 
         # G2b body-size 硬护栏：max_request_bytes 启用时，请求体超限在发送前
         # 直接抛 RequestTooLargeError（确定性字节数，无误判；比等 provider 4xx 快）。

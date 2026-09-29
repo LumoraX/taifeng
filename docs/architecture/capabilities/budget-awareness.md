@@ -46,7 +46,9 @@
 
 ### Requirement: 复用 `soft_limit` 阈值，穿越一次注一次（回落复位）
 
-- 不新增阈值配置；直接复用 `ContextBudget.soft_limit`（默认 `0.85 * context_window`）。
+- 不新增阈值配置；直接复用 `ContextBudget.soft_limit`（默认 `0.85 * context_window`）。取的是本 turn
+  **生效预算** `TurnRunner.effective_budget`（输出预留含 entry skill 的 `max_output_tokens`，ADR 0071），
+  `remaining_to_hard` 同理——与压缩触发同一阈值。
 - 一个「超 soft episode」内**至多注一条**（`_budget_notified` 标志），避免每轮刷新打断 cache。
 - 用量回落到 soft 以下 → 标志复位；再穿越 → 重新注一条。
 

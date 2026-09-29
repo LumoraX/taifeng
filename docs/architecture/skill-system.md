@@ -103,6 +103,13 @@ inference:
 顶层 entry 与经 `call_skill` 派发的子 turn 走同一条 `build_api_request` 路径，故父子各按自己的声明下发，互不继承。
 atomic 也可声明（它被派发时同样独立采样）；这与 `model` 不同，`model` 仍仅限 composite。
 
+`max_output_tokens` 还参与上下文预算（ADR 0071）：窗口由输入与输出共用，本 turn 生效的输出预留 =
+`max(ContextBudget.output_reserve_tokens, max_output_tokens)`，压缩触发、预算提示与发送前 hard 预检都按
+「窗口 − 生效预留」算 soft / hard。同样按 turn 的 entry skill 取值——`call_skill` 子 turn 与 detached spawn
+子 turn 各用各自的声明，不继承父的放大值。声明值 `>= context_window` 时该 turn 以
+`OutputReserveExceedsWindowError` 显式失败（加载期不知道窗口，只能在运行期判定）。详见
+[token-accounting-calibration](capabilities/token-accounting-calibration.md)。
+
 **校验（加载期 fail-fast）**：`inference` 非 mapping、含未知键（如拼错的 `temprature`）、`reasoning_effort` 不在枚举内、
 `temperature` 非数值或越界、`max_output_tokens` 非正整数（`true` 这类布尔值同样拒绝）→ `SkillValidationError`。
 provider 不支持的组合由 provider 显式报错（如 Anthropic 开 extended thinking 时拒绝自定义 temperature），内核不静默丢弃。

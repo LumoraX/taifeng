@@ -1,18 +1,21 @@
-"""memory —— 让模型主动检索 / 写入长期记忆的薄工具（opt-in 内置工具，ADR 0064）。
+"""memory —— 让模型主动检索 / 写入 / 删除长期记忆的薄工具（opt-in 内置工具，ADR 0064 / 0071）。
 
 定位：K3 ``MemoryStore`` 协议的**模型侧入口**。内核在每个 turn 前后被动调用
 ``prefetch`` / ``writeback``（page-in / 脏页写回）；本工具让模型在 turn 中途按自己的判断
-「查一下记忆」「把这条记下来」。读写**全部委托**注入的 ``MemoryStore``，内核不内置任何
+「查一下记忆」「把这条记下来」「把这条忘掉」。读写删**全部委托**注入的 store，内核不内置任何
 存储后端（ADR 0017 规则③）。
 
-动作集合只取协议已支持的：
+动作集合只取 store 实际支持的：
 
 | 动作 | 委托 | 说明 |
 | --- | --- | --- |
 | ``search`` | ``prefetch(query, thread_id=...)`` | 以模型给的 query 检索；返回文本按字符上限截断 |
 | ``save`` | ``writeback(thread_id=..., items=[<assistant_message>])`` | 写入一条模型撰写的要点 |
+| ``delete`` | ``forget(target, thread_id=...)`` | 仅当 store 实现 ``ForgettableMemoryStore`` |
 
-协议没有删除 / 更新语义，本工具也不提供（遗忘策略属于后端，见 ADR 0064）。
+``delete`` 的 ``target`` 是模型能表达的删除依据——search 结果里后端展示的记忆标识，或该条
+记忆的原文；如何解析由后端决定（见 ``ForgettableMemoryStore.forget``）。没有更新动作：
+「改一条记忆」= delete 旧的 + save 新的。
 
 ``save`` 写入的 item：``kind="assistant_message"``、``payload={"text": 要点, "model": ""}``、
 ``metadata={"source": "memory_tool", "call_id": <本次调用 id>}``——按 user/assistant 文本
@@ -27,7 +30,8 @@
     )
 
 只读知识库（继承 ``NullMemoryStore`` 仅覆写 prefetch）应传 ``actions=("search",)``：
-否则 ``save`` 会落到 no-op 的 writeback，模型以为记住了、实际什么都没存。
+否则 ``save`` 会落到 no-op 的 writeback，模型以为记住了、实际什么都没存。store 实现了
+``forget`` 但不想开放删除时，显式传 ``actions=("search", "save")``。
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Literal
 
+from taifeng.context.memory import ForgettableMemoryStore
 from taifeng.conversation.models import ResponseItem
 from taifeng.loop.cancellation import interrupt_on_cancel
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
@@ -47,13 +52,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MemoryAction = Literal["search", "save"]
-MEMORY_ACTIONS: tuple[MemoryAction, ...] = ("search", "save")
+MemoryAction = Literal["search", "save", "delete"]
+#: 全部已知动作；``delete`` 只在 store 实现 ``ForgettableMemoryStore`` 时可启用
+MEMORY_ACTIONS: tuple[MemoryAction, ...] = ("search", "save", "delete")
+
+#: 会改动后端的动作——启用任一即取最保守的副作用分类
+_WRITE_ACTIONS: frozenset[MemoryAction] = frozenset({"save", "delete"})
 
 #: save 写入 item 的 ``metadata["source"]`` 取值（后端据此识别模型主动记忆）
 MEMORY_TOOL_SOURCE = "memory_tool"
 
-#: 检索语句字符上限：防模型把整段上下文当 query 塞给后端
+#: 检索语句 / 删除依据的字符上限：防模型把整段上下文当参数塞给后端
 _MAX_QUERY_CHARS = 2000
 
 
@@ -95,18 +104,28 @@ async def _call_store[T](
     return on_ok(value)
 
 
-def _normalize_actions(actions: Sequence[MemoryAction]) -> tuple[MemoryAction, ...]:
-    """去重保序并校验动作集合。
+def _normalize_actions(
+    actions: Sequence[MemoryAction] | None, *, forgettable: bool,
+) -> tuple[MemoryAction, ...]:
+    """去重保序并校验动作集合；``None`` = 按 store 能力取缺省集合。
+
+    缺省集合：``search`` + ``save``，store 实现 ``ForgettableMemoryStore`` 时再加 ``delete``。
 
     Raises:
-        ValueError: 空集合或含协议不支持的动作。
+        ValueError: 空集合、含未知动作，或启用 ``delete`` 但 store 不支持删除。
     """
+    if actions is None:
+        return ("search", "save", "delete") if forgettable else ("search", "save")
     enabled = tuple(dict.fromkeys(actions))
     if not enabled:
         raise ValueError("actions must not be empty")
     unknown = [a for a in enabled if a not in MEMORY_ACTIONS]
     if unknown:
         raise ValueError(f"unsupported memory actions: {unknown} (supported: {MEMORY_ACTIONS})")
+    if "delete" in enabled and not forgettable:
+        raise ValueError(
+            "action 'delete' requires a store implementing ForgettableMemoryStore.forget"
+        )
     return enabled
 
 
@@ -121,6 +140,13 @@ def _schema(enabled: tuple[MemoryAction, ...]) -> dict[str, Any]:
         properties["content"] = {
             "type": "string",
             "description": "save 用：要长期记住的要点（自成一句，脱离上下文也能看懂）",
+        }
+    if "delete" in enabled:
+        properties["target"] = {
+            "type": "string",
+            "description": (
+                "delete 用：要删除的那条记忆——search 结果里显示的记忆标识，或该条记忆的原文"
+            ),
         }
     return {
         "type": "object",
@@ -140,6 +166,11 @@ def _description(enabled: tuple[MemoryAction, ...], max_result_chars: int) -> st
         )
     if "save" in enabled:
         parts.append("action=save + content：记下一条值得长期保留的要点（偏好、结论、约定）。")
+    if "delete" in enabled:
+        parts.append(
+            "action=delete + target：删除一条已过时或错误的记忆（target 用 search 结果里的"
+            "记忆标识或原文；不可撤销，返回实际删除条数）。"
+        )
     return "".join(parts)
 
 
@@ -201,10 +232,40 @@ async def _save(
     )
 
 
+def _render_delete(count: int) -> ToolResult:
+    """delete 结果渲染：0 条是正常结果（没有匹配）；非法计数视为后端契约违约，显式报错。"""
+    # store 是业务实现（系统边界）：计数必须是非负整数，bool 不算
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return ToolResult.error(
+            f"memory_error: delete failed: store returned invalid count {count!r}",
+            reason="memory_error",
+            action="delete",
+        )
+    if count == 0:
+        return ToolResult.ok(
+            "no matching memory found; nothing deleted", action="delete", deleted=0,
+        )
+    return ToolResult.ok(f"deleted {count} memory record(s)", action="delete", deleted=count)
+
+
+async def _delete(
+    store: ForgettableMemoryStore, args: dict[str, Any], ctx: ToolContext,
+) -> ToolResult:
+    """action=delete：校验 target 后委托 ``store.forget``（thread_id 取当前工具上下文）。"""
+    target = args.get("target")
+    if not isinstance(target, str) or not target.strip():
+        return _bad_args("delete requires a non-empty string `target`")
+    if len(target) > _MAX_QUERY_CHARS:
+        return _bad_args(f"target longer than {_MAX_QUERY_CHARS} chars")
+    return await _call_store(
+        ctx, "delete", lambda: store.forget(target, thread_id=ctx.thread_id), _render_delete,
+    )
+
+
 def make_memory_tool(
     store: MemoryStore,
     *,
-    actions: Sequence[MemoryAction] = MEMORY_ACTIONS,
+    actions: Sequence[MemoryAction] | None = None,
     max_result_chars: int = 4000,
     max_save_chars: int = 2000,
     timeout_seconds: float = 30.0,
@@ -213,7 +274,10 @@ def make_memory_tool(
 
     Args:
         store: 业务实现的 ``MemoryStore``；通常与 ``EnginePool.create(memory_store=)`` 同一实例。
-        actions: 启用的动作子集（``"search"`` / ``"save"``）；只读后端传 ``("search",)``。
+            实现了可选协议 ``ForgettableMemoryStore`` 时才可启用 ``delete``。
+        actions: 启用的动作子集（``"search"`` / ``"save"`` / ``"delete"``）；None（缺省）=
+            ``search`` + ``save``，store 可遗忘时再加 ``delete``。只读后端传 ``("search",)``；
+            store 可遗忘但不想开放删除传 ``("search", "save")``。
         max_result_chars: search 返回文本的字符上限（协议返回单段文本，没有条目概念，
             故上限按字符计）。
         max_save_chars: save 单条要点的字符上限；超出以 ``too_large`` 拒绝，不截断写入。
@@ -221,16 +285,24 @@ def make_memory_tool(
 
     Returns:
         ``ToolSpec(name="memory")``。副作用分类取**已启用动作中最保守**的一档：
-        含 save → ``parallel_safe=False`` / ``external_non_idempotent`` / ``manual``
-        （后端写入是否幂等内核无从得知，崩溃后交人裁决而不是引导重发）；
+        含 save 或 delete → ``parallel_safe=False`` / ``external_non_idempotent`` / ``manual``
+        （后端写入 / 删除是否幂等内核无从得知，崩溃后交人裁决而不是引导重发）；
         仅 search → ``parallel_safe=True`` / ``pure`` / ``none``。
 
     Raises:
-        ValueError: 动作集合为空或含未知动作；上限参数非正。
+        ValueError: 动作集合为空、含未知动作、启用 delete 但 store 不可遗忘；上限参数非正。
     """
-    enabled = _normalize_actions(actions)
+    forgetter = store if isinstance(store, ForgettableMemoryStore) else None
+    enabled = _normalize_actions(actions, forgettable=forgetter is not None)
     if min(max_result_chars, max_save_chars) <= 0:
         raise ValueError("max_result_chars / max_save_chars must be > 0")
+    # 动作 → 执行体；delete 只在 store 可遗忘时登记（_normalize_actions 已保证 enabled ⊆ ops）
+    ops: dict[str, Callable[[dict[str, Any], ToolContext], Awaitable[ToolResult]]] = {
+        "search": lambda a, c: _search(store, a, c, max_result_chars=max_result_chars),
+        "save": lambda a, c: _save(store, a, c, max_save_chars=max_save_chars),
+    }
+    if forgetter is not None:
+        ops["delete"] = lambda a, c: _delete(forgetter, a, c)
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         """按 action 分派；未启用的动作以 bad_args 拒绝。"""
@@ -239,11 +311,9 @@ def make_memory_tool(
             return _bad_args(f"action must be one of {list(enabled)}")
         if ctx.cancel.is_cancelled:
             return _cancelled(ctx)
-        if action == "search":
-            return await _search(store, args, ctx, max_result_chars=max_result_chars)
-        return await _save(store, args, ctx, max_save_chars=max_save_chars)
+        return await ops[action](args, ctx)
 
-    writes = "save" in enabled
+    writes = bool(_WRITE_ACTIONS.intersection(enabled))
     return ToolSpec(
         name="memory",
         description=_description(enabled, max_result_chars),

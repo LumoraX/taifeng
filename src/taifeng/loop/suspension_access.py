@@ -12,9 +12,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from taifeng.context.budget import ContextBudget
 from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
 from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.loop.event import EngineLog, EventMsg
@@ -26,6 +26,7 @@ from taifeng.tool.arg_validation import arguments_rejection
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
+    from taifeng.context.budget import ContextBudget
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
     from taifeng.loop.submission import CompactNow
@@ -292,6 +293,34 @@ class SuspensionAccess:
             self._engine._history.append(out)
         await self._engine._store.append(out)
 
+    def _compact_budget(self, op: CompactNow) -> ContextBudget:
+        """CompactNow 用的预算：op 带覆盖时在 engine budget 上 ``replace``，否则原样返回。
+
+        覆盖只改 soft 比例与尾部保留，其余字段（含输出预留）沿用 engine budget。
+        ``target_tokens`` 是绝对值：按 runner 生效的可用输入窗口折算比例，使生效 soft_limit
+        恰为 target（生效预留含 entry skill 的 max_output_tokens，ADR 0071）。
+
+        Raises:
+            OutputReserveExceedsWindowError: entry skill 声明的输出上限不小于窗口。
+        """
+        base = self._engine._budget
+        if op.target_tokens is None and op.preserve_tail is None:
+            return base
+        entry = self._engine._entry_skill
+        usable = base.with_output_reserve(
+            entry.inference.max_output_tokens,
+            source=f"skill {entry.id!r} inference.max_output_tokens",
+        ).usable_input_window
+        return replace(
+            base,
+            soft_limit_ratio=(
+                base.soft_limit_ratio if op.target_tokens is None else op.target_tokens / usable
+            ),
+            preserve_tail_messages=(
+                base.preserve_tail_messages if op.preserve_tail is None else op.preserve_tail
+            ),
+        )
+
     async def run_compact_now(
         self,
         submission_id: str,
@@ -312,24 +341,7 @@ class SuspensionAccess:
                 )
             )
             return
-        # 若 op 提供了临时 budget 覆盖，用临时 budget；否则用 engine budget
-        budget = self._engine._budget
-        if op.target_tokens is not None or op.preserve_tail is not None:
-            budget = ContextBudget(
-                context_window=self._engine._budget.context_window,
-                soft_limit_ratio=(
-                    op.target_tokens / max(self._engine._budget.context_window, 1)
-                    if op.target_tokens is not None
-                    else self._engine._budget.soft_limit_ratio
-                ),
-                hard_limit_ratio=self._engine._budget.hard_limit_ratio,
-                preserve_tail_messages=(
-                    op.preserve_tail
-                    if op.preserve_tail is not None
-                    else self._engine._budget.preserve_tail_messages
-                ),
-            )
-
+        budget = self._compact_budget(op)
         cancel = root_cancel.child(f"sub:{submission_id}")
         runner = TurnRunner(
             entry_skill=self._engine._entry_skill,

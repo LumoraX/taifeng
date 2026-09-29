@@ -1,7 +1,8 @@
 """token-accounting-calibration 单元测试 —— 实测锚点 + 增量粗估 / 输出预留。
 
 覆盖 ``TokenCalibration`` / ``build_token_calibration`` / ``calibrated_history_tokens``
-三档估算与 ``ContextBudget.output_reserve_tokens`` 的阈值与校验。
+三档估算与 ``ContextBudget.output_reserve_tokens`` 的阈值与校验，以及按 skill
+``max_output_tokens`` 派生生效预留的 ``with_output_reserve``（ADR 0071）。
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import pytest
 
 from taifeng.context.budget import (
     ContextBudget,
+    OutputReserveExceedsWindowError,
     TokenCalibration,
     build_token_calibration,
     calibrated_history_tokens,
@@ -108,3 +110,32 @@ def test_context_budget_invalid_reserve_raises(reserve: int) -> None:
     """预留为负或不小于窗口 → 构造期报错（阈值会失去意义）。"""
     with pytest.raises(ValueError, match="output_reserve_tokens"):
         ContextBudget(context_window=10_000, output_reserve_tokens=reserve)
+
+
+@pytest.mark.parametrize("declared", [None, 1_000, 2_000])
+def test_with_output_reserve_keeps_budget_when_not_larger(declared: int | None) -> None:
+    """未声明或不大于既有预留 → 原样返回同一实例（未声明时一切不变）。"""
+    budget = ContextBudget(context_window=10_000, output_reserve_tokens=2_000)
+    assert budget.with_output_reserve(declared) is budget
+
+
+def test_with_output_reserve_raises_reserve_and_limits() -> None:
+    """声明更大的输出上限 → 预留取声明值，soft / hard 随之收紧，其余字段不变。"""
+    budget = ContextBudget(
+        context_window=10_000, soft_limit_ratio=0.5, hard_limit_ratio=0.9,
+        preserve_tail_messages=7, max_request_bytes=1234, output_reserve_tokens=1_000)
+    eff = budget.with_output_reserve(4_000)
+    assert eff.output_reserve_tokens == 4_000
+    assert (eff.usable_input_window, eff.soft_limit, eff.hard_limit) == (6_000, 3_000, 5_400)
+    assert (eff.preserve_tail_messages, eff.max_request_bytes, eff.context_window) == (
+        7, 1234, 10_000)
+    assert budget.output_reserve_tokens == 1_000  # 原预算不被改写（frozen 派生）
+
+
+@pytest.mark.parametrize("declared", [10_000, 20_000])
+def test_with_output_reserve_rejects_reserve_not_below_window(declared: int) -> None:
+    """声明值不小于窗口 → 显式报错（ValueError 子类），错误里写明来源与数值。"""
+    budget = ContextBudget(context_window=10_000)
+    with pytest.raises(OutputReserveExceedsWindowError, match="skill 'x' .*10000"):
+        budget.with_output_reserve(declared, source="skill 'x' inference.max_output_tokens")
+    assert issubclass(OutputReserveExceedsWindowError, ValueError)

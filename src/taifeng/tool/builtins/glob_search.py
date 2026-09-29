@@ -6,6 +6,8 @@
     - 结果按路径逐段字典序排列（确定性；理由见 ``search_walk`` 模块说明与 ADR 0064），
       ``max_results`` 截断时在输出尾明确告知，且遍历提前停止
     - 只列文件（目录本身不作为结果）；输出路径相对沙盒根，可直接喂给 file_read
+    - ``respect_gitignore``（工厂参数，默认 True，ADR 0071）：按沙盒内 .gitignore 跳过路径，
+      跳过数量在尾注告知；语义与不支持的语法见 ``gitignore`` 模块
     - 沙盒 / 符号链接 / 权限 / 取消语义见 ``search_walk``；``parallel_safe=True``、``pure``
 """
 
@@ -45,6 +47,7 @@ class _GlobRun:
     matcher: GlobMatcher
     max_results: int
     exclude_dirs: frozenset[str]
+    gitignore: bool
     hits: list[str] = field(default_factory=list)
     truncated: bool = False
     stats: WalkStats = field(default_factory=WalkStats)
@@ -57,7 +60,7 @@ class _GlobRun:
         """
         files = iter_files(
             base, root=self.root, exclude_dirs=self.exclude_dirs,
-            should_stop=should_stop, stats=self.stats,
+            should_stop=should_stop, stats=self.stats, gitignore=self.gitignore,
         )
         for path in files:
             if not self.matcher.matches(path.relative_to(base).parts):
@@ -82,6 +85,8 @@ def _render(run: _GlobRun) -> ToolResult:
         count=len(run.hits),
         truncated=run.truncated,
         skipped_symlinks=run.stats.skipped_symlinks,
+        skipped_ignored=run.stats.skipped_ignored,
+        gitignore_unsupported=run.stats.gitignore_unsupported,
         unreadable=run.stats.unreadable,
     )
 
@@ -125,6 +130,7 @@ def make_glob_tool(
     policy: PermissionPolicy | None = None,
     max_results: int = 200,
     exclude_dirs: frozenset[str] = DEFAULT_SEARCH_EXCLUDE_DIRS,
+    respect_gitignore: bool = True,
     timeout_seconds: float = 30.0,
 ) -> ToolSpec:
     """构造 glob 工具（opt-in：经 ``EnginePool.create(extra_tools=[...])`` 注册）。
@@ -134,6 +140,8 @@ def make_glob_tool(
         policy: 可选权限策略；每次调用以 ``scope="file_read"``、target=基点绝对路径审批一次。
         max_results: 结果条数上限；超出截断并在输出尾告知。
         exclude_dirs: 不下探的目录名集合（默认 ``DEFAULT_SEARCH_EXCLUDE_DIRS``）。
+        respect_gitignore: 按沙盒内的 .gitignore 跳过路径（默认 True，理由见 ADR 0071）；
+            跳过数量在尾注告知，显式指定的搜索基点自身不受影响。
         timeout_seconds: 单次调用超时（ToolSpec 级，超时由 runtime 统一处理）。
 
     Raises:
@@ -165,6 +173,7 @@ def make_glob_tool(
             return ToolResult.error(f"not_a_directory: {rel}", reason="not_found")
         run = _GlobRun(
             root=root, matcher=matcher, max_results=max_results, exclude_dirs=exclude_dirs,
+            gitignore=respect_gitignore,
         )
         try:
             await run_in_worker(lambda stop: run.run(base, stop), ctx.cancel)
@@ -180,7 +189,8 @@ def make_glob_tool(
             f"在沙盒（root={root}）内按 glob 模式列出文件，纯只读。模式相对搜索基点："
             "*.py 只匹配基点这一层，递归用 **/*.py；支持 ? [...] {a,b}，大小写敏感。"
             f"结果按路径排序，最多 {max_results} 条（超出会截断并提示收窄条件）；"
-            "路径相对沙盒根，可直接用于 file_read。"
+            + ("遵循 .gitignore（被忽略的路径跳过并告知）；" if respect_gitignore else "")
+            + "路径相对沙盒根，可直接用于 file_read。"
         ),
         input_schema=_SCHEMA,
         handler=handler,
