@@ -245,21 +245,24 @@ class TurnContextLoad:
         R1：只陈述客观事实，不含「该不该收敛」的产品意见——怎么做交给模型/业务侧。
         """
         tokens = self.__ctxload_owner._history_token_estimate()
+        # 生效预算（输出预留含 entry skill 的 max_output_tokens，ADR 0071）：soft 穿越判定与
+        # 「距 hard 还剩多少」都按它算，与压缩触发同一口径
+        budget = self.__ctxload_owner.effective_budget
         inject, self.__ctxload_owner._budget_notified = evaluate_budget_hint(
-            tokens, self.__ctxload_owner.budget, was_notified=self.__ctxload_owner._budget_notified)
+            tokens, budget, was_notified=self.__ctxload_owner._budget_notified)
         if not inject:
             return
         from taifeng.conversation.models import system_injection
 
         note = system_injection(
-            render_budget_hint(tokens, self.__ctxload_owner.budget),
+            render_budget_hint(tokens, budget),
             thread_id=self.__ctxload_owner.thread_id, source="budget_hint")
         self.__ctxload_owner.history_buffer.append(note)
         await self.__ctxload_owner.store.append(note)
-        window = self.__ctxload_owner.budget.context_window
+        window = budget.context_window
         await self.__ctxload_owner._emit(BudgetHintInjected(data={
             "used": tokens,
             "context_window": window,
             "ratio": round(tokens / window, 2) if window > 0 else 0.0,
-            "remaining_to_hard": max(0, self.__ctxload_owner.budget.hard_limit - tokens),
+            "remaining_to_hard": max(0, budget.hard_limit - tokens),
         }))

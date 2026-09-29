@@ -336,6 +336,13 @@ class TurnRunner:
         self._persist = TurnPersist(self)
         self._guards = TurnGuards(self)
 
+    @property
+    def effective_budget(self) -> ContextBudget:
+        """本 turn 生效预算：输出预留 = max(budget 预留, entry skill max_output_tokens)（ADR 0071）。"""
+        return self.budget.with_output_reserve(
+            self.entry_skill.inference.max_output_tokens,
+            source=f"skill {self.entry_skill.id!r} inference.max_output_tokens")
+
     async def _emit(self, msg: Any) -> None:
         try:
             await self.emit(EventMsg(submission_id=self.submission_id, msg=msg))

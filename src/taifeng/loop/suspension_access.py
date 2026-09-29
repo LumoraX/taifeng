@@ -12,9 +12,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from taifeng.context.budget import ContextBudget
 from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
 from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.loop.event import EngineLog, EventMsg
@@ -312,21 +312,28 @@ class SuspensionAccess:
                 )
             )
             return
-        # 若 op 提供了临时 budget 覆盖，用临时 budget；否则用 engine budget
-        budget = self._engine._budget
+        # 若 op 提供了临时 budget 覆盖，用临时 budget；否则用 engine budget。
+        # 覆盖只改 soft 比例与尾部保留，其余字段（含输出预留）沿用 engine budget
+        base = self._engine._budget
+        budget = base
         if op.target_tokens is not None or op.preserve_tail is not None:
-            budget = ContextBudget(
-                context_window=self._engine._budget.context_window,
+            # target_tokens 是绝对值：按 runner 生效的可用输入窗口折算比例，让 soft_limit
+            # 恰为 target（生效预留含 entry skill 的 max_output_tokens，ADR 0071）
+            usable = base.with_output_reserve(
+                self._engine._entry_skill.inference.max_output_tokens,
+                source=f"skill {self._engine._entry_skill.id!r} inference.max_output_tokens",
+            ).usable_input_window
+            budget = replace(
+                base,
                 soft_limit_ratio=(
-                    op.target_tokens / max(self._engine._budget.context_window, 1)
+                    op.target_tokens / usable
                     if op.target_tokens is not None
-                    else self._engine._budget.soft_limit_ratio
+                    else base.soft_limit_ratio
                 ),
-                hard_limit_ratio=self._engine._budget.hard_limit_ratio,
                 preserve_tail_messages=(
                     op.preserve_tail
                     if op.preserve_tail is not None
-                    else self._engine._budget.preserve_tail_messages
+                    else base.preserve_tail_messages
                 ),
             )
 

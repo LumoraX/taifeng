@@ -6,6 +6,7 @@
 
 from taifeng.context.budget import (
     ContextBudget,
+    OutputReserveExceedsWindowError,
     estimate_history_tokens,
     estimate_item_tokens,
     estimate_text_tokens,
@@ -54,6 +55,7 @@ __all__ = [
     "HandoffCompactionStrategy",
     "InitialContextInjection",
     "OffloadStrategy",
+    "OutputReserveExceedsWindowError",
     "PinnedStateRegistry",
     "PinnedStateSource",
     "PromptCacheStats",

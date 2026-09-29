@@ -62,11 +62,11 @@ class TurnCompaction:
         if self.__compaction_owner.compressors is None:
             return False
         tokens = self.__compaction_owner._history_token_estimate()
-        if not force:
-            if phase == "pre_turn" and not self.__compaction_owner.budget.is_soft_exceeded(tokens):
-                return False
-            if phase == "mid_turn" and not self.__compaction_owner.budget.is_soft_exceeded(tokens):
-                return False
+        # 生效预算：输出预留已按 entry skill 的 max_output_tokens 放大（ADR 0071），
+        # 阈值判定与交给策略的 CompressionContext 用同一份
+        budget = self.__compaction_owner.effective_budget
+        if not force and phase in ("pre_turn", "mid_turn") and not budget.is_soft_exceeded(tokens):
+            return False
 
         # === pre_compact hook ===
         # 业务侧拦截点：在 strategy 执行前可拒绝本轮压缩。
@@ -109,7 +109,7 @@ class TurnCompaction:
         ctx = CompressionContext(
             history=list(self.__compaction_owner.history_buffer),
             token_estimate=tokens,
-            budget=self.__compaction_owner.budget,
+            budget=budget,
             cache_anchor_index=self.__compaction_owner.cache_anchor_index,
             phase=phase,  # type: ignore[arg-type]
             available_injections=frozenset({injection}),
