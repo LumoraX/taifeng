@@ -64,7 +64,8 @@ class TodoStore:
             return None
         lines = [f"{_STATUS_MARK[i['status']]} {i['content']}"
                  for i in self._items]
-        return "## 任务清单\n" + "\n".join(lines)
+        # 标明「最新状态」：周期重注与对话里早先的 todo_write 输出并存时，模型据此判断以哪份为准
+        return "## 任务清单（最新状态，以此为准）\n" + "\n".join(lines)
 
 
 def make_todo_write_tool(store: TodoStore) -> ToolSpec:

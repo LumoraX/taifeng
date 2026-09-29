@@ -13,13 +13,14 @@
 本脚本扮演 host 角色：
 
     - 父进程 spawn ``taifeng mcp serve ... --enable-hitl``
+    - initialize 时声明 ``elicitation`` 能力（server 只向声明了该能力的客户端发审批请求）
     - 同时监听子进程 stdout：识别 server-initiated request → 模拟用户决策
     - 调一次 tools/call run_skill_turn，让 server 内部触发 PermissionPolicy.check
 
-运行（用 mock LLM 走真实 dispatch；不依赖外部 API）：
+运行（需要真实 LLM key，脚本自读 .env 的 LLM_BOOTSTRAP_*）：
 
     cd taifeng
-    PYTHONPATH=src uv run python examples/mcp_server_hitl_e2e.py
+    PYTHONPATH=src uv run python examples/mcp_hitl/demo.py
 
 输出中你会看到：
 
@@ -145,6 +146,12 @@ class HostSimulator:
             print(f"  ← unknown server message: method={method} id={req_id}",
                   flush=True)
 
+    async def notify(self, method: str) -> None:
+        """父进程发一条 JSON-RPC 通知（无 id、无响应）。"""
+        line = (json.dumps({"jsonrpc": "2.0", "method": method}) + "\n").encode("utf-8")
+        self._stdin.write(line)
+        await self._stdin.drain()
+
     async def call(
         self, method: str, params: dict[str, Any] | None = None,
         *, timeout_s: float = 120.0,   # noqa: ASYNC109
@@ -238,12 +245,21 @@ async def main() -> int:
 
     try:
         print("\n=== 1) initialize ===", flush=True)
+        # host 必须在 initialize 声明 elicitation 能力：server 只向声明了该能力的客户端发
+        # elicitation/create（MCP 2025-06-18：只能使用协商成功的能力）；不声明则审批一律
+        # fail-closed 判 deny（reason=elicitation_unsupported: ...）
         resp = await host.call(
             "initialize",
-            {"protocolVersion": "2024-11-05", "capabilities": {}},
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"elicitation": {}},
+                "clientInfo": {"name": "hitl-demo-host", "version": "0"},
+            },
         )
         info = resp.get("result", {})
-        print(f"     server: {info.get('serverInfo')}", flush=True)
+        print(f"     server: {info.get('serverInfo')}  "
+              f"protocol={info.get('protocolVersion')}", flush=True)
+        await host.notify("notifications/initialized")
 
         print("\n=== 2) tools/call run_skill_turn (HITL: PermissionPolicy=ask) ===",
               flush=True)

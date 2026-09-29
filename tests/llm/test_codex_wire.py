@@ -94,8 +94,11 @@ def test_codex_uses_top_level_instructions_and_ordered_list_input() -> None:
     assert payload["input"][3]["type"] == "function_call_output"
 
 
-def test_codex_folds_runtime_system_items_into_top_level_instructions() -> None:
-    """budget/memory/compaction 等动态 system item 走 instructions，不落 input。"""
+def test_codex_keeps_runtime_system_items_in_place_as_tagged_user_messages() -> None:
+    """budget/memory/compaction 等中段 system item 原位改写为带标签 user 消息，instructions 只含 system prompt。
+
+    ADR 0072：折叠进 instructions 会丢位置（尾部注记跑到对话之前）并每次改写缓存前缀。
+    """
     request = ApiRequest(
         model="gpt-5.6-luna",
         system_prompt=["base"],
@@ -108,8 +111,23 @@ def test_codex_folds_runtime_system_items_into_top_level_instructions() -> None:
 
     payload = build_codex_payload(request, default_model="fallback")
 
-    assert payload["instructions"] == "base\n\nruntime budget hint"
-    assert [item["role"] for item in payload["input"]] == ["user", "assistant"]
+    assert payload["instructions"] == "base"
+    assert [item["role"] for item in payload["input"]] == ["user", "user", "assistant"]
+    note = payload["input"][1]["content"][0]
+    assert note["type"] == "input_text"
+    assert note["text"] == "<system-reminder>\nruntime budget hint\n</system-reminder>"
+
+
+def test_codex_instructions_stable_across_injected_notes() -> None:
+    """注入中段注记不改变 instructions（缓存前缀稳定）。"""
+    base = [ApiMessageItem(role="user", content="q")]
+    plain = build_codex_payload(
+        ApiRequest(model="m", system_prompt=["base"], input_items=base), default_model="f")
+    noted = build_codex_payload(ApiRequest(
+        model="m", system_prompt=["base"],
+        input_items=[*base, ApiMessageItem(role="system", content="pinned todo")]), default_model="f")
+    assert plain["instructions"] == noted["instructions"] == "base"
+    assert noted["input"][: len(plain["input"])] == plain["input"]
 
 
 def test_codex_omits_empty_instructions_and_maps_tools_and_format() -> None:

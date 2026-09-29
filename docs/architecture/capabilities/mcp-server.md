@@ -43,6 +43,10 @@ SHALL 原样回；否则（含缺失、非字符串）SHALL 回 `LATEST_PROTOCOL
 断开——initialize 不以 JSON-RPC 错误拒绝版本（规范 lifecycle）。`server.MCP_PROTOCOL_VERSION` 为
 `LATEST_PROTOCOL_VERSION` 的别名。
 
+initialize 时 server SHALL 记下客户端声明的 `params.capabilities`（非对象按「未声明任何能力」），经只读属性
+`McpStdioServer.client_capabilities`（副本；尚未 initialize 为 `None`）暴露，供 server → client 请求门控（见
+「Server-initiated request 只用协商成功的客户端能力」）。
+
 #### Scenario: initialize 返回标准 handshake
 - **WHEN** MCP 客户端发送 `{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", ...}}`
 - **THEN** server SHALL 返回 result 含 `protocolVersion="2025-03-26"`、`serverInfo.name=server_name`、`capabilities.tools` / `capabilities.resources` 字段
@@ -209,6 +213,30 @@ SHALL 原样回；否则（含缺失、非字符串）SHALL 回 `LATEST_PROTOCOL
 - **AND** `_pending_outgoing` SHALL 不再含该 id
 - **AND** 后续 stdin 若收到该 id 的迟到 response，SHALL 仅 log warning 不崩溃
 
+### Requirement: Server-initiated request 只用协商成功的客户端能力
+
+规范 lifecycle：运行期双方 MUST 只使用协商成功的能力；elicitation 章节：支持它的客户端 MUST 声明
+`capabilities.elicitation`。`server_initiated_request` SHALL 在写出请求**之前**按方法查所需的客户端能力
+（`server_capabilities.REQUIRED_CLIENT_CAPABILITY`：`elicitation/create` → `elicitation`、`sampling/createMessage` →
+`sampling`、`roots/list` → `roots`；`ping` 等不需要能力）。能力项须为 JSON 对象才算声明；缺失（含尚未 initialize）时 SHALL：
+
+1. SHALL NOT 写出该请求；
+2. emit `elicitation_unsupported`：`data = {"method": <str>, "capability": <str>, "initialized": <bool>}`
+   （不再 emit `elicitation_started` / `elicitation_completed`——没有请求发出）；
+3. 抛 `McpClientCapabilityError`（`method` / `capability` / `initialized` 属性）。
+
+`McpPrompter` SHALL 把该错误按 fail-closed 判 `PermissionDecision.deny(reason="elicitation_unsupported: <说明>")`，
+立即返回而非等超时（见 [permission-gate](permission-gate.md)）。
+
+#### Scenario: 客户端未声明 elicitation
+- **WHEN** 客户端 initialize 的 `capabilities` 不含 `elicitation`，turn 内工具触发 `McpPrompter.prompt`
+- **THEN** stdout 上 SHALL NOT 出现 `elicitation/create`；审批立即 deny，reason 以 `elicitation_unsupported:` 开头；
+  emit `elicitation_unsupported(initialized=True)`
+
+#### Scenario: 尚未 initialize
+- **WHEN** 客户端未发 initialize 就触发审批
+- **THEN** 同上，`initialized=False`
+
 ### Requirement: stdin 路由区分 incoming request / incoming response
 
 `McpStdioServer._handle_line` SHALL 区分三种 incoming JSON-RPC 消息：
@@ -256,11 +284,12 @@ SHALL 原样回；否则（含缺失、非字符串）SHALL 回 `LATEST_PROTOCOL
 
 ### Requirement: Telemetry 事件覆盖 elicitation 生命周期
 
-`McpStdioServer` SHALL 在 `server_initiated_request` 内部 emit 3 个新 EventMsg kind：
+`McpStdioServer` SHALL 在 `server_initiated_request` 内部 emit 4 个 EventMsg kind：
 
 - `elicitation_started`：`data = {"method": <str>, "id": <str>, "params_preview": <truncated str ≤200>}`
 - `elicitation_completed`：`data = {"method": <str>, "id": <str>, "duration_ms": <int>, "outcome": "ok|timeout|cancelled|error"}`
 - `elicitation_timed_out`：`data = {"method": <str>, "id": <str>, "timeout": <float>}`
+- `elicitation_unsupported`：`data = {"method": <str>, "capability": <str>, "initialized": <bool>}`——客户端未声明所需能力，请求未发出
 
 业务侧通过构造 `McpStdioServer(pool, emit=<async callable>)` 注入 emit 回调；为 `None` 时 SHALL 走 logger.info（不 raise）。
 
@@ -272,3 +301,15 @@ SHALL 原样回；否则（含缺失、非字符串）SHALL 回 `LATEST_PROTOCOL
 - **WHEN** elicitation 超时
 - **THEN** SHALL emit `elicitation_started` → `elicitation_timed_out` → `elicitation_completed(outcome="timeout")`
 
+#### Scenario: 客户端能力缺失只 emit elicitation_unsupported
+- **WHEN** 所需客户端能力未声明（见「Server-initiated request 只用协商成功的客户端能力」）
+- **THEN** SHALL 只 emit `elicitation_unsupported`，不 emit started / completed
+
+## 能力边界（如实记录）
+
+- 只有 stdio 传输；不支持 streamable HTTP server、`prompts/*`、`sampling/createMessage`（server 反向调客户端 LLM）、
+  `roots/list`、OAuth——ADR 0017 规则④（产品面，内核无机制缺口）；门控表已含 sampling / roots，将来若发起这两类请求自动受约束。
+- 不向客户端发 `notifications/tools/list_changed`（meta-tool 恒为 `run_skill_turn`）；`tools/list` 不分页（单工具）。
+- 不处理客户端发来的 `notifications/cancelled`：在飞的 `tools/call` turn 不会因此中止（按规范 MAY 忽略），仍以
+  `_TURN_WAIT_TIMEOUT_SECONDS` 与 `run()` 退出时的收敛兜底。
+- 不因「未收到 `notifications/initialized`」拦截 server 请求（规范为 SHOULD NOT）；只按 initialize 声明的能力门控。

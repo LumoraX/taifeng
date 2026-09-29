@@ -15,6 +15,7 @@ import pytest
 
 from taifeng.mcp.server import McpStdioServer
 from tests.conftest import GUARD_TIMEOUT_SECONDS, wait_for_condition
+from tests.mcp.server_handshake import ELICITATION, negotiate
 
 
 def _make_pipe() -> tuple[asyncio.StreamReader, asyncio.StreamWriter, list[bytes]]:
@@ -58,6 +59,7 @@ async def test_success_emits_started_then_completed() -> None:
         lambda: server._stdout is not None,
         message="server.run 未在守卫期限内 bind _stdout",
     )
+    await negotiate(reader, written, ELICITATION)
 
     async def respond() -> None:
         await wait_for_condition(
@@ -103,12 +105,13 @@ async def test_timeout_emits_started_then_timed_out_then_completed_timeout() -> 
 
     pool = MagicMock()
     server = McpStdioServer(pool, emit=emit)
-    reader, writer, _written = _make_pipe()
+    reader, writer, written = _make_pipe()
     task = asyncio.create_task(server.run(stdin=reader, stdout=writer))
     await wait_for_condition(
         lambda: server._stdout is not None,
         message="server.run 未在守卫期限内 bind _stdout",
     )
+    await negotiate(reader, written, ELICITATION)
 
     with pytest.raises(TimeoutError):
         await server.server_initiated_request(

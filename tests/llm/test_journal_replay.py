@@ -9,6 +9,7 @@ import pytest
 import taifeng
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.llm.audit import AttemptObservableClientAdapter
+from taifeng.llm.client import ModelCapabilities
 from taifeng.llm.providers.replay import (
     JournalReplayClient,
     RecordedCall,
@@ -92,13 +93,42 @@ async def test_replay_detects_divergence(tmp_path: Path, skills_dir: Path) -> No
 
 def _call(items: tuple[dict[str, Any], ...], status: str = "complete") -> RecordedCall:
     return RecordedCall(request_record_id="r1", provider="p", model="m", digest="d" * 64,
-                        status=status, normalized_items=items, usage={})
+                        status=status, normalized_items=items, usage={},
+                        api_request_safe={"input_items": []})
 
 
-def test_responses_protocol_recording_rejected() -> None:
-    """Responses 协议 normalized item（type=message 等）→ 构造期拒绝。"""
-    with pytest.raises(ReplayUnsupportedError, match="chat-protocol"):
+def test_malformed_recorded_items_rejected() -> None:
+    """既非 Chat kind、也不是合法 Responses terminal item 的录制 → 构造期拒绝。"""
+    with pytest.raises(ReplayUnsupportedError, match="unrecognized output items"):
         JournalReplayClient([_call(({"type": "message", "content": []},))])
+
+
+def test_refusal_item_rejected() -> None:
+    """refusal 不进入 durable history，出现在录制里即录制损坏。"""
+    refusal = {"type": "refusal", "output_index": 0, "text": "no"}
+    with pytest.raises(ReplayUnsupportedError, match="refusal"):
+        JournalReplayClient([_call((refusal,))])
+
+
+def test_mixed_protocol_recording_rejected() -> None:
+    """同一录制混杂 Chat 与 Responses 输出项 → 构造期拒绝。"""
+    chat = _call(({"kind": "assistant", "text": "hi"},))
+    responses = _call(({"type": "message", "output_index": 0, "text": "hi"},))
+    with pytest.raises(ReplayUnsupportedError, match="mixes"):
+        JournalReplayClient([chat, responses])
+
+
+def test_capabilities_protocol_must_match_recording() -> None:
+    """显式声明的协议与录制不符 → 构造期拒绝；一致时沿用调用方声明。"""
+    responses = _call(({"type": "message", "output_index": 0, "text": "hi"},))
+    chat_caps = ModelCapabilities(input_modalities=frozenset({"text"}), provider="x",
+                                  protocol="chat")
+    with pytest.raises(ReplayUnsupportedError, match="declare"):
+        JournalReplayClient([responses], capabilities=chat_caps)
+
+    client = JournalReplayClient([responses])
+    assert client.capabilities.protocol == "responses"
+    assert client.capabilities.accepts_provider_state is True
 
 
 def test_unknown_request_raises_divergence() -> None:

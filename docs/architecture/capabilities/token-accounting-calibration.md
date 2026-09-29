@@ -13,7 +13,8 @@
 opencode `session/overflow.ts`（按真实 tokens 判断并扣输出预留）。决策：ADR 0043。
 
 实现：`context/budget.py`（`TokenCalibration` / `build_token_calibration` /
-`calibrated_history_tokens` / `ContextBudget.output_reserve_tokens`）、
+`calibrated_history_tokens` / `ContextBudget.output_reserve_tokens` / `ContextBudget.with_output_reserve`）、
+`loop/turn.py`（`TurnRunner.effective_budget`）、
 `loop/turn_context.py`（`history_token_estimate` / `calibrate_from_usage`）、
 `loop/turn_sample.py`（采样成功后建锚点）、`loop/turn_compaction.py`（压缩改写前缀时失效）、
 `llm/providers/_shared.py`（`extract_usage_anthropic` 口径归一）。
@@ -48,6 +49,22 @@ opencode `session/overflow.ts`（按真实 tokens 判断并扣输出预留）。
 为模型输出预留的 token。`usable_input_window = context_window - output_reserve_tokens`；
 `soft_limit` / `hard_limit` 按 `usable_input_window × ratio` 计算。默认 0（阈值与引入前一致）。
 构造期校验：`< 0` 或 `>= context_window` → `ValueError`。可经 `UpdateBudget(output_reserve_tokens=...)` 运行时调整。
+它是**下限**：entry skill 声明了更大的 `inference.max_output_tokens` 时，该 turn 按声明值预留（见下）。
+
+### `ContextBudget.with_output_reserve(max_output_tokens, *, source="max_output_tokens") -> ContextBudget`
+
+派生本次采样生效的预算（ADR 0071）：
+
+- `max_output_tokens is None` 或 `<= output_reserve_tokens` → 原样返回 `self`（同一实例）；
+- 否则 → `replace(self, output_reserve_tokens=max_output_tokens)`，其余字段不变；
+- `max_output_tokens >= context_window` → 抛 `OutputReserveExceedsWindowError`（`ValueError` 子类，
+  消息含 `source` 与两个数值；从 `taifeng.context` 导出）。
+
+### `TurnRunner.effective_budget`（只读属性）
+
+`budget.with_output_reserve(entry_skill.inference.max_output_tokens, source="skill '<id>' inference.max_output_tokens")`。
+每个 runner 按**自己的** entry skill 派生：根 turn、`call_skill` 子 turn、detached spawn 子 turn、
+子 thread 续跑、CompactNow runner 各自独立。`TurnRunner.budget` 保持配置值，派生子 runner 时原样传递。
 
 ## 行为契约
 
@@ -83,6 +100,28 @@ tail 部分本就按粗估重算。
 压缩触发（`TurnCompaction`）、预算提示（budget-awareness）、发送前预检（`ContextBudgetExceeded`）、
 `engine.estimate_tokens()` / `usage_ratio()` / `introspect()` SHALL 走同一 `calibrated_history_tokens`。
 
+### Requirement: 阈值判定用本 turn 生效的输出预留
+
+TurnRunner 内所有依赖 usable window / soft / hard 的判定 SHALL 读 `effective_budget`：pre-turn / mid-turn
+压缩的 soft 预检与交给策略的 `CompressionContext.budget`（overflow / manual 路径同样）、预算提示的穿越判定与
+`remaining_to_hard`、发送前 hard 预检 `context_budget_exceeded.hard_limit`。`CompactNow(target_tokens=T)`
+的临时预算 SHALL 以 `replace` 保留配置预算的其余字段，`soft_limit_ratio = T / 生效 usable_input_window`，
+使生效 soft_limit 仍为 T。`engine.usage_ratio()` / `introspect()["context_window"]` 是「用量 / 原始窗口」的
+观测值，不是阈值判定，不受预留影响。
+
+#### Scenario: 声明的输出上限收紧阈值
+- **WHEN** 预算 `context_window=4000, soft=0.5, hard=0.95`，entry skill 声明 `max_output_tokens: 2000`，实测 prompt 1950
+- **THEN** 生效 soft=1000、hard=1900：pre-turn 压缩被咨询、注预算提示、`context_budget_exceeded.hard_limit == 1900`；
+  未声明时 soft=2000 / hard=3800，三者都不发生
+
+#### Scenario: 子 turn 各用各自的声明
+- **WHEN** 父 entry 未声明、`call_skill` 派发的子 skill 声明 `max_output_tokens: 3000`（或反之）
+- **THEN** 子 turn 的判定按 3000 预留，父 turn 前后仍按 0（反之亦然）；detached spawn 子 turn 同理
+
+#### Scenario: 预留不小于窗口
+- **WHEN** entry skill 声明 `max_output_tokens: 4000`，`context_window=4000`
+- **THEN** turn SHALL 以 `turn_failed{kind="OutputReserveExceedsWindowError"}` 结束，且不发任何 LLM 请求
+
 ### Requirement: 跨 turn 携带、跨进程不携带
 
 Engine 持有 `_token_calibration`，每个根 turn / CompactNow runner 注入并在收尾读回（与
@@ -91,7 +130,7 @@ Engine 持有 `_token_calibration`，每个根 turn / CompactNow runner 注入�
 
 ## R1–R5 影响
 
-- R1：无业务概念；预留值是业务注入的策略。
+- R1：无业务概念；预留值是业务注入的策略（`ContextBudget`）与 skill 自己的声明（`inference`）。
 - R2：只读 usage，不改 prompt；无 cache 影响。
 - R3：估算值随既有 `budget_hint_injected` / `context_budget_exceeded` / `compaction_started` 事件透出。
 - R4：纯计算，无阻塞。

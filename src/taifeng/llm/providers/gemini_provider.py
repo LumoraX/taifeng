@@ -18,8 +18,9 @@ import json
 import uuid
 from typing import TYPE_CHECKING, Any, Literal
 
-from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
+from taifeng.llm.client import ModelCapabilities, ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
+    InvalidHistoryError,
     InvalidRequestError,
     InvalidResponseError,
     UnsupportedModalityError,
@@ -37,8 +38,8 @@ from taifeng.llm.events import (
     tool_call_done,
 )
 from taifeng.llm.providers._mid_history import mid_history_system_text
+from taifeng.llm.providers._modality_gate import assert_request_modalities
 from taifeng.llm.providers._shared import (
-    assert_text_only_request,
     classify_abnormal_finish,
     classify_http_error,
     extract_rate_limit_snapshot,
@@ -47,7 +48,7 @@ from taifeng.llm.providers._shared import (
     parse_sse_data,
     transport_error,
 )
-from taifeng.llm.types import ApiRequest, ImagePart, TextPart, TokenUsage
+from taifeng.llm.types import ApiRequest, FilePart, ImagePart, TextPart, TokenUsage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -76,12 +77,23 @@ _ROLE_MAP = {
 
 
 
-def _gemini_parts(content: list[TextPart | ImagePart]) -> list[dict[str, Any]]:
-    """把纯文本 parts 映射为 Gemini ``parts``(``{text}``)。
+# Gemini 原生能力声明：文字 + 文件（inlineData）；图片输入未声明（另立）
+GEMINI_CAPABILITIES = ModelCapabilities(
+    input_modalities=frozenset({"text", "file"}),
+    provider="gemini",
+    protocol="generate_content",
+)
+
+
+def _gemini_parts(
+    content: list[TextPart | ImagePart | FilePart], *, role: str = "user"
+) -> list[dict[str, Any]]:
+    """把 provider-neutral parts 映射为 Gemini ``parts``。
 
     参照 ``openai/_shared.py`` 的 part 映射范式,差异:本 provider **未声明 image
-    输入能力**,故只映射文本;图片由 ``_build_payload`` 开头的
-    ``assert_text_only_request`` 在序列化前拒掉(与 openai_compat 同一道门控)。
+    输入能力**,图片由 ``_build_payload`` 开头的模态门控在序列化前拒掉;文件映射为
+    ``{"inlineData": {"mimeType", "data"}}``(与本 provider 其余字段同用 camelCase;
+    REST JSON 同时接受 snake_case 的 ``inline_data``)。
 
     此前两处调用点是裸 ``parts.extend(msg.content)``,且 ``_build_payload`` 漏调
     门控 —— 把 pydantic 模型对象原样塞进请求体,经 httpx ``json=`` 发出时
@@ -89,6 +101,7 @@ def _gemini_parts(content: list[TextPart | ImagePart]) -> list[dict[str, Any]]:
 
     Args:
         content: 核心层 ``PartContent`` 的 list 形态。
+        role: 所属消息角色;文件只允许出现在 user 消息。
 
     Returns:
         可 JSON 序列化的 Gemini part 列表;空文本项丢弃(不承载信息,白占数组槽位)。
@@ -96,12 +109,19 @@ def _gemini_parts(content: list[TextPart | ImagePart]) -> list[dict[str, Any]]:
     Raises:
         UnsupportedModalityError: 含 ImagePart。正常路径已被门控先拒;这里再拒一次,
             保证直接调用本函数也不会**悄悄丢图**(禁止 silent fallback)。
+        InvalidHistoryError: 非 user 消息里出现文件 part。
     """
     mapped: list[dict[str, Any]] = []
     for part in content:
         if isinstance(part, ImagePart):
             raise UnsupportedModalityError("image input is not supported by this client")
-        if part.text:
+        if isinstance(part, FilePart):
+            if role != "user":
+                raise InvalidHistoryError("Gemini files are only valid in user messages")
+            mapped.append(
+                {"inlineData": {"mimeType": part.media_type, "data": part.base64_data}}
+            )
+        elif part.text:
             mapped.append({"text": part.text})
     return mapped
 
@@ -165,7 +185,7 @@ def _to_gemini_contents(
                 str(msg.tool_call_id or ""), msg.tool_call_id or "",
             )
             if isinstance(msg.content, list):
-                parts.extend(_gemini_parts(msg.content))
+                parts.extend(_gemini_parts(msg.content, role=msg.role))
             else:
                 raw = (
                     msg.content
@@ -185,7 +205,7 @@ def _to_gemini_contents(
                 if msg.content:
                     parts.append({"text": msg.content})
             elif isinstance(msg.content, list):
-                parts.extend(_gemini_parts(msg.content))
+                parts.extend(_gemini_parts(msg.content, role=msg.role))
 
             # assistant.tool_calls → functionCall
             if msg.role == "assistant" and msg.tool_calls:
@@ -290,9 +310,9 @@ class GeminiSession:
         pass
 
     def _build_payload(self, request: ApiRequest) -> dict[str, Any]:
-        # 与 openai_compat 同一道门控:本 provider 只消费兼容 messages view、未声明
-        # image 输入能力,序列化前显式拒图,避免 pydantic part 泄漏进 JSON encoder
-        assert_text_only_request(request)
+        # 与 openai_compat 同一道门控:本 provider 只消费兼容 messages view、按自身
+        # 声明的模态序列化前显式拒图(文件放行),避免 pydantic part 泄漏进 JSON encoder
+        assert_request_modalities(request, GEMINI_CAPABILITIES.input_modalities)
         system_instruction, contents = _to_gemini_contents(request)
         payload: dict[str, Any] = {"contents": contents}
         if system_instruction is not None:
@@ -498,7 +518,7 @@ class GeminiSession:
 
 
 class GeminiClient(OneNetworkAttemptModelClient, ModelClient):
-    """Session 级 Gemini native 客户端。
+    """Session 级 Gemini native 客户端（文字 + 文件 inlineData 输入）。
 
     构造参数：
         api_key: GEMINI_API_KEY（业务侧从环境变量读后注入）
@@ -512,6 +532,8 @@ class GeminiClient(OneNetworkAttemptModelClient, ModelClient):
         include_thoughts: 让思考摘要经 ``reasoning_delta`` 流出（默认 False）。
             无论是否开启，functionCall 的 ``thoughtSignature`` 都会随调用落史并回传。
     """
+
+    capabilities = GEMINI_CAPABILITIES
 
     def __init__(
         self,

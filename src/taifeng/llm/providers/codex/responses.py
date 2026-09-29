@@ -224,7 +224,7 @@ class CodexResponsesClient(OneNetworkAttemptModelClient, ModelClient):
     """Codex 代理专用 Responses client；不提供 Chat fallback。"""
 
     capabilities = ModelCapabilities(
-        input_modalities=frozenset({"text", "image"}),
+        input_modalities=frozenset({"text", "image", "file"}),
         provider="codex",
         protocol="responses",
         accepts_provider_state=True,

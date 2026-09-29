@@ -210,7 +210,7 @@ async def run_turn(turn_ctx: TurnContext, cancel: CancellationToken) -> TurnOutc
 
 ### 图片 admission 与 Responses durable gate
 
-`EnginePool.create(image_input_policy=..., input_cost_estimator=...)` 把业务策略传播到 root、call_skill、detached spawn、child Resume 与 manual compaction runner。`UserMessage.attachments` 在 actor enqueue 和 conversation append 之前完成 count、base64、decoded bytes、digest、MIME、dimensions/frame 检查；默认禁用或 client capability 不匹配时不留下脏历史。
+`EnginePool.create(image_input_policy=..., input_cost_estimator=..., file_input_policy=...)` 把业务策略传播到 root、call_skill、detached spawn、child Resume 与 manual compaction runner。`UserMessage.attachments`（图片与文件共用）在 actor enqueue 和 conversation append 之前经 `loop/attachment_parts.admit_user_attachments` 完成 count、base64、decoded bytes、digest、MIME、图片 dimensions/frame、PDF 头尾结构检查——与每轮 prompt 重建同一道能力门与 admission；默认禁用或 client capability 不匹配时不留下脏历史。
 
 prompt 层只走一条 history 转换路径：普通 Chat 由 canonical items 派生 messages；OpenAI/Codex Responses 保留 provider state、function call/output 的严格顺序。Codex 把 system prompt 投影为顶层 `instructions`，不生成 synthetic system item。provider terminal 必须收敛为恰好一次 `normalized_output → completed`；Codex 在内部还要求 done-item facts、唯一 completed gate 与 clean EOF。Loop 随后以 `(thread_id, sample_scope_id, turn_index, iteration)` 确定性生成 `llm_sample_id`，原子提交 reasoning/assistant/function-call group，commit ack 之后才允许 tool dispatch。sample scope 默认等于 submission id；detached child Resume/Rewind 保持事件归因到 child thread 时，改用本次操作 id 作为 sample scope。工具结果携带 `origin_llm_sample_id`，下一轮和冷恢复都按 sample closure 重放。
 

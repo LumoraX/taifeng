@@ -3,12 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from taifeng.context.truncate import truncate_middle
 
 if TYPE_CHECKING:
     from taifeng.conversation.models import ResponseItem
+
+
+def _file_placeholders(payload: dict[str, Any]) -> list[str]:
+    """user 消息里文件附件的描述占位：只含文件名 / 类型 / 大小，绝不含正文。
+
+    文件被压缩淘汰后，这行是模型唯一能看到的「这里曾有文件」证据（llm-file-input
+    契约：被压缩区间里的文件只保留描述占位，不进入摘要输入正文）。
+    """
+    raw = payload.get("attachments")
+    if not isinstance(raw, list):
+        return []
+    return [
+        f"[附件文件 {attachment.get('filename') or '（未命名）'}"
+        f"（{attachment.get('media_type')}，{attachment.get('size')} 字节）]"
+        for attachment in raw
+        if isinstance(attachment, dict) and attachment.get("kind") == "file"
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +48,9 @@ class CompactionView:
         projected: list[_ViewItem] = []
         for item in items:
             if item.kind == "user_message":
-                projected.append(_ViewItem("用户", str(item.payload.get("text", ""))))
+                text = str(item.payload.get("text", ""))
+                lines = [text, *_file_placeholders(item.payload)]
+                projected.append(_ViewItem("用户", "\n".join(line for line in lines if line)))
             elif item.kind == "assistant_message":
                 projected.append(_ViewItem("助手", str(item.payload.get("text", ""))))
             elif item.kind == "reasoning":

@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from taifeng.conversation.journal.canonical import canonical_bytes
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from taifeng.llm.types import ApiRequest
 
-type RedactionKind = Literal["image_base64", "provider_encrypted_content"]
+type RedactionKind = Literal["image_base64", "file_base64", "provider_encrypted_content"]
 
 
 class SensitiveRequestShapeError(ValueError):
@@ -41,26 +43,35 @@ def _pointer(path: tuple[str, ...]) -> str:
     return "/" + "/".join(escaped)
 
 
-def _redact_image(
+def _redact_inline_body(
     value: dict[str, Any],
     path: tuple[str, ...],
     redactions: list[RequestRedaction],
+    *,
+    label: str,
+    kind: RedactionKind,
 ) -> dict[str, Any]:
-    """删除 canonical ImagePart 正文，同时保留不可反解 descriptor。"""
+    """删除 canonical ImagePart / FilePart 正文，同时保留不可反解 descriptor。
+
+    Args:
+        value: 形如 ``{"type": "image"|"file", "base64_data": ..., ...}`` 的 part dict。
+        path: 该 part 在 request JSON 树里的路径。
+        redactions: manifest 累加器（追加一条本 part 的正文地址）。
+        label: 报错文案里的 part 类别。
+        kind: manifest 与 marker 里的 redaction 种类。
+    """
     if "content_redacted" in value:
-        raise SensitiveRequestShapeError("image redaction marker collision")
+        raise SensitiveRequestShapeError(f"{label} redaction marker collision")
     body = value.get("base64_data")
     if not isinstance(body, str) or not body:
-        raise SensitiveRequestShapeError("image base64_data must be non-empty")
+        raise SensitiveRequestShapeError(f"{label} base64_data must be non-empty")
     safe = {
         key: _redact_value(item, (*path, key), redactions)
         for key, item in value.items()
         if key != "base64_data"
     }
-    safe["content_redacted"] = {"kind": "image_base64", "redacted": True}
-    redactions.append(
-        RequestRedaction(path=_pointer((*path, "base64_data")), kind="image_base64")
-    )
+    safe["content_redacted"] = {"kind": kind, "redacted": True}
+    redactions.append(RequestRedaction(path=_pointer((*path, "base64_data")), kind=kind))
     return safe
 
 
@@ -131,7 +142,9 @@ def _redact_value(
     if not isinstance(value, dict):
         return value
     if value.get("type") == "image" and "base64_data" in value:
-        return _redact_image(value, path, redactions)
+        return _redact_inline_body(value, path, redactions, label="image", kind="image_base64")
+    if value.get("type") == "file" and "base64_data" in value:
+        return _redact_inline_body(value, path, redactions, label="file", kind="file_base64")
     if value.get("type") == "provider_state":
         return _redact_provider_state(value, path, redactions)
     if "base64_data" in value or "encrypted_content" in value:
@@ -142,6 +155,24 @@ def _redact_value(
     }
 
 
+def canonical_attempt_digest(
+    provider: str,
+    model: str,
+    api_request: Mapping[str, Any],
+) -> str:
+    """attempt 摘要的唯一 preimage 定义：``{provider, model, api_request}`` 的 RFC 8785 SHA-256。
+
+    ``api_request`` 是 ``ApiRequest.model_dump(mode="json")`` 形状的 JSON 对象。录制侧
+    （``project_attempt_request``）与 Journal 回放的复核（``llm/providers/replay.py``）共用本函数，
+    保证两边对「同一请求」的判定逐字节一致。
+    """
+    return hashlib.sha256(
+        canonical_bytes(
+            {"provider": provider, "model": model, "api_request": dict(api_request)}
+        )
+    ).hexdigest()
+
+
 def project_attempt_request(
     provider: str,
     model: str,
@@ -149,11 +180,7 @@ def project_attempt_request(
 ) -> AttemptRequestProjection:
     """在内存中生成安全投影，并绑定脱敏前 provider-neutral request。"""
     full = request.model_dump(mode="json")
-    digest = hashlib.sha256(
-        canonical_bytes(
-            {"provider": provider, "model": model, "api_request": full}
-        )
-    ).hexdigest()
+    digest = canonical_attempt_digest(provider, model, full)
     redactions: list[RequestRedaction] = []
     safe = _redact_value(full, (), redactions)
     assert isinstance(safe, dict)
@@ -174,5 +201,6 @@ __all__ = [
     "AttemptRequestProjection",
     "RequestRedaction",
     "SensitiveRequestShapeError",
+    "canonical_attempt_digest",
     "project_attempt_request",
 ]

@@ -109,6 +109,9 @@ _KIND_TAG = {
     # post-turn-hook：root turn 真终态收尾审计点（R3 审计补：此前落 `evt` 兜底）
     "post_turn_hook_fired": ("hook", _Colors.GRAY, "⊛"),
     "engine_log": ("eng ", _Colors.GRAY, "·"),
+    # 审计可观测 层1：request 留痕只打摘要（模型 / 条数 / 推理参数），不打正文——
+    # 兜底分支会把整份 prompt 与工具输出原样刷屏
+    "llm_request_recorded": ("req ", _Colors.GRAY, "⇢"),
     "shutdown": ("eng ", _Colors.GRAY, "⏹"),
 }
 
@@ -152,8 +155,14 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         parts.append(f"{data.get('name')}({_short(data.get('arguments'), 60)}) call_id={data.get('call_id', '')[:8]}")
     elif ev.msg.kind == "tool_call_completed":
         status = "err" if data.get("is_error") else "ok"
+        # 钩子改写 / 结果截断只在发生时标出（ADR 0061）
+        flags = "".join((
+            " [rewritten]" if data.get("output_rewritten_by_hook") else "",
+            f" [capped {data['output_capped'].get('original_bytes')}B]"
+            if isinstance(data.get("output_capped"), dict) else "",
+        ))
         parts.append(
-            f"{data.get('name')} {status} ({data.get('duration_ms', 0)}ms): "
+            f"{data.get('name')} {status} ({data.get('duration_ms', 0)}ms){flags}: "
             f"{_short(data.get('output', ''), 80)}"
         )
     elif ev.msg.kind == "skill_dispatched":
@@ -323,6 +332,8 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         )
     elif ev.msg.kind == "engine_log":
         parts.append(f"{data.get('level')}: {data.get('message')}")
+    elif ev.msg.kind == "llm_request_recorded":
+        parts.append(_fmt_llm_request(data))
     else:
         # 兜底：没有专用 formatter 的事件（多为诊断/恢复类边缘事件）也必须自描述——
         # 打出 kind 名 + 原始 data，确保"所有关键信息都输出"，不出现匿名 `?` 行。
@@ -333,6 +344,21 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
     if color:
         return f"{_Colors.GRAY}[{ts}]{_Colors.RESET} {col}{tag}{_Colors.RESET} {arrow} {body}"
     return f"[{ts}] {tag} {arrow} {body}"
+
+
+def _fmt_llm_request(data: dict[str, Any]) -> str:
+    """request 留痕摘要：模型、各段条数与推理参数，不含任何正文。"""
+    inputs = data.get("input_items") or data.get("messages") or []
+    params = " ".join(
+        f"{key}={data[key]}"
+        for key in ("reasoning_effort", "max_output_tokens", "temperature")
+        if data.get(key) is not None
+    )
+    summary = (
+        f"model={data.get('model') or '-'} system={len(data.get('system_prompt') or [])} "
+        f"input={len(inputs)} tools={len(data.get('tools') or [])}"
+    )
+    return f"{summary} {params}".rstrip()
 
 
 def _short(value: Any, n: int) -> str:

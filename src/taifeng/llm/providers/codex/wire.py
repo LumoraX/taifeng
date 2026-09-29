@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from taifeng.llm.errors import InvalidHistoryError
+from taifeng.llm.providers._mid_history import mid_history_system_text
 from taifeng.llm.providers.openai._shared import (
     enforce_openai_wire_size,
+    responses_input_file,
     tool_output_content,
 )
 from taifeng.llm.types import (
@@ -15,6 +17,7 @@ from taifeng.llm.types import (
     ApiMessageItem,
     ApiProviderStateItem,
     ApiRequest,
+    FilePart,
     ImagePart,
     TextPart,
 )
@@ -45,6 +48,11 @@ def _message_content(item: ApiMessageItem) -> list[dict[str, Any]]:
                     "detail": part.detail,
                 }
             )
+            continue
+        if isinstance(part, FilePart):
+            if item.role != "user":
+                raise InvalidHistoryError("Codex files are only valid in user messages")
+            content.append(responses_input_file(part))
     return content
 
 
@@ -96,17 +104,23 @@ def _input_item(item: object) -> dict[str, Any]:
 
 
 def _partition_instructions(request: ApiRequest) -> tuple[list[str], list[dict[str, Any]]]:
-    """把动态 system history 折叠到顶层 instructions，并保留其余 item 顺序。"""
+    """顶层 instructions 只放 system prompt；历史中段 system item 原位改写为带标签 user 消息。
+
+    Codex 代理拒收 role=system 的 input item（ADR 0026），但把压缩摘要 / pinned 重注 /
+    预算提示 / 记忆预取这类中段注记折叠进 instructions 有两处代价：丢失位置（周期重注
+    本在尾部，折叠后排到对话之前，模型反把对话里更早的旧状态当成最新）；且每次注入都
+    改写 instructions 前缀，prompt cache 随之失效（R2）。与 Anthropic / Gemini 同一处置
+    （ADR 0055 / 0072）：保持原位、改写为 ``<system-reminder>`` 包裹的 user 文本。
+    """
     prompts = [prompt for prompt in request.system_prompt if prompt != ""]
     input_items: list[dict[str, Any]] = []
     for item in request.input_items:
         if isinstance(item, ApiMessageItem) and item.role == "system":
-            if not isinstance(item.content, str):
-                raise InvalidHistoryError(
-                    "Codex system instructions must contain text only"
-                )
-            if item.content:
-                prompts.append(item.content)
+            input_items.append({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": mid_history_system_text(item.content)}],
+            })
             continue
         input_items.append(_input_item(item))
     return prompts, input_items

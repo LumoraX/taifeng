@@ -29,6 +29,11 @@
 
 多源(知识库 + 会话记忆)用 ``CompositeMemoryStore`` 组合；检索 query 的构造可经
 ``EnginePool.create(memory_query_builder=...)`` 定制（默认 = 最后一条用户消息）。
+
+**可选删除语义**（ADR 0071）：``ForgettableMemoryStore`` 在四钩子之外多一个 ``forget``。它是
+可选协议——``MemoryStore`` 本身不变，既有实现零改动；内核被动路径从不调用 ``forget``，只有
+模型侧 ``memory`` 工具在 store 实现了它时才提供 ``delete`` 动作。``NullMemoryStore`` 刻意
+**不**实现 ``forget``：继承它的只读知识库不会意外获得删除入口。
 """
 
 from __future__ import annotations
@@ -79,8 +84,41 @@ class MemoryStore(Protocol):
         ...
 
 
+@runtime_checkable
+class ForgettableMemoryStore(MemoryStore, Protocol):
+    """可选扩展协议：支持按模型给出的依据删除长期记忆（ADR 0071）。
+
+    只多一个 ``forget``；是否实现由后端决定（遗忘 / 覆盖策略因后端而异，属于规则③）。
+    ``isinstance(store, ForgettableMemoryStore)`` 为真时，``make_memory_tool`` 缺省启用
+    ``delete`` 动作。
+    """
+
+    async def forget(self, target: str, *, thread_id: str) -> int:
+        """删除与 ``target`` 对应的长期记忆条目。
+
+        ``prefetch`` 只返回一段文本、没有结构化条目，模型能表达的删除依据因此也只有文本：
+        后端在 prefetch 结果里展示的记忆标识（如 ``[mem:42]``），或该条记忆的原文 / 足以唯一
+        定位它的片段。如何解析由后端决定；**推荐精确匹配**（标识或原文），不要按语义相似度批量
+        删除——删除不可逆，而模型只看得到 prefetch 返回的那一部分。
+
+        Args:
+            target: 模型给出的删除依据（非空，工具层已校验长度）。
+            thread_id: 发起删除的 thread（与 prefetch / writeback 同一作用域语义）。
+
+        Returns:
+            实际删除的条目数（>= 0）；0 表示没有匹配，不是错误。
+
+        Raises:
+            Exception: 后端失败；memory 工具以 ``memory_error`` 显式返回给模型。
+        """
+        ...
+
+
 class NullMemoryStore:
-    """无操作默认实现 —— 不接长期记忆时的零开销占位（engine 默认用 None，不用它）。"""
+    """无操作默认实现 —— 不接长期记忆时的零开销占位（engine 默认用 None，不用它）。
+
+    刻意不实现 ``forget``：继承它只覆写 ``prefetch`` 的只读知识库不应获得删除入口。
+    """
 
     async def prefetch(self, query: str, *, thread_id: str) -> str:
         return ""
@@ -113,7 +151,24 @@ class CompositeMemoryStore:
     单个子 store 抛异常 → 记日志后继续其余子(不传染,与内核对单 store 的
     best-effort 语义一致)。不去重、不限长:结果体积由各子 store 自律,
     prompt 层既有截断兜底——组合器只做 fan-out,不引入第二套护栏。
+
+    删除语义(ADR 0071):任一子 store 实现 ``ForgettableMemoryStore`` 时,构造出的实例
+    自动带 ``forget``(满足该协议),转发给可遗忘的子并返回删除总数;没有可遗忘的子时实例
+    不带 ``forget``,memory 工具也就不会提供 delete——不会出现「给了入口却什么都删不掉」。
     """
+
+    def __new__(cls, stores: Sequence[MemoryStore] = ()) -> CompositeMemoryStore:
+        """按子 store 能力选择实例类型:有可遗忘的子 → 带 ``forget`` 的私有子类。
+
+        只在直接构造 ``CompositeMemoryStore`` 时切换;业务自定义子类保持原样。
+        ``stores`` 的空缺省只服务 copy / pickle 协议(它们以 ``cls.__new__(cls)`` 重建实例
+        再恢复 ``__dict__``);正常构造的空序列仍由 ``__init__`` 显式拒绝。
+        """
+        if cls is CompositeMemoryStore and any(
+            isinstance(s, ForgettableMemoryStore) for s in stores
+        ):
+            return super().__new__(_ForgettableCompositeMemoryStore)
+        return super().__new__(cls)
 
     def __init__(self, stores: Sequence[MemoryStore]) -> None:
         """Args:
@@ -169,3 +224,37 @@ class CompositeMemoryStore:
                 await s.on_session_end(thread_id=thread_id, items=items)
             except Exception:
                 logger.exception("composite memory on_session_end failed (skipped)")
+
+
+class _ForgettableCompositeMemoryStore(CompositeMemoryStore):
+    """至少一个子 store 可遗忘时的组合器(由 ``CompositeMemoryStore.__new__`` 选中)。"""
+
+    async def forget(self, target: str, *, thread_id: str) -> int:
+        """按注册序转发给可遗忘的子 store,返回删除总数。
+
+        与被动钩子的 best-effort 不同,这是模型主动发起的删除:某个子失败(抛错或返回非法计数)
+        时其余子照做,最后抛 ``RuntimeError`` 写明已删除数与失败明细,让模型看见部分失败。
+
+        Raises:
+            RuntimeError: 至少一个可遗忘的子失败。
+        """
+        total = 0
+        failures: list[str] = []
+        for s in self._stores:
+            if not isinstance(s, ForgettableMemoryStore):
+                continue
+            try:
+                count = await s.forget(target, thread_id=thread_id)
+            except Exception as exc:
+                failures.append(f"{type(s).__name__}: {type(exc).__name__}: {exc}")
+                continue
+            # 子 store 是业务实现(系统边界):计数必须是非负整数,bool 不算
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                failures.append(f"{type(s).__name__}: invalid forget count {count!r}")
+                continue
+            total += count
+        if failures:
+            raise RuntimeError(
+                f"forget partially failed after deleting {total} record(s): " + "; ".join(failures)
+            )
+        return total

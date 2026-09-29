@@ -205,12 +205,17 @@ def _config() -> AuditConfig:
 
 
 def test_config_has_no_shadow_capability_or_resume_fields() -> None:
-    """AuditConfig 不复制 Pool resolved dependencies 或 per-session resume。"""
+    """AuditConfig 不复制 Pool resolved dependencies 或 per-session resume。
+
+    ``tool_outcome_resolver`` 是审计专属的 pool 级注入（ADR 0070：resume 时征求人对结果未知
+    工具调用的裁决），不是 per-session resume 状态，也不复制任何 Pool 依赖。
+    """
     assert {field.name for field in fields(AuditConfig)} == {
         "journal_core",
         "writer_id",
         "max_attachment_bytes",
         "max_total_attachment_bytes",
+        "tool_outcome_resolver",
     }
 
 

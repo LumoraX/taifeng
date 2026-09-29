@@ -4,7 +4,8 @@
 
 taifeng 连外部 MCP server（stdio 子进程 / streamable HTTP），把其工具桥接进 `ToolRegistry`，并与
 server 完成双向 JSON-RPC：本端发请求，server 也会在处理途中反向发请求（`elicitation/create`、`ping`）。
-本契约覆盖**协议版本协商**、**tools/call 结果投影**、**server → client 请求路由与 elicitation 注入口**。
+本契约覆盖**协议版本协商**、**tools/list 分页**、**tools/call 结果投影与 outputSchema 校验**、
+**本端放弃请求时的取消通知**、**streamable HTTP 断流续传**、**server → client 请求路由与 elicitation 注入口**。
 工具集的注册 / 同步见 [dynamic-tool-set](dynamic-tool-set.md)；taifeng 作为 server 的一侧见
 [mcp-server](mcp-server.md)。
 
@@ -16,10 +17,19 @@ server 完成双向 JSON-RPC：本端发请求，server 也会在处理途中反
   与本端请求撞号时被误当成响应；
 - stdio 声明 `2024-11-05`、HTTP 声明 `2025-03-26`、server 恒回 `2024-11-05`，客户端从不校验 server 回的版本。
 
-参照：MCP 规范 2025-06-18（lifecycle / transports / tools / elicitation / cancellation）；codex
-`codex-rs/rmcp-client`、`codex-rs/protocol/src/models.rs`。决策：ADR 0063。
-实现：`mcp/protocol.py`、`mcp/content.py`、`mcp/elicitation.py`、`mcp/server_messages.py`，接线
-`mcp/stdio_client.py`、`mcp/http_client.py`、`mcp/bridge.py`、`mcp/server.py`。
+修复的缺口（2026-09-29，ADR 0069）：
+
+- `tools/list` 只取第一页：分页 server 的其余工具对模型不可见，`list_changed` 重新同步时还被当成「已删除」；
+- 忽略工具声明的 `outputSchema`：server 违约的结构化结果直接进模型上下文；
+- 本端超时 / 取消时不发 `notifications/cancelled`：server 侧处理（可能正等 elicitation 应答）要跑到它自己的超时；
+- HTTP 的 SSE 流在响应前断开即失败（或干等超时），即便 server 支持续传；GET 推送流被 server 关闭后再也收不到通知。
+
+参照：MCP 规范 2025-06-18（lifecycle / transports / tools / elicitation / utilities: cancellation、pagination）；
+codex `codex-rs/rmcp-client`、`codex-rs/protocol/src/models.rs`；modelcontextprotocol typescript-sdk / python-sdk
+（outputSchema 校验、取消通知）。决策：ADR 0063、ADR 0069。
+实现：`mcp/protocol.py`、`mcp/content.py`、`mcp/elicitation.py`、`mcp/server_messages.py`、`mcp/pagination.py`、
+`mcp/output_schema.py`、`mcp/cancellation.py`、`mcp/sse.py`，接线 `mcp/stdio_client.py`、`mcp/http_client.py`、
+`mcp/bridge.py`、`mcp/server.py`。
 
 ## 数据契约
 
@@ -33,6 +43,19 @@ server 完成双向 JSON-RPC：本端发请求，server 也会在处理途中反
 | `select_server_protocol_version(requested) -> str` | server 侧：请求版本受支持原样回，否则回最新版 |
 | `McpProtocolVersionError(McpToolError)` | code `-32602`；`requested` / `received` / `supported` 属性 |
 | `McpStdioClient.protocol_version` / `McpHttpClient.protocol_version` | 协商结果；握手前为 `None` |
+
+### tools/list 分页（`mcp/pagination.py`）
+
+两种传输的 `list_tools()` 都返回**跟完 `nextCursor` 后的完整列表**（`McpClient` 协议语义），`McpToolBinding.sync`
+据此做增删 / 替换判定。首页请求不带 `params`，后续页带 `{"cursor": <上一页 nextCursor>}`（原样回传，不解析）。
+
+| 符号 / 情形 | 含义 |
+| --- | --- |
+| `max_list_pages`（stdio `spawn` / `__init__`、HTTP `connect` / `__init__`，默认 `DEFAULT_MAX_LIST_PAGES = 100`） | 单次 `tools/list` 的页数上限；< 1 构造期 `ValueError`（stdio 在拉起子进程之前） |
+| `nextCursor` 缺失 / `null` / 空串 | 结束 |
+| `nextCursor` 非字符串、同一游标出现第二次、页数超限 | `McpPaginationError`（`McpToolError` 子类，code `-32000`，`pages` 属性）；**不**返回已取到的部分 |
+| 某页 result 非对象 / `tools` 非数组或缺失 | `McpToolError(-32000)`（不当成空列表） |
+| `list_all_tools(fetch_page, *, max_pages)` | 与传输无关的翻页循环（`fetch_page(cursor) -> result`） |
 
 ### tools/call 结果投影（`mcp/content.py`）
 
@@ -52,6 +75,47 @@ server 完成双向 JSON-RPC：本端发请求，server 也会在处理途中反
 | `isError` | `is_error` |
 
 `extract_text_content(result) -> (text, is_error)` 保留为公共符号：同一套文本规则、图片恒为占位、不产附件。
+
+### outputSchema 校验（`mcp/output_schema.py`，桥 handler 执行）
+
+| 情形 | `ToolResult` |
+| --- | --- |
+| 工具未声明 `outputSchema` | 不校验 |
+| `isError: true` | 不校验，按上表投影 |
+| 声明了 outputSchema，缺 `structuredContent` | `ToolResult.error("mcp_output_schema_violation: $: structuredContent is missing …", reason="mcp_output_schema_violation", mcp_tool=<名>, violations=[…])` |
+| `structuredContent` 违反 outputSchema | 同上，`violations` 为确定的违例清单（≤8 条）；server 的原文**不**进 `output` |
+| 合规 | 按上表投影 |
+
+- 校验器：`taifeng.tool.arg_validation.schema_violations`（type / required / properties / enum / const / items /
+  additionalProperties:false；不认识的关键字放过，只报确定的违例）。
+- `parse_output_schema(meta)`：outputSchema 须为 `type: "object"` 的对象，否则 `McpOutputSchemaError`——桥**跳过该工具并告警**。
+- `McpToolBinding.output_schemas: dict[本地名, schema]`：已注册且声明了 outputSchema 的工具；`sync` 时 outputSchema
+  的增 / 改 / 删与描述、inputSchema、副作用分类一样触发 `replace`（handler 闭包随之更新）。
+
+### 取消通知（`mcp/cancellation.py`）
+
+| 符号 | 含义 |
+| --- | --- |
+| `cancelled_notification(request_id, reason)` | `{"method": "notifications/cancelled", "params": {"requestId", "reason"}}`；reason 截断到 200 字符 |
+| `CancelNotifier(send)` | 两种传输各持一个：`notify(request_id, method, reason)` 以后台任务发出；`initialize` 不发；投递失败只记日志；`aclose()` 在 `close()` 时取消未发出的通知 |
+| `cancel_reason(exc)` | `CancelledError` 的消息即原因；无消息 → `DEFAULT_CANCEL_REASON = "request cancelled by client"` |
+| `await_or_abandon(call, *, timeout_seconds, cancel)` | 桥 handler 用：调用与超时、`ToolContext.cancel` 竞速；放弃时 `task.cancel(<原因>)` 打断在飞调用。超时 → `TimeoutError`；token 取消 → `CancelledError`（运行时收敛为 cancelled 结果）；自身被外部取消同样打断调用 |
+
+| 放弃方式 | 通知 `reason` |
+| --- | --- |
+| 客户端层超时（stdio / HTTP `request_timeout_seconds`） | `client timeout after <N>s` |
+| 桥超时（`bind_mcp_tools(timeout_seconds=)`） | `client timeout after <N>s` |
+| turn 取消（`ToolContext.cancel`） | `client cancelled the request (<CancelReason>[: <detail>])` |
+| 宿主 `task.cancel(msg)` | `msg`；无消息为默认文案 |
+
+### HTTP 断流续传（`mcp/sse.py`，`McpHttpClient` 接线）
+
+| 符号 | 含义 |
+| --- | --- |
+| `SseCursor{last_event_id, retry_ms, events}` / `.resume_id` | 一条逻辑 SSE 流的续传状态，跨重连复用；id 在事件派发时提交（只带 id 的起点事件也提交），空 id = 清空 |
+| `iter_sse_data(resp, cursor)` | WHATWG 事件流解析：`data` 多行拼接、`:` 注释、`id`（含 NUL 忽略）、`retry`（全数字才生效）；中途断开的残余事件不派发，正常 EOF 的残余事件照常派发 |
+| `max_stream_resumptions`（`McpHttpClient` / `connect`，默认 `DEFAULT_MAX_STREAM_RESUMPTIONS = 3`） | POST 流续传次数上限；GET 推送流连续无事件重连的上限；0 = 不续传 / 不重连；< 0 构造期 `ValueError` |
+| `stream_resume_delay_seconds`（默认 `1.0`） | 续传 / 重连基础间隔，按次数翻倍，单次 ≤30s；server 的 SSE `retry:` 优先；< 0 构造期 `ValueError` |
 
 ### elicitation 注入口（`mcp/elicitation.py`）
 
@@ -80,6 +144,63 @@ server 完成双向 JSON-RPC：本端发请求，server 也会在处理途中反
 | `notifications/tools/list_changed` | 以 task 调度监听者（`bind_mcp_tools` 登记） |
 
 ## 行为契约
+
+### Requirement: tools/list 跟完分页、失控显式报错
+
+`list_tools()` SHALL 按 `nextCursor` 翻页直到缺失 / `null` / 空串，返回各页 `tools` 的按序拼接。页数超过
+`max_list_pages`、游标重复、`nextCursor` 非字符串 SHALL 抛 `McpPaginationError`，SHALL NOT 静默返回部分列表；
+某页形状非法 SHALL 抛 `McpToolError`。
+
+#### Scenario: 三页工具
+- **WHEN** server 分三页返回 `t1` / `t2` / `t3`
+- **THEN** `bind_mcp_tools` 注册全部三个；server 依次收到 `params` 为无、`{"cursor": "cursor-1"}`、`{"cursor": "cursor-2"}`
+
+#### Scenario: 无限翻页
+- **WHEN** server 永远返回新的 `nextCursor`，`max_list_pages=4`
+- **THEN** 第 4 页后抛 `McpPaginationError`，`bind_mcp_tools` 失败，注册表不留半截工具
+
+### Requirement: outputSchema 不合规的结果不交给模型
+
+工具声明了 `outputSchema` 时，非 `isError` 的结果 SHALL 带合规的 `structuredContent`；缺失或违例 SHALL 使该次调用
+判错（`reason="mcp_output_schema_violation"`，`data["violations"]` 列违例），server 原文 SHALL NOT 进 `output`。
+outputSchema 变化 SHALL 触发 `sync` 替换。
+
+#### Scenario: 类型不符
+- **WHEN** outputSchema 要求 `temperature: number`，结果 `structuredContent = {"temperature": "hot", ...}`
+- **THEN** `ToolResult.is_error`，`data["violations"] == ["$.temperature: expected number, got string"]`
+
+### Requirement: 放弃请求即通知 server
+
+本端请求（`initialize` 除外）已发出后因客户端超时、桥超时、turn 取消或调用方取消而放弃时，客户端 SHALL 向 server 发
+`notifications/cancelled{requestId, reason}`，并 SHALL 忽略之后迟到的响应。stdio 尚未写出的请求 SHALL NOT 发通知；
+HTTP 无从确知 server 是否收到请求体，放弃即发（规范要求接收方忽略未知 id）。通知以后台任务发出，SHALL NOT 阻塞取消
+的传播（R4）。
+
+#### Scenario: stdio 超时
+- **WHEN** `request_timeout_seconds=0.2`，server 不回 id=2 的 `tools/call`
+- **THEN** 调用方得 `McpToolError("request timeout: tools/call")`，server 收到 `{"requestId": 2, "reason": "client timeout after 0.2s"}`
+
+#### Scenario: turn 取消
+- **WHEN** 桥接工具执行中 `ToolContext.cancel` 以 `shutdown` 取消
+- **THEN** handler 以 `CancelledError` 结束（运行时收敛为 cancelled），server 收到 reason `client cancelled the request (shutdown)`
+
+### Requirement: HTTP 断流按 Last-Event-ID 续传，不支持即显式失败
+
+POST 的 SSE 流在给出本请求响应之前结束（断开或提前 EOF）时：server 给过事件 id → 客户端 SHALL 以
+`GET` + `Last-Event-ID: <最新事件 id>` 续传，续传流里的 server 请求 / 通知照常路由，拿到响应即返回；续传流再断则用
+最新 id 继续，至多 `max_stream_resumptions` 次。server 从未给过事件 id、续传 GET 回 405 / 其他错误 / 非 SSE、次数
+用尽 SHALL 抛 `McpToolError(-32000)`，SHALL NOT 静默等到超时。全部续传计入该请求的 `request_timeout_seconds`。
+
+GET 推送流结束或断开后，客户端 SHALL 带 `Last-Event-ID`（有则带）重连；连续 `max_stream_resumptions` 次重连都没收到
+任何事件则放弃并告警（此后工具只在显式 `sync` 时刷新）；收到事件即清零。405 / 错误状态 / 非 SSE 响应 SHALL 停止重连。
+
+#### Scenario: 续传拿到响应
+- **WHEN** `tools/call` 的 SSE 流推出 `id: e1` 的事件后断开，server 支持续传
+- **THEN** 客户端发 `GET`（`Last-Event-ID: e1`），从续传流拿到响应，调用成功
+
+#### Scenario: server 不带事件 id
+- **WHEN** SSE 流在响应前断开，且此前的事件都没有 id
+- **THEN** 立即抛 `McpToolError`（`sent no event id to resume from`），不发续传 GET
 
 ### Requirement: 版本协商不静默继续
 
@@ -135,7 +256,7 @@ schema 子集）→ `-32603`；否则回 `{"action": ..., "content"?: ...}`。�
 ### Requirement: 取消与关闭
 
 handler 调用 SHALL 可被两种方式打断：server 的 `notifications/cancelled`（取消后不回响应）与客户端
-`close()`（先 `aclose` 路由器，再关传输）。内核 SHALL NOT 另设 handler 超时：规范把请求超时与取消通知
+`close()`（先 `aclose` 路由器与取消通知发送器，再关传输）。内核 SHALL NOT 另设 handler 超时：规范把请求超时与取消通知
 归于请求发送方（server）；宿主要自有时限可在 handler 内限时后返回 `cancel`。
 
 `tools/call` 途中发生的 elicitation，其等待用户的时间计入该次调用的超时（stdio
@@ -147,21 +268,28 @@ handler 调用 SHALL 可被两种方式打断：server 的 `notifications/cancel
 - `tests/mcp/test_content.py` —— 各内容类型投影、非法形状、structuredContent 去重 / 补全、桥 handler、经 loop admission 落 fco（策略启用 / 未启用）
 - `tests/mcp/test_elicitation.py` —— 两种传输：能力声明、accept / decline、未注入 -32601、handler 抛错、撞号、ping、未知方法、server 取消、close 打断
 - `tests/mcp/test_server_messages.py` —— 路由器单测：非法 / 重号 id、未知取消、监听派发、`aclose`、投递失败
+- `tests/mcp/test_pagination.py` —— 翻页拼接、结束条件、页数上限 / 重复游标 / 非法游标 / 非法页、旋钮校验；stdio 三页绑定与无限翻页、HTTP 两页 + sync 增删
+- `tests/mcp/test_output_schema.py` —— schema 形状、违例判定、桥 handler（合规 / 违例 / 缺失 / isError / 未声明 / 非法 schema 跳过）、sync 替换与重校验、HTTP 端到端
+- `tests/mcp/test_cancellation.py` —— 通知报文、原因提取、发送器（initialize 不发 / 投递失败 / 关闭）、`await_or_abandon` 四条路径；stdio 超时 / 完成不发 / 迟到响应 / 桥 token 取消 / 桥超时，HTTP 超时 / 调用方取消
+- `tests/mcp/test_sse.py` —— SSE 解析（字段、注释、多行、id 提交与清空、NUL、retry、残余事件、中途断开）、退避、续传响应校验
+- `tests/mcp/test_http_resumption.py` —— POST 流续传（断开 / 提前 EOF、续传流内 server 请求路由、次数用尽、无事件 id、405、0 次）、旋钮校验；推送流带 Last-Event-ID 重连、无事件放弃、非 SSE 停止
 
 ## 能力边界（如实记录）
 
-- **不校验 `outputSchema`**：规范 SHOULD 由客户端按工具的 `outputSchema` 校验 structuredContent；当前未做（同名
-  工具 outputSchema 变化还需纳入 `McpToolBinding.sync` 的替换判定）。
-- **不支持** `sampling/createMessage`、`roots/list`、`resources/*`（作为客户端）、`prompts/*`、进度通知、分页
-  `nextCursor`、HTTP 流续传（`Last-Event-ID`）；对应的 server 请求一律 `-32601`。
-- **本端超时 / 取消时不发 `notifications/cancelled`**：`tools/call` 在客户端超时后，server 侧可能仍在等
-  elicitation 应答，直到它自己的超时。
+- **不支持** `sampling/createMessage`、`roots/list`、`resources/*`（作为客户端）、`prompts/*`、OAuth：均属 ADR 0017
+  规则④（「别家有」的产品面，内核无机制缺口）；对应的 server 请求一律 `-32601`，鉴权头由宿主经 `headers` 注入。
+- **不处理进度通知**（`notifications/progress`）：记 debug 后忽略，也不据此重置超时。
+- **outputSchema 只校验内核子集**：`pattern` / `format` / `oneOf` / `$ref` 等关键字不校验（放过，不误拦）；outputSchema
+  也不进模型视野（ToolSpec 无对应字段），模型只从描述与结果推断结构。
+- **stdio 无续传**：子进程管道断开即连接结束（未决请求以连接关闭失败）；续传只存在于 streamable HTTP。
+- **HTTP 会话过期（404）不自动重建会话**：规范要求客户端以新 initialize 重建；当前按传输错误抛出，由宿主重连并重新绑定。
 - `resource_link` 只给引用，不代为 `resources/read`；blob 资源（即使是图片）只给占位。
 - audio 无内核模态，恒为占位。
 
 ## R1–R5 影响
 
-R1：纯协议机制，UI 与用户交互全在宿主 handler；R2：附件随 fco 追加在 tail，与既有工具图片同路；R3：
-客户端不在 engine 事件总线上，路由器以日志记录取消 / 投递失败 / handler 异常，工具侧结果仍经
-`tool_call_completed`；R4：handler 与监听均为可取消 task，`close()` 统一收敛；R5：无持久化状态，
-重启后由宿主重新建连与绑定。
+R1：纯协议机制，UI 与用户交互全在宿主 handler；R2：附件随 fco 追加在 tail，与既有工具图片同路；outputSchema 变化
+触发的 `replace` 按 dynamic-tool-set 归因为 `tool_spec_changed`；R3：客户端不在 engine 事件总线上，路由器 / 取消通知 /
+续传 / 推送流重连以日志记录，工具侧结果（含 `mcp_output_schema_violation`、`mcp_timeout`、cancelled）仍经
+`tool_call_completed`；R4：handler、监听、取消通知均为可取消 task，`close()` 统一收敛，桥接工具响应 `ToolContext.cancel`；
+R5：无持久化状态（续传游标只在一次请求 / 一条推送流内有效，规范禁止跨会话持久化分页游标），重启后由宿主重新建连与绑定。

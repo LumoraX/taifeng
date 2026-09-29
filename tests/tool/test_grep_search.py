@@ -176,14 +176,21 @@ def test_grep_spec_metadata_and_schema(tmp_path: Path) -> None:
     assert spec.name == "grep"
     assert spec.parallel_safe is True
     assert (spec.effect_kind, spec.reconciliation) == ("pure", "none")
-    assert check_tool_arguments(spec.input_schema, {"pattern": "x", "context": 3}) is not None
+    assert check_tool_arguments(spec.input_schema, {"pattern": "x", "before": 3}) is not None
     assert check_tool_arguments(
         spec.input_schema, {"pattern": "x", "output_mode": "json"},
     ) is not None
     assert check_tool_arguments(
+        spec.input_schema, {"pattern": "x", "context": "3"},
+    ) is not None
+    assert check_tool_arguments(
         spec.input_schema,
         {"pattern": "x", "path": "src", "include": "*.py", "ignore_case": True,
-         "output_mode": "count"},
+         "output_mode": "count", "multiline": False},
+    ) is None
+    assert check_tool_arguments(
+        spec.input_schema,
+        {"pattern": "x", "context": 2, "context_before": 1, "context_after": 0},
     ) is None
 
 

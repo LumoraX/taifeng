@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import math
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from taifeng.llm.attachment_codec import decode_canonical_base64
 from taifeng.llm.errors import (
     AttachmentTooLargeError,
     ImageCountExceededError,
@@ -245,33 +245,11 @@ def _gpt_56_image_tokens(
     return math.ceil(_patch_count(resized_width, resized_height) * 1.2)
 
 
-def _encoded_limit(decoded_limit: int) -> int:
-    """返回最多 decoded_limit bytes 的 canonical base64 最大长度。"""
-    return ((decoded_limit + 2) // 3) * 4
-
-
 def _decode_canonical_base64(content: str, *, max_bytes: int) -> bytes:
-    """带 O(1) 编码长度闸门的严格、canonical base64 解码。"""
-    if len(content) > _encoded_limit(max_bytes):
-        raise AttachmentTooLargeError(
-            "image encoded content exceeds byte limit",
-            estimated_bytes=len(content),
-            max_bytes=_encoded_limit(max_bytes),
-        )
-    try:
-        encoded = content.encode("ascii")
-        decoded = base64.b64decode(encoded, validate=True)
-    except (UnicodeEncodeError, binascii.Error) as exc:
-        raise InvalidImageError("image content is not strict base64") from exc
-    if base64.b64encode(decoded).decode("ascii") != content:
-        raise InvalidImageError("image content is not canonical base64")
-    if len(decoded) > max_bytes:
-        raise AttachmentTooLargeError(
-            "image decoded content exceeds byte limit",
-            estimated_bytes=len(decoded),
-            max_bytes=max_bytes,
-        )
-    return decoded
+    """带 O(1) 编码长度闸门的严格、canonical base64 解码（与文件附件同源实现）。"""
+    return decode_canonical_base64(
+        content, max_bytes=max_bytes, label="image", invalid_error=InvalidImageError
+    )
 
 
 def _inspect_png(data: bytes) -> tuple[int, int, int]:
@@ -488,7 +466,12 @@ def admit_tool_attachments(
 
 
 def redact_sensitive_request_data(value: object) -> Any:
-    """递归脱敏 request JSON 中的图片正文与 provider 加密状态。"""
+    """递归脱敏 request JSON 中的图片 / 文件正文与 provider 加密状态。
+
+    图片 part 只留 MIME / size / detail；文件 part 只留 MIME / size / sha256 /
+    filename（llm-file-input 契约）。两者都打 ``content_redacted`` 标记，base64
+    正文与 Data URL 绝不进入 capture。
+    """
     if isinstance(value, list):
         return [redact_sensitive_request_data(item) for item in value]
     if not isinstance(value, dict):
@@ -499,6 +482,15 @@ def redact_sensitive_request_data(value: object) -> Any:
             "media_type": value.get("media_type"),
             "size": value.get("size"),
             "detail": value.get("detail"),
+            "content_redacted": True,
+        }
+    if value.get("type") == "file" and "base64_data" in value:
+        return {
+            "type": "file",
+            "media_type": value.get("media_type"),
+            "size": value.get("size"),
+            "sha256": value.get("sha256"),
+            "filename": value.get("filename"),
             "content_redacted": True,
         }
     redacted = {

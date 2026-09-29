@@ -68,7 +68,7 @@ from taifeng.context.budget import ContextBudget
 class CompressionContext:
     history: list[ResponseItem]
     token_estimate: int
-    budget: ContextBudget              # 不再是裸 int —— 含 context_window / soft / hard / max_request_bytes
+    budget: ContextBudget              # 本 turn 生效预算（输出预留已含 entry skill 的 max_output_tokens，ADR 0071）
     cache_anchor_index: int            # 最后一条已缓存 history 下标（含），-1 无缓存；首个可变 = anchor+1
     phase: Literal["pre_turn", "mid_turn", "manual", "overflow"]
     available_injections: frozenset[InitialContextInjection]
@@ -303,6 +303,16 @@ result.new_history
 `TokenUsage.input_tokens` 跨 provider 统一为含缓存的完整 prompt 数（Anthropic 在映射层归一）。
 `ContextBudget.output_reserve_tokens` 从窗口中扣除输出预留后再按比例算 soft / hard。
 
+**本 turn 生效的输出预留** = `max(output_reserve_tokens, entry skill 的 inference.max_output_tokens)`
+（ADR 0071）：`TurnRunner.effective_budget` 经 `ContextBudget.with_output_reserve` 按**自己的** entry skill
+派生，压缩触发（及交给策略的 `CompressionContext.budget`）、预算提示、发送前 hard 预检都读它。
+`TurnRunner.budget` 保持配置值并原样传给 `call_skill` / spawn 子 runner——子 turn 各按自己 entry skill
+的声明派生，不继承父的放大值。未声明 `max_output_tokens` 时生效预算就是配置预算本身（行为不变）；
+声明值 `>= context_window` → `OutputReserveExceedsWindowError`，turn 在首次预算判定处 `turn_failed`、不发请求。
+`CompactNow(target_tokens=...)` 的临时预算按生效可用窗口折算 soft 比例，soft_limit 仍恰为 target。
+`SurgicalTrimStrategy` 的 `soft_trim_ratio` / `hard_clear_ratio` 按 `token_estimate / context_window`
+（原始窗口）判定，不受输出预留影响。
+
 契约：[capabilities/token-accounting-calibration.md](capabilities/token-accounting-calibration.md)。决策：ADR 0043。
 
 ## 预算自知提示（budget-awareness，规则② 原语）
@@ -514,7 +524,8 @@ class MemoryStore(Protocol):
 - **检索语境定制**：`EnginePool.create(memory_query_builder=...)`（同步 `(history 拷贝) -> str`）——默认 query 只取最后一条用户消息，多轮指代场景用 builder 拼近 N 轮语境；builder 异常记日志回退默认。
 - **writeback 语义注意**：钩子收到的是「本 turn 运行期间新增」items（assistant 输出等）；用户消息在 turn 构造前已入 history、不在新增集合内。
 - demo：`examples/memory/knowledge_demo.py`（三件套一起演示）。
-- **模型主动读写**：opt-in 的 `memory` 工具（`tool/builtins/memory.py::make_memory_tool`）让模型在 turn 中途自己 `search`（委托 `prefetch`）/ `save`（委托 `writeback`，item 带 `metadata.source="memory_tool"`）；不扩协议、不带后端，后端异常显式返回给模型。契约见 [tool-builtins-extended § memory](capabilities/tool-builtins-extended.md)，决策 ADR 0064。
+- **模型主动读写删**：opt-in 的 `memory` 工具（`tool/builtins/memory.py::make_memory_tool`）让模型在 turn 中途自己 `search`（委托 `prefetch`）/ `save`（委托 `writeback`，item 带 `metadata.source="memory_tool"`）/ `delete`（委托 `forget`，仅当 store 可遗忘）；不带后端，后端异常显式返回给模型。契约见 [tool-builtins-extended § memory](capabilities/tool-builtins-extended.md)，决策 ADR 0064 / 0071。
+- **可选删除协议**：`ForgettableMemoryStore(MemoryStore)` 只多一个 `async forget(target, *, thread_id) -> int`（`target` = 后端在 prefetch 文本里展示的记忆标识或该条记忆原文；返回实际删除条数）。`MemoryStore` 本身不变；内核被动路径从不调用 `forget`，只有 memory 工具据 `isinstance` 决定是否提供 `delete`。`NullMemoryStore` 刻意不实现；`CompositeMemoryStore` 在有可遗忘子时才构造出带 `forget` 的实例（转发给可遗忘的子、返回总数，部分失败显式抛错）。
 
 ## `replaced_range` 与冷加载消费
 

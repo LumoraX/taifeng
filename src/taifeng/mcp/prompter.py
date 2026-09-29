@@ -8,6 +8,8 @@
     - McpPrompter 实现 PermissionPrompter 协议；业务侧把它注入 PermissionPolicy
     - 不引入业务术语；所有透传字段（call_chain / 业务自定义 metadata）由 PermissionRequest 携带
     - timeout / error / cancel 全转为 PermissionDecision.deny（保守失败）
+    - 客户端未在 initialize 声明 ``elicitation`` 能力 → 不发请求（规范 MUST 只用协商成功的
+      能力），直接 deny；server 侧 emit ``elicitation_unsupported``
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from taifeng.mcp.server_capabilities import McpClientCapabilityError
 from taifeng.permission.types import PermissionDecision, PermissionRequest
 
 if TYPE_CHECKING:
@@ -70,6 +73,8 @@ class McpPrompter:
         """实现 PermissionPrompter 协议。
 
         失败语义（全保守 deny）：
+            - 客户端未声明 elicitation 能力 → 不发请求，deny(reason=
+              'elicitation_unsupported: <说明>')
             - timeout → deny(reason='elicitation_timeout')
             - server-initiated error → deny(reason='elicitation_error:<type>')
             - client action != accept → deny(reason='user_declined' / 'user_rejected'
@@ -86,6 +91,10 @@ class McpPrompter:
                 params,
                 timeout=self._timeout,
             )
+        except McpClientCapabilityError as e:
+            # 客户端不支持 elicitation：请求没有发出，按 fail-closed 判拒（不等超时）
+            logger.warning("elicitation not sent: %s", e)
+            return PermissionDecision.deny(reason=f"elicitation_unsupported: {e}")
         except TimeoutError:
             return PermissionDecision.deny(reason="elicitation_timeout")
         except McpServerInitiatedRequestError as e:

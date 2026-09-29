@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import taifeng
-from taifeng.context.memory import NullMemoryStore
+from taifeng.context.memory import ForgettableMemoryStore, NullMemoryStore
 from taifeng.llm.providers import SimTurn
 from taifeng.loop.audit_config import AUDIT_TOOL_EFFECT_RECONCILIATION
 from taifeng.loop.cancellation import CancellationToken
@@ -206,14 +206,133 @@ def test_schema_rejects_unknown_args_and_foreign_action() -> None:
     ("kwargs", "fragment"),
     [
         ({"actions": ()}, "must not be empty"),
-        ({"actions": ("search", "delete")}, "unsupported memory actions"),
+        ({"actions": ("search", "update")}, "unsupported memory actions"),
+        ({"actions": ("search", "delete")}, "requires a store implementing ForgettableMemoryStore"),
         ({"max_result_chars": 0}, "must be > 0"),
     ],
 )
 def test_factory_rejects_bad_configuration(kwargs: dict[str, Any], fragment: str) -> None:
-    """装配期错误（空动作集 / 协议不支持的动作 / 非正上限）构造时即报错。"""
+    """装配期错误（空动作集 / 未知动作 / 不可遗忘却启用 delete / 非正上限）构造时即报错。"""
     with pytest.raises(ValueError, match=fragment):
         make_memory_tool(_RecordingStore(), **kwargs)
+
+
+# ── delete（可选协议 ForgettableMemoryStore，ADR 0071）─────────────────────────
+
+
+class _ForgetStore(_RecordingStore):
+    """实现 forget 的 store：记录删除依据，返回预置计数或抛预置异常。"""
+
+    def __init__(self, deleted: Any = 1, boom: Exception | None = None) -> None:
+        super().__init__()
+        self.deleted = deleted
+        self.boom = boom
+        self.forgotten: list[tuple[str, str]] = []
+
+    async def forget(self, target: str, *, thread_id: str) -> int:
+        self.forgotten.append((target, thread_id))
+        if self.boom is not None:
+            raise self.boom
+        return self.deleted  # type: ignore[no-any-return]
+
+
+def test_delete_offered_only_for_forgettable_store() -> None:
+    """缺省动作集随 store 能力：可遗忘才出现 delete（schema 与描述同步）；否则不出现。"""
+    assert isinstance(_ForgetStore(), ForgettableMemoryStore)
+    assert not isinstance(_RecordingStore(), ForgettableMemoryStore)
+    spec = make_memory_tool(_ForgetStore())
+    assert spec.input_schema["properties"]["action"]["enum"] == ["search", "save", "delete"]
+    assert "target" in spec.input_schema["properties"]
+    assert "action=delete" in spec.description
+    plain = make_memory_tool(_RecordingStore())
+    assert plain.input_schema["properties"]["action"]["enum"] == ["search", "save"]
+    assert "target" not in plain.input_schema["properties"]
+    assert "delete" not in plain.description
+    opted_out = make_memory_tool(_ForgetStore(), actions=("search", "save"))
+    assert "target" not in opted_out.input_schema["properties"]
+
+
+def test_delete_effect_classification() -> None:
+    """delete 是改动后端的动作：只要启用就取最保守一档（ADR 0025 合法组合）。"""
+    spec = make_memory_tool(_ForgetStore(), actions=("search", "delete"))
+    assert spec.parallel_safe is False
+    assert (spec.effect_kind, spec.reconciliation) == ("external_non_idempotent", "manual")
+    assert (spec.effect_kind, spec.reconciliation) in AUDIT_TOOL_EFFECT_RECONCILIATION
+
+
+async def test_delete_delegates_forget_and_reports_count() -> None:
+    """delete → forget(target, thread_id=当前 thread)，返回实际删除条数。"""
+    store = _ForgetStore(deleted=2)
+    r = await make_memory_tool(store).handler({"action": "delete", "target": "[mem:7]"}, _ctx())
+    assert not r.is_error
+    assert r.output == "deleted 2 memory record(s)"
+    assert r.data["deleted"] == 2
+    assert store.forgotten == [("[mem:7]", "t1")]
+
+
+async def test_delete_zero_is_normal_result() -> None:
+    """没有匹配不是错误，明确告知未删除。"""
+    r = await make_memory_tool(_ForgetStore(deleted=0)).handler(
+        {"action": "delete", "target": "不存在的记忆"}, _ctx(),
+    )
+    assert not r.is_error
+    assert r.output == "no matching memory found; nothing deleted"
+
+
+@pytest.mark.parametrize("bad", [-1, True, "2", None])
+async def test_delete_invalid_count_is_memory_error(bad: Any) -> None:
+    """后端返回非法计数（负数 / bool / 非整数）→ 显式 memory_error，不当作成功。"""
+    r = await make_memory_tool(_ForgetStore(deleted=bad)).handler(
+        {"action": "delete", "target": "x"}, _ctx(),
+    )
+    assert r.is_error
+    assert r.data["reason"] == "memory_error"
+    assert "invalid count" in r.output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [{"action": "delete"}, {"action": "delete", "target": "  "},
+     {"action": "delete", "target": "t" * 2001}, {"action": "delete", "target": 3}],
+)
+async def test_delete_bad_args_do_not_touch_store(args: dict[str, Any]) -> None:
+    """缺 target / 空白 / 超长 / 类型错 → bad_args，forget 零触达。"""
+    store = _ForgetStore()
+    r = await make_memory_tool(store).handler(args, _ctx())
+    assert r.data["reason"] == "bad_args"
+    assert store.forgotten == []
+
+
+async def test_delete_backend_failure_is_explicit() -> None:
+    """forget 抛错 → memory_error 带异常类型与消息。"""
+    r = await make_memory_tool(_ForgetStore(boom=PermissionError("read-only replica"))).handler(
+        {"action": "delete", "target": "x"}, _ctx(),
+    )
+    assert r.is_error
+    assert r.data == {"reason": "memory_error", "action": "delete"}
+    assert "PermissionError: read-only replica" in r.output
+
+
+async def test_delete_cancel_interrupts_slow_backend() -> None:
+    """forget 阻塞时 token 取消 → 原地打断返回 cancelled（R4）。"""
+    entered = asyncio.Event()
+
+    class _SlowForget(_ForgetStore):
+        """forget 永不返回。"""
+
+        async def forget(self, target: str, *, thread_id: str) -> int:
+            entered.set()
+            await asyncio.Event().wait()
+            return 0
+
+    token = CancellationToken()
+    task = asyncio.create_task(
+        make_memory_tool(_SlowForget()).handler({"action": "delete", "target": "x"}, _ctx(token)),
+    )
+    await wait_for_condition(entered.is_set)
+    token.cancel()
+    r = await task
+    assert r.data["reason"] == "cancelled"
 
 
 # ── 端到端：真实 EnginePool + SimClient ─────────────────────────────────────
@@ -299,5 +418,37 @@ async def test_memory_tool_e2e_save_via_engine_pool(
         ]
         assert output["is_error"] is False
         assert output["output"] == "saved to memory (8 chars)"
+    finally:
+        await pool.close()
+
+
+async def test_memory_tool_e2e_delete_via_engine_pool(
+    tmp_path: Path, threads_dir: Path, sim_client,
+) -> None:
+    """可遗忘 store：请求里 memory 的 schema 含 delete，LLM 调一次 delete，结果回流。"""
+    store = _ForgetStore(deleted=1)
+    client = sim_client(turns=[
+        SimTurn(text="删掉", tool_calls=[{
+            "id": "d1", "name": "memory",
+            "arguments": json.dumps({"action": "delete", "target": "[mem:3]"}),
+        }]),
+        SimTurn(text="已删除"),
+    ])
+    pool = await taifeng.EnginePool.create(
+        skills_dir=_write_skill(tmp_path), threads_dir=threads_dir,
+        model_client=client, compressors=[],
+        memory_store=store, extra_tools=[make_memory_tool(store)],
+    )
+    try:
+        engine = await pool.get_or_create(session_id="s", entry_skill_id="assistant")
+        await _run_turn(engine, "忘掉那条过时的约定")
+        [tool] = [t for t in client.ledger.requests()[0].request.tools if t.name == "memory"]
+        assert "delete" in tool.input_schema["properties"]["action"]["enum"]
+        assert store.forgotten[0][0] == "[mem:3]"
+        [output] = [
+            it.payload for it in engine.history_snapshot()
+            if it.kind == "function_call_output" and it.payload["call_id"] == "d1"
+        ]
+        assert output["output"] == "deleted 1 memory record(s)"
     finally:
         await pool.close()

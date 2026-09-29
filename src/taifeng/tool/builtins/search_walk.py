@@ -11,9 +11,13 @@
     - **R4 可取消**：阻塞 IO 在 ``anyio.to_thread`` 工作线程里跑，线程在每个目录项 /
       每批行处检查停止信号；token 取消与 await 被放弃（超时 / 外部取消）都会点亮它。
 
-参照：ripgrep ``ignore::WalkBuilder``（默认不跟随符号链接、噪声目录排除）与 Claude Code
-Glob / Grep 工具的 LLM 侧形状；差异：纯 Python 实现、不读 .gitignore（排除集由业务显式
-配置）、结果按路径排序而非 mtime。
+    - **.gitignore**（ADR 0071）：``gitignore=True`` 时按 ``gitignore`` 模块的语义逐条判定
+      遍历到的路径，被忽略的目录不下探、被忽略的路径计数并告知；规则来自沙盒根到搜索基点
+      沿途各级目录与遍历中进入的子目录。搜索基点自身不受忽略规则影响（显式指定即照常搜索）。
+
+参照：ripgrep ``ignore::WalkBuilder``（默认不跟随符号链接、噪声目录排除、按 .gitignore 剪枝）与
+Claude Code Glob / Grep 工具的 LLM 侧形状；差异：纯 Python 实现、只读工作区内的 .gitignore、
+结果按路径排序而非 mtime。
 """
 
 from __future__ import annotations
@@ -28,6 +32,12 @@ from typing import TYPE_CHECKING
 import anyio.to_thread
 
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
+from taifeng.tool.builtins.gitignore import (
+    IgnoreLevel,
+    is_ignored,
+    parse_gitignore,
+    read_gitignore,
+)
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -72,6 +82,12 @@ class WalkStats:
 
     skipped_binary: int = 0
     """二进制（含 NUL 字节）或非 UTF-8 而跳过的文件数（仅 grep 使用）。"""
+
+    skipped_ignored: int = 0
+    """被 .gitignore 规则忽略的路径数（被忽略的目录按 1 计，其子树不再遍历）。"""
+
+    gitignore_unsupported: int = 0
+    """.gitignore 中语法不受支持而未生效的行数（这些规则对应的路径**没有**被跳过）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +230,83 @@ def _match_parts(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _Walk:
+    """一次遍历的可变状态：目录项迭代栈，以及与之对齐的 .gitignore 规则层栈。
+
+    栈帧 = ``(目录项迭代器, 该目录是否压了规则层)``；弹出目录时同步弹出它的规则层，
+    保证 ``levels`` 始终只含「当前路径的祖先目录」的规则（``is_ignored`` 的前提）。
+    """
+
+    root: Path
+    exclude_dirs: frozenset[str]
+    stats: WalkStats
+    gitignore: bool
+    stack: list[tuple[Iterator[os.DirEntry[str]], bool]] = field(default_factory=list)
+    levels: list[IgnoreLevel] = field(default_factory=list)
+
+    def load_ancestors(self, base: Path) -> None:
+        """载入沙盒根到 ``base`` 父目录沿途各级的 .gitignore（常驻，不随栈弹出）。"""
+        parts = base.relative_to(self.root).parts
+        for depth in range(len(parts)):
+            level = self._load_level(self.root.joinpath(*parts[:depth]))
+            if level is not None:
+                self.levels.append(level)
+
+    def enter(self, directory: Path) -> None:
+        """目录压栈；启用 gitignore 且该目录有生效规则时同步压入规则层。"""
+        level = self._load_level(directory) if self.gitignore else None
+        if level is not None:
+            self.levels.append(level)
+        self.stack.append((_sorted_entries(directory, self.stats), level is not None))
+
+    def leave(self) -> None:
+        """当前目录遍历完毕：弹栈，并弹出它压入的规则层。"""
+        _, owns_level = self.stack.pop()
+        if owns_level:
+            self.levels.pop()
+
+    def admit(self, entry: os.DirEntry[str]) -> Path | None:
+        """判定一个目录项：文件返回其路径；目录压栈后返回 None；其余跳过（计数）。"""
+        is_dir = entry.is_dir(follow_symlinks=False)
+        if is_dir and entry.name in self.exclude_dirs:
+            return None
+        if self.levels and is_ignored(
+            self.levels, Path(entry.path).relative_to(self.root).parts, is_dir=is_dir,
+        ):
+            # 被忽略的目录整棵子树不下探（与 git「父目录被忽略则子路径无法重新纳入」一致）
+            self.stats.skipped_ignored += 1
+            return None
+        if entry.is_symlink():
+            if _symlink_file_inside(entry, self.root):
+                return Path(entry.path)
+            self.stats.skipped_symlinks += 1
+            return None
+        if is_dir:
+            self.enter(Path(entry.path))
+            return None
+        return Path(entry.path) if entry.is_file(follow_symlinks=False) else None
+
+    def _load_level(self, directory: Path) -> IgnoreLevel | None:
+        """读取并解析 ``directory/.gitignore``；无文件 / 无有效规则返回 None。
+
+        读不了（权限 / 超大 / 非 UTF-8）计入 ``unreadable``；不支持的行计入
+        ``gitignore_unsupported``——两者都会在输出尾注告知，不静默。
+        """
+        try:
+            text = read_gitignore(directory)
+        except OSError:
+            self.stats.unreadable += 1
+            return None
+        if text is None:
+            return None
+        rules, unsupported = parse_gitignore(text)
+        self.stats.gitignore_unsupported += unsupported
+        if not rules:
+            return None
+        return IgnoreLevel(base_parts=directory.relative_to(self.root).parts, rules=rules)
+
+
 def iter_files(
     base: Path,
     *,
@@ -221,10 +314,13 @@ def iter_files(
     exclude_dirs: frozenset[str],
     should_stop: Callable[[], bool],
     stats: WalkStats,
+    gitignore: bool = False,
 ) -> Iterator[Path]:
     """按路径逐段字典序深度优先产出 ``base`` 下的文件（``base`` 是文件时只产出它自己）。
 
     - 目录名在 ``exclude_dirs`` 内 → 不下探（``base`` 自身不受此限）；
+    - ``gitignore=True`` → 沿途 .gitignore 命中的路径跳过并计数，被忽略目录不下探
+      （``base`` 自身不受此限：显式指定的基点照常搜索，其下路径仍逐条判定）；
     - 符号链接：指向 root 内文件 → 以链接路径产出；指向目录 / root 外 / 悬空 → 跳过并计数；
     - 读不了的目录 → 计数后继续（不静默吞，渲染时明确告知）。
 
@@ -234,24 +330,20 @@ def iter_files(
     if base.is_file():
         yield base
         return
-    stack: list[Iterator[os.DirEntry[str]]] = [_sorted_entries(base, stats)]
-    while stack:
-        entry = next(stack[-1], None)
+    walk = _Walk(root=root, exclude_dirs=exclude_dirs, stats=stats, gitignore=gitignore)
+    if gitignore:
+        walk.load_ancestors(base)
+    walk.enter(base)
+    while walk.stack:
+        entry = next(walk.stack[-1][0], None)
         if entry is None:
-            stack.pop()
+            walk.leave()
             continue
         if should_stop():
             raise SearchStopped
-        if entry.is_symlink():
-            if _symlink_file_inside(entry, root):
-                yield Path(entry.path)
-            else:
-                stats.skipped_symlinks += 1
-        elif entry.is_dir(follow_symlinks=False):
-            if entry.name not in exclude_dirs:
-                stack.append(_sorted_entries(Path(entry.path), stats))
-        elif entry.is_file(follow_symlinks=False):
-            yield Path(entry.path)
+        path = walk.admit(entry)
+        if path is not None:
+            yield path
 
 
 def _sorted_entries(directory: Path, stats: WalkStats) -> Iterator[os.DirEntry[str]]:
@@ -373,6 +465,16 @@ def skip_notes(stats: WalkStats, *, max_file_bytes: int | None = None) -> list[s
         )
     if stats.unreadable:
         notes.append(f"[skipped {stats.unreadable} unreadable path(s)]")
+    if stats.skipped_ignored:
+        notes.append(
+            f"[skipped {stats.skipped_ignored} path(s) ignored by .gitignore; pass an ignored "
+            "directory as `path` to search inside it]"
+        )
+    if stats.gitignore_unsupported:
+        notes.append(
+            f"[{stats.gitignore_unsupported} .gitignore line(s) use unsupported syntax and were "
+            "not applied; paths they target were searched]"
+        )
     return notes
 
 

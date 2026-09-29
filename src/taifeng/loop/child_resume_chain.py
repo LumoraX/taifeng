@@ -580,6 +580,7 @@ class ChildResumeChain:
             cancel=turn_cancel,
             image_input_policy=self._engine._image_input_policy,
             input_cost_estimator=self._engine._input_cost_estimator,
+            file_input_policy=self._engine._file_input_policy,
             hooks=self._engine._hooks,
             script_executors=self._engine._script_executors,
             max_iterations=self._engine._max_iterations,

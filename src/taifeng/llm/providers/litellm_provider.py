@@ -33,6 +33,8 @@ from taifeng.llm.events import (
     tool_call_delta,
     tool_call_done,
 )
+from taifeng.llm.providers._modality_gate import assert_text_only_request
+from taifeng.llm.providers.openai._shared import chat_content
 from taifeng.llm.types import ApiRequest, TokenUsage
 
 if TYPE_CHECKING:
@@ -97,17 +99,20 @@ def _classify_litellm_error(exc: Exception) -> LLMError:
 
 
 def _to_litellm_messages(req: ApiRequest) -> list[dict[str, Any]]:
-    """将 Taifeng ApiRequest 转 LiteLLM messages 格式。"""
+    """将 Taifeng ApiRequest 转 LiteLLM messages 格式。
+
+    LiteLLM 按 model 前缀路由到任意后端，图片 / 文件能否被接受取决于路由到的具体
+    模型；内核不据模型名猜能力（llm-image-input / llm-file-input 契约），故本 client
+    不声明多模态能力，含图片 / 文件 / provider state 的请求在序列化前显式拒绝。
+    part 列表（仅剩文本）按 OpenAI content part 形状序列化，不把 pydantic 对象交给 LiteLLM。
+    """
+    assert_text_only_request(req)
     messages: list[dict[str, Any]] = []
     for sp in req.system_prompt:
         if sp:
             messages.append({"role": "system", "content": sp})
     for m in req.messages:
-        msg: dict[str, Any] = {"role": m.role}
-        if isinstance(m.content, str):
-            msg["content"] = m.content
-        else:
-            msg["content"] = m.content
+        msg: dict[str, Any] = {"role": m.role, "content": chat_content(m.content, role=m.role)}
         if m.tool_call_id is not None:
             msg["tool_call_id"] = m.tool_call_id
         if m.tool_calls:

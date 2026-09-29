@@ -37,8 +37,8 @@ from taifeng.llm.events import (
     tool_call_delta,
     tool_call_done,
 )
+from taifeng.llm.providers._modality_gate import assert_text_only_request
 from taifeng.llm.providers._shared import (
-    assert_text_only_request,
     classify_http_error,
     extract_rate_limit_snapshot,
     extract_request_id,

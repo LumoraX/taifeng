@@ -44,20 +44,24 @@ verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
   首个 Journal IO / 完整性 / ack 不确定失败即关闭 effect gate（freeze），且**每 Session 独立**——一个
   Session 冻结不影响其他 Session。
 - **resume（Journal 接管）**：`get_or_create(resume_thread_id=...)` 经投影 marker 定位 Journal Session →
-  `open_existing` 接管（epoch+1）→ 存在未结算 effect（intent 无 outcome / 已落 unknown / submission 未 applied）
-  即 `AuditResumeError("audit_resume_recovery_required")` 并列出 record id，否则用 root thread 已提交
+  `open_existing` 接管（epoch+1）→ root thread 上结果未知的工具调用（intent 无 outcome / outcome 已落 unknown）
+  按副作用分流收敛：可回查的回查、幂等的判可安全重发、其余经 `AuditConfig.tool_outcome_resolver` 征求人裁决，
+  结论作为 `tool_recovery_committed`（+ 补写的 `function_call_output` 会话项）原子追加（ADR 0070）；其余未结算
+  effect（LLM attempt / skill 派发 / submission 未 applied）或仍需人裁决的调用即
+  `AuditResumeError("audit_resume_recovery_required")` 并列出 record id。通过后用 root thread 已提交
   `conversation_item` 重建 history、复用并核对既有投影 thread 后续跑；已 `session_ended` 的 Session 不可重开。
   resume 失败只释放 lease，不写 `session_ended`。
 - **current recovery exclusions（本阶段不支持）**：custom store/directory、IndexHook、hooks、permission/HITL、
   compressor、memory、instruction layers、orchestration、spawn/peer、非 attempt-observable client、可
-  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。未结算 effect 的
-  repair/reconcile/unfreeze、历史迁移仍不在本阶段范围（resume 只 fail closed，不替运维裁决）。
+  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。工具以外未结算
+  effect 的 repair/unfreeze、子 thread 工具调用的收敛、历史迁移仍不在本阶段范围（resume 只 fail closed）。
 
 完整数据契约与边界以
 [SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)、
 [SessionJournal Durable Core 能力契约](capabilities/session-journal-core.md)、
-[ADR 0025](../decisions/0025-session-journal-source-of-truth.md) 和
-[ADR 0053](../decisions/0053-audited-session-resume-and-writer-takeover.md) 为准。
+[ADR 0025](../decisions/0025-session-journal-source-of-truth.md)、
+[ADR 0053](../decisions/0053-audited-session-resume-and-writer-takeover.md) 和
+[ADR 0070](../decisions/0070-audit-resume-reconcile-and-responses-replay.md) 为准。
 
 ## 三协议总览
 
@@ -187,7 +191,7 @@ report = await rebuild_index(writer, directory, *, dry_run=False, sink=None)
 
 ## reconstruct_logical_history（冷加载逻辑 history 重建）
 
-图片 user item 把完整 `ImageAttachmentV1` 作为 canonical JSON 保存（MIME、decoded size、SHA-256、裸 base64、detail）；不保存 provider Data URL。冷加载后 prompt 层重新执行 admission，因此磁盘内容被篡改、策略收紧或换到 text-only client 时都会在网络前 fail closed。
+图片 user item 把完整 `ImageAttachmentV1` 作为 canonical JSON 保存（MIME、decoded size、SHA-256、裸 base64、detail）；文件 user item 同样保存完整 `FileAttachmentV1`（MIME、decoded size、SHA-256、裸 base64、可选 filename），两者同在 `payload.attachments`、以 `kind` 区分并保持提交顺序。都不保存 provider Data URL。冷加载后 prompt 层按当前策略与 client 能力重新执行 admission，因此磁盘内容被篡改、策略收紧或换到不支持该模态的 client 时都会在网络前 fail closed。
 
 OpenAI/Codex Responses 的一个 terminal sample 通过 `append_atomic_batch(items, batch_id=llm_sample_id)` 写为 begin/items/commit frames；sample ID 由 `(thread_id, sample_scope_id, turn_index, iteration)` 确定性生成。通常 sample scope 等于 submission id；detached child Resume/Rewind 的事件仍归因到 child thread，但 sample scope 使用本次操作 submission id，保证每次主动重入是新的逻辑 sample。reader 只发布 digest 与 item ids 完整匹配的首个 commit；崩溃留下的半 batch 不可见，同 batch 同 digest 幂等，不同 digest 报 conflict。默认 JSONL 的普通 append 与原子 batch 共用 `<thread>.lock` advisory file lock，committed 检查和 durable append 在同一跨 writer 临界区；文件读写、flush/fsync 和阻塞锁调用均在 anyio worker thread，不阻塞主 actor。
 

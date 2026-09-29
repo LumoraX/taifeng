@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
+from taifeng.llm.file_input import FileAttachmentV1, FileInputPolicy
 from taifeng.llm.providers.replay import (
     JournalReplayClient,
     RecordedCall,
@@ -21,7 +22,12 @@ from taifeng.llm.providers.replay import (
     ReplayUnsupportedError,
     recorded_calls,
 )
+from taifeng.llm.types import FilePart
 from taifeng.loop.audit_config import AuditCapabilityError, AuditConfig
+from taifeng.loop.audit_resume_resolution import (
+    AuditToolOutcomeRequest,
+    AuditToolOutcomeResolution,
+)
 from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
 from taifeng.mcp.http_client import McpHttpClient
 from taifeng.skill.fitness import (
@@ -37,6 +43,9 @@ __all__ = [
     "AuditCapabilityError",
     "AuditConfig",
     "JsonlSessionJournalCore",
+    # 审计 resume 时人对结果未知工具调用的裁决（ADR 0070，🧪）
+    "AuditToolOutcomeRequest",
+    "AuditToolOutcomeResolution",
     # Journal 确定性回放（journal-replay，🧪）
     "JournalReplayClient",
     "RecordedCall",
@@ -54,4 +63,8 @@ __all__ = [
     "SkillFitness",
     "SkillFitnessRecorder",
     "SkillFitnessStore",
+    # 用户文件（PDF）输入（llm-file-input，🧪）
+    "FileAttachmentV1",
+    "FileInputPolicy",
+    "FilePart",
 ]

@@ -134,13 +134,14 @@ class ApiRequest(BaseModel):
 ```
 src/taifeng/llm/providers/
 ├── openai_compat.py        # OpenAI / vLLM / Ollama / one-api 等 OpenAI-compat gateway（含 reasoning_content）
-├── openai/                 # 官方 OpenAI 双协议：Chat Completions + Responses（文字/图片）
+├── openai/                 # 官方 OpenAI 双协议：Chat Completions + Responses（文字/图片/文件）
 ├── codex/                  # 独立 Codex Responses dialect（instructions / typed input / done-item）
 ├── anthropic_provider.py   # Anthropic messages API（cache_control / extended thinking，零 anthropic-sdk）
 ├── gemini_provider.py      # Gemini streamGenerateContent（零 google-genai-sdk）
 ├── deepseek_provider.py    # DeepSeek（openai_compat 薄子类，预设 base_url + prompt_cache_hit_tokens 映射）
 ├── litellm_provider.py     # 兜底：Bedrock / Vertex / Azure / Kimi 等非主流 provider
 ├── sim/                    # conformance 模拟器 SimClient / RoutingSimClient（测试用，CI 禁真实 API；契约见 capabilities/llm-sim-conformance.md）
+├── _modality_gate.py       # 序列化前输入模态门控：未声明的图片 / 文件 / provider state 一律显式拒绝
 └── _shared.py              # classify_http_error（按 status code）/ SSE 解析 / usage 统一
 ```
 
@@ -163,16 +164,20 @@ engine = AgentEngine(
 
 OpenAI 不再由一个“兼容客户端”猜协议。业务按 endpoint 显式选择：
 
-| 客户端 | endpoint | 图片 wire | 状态恢复 |
-| --- | --- | --- | --- |
-| `OpenAIChatClient` | `/v1/chat/completions` | `image_url.url = data:<mime>;base64,...` | Chat message/tool history |
-| `OpenAIResponsesClient` | `/v1/responses` | `input_image.image_url = data:<mime>;base64,...` | JSONL 中的 ordered items + encrypted reasoning state |
-| `OpenAICompatClient` | 兼容 `/chat/completions` | 不支持，网络前拒绝 | 原 text-only 行为不变 |
+| 客户端 | endpoint | 图片 wire | 文件（PDF）wire | 状态恢复 |
+| --- | --- | --- | --- | --- |
+| `OpenAIChatClient` | `/v1/chat/completions` | `image_url.url = data:<mime>;base64,...` | `{"type": "file", "file": {file_data, filename}}` | Chat message/tool history |
+| `OpenAIResponsesClient` | `/v1/responses` | `input_image.image_url = data:<mime>;base64,...` | `input_file`（`file_data` + `filename`） | JSONL 中的 ordered items + encrypted reasoning state |
+| `OpenAICompatClient` | 兼容 `/chat/completions` | 不支持，网络前拒绝 | 不支持，网络前拒绝 | 原 text-only 行为不变 |
 
-原生 `GeminiClient` / `AnthropicClient` 同样是 **text-only**：与 `OpenAICompatClient` 走同一道
-`assert_text_only_request` 门控，含 `ImagePart` 的请求在组 payload 时即抛 `UnsupportedModalityError`，
-不会让 pydantic part 泄漏进 JSON encoder；纯文本 `list[TextPart]` content 映射为各自 wire 形状
-（Gemini `{text}`、Anthropic `{type: "text", text}`），空文本项丢弃。二者的图片输入能力**未声明**，另立。
+原生 `GeminiClient` / `AnthropicClient` 声明 `input_modalities={"text", "file"}`：组 payload 前经
+`_modality_gate.assert_request_modalities` 按自身声明门控——含 `ImagePart` 的请求即抛 `UnsupportedModalityError`
+（图片输入能力**未声明**，另立），`FilePart` 映射为 Anthropic `document` 块（base64 source，有文件名时带 `title`）/
+Gemini `inlineData`；纯文本 `list[TextPart]` content 映射为各自 wire 形状（Gemini `{text}`、Anthropic
+`{type: "text", text}`），空文本项丢弃，不会让 pydantic part 泄漏进 JSON encoder。`OpenAICompatClient`（含
+`DeepSeekClient`）与 `LiteLLMClient` 走 text-only 门 `assert_text_only_request`，图片与文件都在序列化前拒绝；
+LiteLLM 的 part 列表按 OpenAI content part 形状序列化后再交给 litellm。文件只允许出现在 user 消息，任何 provider
+在 assistant / tool 消息里遇到 `FilePart` 都抛 `InvalidHistoryError`。
 
 `CodexResponsesClient` 是显式 `provider=codex, protocol=responses` 的独立客户端，不属于 OpenAI
 兼容分支，也不提供 Chat fallback。它要求业务提供合法 API-root `base_url`，endpoint 固定由
@@ -207,7 +212,9 @@ done items 承担，噪声吞不掉输出事实。
 
 图片 token 预算使用可注入 `InputCostEstimator`；GPT-5.6 Sol/Terra/Luna 按 32×32 patch、detail resize/patch budget 与 1.2 multiplier 估算，未知模型走 policy 的非零上界。公共 `AgentEngine.estimate_tokens()` 与 turn preflight 复用同一策略、估算器和 entry model。最终 OpenAI/Codex wire JSON 均受 `ContextBudget.max_request_bytes` 精确 UTF-8 字节门禁。
 
-普通 request capture 与 strict attempt observer 共用敏感请求脱敏：图片正文替换为 descriptor，`encrypted_content` 键和值均移除。strict request intent 使用 V2 safe projection、排序唯一的 RFC 6901 redaction manifest 与脱敏前 canonical attempt SHA-256；observer 从不接收图片正文或 ciphertext。Chat 仅在 `[DONE]` 或非空 `finish_reason` 后完成；Chat/Responses 都通过可取消 SSE 行迭代器竞争 read 与 turn token，使 stalled 网络读取可被立即中断。
+文件（PDF）输入与图片同构（契约见 [llm-file-input](capabilities/llm-file-input.md)）：`FileAttachmentV1` canonical base64 落 conversation，业务显式注入 `FileInputPolicy(enabled=True, ...)` 且 client 声明 `"file"` 才放行；admission 校验数量、MIME 白名单、canonical base64、size / SHA-256 与 PDF 头尾结构；token 估算按 PDF 页数 × 每页上界，页数未知或策略未启用时取非零固定上界。图片与文件共用 `attachment_codec.decode_canonical_base64`。
+
+普通 request capture 与 strict attempt observer 共用敏感请求脱敏：图片 / 文件正文替换为 descriptor（文件保留 MIME / size / SHA-256 / filename，strict manifest kind 为 `file_base64`），`encrypted_content` 键和值均移除。strict request intent 使用 V2 safe projection、排序唯一的 RFC 6901 redaction manifest 与脱敏前 canonical attempt SHA-256；observer 从不接收图片正文或 ciphertext。Chat 仅在 `[DONE]` 或非空 `finish_reason` 后完成；Chat/Responses 都通过可取消 SSE 行迭代器竞争 read 与 turn token，使 stalled 网络读取可被立即中断。
 
 ## 重试与失败转移
 
@@ -341,18 +348,31 @@ native provider 实现可在请求里带额外 header（如 `extra_headers`）�
 只有顶层 system 字段：两家 provider 把这些消息**原位**改写为 `<system-reminder>` 包裹的 user 文本并与相邻 user 合并；
 OpenAI 系原样透传 `role="system"`。契约见 `capabilities/llm-provider-native.md`。
 
-## Journal 确定性回放（journal-replay，ADR 0054）
+## Journal 确定性回放（journal-replay，ADR 0054 / 0070）
 
-`JournalReplayClient.from_records(records)` 把 strict audit Journal 录下的 LLM 调用反过来当成 `ModelClient`：
-每个新请求按录制侧同一规则（`project_attempt_request(provider, model, request)`，空模型以录制模型补齐）算
-`canonical_attempt_sha256`，按摘要取对应录制的 `llm_response_committed.normalized_items` 还原为
-`reasoning_delta` / `text_delta` / `tool_call_done` / `completed` 事件流。
+`JournalReplayClient.from_records(records, capabilities=None)` 把 strict audit Journal 录下的 LLM 调用反过来当成
+`ModelClient`（实现：`llm/providers/replay.py` + `replay_match.py`）。每条录制 = V2 `llm_request_committed` 的安全投影
+`api_request_safe` 与完整摘要 `canonical_attempt_sha256` + `llm_response_committed` 的 `normalized_items` / `usage`。
 
-- **按摘要而非顺序匹配**：并发 call_skill 子 turn 的请求顺序不稳定；同摘要多次录制按录制顺序消费。
-- **分叉即报错**：无匹配 → `ReplayDivergenceError`（`failure_class=invalid_request`），turn 以 `turn_failed` 终止——
-  这正是回归信号；`remaining` / `consumed` 供断言「新运行是否少走 / 多走了调用」。
-- **边界**：只回放 Chat 协议录制（Responses 输入项带 thread 派生的 sample id，跨运行不可复现 → 构造期
-  `ReplayUnsupportedError`）；只回放 `status=complete`；provider 专有回传状态（thinking 签名等）不还原。
+- **两段式匹配**（空模型以录制模型补齐，逐一尝试录制出现过的 provider / model）：
+  1. 定位：按录制侧同一规则投影新请求（`project_attempt_request`），把输入项里由运行身份派生的采样 id
+     （`{thread}:{submission}:turn:{i}:llm:{j}`，见 `loop/turn_helpers._responses_sample_id`）按首次出现顺序换成
+     位置占位符后算摘要，找候选；`legacy:*` 等确定 id 不改；
+  2. 复核：把完整请求（含脱敏掉的图片正文与 provider 密文）按位置映射改写回录制的采样 id，用
+     `canonical_attempt_digest`（录制侧同一 preimage）复算，必须与录制摘要逐字节相等。
+  判据是「采样 id 一致双射重命名下逐字节相同」：采样 id 从不进入 provider wire，只做内核内部归组。脱敏内容或归组
+  不同都复核失败，不因重命名放宽匹配。
+- **按内容而非顺序匹配**：并发 call_skill 子 turn 的请求顺序不稳定；同一请求的多次录制按录制顺序消费。
+- **分叉即报错**：无匹配 → `ReplayDivergenceError`（`failure_class=invalid_request`，仅复核失败时消息标明「脱敏内容或
+  采样归组不同」），turn 以 `turn_failed` 终止——这正是回归信号；`remaining` / `consumed` 供断言「新运行是否少走 /
+  多走了调用」。
+- **还原**：Chat 录制还原为 `reasoning_delta` / `text_delta` / `tool_call_done`，并从同一响应 batch 的会话项
+  （`causation_id` 指向响应记录）还原 `provider_reasoning`（→ `reasoning_state`，thinking 签名）与 function_call 的
+  `extra_content`；Responses 录制把 `normalized_items` 原样经 `normalized_output` 交回（reasoning 的
+  `encrypted_content` 随之还原），另发可见文本 delta 供流式展示。
+- **能力声明**：默认按录制协议声明（text 输入；Responses 时 `accepts_provider_state=True`）。录制 client 声明的能力若
+  影响 prompt 组装（如图片），须以 `capabilities=` 传入同样的声明；录制混杂两种协议、声明与录制协议不符、输出项既非
+  Chat kind 也非合法 Responses terminal item（含 refusal），构造期 `ReplayUnsupportedError`。只回放 `status=complete`。
 
 ## Cache 统计
 

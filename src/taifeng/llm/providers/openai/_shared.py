@@ -6,7 +6,14 @@ import json
 from typing import Any
 
 from taifeng.llm.errors import InvalidHistoryError, InvalidRequestError, RequestTooLargeError
-from taifeng.llm.types import ApiProviderStateItem, ApiRequest, ImagePart, PartContent, TextPart
+from taifeng.llm.types import (
+    ApiProviderStateItem,
+    ApiRequest,
+    FilePart,
+    ImagePart,
+    PartContent,
+    TextPart,
+)
 
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 MAX_REQUEST_BYTES_METADATA_KEY = "taifeng.max_request_bytes"
@@ -78,11 +85,35 @@ def tool_output_content(content: PartContent) -> str | list[dict[str, Any]]:
                     "detail": part.detail,
                 }
             )
+        elif isinstance(part, FilePart):
+            # 文件只允许出现在 user 消息（llm-file-input）；工具附件契约只有图片
+            raise InvalidHistoryError("file parts are only valid in user messages")
     return mapped
 
 
-def chat_content(content: PartContent) -> str | list[dict[str, Any]]:
-    """把 provider-neutral parts 映射为 OpenAI Chat content parts。"""
+def responses_input_file(part: FilePart) -> dict[str, Any]:
+    """``FilePart`` → Responses / codex 的 ``input_file`` content item。
+
+    Data URL 只在此处临时构造；``filename`` 缺省时用确定性默认名（见
+    ``FilePart.wire_filename``），同一文件每轮 wire 逐位一致。
+    """
+    return {
+        "type": "input_file",
+        "file_data": part.data_url(),
+        "filename": part.wire_filename(),
+    }
+
+
+def chat_content(content: PartContent, *, role: str = "user") -> str | list[dict[str, Any]]:
+    """把 provider-neutral parts 映射为 OpenAI Chat content parts。
+
+    Args:
+        content: 核心层 ``PartContent``。
+        role: 所属消息角色；``FilePart`` 只允许出现在 user 消息，其余角色显式拒绝。
+
+    Raises:
+        InvalidHistoryError: 非 user 消息里出现文件 part。
+    """
     if isinstance(content, str):
         return content
     mapped: list[dict[str, Any]] = []
@@ -96,6 +127,19 @@ def chat_content(content: PartContent) -> str | list[dict[str, Any]]:
                     "image_url": {
                         "url": f"data:{part.media_type};base64,{part.base64_data}",
                         "detail": part.detail,
+                    },
+                }
+            )
+        elif isinstance(part, FilePart):
+            if role != "user":
+                raise InvalidHistoryError("Chat files are only valid in user messages")
+            # Chat 的文件 part：file_data 为临时 Data URL，filename 随附（确定性默认名）
+            mapped.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "file_data": part.data_url(),
+                        "filename": part.wire_filename(),
                     },
                 }
             )

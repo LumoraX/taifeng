@@ -52,7 +52,7 @@ class SkillRequirements:
     os: frozenset[str] = frozenset()
     """需要的 OS（``linux`` / ``darwin`` / ``windows``）；空=任意。"""
     modalities: frozenset[str] = frozenset()
-    """需要的模型模态能力标签（如 ``tool_output_image`` / ``input_image``）。
+    """需要的模型模态能力标签（如 ``tool_output_image`` / ``input_image`` / ``input_file``）。
 
     与 bins / env / os 的差别只在**谁来填**能力侧：这些标签由内核从注入的
     ``ModelClient`` 自己声明的 ``ModelCapabilities`` 派生（见

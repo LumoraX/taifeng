@@ -23,11 +23,12 @@
 | **`failure_suspend_max_auto_retries`** | `None` | TTL 自动 retry 的谱系上限（resource-limit-retry-semantics）：同一失败谱系经 N 次「到期自动 retry → 再失败再挂起」后,下次到期强制 abort 并在 `suspension_expired.data` 标注 `auto_retry_exhausted: true`。None = 不限——**配 `on_expire="retry"` 时强烈建议设置**,否则确定性失败会无界自动循环烧钱。人工 Resume 不计数 | — |
 | **`failure_suspend_ttl_seconds`** / **`failure_suspend_on_expire`** | `None` / `"abort"` | 内核自产挂起（SYSTEM_RETRY / RESOURCE_LIMIT）的存活期与到期动作（suspension-ttl）。None = 永不过期；无人值守部署配 ttl + `"retry"` 实现「限流/触顶到期自动续跑」。业务挂起的 ttl 在 `make_request_user_input_tool(ttl_seconds=...)` 工厂声明（DATA 到期恒 abort）。详见 [capabilities/suspend-resume.md](architecture/capabilities/suspend-resume.md) §挂起存活期 | — |
 | **`now_factory`** | `time.time` | 壁钟工厂（TTL 到期计算用）；测试注入固定时钟可让到期立即触发 | — |
-| **`tool_recovery`** | `"suspend"` | 冷恢复时，执行途中崩溃、非幂等且无法回查的工具调用怎么处置：`"suspend"` 落 `TOOL_OUTCOME_UNKNOWN` 挂起交人（retry / provide / abort）；`"report"` 回填「结果未知，不重试」。pure / idempotent 工具与提供 `ToolSpec.reconcile` 的工具不受影响（ADR 0045） | ADR 0025 recovery |
+| **`tool_recovery`** | `"suspend"` | 冷恢复时，执行途中崩溃、非幂等且无法回查的工具调用怎么处置：`"suspend"` 落 `TOOL_OUTCOME_UNKNOWN` 挂起交人（retry / provide / abort）；`"report"` 回填「结果未知，不重试」。pure / idempotent 工具与提供 `ToolSpec.reconcile` 的工具不受影响（ADR 0045）。只作用于非审计路径：strict audit resume 从不自动回填「结果未知」，人裁决走 `AuditConfig.tool_outcome_resolver`（ADR 0070） | ADR 0025 recovery |
 | **`max_parallel_tool_calls`** | `1` | 单 turn 内**一批** tool call 的最大并发数（一条 assistant 消息里的多个 tool call / call_skill）。默认 `1` = 严格串行（等同历史行为，零回归）；设 `>1` 开启并发 fan-out。安全由 `ToolCallRuntime` 的 RwLock 兜底（parallel_safe 读类重叠、写类独占；call_skill 跳锁真并行）。结果按发起序配对回填历史，cache / resume 不受影响。声明式编排（SKILL.md `orchestration`）的 parallel 段同样受此旋钮限流，serial 段无论该值多大都强制串行。详见 `docs/architecture/agent-loop.md` 并发派发段 + 编排 turn 段 | codex `tools/parallel.rs` |
 | **`reasoning_passback`** | `True` | thinking 模型 reasoning 回传开关（reasoning-content-passback）。开：prompt 重建把落史的 `reasoning` item 附回该采样轮的合并 assistant 消息，provider 组装为 `reasoning_content`（deepseek-v4 等 thinking 模型对带 tool_calls 的 assistant 消息的续传硬性要求，不回传则挂起恢复/多轮续跑被 400 拒）。回传天然自限：history 无 reasoning item 即不回传，非 thinking 模型零变化；关闭场景仅限同 thread 中途从 thinking 切换到严格拒绝未知字段的 provider。落史本身无旋钮（R5）。详见 `docs/architecture/llm-client.md` reasoning 回传节 | — |
 | **`image_input_policy`** | `None`（= disabled） | 图片输入总闸与资源策略。只有显式传 `ImageInputPolicy(enabled=True, max_images=..., max_item_bytes=..., max_total_bytes=..., allowed_media_types=...)` 才接受图片；在 durable append 前验证 canonical base64、decoded size、SHA-256、MIME/header、dimensions 与单帧约束。root/child/spawn/resume runner 均继承 | — |
 | **`input_cost_estimator`** | `None`（启图时走 policy ceiling） | 图片 token 估算策略。可注入 `OpenAIImageCostEstimator()`；未知模型或未注入时使用 `unknown_model_token_ceiling` 非零上界。最终 wire bytes 仍由 `ContextBudget.max_request_bytes` 精确门禁 | — |
+| **`file_input_policy`** 🧪 | `None`（= disabled） | 用户文件（首批 PDF）输入总闸与资源策略（[llm-file-input](architecture/capabilities/llm-file-input.md)）。只有显式传 `FileInputPolicy(enabled=True, max_files=..., max_item_bytes=..., max_total_bytes=..., allowed_media_types=..., page_token_ceiling=..., unknown_file_token_ceiling=...)` 且 client 声明 `"file"` 能力才接受文件；在 durable append 前验证数量、MIME 白名单、canonical base64、decoded size、SHA-256 与 PDF 头尾结构。token 估算 = PDF 页数 × `page_token_ceiling`（默认 5000），页数未知或策略未启用时每个文件取 `unknown_file_token_ceiling`（默认 32768）。root/child/spawn/resume runner 均继承；strict audit 模式下带文件的消息在 acceptance 前显式拒绝 | — |
 | `auto_watch_skills` | `False` | 启用 SKILL.md 文件监听热更 | — |
 | `watch_poll_interval_seconds` | `1.0` | 文件监听轮询间隔 | — |
 | **`instruction_layers`** | `None` | `list[InstructionLayer]`；业务侧注入的系统指令层（类似 codex 的 AGENTS.md 角色，但走协议而非读文件）。详见下方 §1.1 | codex `~/.codex/AGENTS.md` |
@@ -73,7 +74,7 @@
 | `sink` | `None` | `TelemetrySink` —— 事件外发后端；`None` 不外发（R3 仍在总线上） | codex telemetry |
 | `permission_policy` | `None` | `PermissionPolicy` —— HITL 审批策略；`None` 则工具全放行 | claw-code permission |
 | `request_metadata` | `None` | 透传给 provider 的请求级 metadata（业务侧标签） | — |
-| `audit` | `None` | `AuditConfig` —— 开启审计模式（strict 下与多 attempt 客户端互斥，见 ADR 0037） | — |
+| `audit` | `None` | `AuditConfig` —— 开启审计模式（strict 下与多 attempt 客户端互斥，见 ADR 0037）。`AuditConfig.tool_outcome_resolver`（默认 `None`）：resume 时对回查也查不清的结果未知工具调用征求人裁决（`provide` / `abort`，以 operator actor 落账）；`None` = 不问人，这类调用令 resume 拒绝（ADR 0070） | — |
 | `hook_runner` | `None` | `HookRunner` —— PreToolUse / PostToolUse / PreCompact / PreTurn / PostTurn 钩子编排 | claw-code hooks |
 | `initial_history` | `None` | engine 构造时预置的 history（冷恢复重建用） | — |
 | `compaction_degradation_threshold` | `3` | 连续压缩无进展多少次后 emit `CompactionDegradationWarning` | — |
@@ -97,13 +98,19 @@ ContextBudget(
     hard_limit_ratio=0.95,       # 必须压缩否则报错的占比
     preserve_tail_messages=4,    # 压缩时保留尾部消息数
     max_request_bytes=None,      # 发送前请求体字节硬上限（G2b）
-    output_reserve_tokens=0,     # 输出预留：soft/hard 按「窗口 - 预留」计算（ADR 0043）
+    output_reserve_tokens=0,     # 输出预留下限：soft/hard 按「窗口 - 生效预留」计算（ADR 0043）；
+                                 # 生效预留 = max(本值, entry skill 的 inference.max_output_tokens)（ADR 0071）
     max_tool_result_bytes=128 * 1024,  # 单条工具结果进历史前的字节上限，超限保头尾；None=不限；配 OffloadStrategy 时不生效（ADR 0061）
 )
 ```
 
 > 占用估算以 provider 实测 usage 校准（ADR 0043）：首次采样后 `engine.estimate_tokens()` =
 > 实测 prompt token + 之后新增条目粗估，不再只是 `len/3.5`。
+>
+> 输出预留联动（ADR 0071）：每个 turn 的 soft / hard 按 `max(output_reserve_tokens, entry skill 的
+> inference.max_output_tokens)` 扣除后计算（`TurnRunner.effective_budget`）；call_skill / spawn 子 turn 各按
+> 自己 entry skill 的声明。未声明时与配置值一致；声明值 `>= context_window` → 该 turn 以
+> `OutputReserveExceedsWindowError` 显式 `turn_failed`（`UpdateBudget` 缩小窗口后同理）。
 
 ### §1.1 InstructionLayer 字段（instructions-injection）
 
@@ -358,7 +365,7 @@ model: claude-sonnet-4-6     # entry skill 偏好模型（空 → 用 client 默
 inference:                   # 推理参数（可选，atomic / composite 通用；未声明 → provider 默认）
   reasoning_effort: high     # none | minimal | low | medium | high
   temperature: 0             # [0, 2]
-  max_output_tokens: 2048    # >= 1；非法值 / 未知键加载期报错
+  max_output_tokens: 2048    # >= 1；非法值 / 未知键加载期报错；同时抬高本 turn 的上下文输出预留（ADR 0071）
 child_skills: [...]          # composite 必填
 tool_names: [...]            # 显式允许的额外工具
 max_call_depth: 6            # 递归深度上限
@@ -675,12 +682,18 @@ LiteLLMClient(
 | `cwd` | `None` | 子进程工作目录 |
 | **`request_timeout_seconds`** | `60.0` | 单条 JSON-RPC 请求超时；`None` = 关闭 client 层超时，完全由调用方控制。`tools/call` 途中 server 发起的 elicitation 等用户的时间也计入 |
 | **`elicitation_handler`** | `None` | 可选 `ElicitationHandler`；注入则 initialize 声明 `elicitation` 能力并处理 server 的 `elicitation/create`；`None` 不声明，server 仍发时回 `-32601`（见 §4.2） |
+| **`max_list_pages`** | `100` | `tools/list` 跟 `nextCursor` 翻页的页数上限；超限 / 游标重复 / 游标非字符串抛 `McpPaginationError`（不静默截断）；< 1 在拉起子进程前 `ValueError` |
 
 协议版本不是旋钮：客户端恒声明 `2025-06-18`，接受 `SUPPORTED_PROTOCOL_VERSIONS`（`2025-06-18` / `2025-03-26` /
 `2024-11-05`）内的协商结果，其余断开并抛 `McpProtocolVersionError`；协商结果读 `client.protocol_version`
 （[mcp-client](architecture/capabilities/mcp-client.md)）。
 
-**双层 timeout 协同**：`register_mcp_tools_async(..., timeout_seconds=N)` 在 tool 调用外层包了一层 `wait_for(..., timeout=N)`。修复前内层硬编码 60s，外层调大会被静默截断；现在 `McpStdioClient(request_timeout_seconds=N)` 与外层匹配，**或** 显式设 `None` 把唯一 timeout 责任交给外层。
+**双层 timeout 协同**：`register_mcp_tools_async(..., timeout_seconds=N)` / `bind_mcp_tools(..., timeout_seconds=N)` 在 tool 调用外层再限时 N 秒（并接 `ToolContext.cancel`）。修复前内层硬编码 60s，外层调大会被静默截断；现在 `McpStdioClient(request_timeout_seconds=N)` 与外层匹配，**或** 显式设 `None` 把唯一 timeout 责任交给外层。
+
+**放弃即通知**（不是旋钮，ADR 0069）：任一层超时、turn 取消或宿主 `task.cancel()` 放弃一个已发出的请求时，客户端向
+server 发 `notifications/cancelled{requestId, reason}`（reason 如 `client timeout after 120s` /
+`client cancelled the request (requested)`；宿主 `task.cancel("…")` 的消息即 reason），此后迟到的响应被忽略。
+`initialize` 不发；stdio 尚未写出的请求不发。
 
 ```python
 # 推荐：内外层 timeout 一致
@@ -719,7 +732,19 @@ server 打开。`register_mcp_tools_async` 同名参数语义相同。
 走工具图片附件的落盘前 admission；只开 `True` 不开策略，带图的调用以 `tool_attachment_rejected` 判错。`structuredContent` 不需要旋钮：恒进
 `ToolResult.data["structured_content"]`，文本侧缺等价 JSON 时自动补上。`register_mcp_tools_async` 同名参数语义相同。
 
-`McpHttpClient.connect` 同样接受 `elicitation_handler`（语义同 §4 表）。
+`McpHttpClient.connect` 同样接受 `elicitation_handler` / `max_list_pages`（语义同 §4 表），另有两个 HTTP 专属旋钮：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| **`max_stream_resumptions`** | `3` | POST 的 SSE 流在响应前断开时，按 `Last-Event-ID` 续传的次数上限；GET 推送流连续无事件重连的上限。`0` = 不续传 / 不重连；< 0 构造期 `ValueError` |
+| **`stream_resume_delay_seconds`** | `1.0` | 续传 / 重连的基础间隔，按次数翻倍、单次 ≤30s；server 以 SSE `retry:` 给出的间隔优先；< 0 构造期 `ValueError` |
+
+续传只在 server 给 SSE 事件带过 id 时发生；server 从未给 id、续传 GET 回 405 / 错误 / 非 SSE、次数用尽 → 该请求以
+`McpToolError` 显式失败（全部续传计入 `request_timeout_seconds`）。
+
+**outputSchema**（不是旋钮）：工具在 `tools/list` 声明了 `outputSchema` 时，桥按它校验非 `isError` 结果的
+`structuredContent`；缺失或违例 → 该次调用判错（`reason="mcp_output_schema_violation"`，`data["violations"]`），
+server 原文不交给模型；outputSchema 形状非法的工具不注册（告警）。
 
 ### 4.2 elicitation 注入口（taifeng 作为 MCP 客户端，ADR 0063）
 
@@ -799,6 +824,12 @@ async def main():
 ```
 
 **重要约束**：CLI / server 的 **stdout 是 JSON-RPC 协议流**；任何 print / log 必须走 stderr。
+
+**HITL 能力门控**（`--enable-hitl` / `McpPrompter`，不是旋钮，ADR 0069）：server 只向在 initialize 声明了
+`capabilities.elicitation` 的客户端发 `elicitation/create`。未声明（或尚未 initialize）→ 请求不发出，审批立即
+fail-closed 判 deny（`reason="elicitation_unsupported: …"`），并经 `McpStdioServer(emit=)` 发 `elicitation_unsupported`
+（`{"method", "capability", "initialized"}`；未注入 emit 时记 info 日志）。要用 MCP 审批，客户端必须声明该能力；
+`McpStdioServer.client_capabilities` 可读到客户端的声明。
 
 ### 错误码
 
@@ -974,7 +1005,7 @@ pool = await EnginePool.create(
 
 **K1 配额 nuance**：`max_concurrent_spawns` 只统计 running（in-flight runner）的 spawn；suspended spawn 释放 slot，不计入并发额度；resume / rewind 重推重新占用，满额排队（见 §1.0）。
 
-### 6.7 `glob` / `grep` —— 沙盒内只读文件搜索（ADR 0064）
+### 6.7 `glob` / `grep` —— 沙盒内只读文件搜索（ADR 0064 / 0071）
 
 **opt-in**：不在 `EnginePool.create` 默认注入，经 `extra_tools=` 显式传入，入口 skill 在 `tool_names` 声明。纯 Python 实现（不依赖 rg），只读、可并行（`parallel_safe=True`、`effect_kind="pure"`）。契约见 [tool-builtins-extended § glob / grep](architecture/capabilities/tool-builtins-extended.md)。
 
@@ -994,10 +1025,11 @@ pool = await EnginePool.create(
         make_grep_tool(
             root_dir="./workspace",
             policy=my_policy,
-            max_results=200,                  # 结果条数上限（content 按匹配行，其余按文件）
-            max_line_chars=500,               # content 模式单行字符上限
+            max_results=200,                  # 结果名额（content 按输出行：匹配行 + 上下文行；其余按文件）
+            max_line_chars=500,               # content 单行 / multiline 单个片段的字符上限
             max_file_bytes=2 * 1024 * 1024,   # 更大的文件跳过并在尾注列出
             exclude_dirs=DEFAULT_SEARCH_EXCLUDE_DIRS | {"dist"},  # 不下探的目录名
+            respect_gitignore=True,           # 按沙盒内 .gitignore 跳过路径（默认开）
         ),
     ],
 )
@@ -1011,13 +1043,14 @@ pool = await EnginePool.create(
 | `max_line_chars` | — | ✓ | `500` | 单行截断并注明原长度 |
 | `max_file_bytes` | — | ✓ | `2MB` | 超大文件跳过并列出名字 |
 | `exclude_dirs` | ✓ | ✓ | `DEFAULT_SEARCH_EXCLUDE_DIRS` | `.git` `.hg` `.svn` `node_modules` `.venv` `__pycache__` `.mypy_cache` `.pytest_cache` `.ruff_cache` `.tox` |
+| `respect_gitignore` | ✓ | ✓ | `True` | 读沙盒根到基点沿途及遍历中子目录的 `.gitignore`，命中路径跳过（目录不下探）并在尾注计数；显式基点自身不受影响。支持注释 / `!` / 尾斜杠 / `**` / 锚定 `/`，POSIX 字符类等不支持的行计数告知且不生效。`False` = 不读 |
 | `timeout_seconds` | ✓ | ✓ | `30.0` | ToolSpec 级超时 |
 
-**LLM 视角**：`glob({"pattern": "**/*.py", "path"?})` → 每行一个路径；`grep({"pattern": "<re>", "path"?, "include"?, "ignore_case"?, "output_mode"?: "content"|"files_with_matches"|"count"})` → `路径:行号:行`（行号 1 基，`file_read` 的 `offset = 行号 - 1`）。结果按路径排序、路径相对沙盒根；二进制 / 非 UTF-8 / 超大文件 / 被跳过的符号链接都以 `[skipped ...]` 尾注告知。
+**LLM 视角**：`glob({"pattern": "**/*.py", "path"?})` → 每行一个路径；`grep({"pattern": "<re>", "path"?, "include"?, "ignore_case"?, "output_mode"?: "content"|"files_with_matches"|"count", "context_before"?, "context_after"?, "context"?, "multiline"?})` → `路径:行号:行`（行号 1 基，`file_read` 的 `offset = 行号 - 1`）；带上下文时上下文行为 `路径-行号-行`、不相邻组以 `--` 分隔（仅 `content`，占结果名额）；`multiline=true` 时整文件按 `re.MULTILINE | re.DOTALL` 匹配，每个匹配 `路径:起始行-结束行:"片段"`。结果按路径排序、路径相对沙盒根；二进制 / 非 UTF-8 / 超大文件 / 被跳过的符号链接 / 被 .gitignore 忽略的路径都以 `[skipped ...]` 尾注告知。
 
-### 6.8 `memory` —— 模型主动检索 / 写入长期记忆（ADR 0064）
+### 6.8 `memory` —— 模型主动检索 / 写入 / 删除长期记忆（ADR 0064 / 0071）
 
-K3 `memory_store` 的模型侧入口：`search` 委托 `store.prefetch`、`save` 委托 `store.writeback`，内核不带后端。**opt-in**，同一 store 双注入：
+K3 `memory_store` 的模型侧入口：`search` 委托 `store.prefetch`、`save` 委托 `store.writeback`、`delete` 委托 `store.forget`（仅当 store 实现可选协议 `ForgettableMemoryStore`），内核不带后端。**opt-in**，同一 store 双注入：
 
 ```python
 from taifeng.tool.builtins import make_memory_tool
@@ -1031,17 +1064,20 @@ pool = await EnginePool.create(
 
 # 只读知识库（继承 NullMemoryStore 只覆写 prefetch）：只开 search
 make_memory_tool(knowledge_base, actions=("search",))
+
+# store 实现了 forget(target, *, thread_id) -> int 但不想开放删除
+make_memory_tool(store, actions=("search", "save"))
 ```
 
 | 工厂参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `store` | 必填 | `MemoryStore` 实现 |
-| `actions` | `("search", "save")` | 启用的动作子集；决定 schema 与副作用分类（含 save → 串行 + `external_non_idempotent`/`manual`；仅 search → 可并行 + `pure`） |
+| `actions` | `None` | 启用的动作子集；`None` = `search` + `save`，store 可遗忘时再加 `delete`。显式含 `delete` 而 store 不可遗忘 → `ValueError`。决定 schema 与副作用分类（含 save / delete → 串行 + `external_non_idempotent`/`manual`；仅 search → 可并行 + `pure`） |
 | `max_result_chars` | `4000` | search 返回文本的字符上限（协议返回单段文本，按字符计），超出截断并注明 |
 | `max_save_chars` | `2000` | save 单条上限，超出以 `too_large` 拒绝（不截断写入） |
 | `timeout_seconds` | `30.0` | ToolSpec 级超时 |
 
-`save` 写入一条 `assistant_message`，`metadata={"source": "memory_tool", "call_id": ...}`——后端据此区分模型主动记忆与 turn 结束的脏页写回、或按 call_id 去重。后端异常以 `reason="memory_error"` 显式返回给模型（不同于被动钩子的 best-effort）。
+`save` 写入一条 `assistant_message`，`metadata={"source": "memory_tool", "call_id": ...}`——后端据此区分模型主动记忆与 turn 结束的脏页写回、或按 call_id 去重。`delete` 的 `target` 是后端在 search 结果里展示的记忆标识或该条记忆原文（`prefetch` 只返回文本，模型能表达的只有文本），`forget` 返回实际删除条数，0 是正常结果。`NullMemoryStore` 不实现 `forget`；`CompositeMemoryStore` 有可遗忘子时才可遗忘。后端异常以 `reason="memory_error"` 显式返回给模型（不同于被动钩子的 best-effort）。
 
 ## 7. LLM 强类型输出（structured_output / P1）
 

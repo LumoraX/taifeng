@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from taifeng.llm.errors import ContextOverflowError
-from taifeng.llm.types import ImagePart, TextPart
+from taifeng.llm.types import FilePart, ImagePart, TextPart
 
 if TYPE_CHECKING:
     from taifeng.llm.providers.sim.contract import SimContractViolation
@@ -34,7 +34,7 @@ _PREFIX_CACHE_CAPACITY = 32
 
 
 def _message_text(msg: ApiMessage) -> str:
-    """取消息规范化文本；图片仅写结构摘要，绝不拼接 base64 正文。"""
+    """取消息规范化文本；图片 / 文件仅写结构摘要，绝不拼接 base64 正文。"""
     if isinstance(msg.content, str):
         return msg.content
     parts: list[str] = []
@@ -45,6 +45,11 @@ def _message_text(msg: ApiMessage) -> str:
             parts.append(
                 f"<image media_type={part.media_type} detail={part.detail} "
                 f"sha256={part.sha256}>"
+            )
+        elif isinstance(part, FilePart):
+            parts.append(
+                f"<file media_type={part.media_type} filename={part.wire_filename()} "
+                f"size={part.size} sha256={part.sha256}>"
             )
     return " ".join(parts)
 
@@ -79,6 +84,19 @@ class ImageInputDescriptor:
 
 
 @dataclass(frozen=True)
+class FileInputDescriptor:
+    """Sim 文件输入的脱敏结构描述；不包含 base64 或文档语义。"""
+
+    order: int
+    message_index: int
+    part_index: int
+    media_type: str
+    filename: str | None
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class RecordedRequest:
     """单次采样请求的侦察视图（强类型 ApiRequest 的断言便捷层）。"""
 
@@ -100,6 +118,28 @@ class RecordedRequest:
                         part_index=part_index,
                         media_type=part.media_type,
                         detail=part.detail,
+                        sha256=part.sha256,
+                    )
+                )
+        return tuple(descriptors)
+
+    def file_inputs(self) -> tuple[FileInputDescriptor, ...]:
+        """按请求顺序返回文件结构描述，不暴露文件正文。"""
+        descriptors: list[FileInputDescriptor] = []
+        for message_index, message in enumerate(self.request.messages):
+            if isinstance(message.content, str):
+                continue
+            for part_index, part in enumerate(message.content):
+                if not isinstance(part, FilePart):
+                    continue
+                descriptors.append(
+                    FileInputDescriptor(
+                        order=len(descriptors),
+                        message_index=message_index,
+                        part_index=part_index,
+                        media_type=part.media_type,
+                        filename=part.filename,
+                        size=part.size,
                         sha256=part.sha256,
                     )
                 )

@@ -32,6 +32,7 @@ from taifeng.conversation.journal.records import (
     validate_attachments,
 )
 from taifeng.conversation.models import ResponseItem
+from taifeng.llm.errors import UnsupportedModalityError
 from taifeng.loop.audit_descriptor import user_message_input_descriptor_hash
 from taifeng.loop.submission import Submission, UserMessage
 
@@ -329,6 +330,10 @@ def _validated_attachments(
         raise TypeError("UserMessage attachments must be a list")
     if any(type(attachment) is not dict for attachment in op.attachments):
         raise TypeError("UserMessage attachments must contain plain mappings")
+    # strict Journal 的 AttachmentV1 只有图片形状（无 filename）：文件附件在 acceptance
+    # 前显式拒绝（durable submission_rejected），而不是被当作形状错误偶然拒掉
+    if any(attachment.get("kind") == "file" for attachment in op.attachments):
+        raise UnsupportedModalityError("strict audit journal does not accept file attachments")
     attachments = tuple(
         AttachmentV1.model_validate(attachment)
         for attachment in op.attachments

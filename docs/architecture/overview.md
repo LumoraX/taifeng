@@ -54,8 +54,9 @@ src/taifeng/
 │       │                 # core:   read_skill / call_skill（skill-as-context 范式）
 │       │                 # io:     file_io（read/write）/ shell / apply_patch
 │       │                 # net:    http_request（受 PermissionPolicy[scope=network] 审批）
-│       │                 # search: glob_search / grep_search（只读 pure；共用 search_walk 沙盒遍历）
-│       │                 # memory: memory（模型主动读写 K3 MemoryStore 的薄封装）
+│       │                 # search: glob_search / grep_search + grep_scan（只读 pure；共用 search_walk 沙盒遍历
+│       │                 #         与 gitignore 规则匹配）
+│       │                 # memory: memory（模型主动读写删 K3 MemoryStore 的薄封装；delete 需 ForgettableMemoryStore）
 │       │                 # bg:     background（run_in_background / wait_for_task）
 │       │                 # script: run_script（SKILL.md scripts 执行）
 │       └── ...           # 详见 docs/configurable-knobs.md §6
@@ -132,7 +133,7 @@ src/taifeng/
 │
 ├── hooks/        # PreToolUse / PostToolUse / PreCompact / PreTurn / Pre|PostSkillDispatch / Pre|PostScriptUse
 ├── instructions/ # §1.6 指令分层注入（InstructionResolver + InstructionSource 协议 + engine/session/turn 三档 scope）
-├── mcp/          # MCP client（stdio / streamable HTTP，2025-06-18 版本协商；bridge 随 list_changed 同步 tools、结果投影含图片附件 / structuredContent；server→client 请求路由 + elicitation 注入口）+ server（taifeng 作为 MCP server）+ prompter
+├── mcp/          # MCP client（stdio / streamable HTTP，2025-06-18 版本协商；tools/list 分页；bridge 随 list_changed 同步 tools、结果投影含图片附件 / structuredContent + outputSchema 校验；放弃请求发 cancelled；HTTP 断流续传；server→client 请求路由 + elicitation 注入口）+ server（taifeng 作为 MCP server，按客户端能力门控 elicitation）+ prompter
 ├── permission/   # HITL 审批：PermissionPolicy + Rule + Decision（per-builtin 权限模型，无中央门）
 └── telemetry/    # TelemetrySink 协议 + Console / Jsonl / OTel 三 sink
 ```
@@ -278,6 +279,8 @@ Taifeng 提供 **native 四件套 + LiteLLM 兜底** 的双层 provider 架构�
 四家 native client + LiteLLM 共享统一 `ModelClient` 协议 + `ResponseEvent` 流形状（`created → server_model → text_delta* → tool_call_done* → prompt_cache → completed`）。错误分类共享 `providers/_shared.py::classify_http_error`（基于 HTTP status code，比 LiteLLM 的 message 关键字匹配精准）。
 
 图片输入是业务 opt-in：只在注入 `ImageInputPolicy(enabled=True, ...)` 且 client capability 声明 `image` 时可进入 durable conversation。核心只持久化 canonical base64；两套 OpenAI adapter 在网络边界各自转换 wire。完整契约见 [LLM 图片输入](capabilities/llm-image-input.md)。
+
+文件（首批 PDF）输入同构且同为 opt-in：注入 `FileInputPolicy(enabled=True, ...)` 且 client 声明 `file`（OpenAI Chat / Responses、Codex、Anthropic、Gemini）时才可进入 durable conversation；OpenAI-compat 与 LiteLLM 保持 text-only。完整契约见 [LLM 文件输入](capabilities/llm-file-input.md)。
 
 native 路径优势：
 - 错误分类基于 httpx 异常类型（`ConnectError` / `ReadTimeout` 直接 → `TransientNetworkError`，可被 `retry_async` 重试），不再被 LiteLLM 黑盒包成 `InternalServerError` 误判
