@@ -13,7 +13,10 @@
 
 from __future__ import annotations
 
-from taifeng.context.strategies import MultimodalEvictionStrategy
+from taifeng.context.strategies import (
+    BackgroundCompactionStrategy,
+    MultimodalEvictionStrategy,
+)
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.origin import (
     InputOrigin,
@@ -113,6 +116,8 @@ __all__ = [
     "RecipeDeclaringPolicy",
     "RecoveryRecipeBook",
     "RecoveryRecipeProvider",
+    # 后台延迟压缩（compaction-background，🧪）
+    "BackgroundCompactionStrategy",
     # 多模态重载荷驱逐（compaction-multimodal-eviction，🧪）
     "MultimodalEvictionStrategy",
     # 用户文件（PDF）输入（llm-file-input，🧪）

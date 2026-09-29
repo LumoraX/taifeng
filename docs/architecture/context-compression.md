@@ -283,6 +283,22 @@ class MultimodalEvictionStrategy:
 
 > `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim / Offload / MultimodalEviction 五档谱系**。
 
+### 后台延迟压缩（ADR 0087）
+
+`BackgroundCompactionStrategy` 包装一组内层策略，把压缩计算挪到后台：
+
+```
+pre_turn 检查（估算 ≥ 软阈值）
+  ├─ 有算好的结果且前缀没变  → 立即应用（不调模型）
+  ├─ 估算 ≥ urgent_ratio     → 同步压缩（与不包装时相同）
+  └─ 其余                    → 后台开始算，本轮不压缩、照常进行
+```
+
+history 只追加，后台在快照上算出的结果可以直接接上之后新增的条目；前缀被改写过则结果作废。延迟逻辑完全落在
+`CompressionStrategy` 协议之内，主循环不感知。应作为 `compressors` 里唯一的策略（兜底策略放进内层）。
+
+契约：[capabilities/compaction-background.md](capabilities/compaction-background.md)。实验层导出。
+
 ### 压缩增量基线（A5，ADR 0083）
 
 压缩腾出的空间有限时，估算会停在软阈值之上，之后每次预算检查都再压一次：每次都破坏缓存、每次都对摘要再做摘要。

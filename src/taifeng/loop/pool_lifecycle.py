@@ -370,6 +370,25 @@ async def _drive_pool_close(pool: EnginePool) -> None:
         raise first
 
 
+async def _close_compressors(
+    pool: EnginePool,
+    first: BaseException | None,
+) -> BaseException | None:
+    """关闭带后台任务的压缩策略（提供 ``aclose`` 的策略，如 BackgroundCompaction）。"""
+    compressors = pool._compressors  # noqa: SLF001
+    if compressors is None:
+        return first
+    for strategy in compressors.strategies:
+        aclose = getattr(strategy, "aclose", None)
+        if aclose is None:
+            continue
+        try:
+            await aclose()
+        except BaseException as exc:  # noqa: BLE001
+            first = first or exc
+    return first
+
+
 async def _cleanup_pool_resources(
     pool: EnginePool,
     first: BaseException | None,
@@ -377,6 +396,7 @@ async def _cleanup_pool_resources(
     """逐段清理非 Session 资源，每段失败均不阻断后续资源。"""
     first = await _stop_watcher(pool, first)
     pool._root_cancel.cancel(CancelReason.SHUTDOWN, "pool_close")  # noqa: SLF001
+    first = await _close_compressors(pool, first)
     if pool._hook_runner is not None:  # noqa: SLF001
         try:
             await pool._hook_runner.shutdown(grace_seconds=5.0)  # noqa: SLF001

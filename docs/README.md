@@ -125,6 +125,7 @@ Later ADRs:
 84. [ADR 0084: 失败恢复配方可由业务声明](decisions/0084-declarable-recovery-recipes.md): 事件里的恢复配方来自内核写死的表，业务只能另查一张，两张表各说各话。决策：`RecoveryRecipeBook` 按失败分类覆盖并在构造期校验；经失败处置 policy 的可选能力注入；`custom_steps` 承载业务动作；声明的配方带 `source: "declared"`；内核仍只透出不执行。
 85. [ADR 0085: 输入来源标记——内核记来源、汇总透出，不做裁决](decisions/0085-input-origin-tagging.md): 上下文里外部内容越来越多，内核却不记录内容是谁给的，业务无从实现「读过外部内容后先问人」。决策：送入方声明来源（Op 的 `origin`、`ToolSpec.output_trust`），派生内容继承不可信标记，汇总经 `input_taint` 交给工具与 hook；标记不进 prompt，内核不裁决。
 86. [ADR 0086: 出站消息归一化——最终回答经 hook 归一后再交给业务](decisions/0086-outbound-message-normalization.md): 内核没有「这一轮的最终回答」事件，也没有改写它的入口，业务只能自己拼接增量再处理。决策：hook 类型 `outbound_message`（`text_override` 链式改写、不可否决）+ 同名事件（先于 `turn_completed`）；只改出站文本不改 history；只对 root turn 真终态；内核自带 opt-in 的渠道无关归一化。
+87. [ADR 0087: 后台延迟压缩——先在后台算摘要，下一轮开始时应用](decisions/0087-background-deferred-compaction.md): 摘要类压缩发生在用户提交消息之后、模型回答之前，长会话里首字延迟多出十几秒。决策：包装策略在 history 快照上后台计算，下一次 pre_turn 核对前缀后应用；逼近硬阈值或后台失败过则同步；只在 pre_turn 起后台与应用；须为唯一策略；pool 关闭时收尾。
 
 ### Fourth Pass: Gap Tracking
 
