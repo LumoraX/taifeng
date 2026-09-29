@@ -88,17 +88,22 @@ async def prepare_pool_session(
     """按 pool 模式准备 audited bootstrap、legacy resume 或新 thread。
 
     legacy resume 路径先收敛崩溃遗留的悬空工具调用（tool-crash-reconciliation），
-    再把 history 交给 engine；strict audit resume 从 Journal 重建 history，存在未结算
-    effect（UNKNOWN）时 fail closed，不做自动收敛。
+    再把 history 交给 engine；strict audit resume 从 Journal 重建 history，结果未知的
+    root 工具调用按副作用分流收敛并 durable 落账（ADR 0070），其余未结算 effect（UNKNOWN）
+    fail closed。``tool_recovery`` 只作用于 legacy 路径：审计模式从不自动回填「结果未知」。
     """
     if audit is not None and resume_thread_id is not None:
-        state, history = await resume_audited_session(
+        resumed = await resume_audited_session(
             config=audit,
             projection_store=projection_store,
             session_id=session_id,
             resume_thread_id=resume_thread_id,
+            tool_registry=tool_registry,
         )
-        return PreparedPoolSession(state.thread_id, history, state)
+        return PreparedPoolSession(
+            resumed.state.thread_id, resumed.history, resumed.state,
+            resumed.recovered_tool_calls,
+        )
     if audit is not None:
         state = await bootstrap_audited_session(
             config=audit,
