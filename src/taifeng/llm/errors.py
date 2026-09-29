@@ -209,6 +209,18 @@ class ImageCountExceededError(InvalidRequestError):
     kind = "image_count_exceeded"
 
 
+class InvalidFileError(InvalidRequestError):
+    """文件 canonical 内容、签名或结构不符合输入契约（见 llm-file-input）。"""
+
+    kind = "invalid_file"
+
+
+class FileCountExceededError(InvalidRequestError):
+    """文件数量超过业务策略允许的上限。"""
+
+    kind = "file_count_exceeded"
+
+
 class CircuitOpenError(LLMError):
     """provider 断路器处于拒绝态：本次采样**未触网**即失败（ADR 0042）。
 
@@ -267,7 +279,7 @@ class RequestTooLargeError(LLMError):
 
 
 class AttachmentTooLargeError(RequestTooLargeError):
-    """单张图片或图片累计 decoded bytes 超过策略上限。"""
+    """单个附件（图片 / 文件）或同类附件累计 decoded bytes 超过策略上限。"""
 
     kind = "attachment_too_large"
 

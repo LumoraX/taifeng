@@ -71,11 +71,11 @@ def _compat_session() -> OpenAICompatSession:
 
 
 def test_openai_chat_declares_official_image_capabilities() -> None:
-    """官方 Chat client 必须显式声明协议与图片能力。"""
+    """官方 Chat client 必须显式声明协议与图片 / 文件能力。"""
     client = OpenAIChatClient(api_key="sk-test", model="gpt-5.6")
 
     assert client.capabilities == ModelCapabilities(
-        input_modalities=frozenset({"text", "image"}),
+        input_modalities=frozenset({"text", "image", "file"}),
         provider="openai",
         protocol="chat",
     )

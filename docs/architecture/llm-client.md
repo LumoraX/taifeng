@@ -134,13 +134,14 @@ class ApiRequest(BaseModel):
 ```
 src/taifeng/llm/providers/
 ├── openai_compat.py        # OpenAI / vLLM / Ollama / one-api 等 OpenAI-compat gateway（含 reasoning_content）
-├── openai/                 # 官方 OpenAI 双协议：Chat Completions + Responses（文字/图片）
+├── openai/                 # 官方 OpenAI 双协议：Chat Completions + Responses（文字/图片/文件）
 ├── codex/                  # 独立 Codex Responses dialect（instructions / typed input / done-item）
 ├── anthropic_provider.py   # Anthropic messages API（cache_control / extended thinking，零 anthropic-sdk）
 ├── gemini_provider.py      # Gemini streamGenerateContent（零 google-genai-sdk）
 ├── deepseek_provider.py    # DeepSeek（openai_compat 薄子类，预设 base_url + prompt_cache_hit_tokens 映射）
 ├── litellm_provider.py     # 兜底：Bedrock / Vertex / Azure / Kimi 等非主流 provider
 ├── sim/                    # conformance 模拟器 SimClient / RoutingSimClient（测试用，CI 禁真实 API；契约见 capabilities/llm-sim-conformance.md）
+├── _modality_gate.py       # 序列化前输入模态门控：未声明的图片 / 文件 / provider state 一律显式拒绝
 └── _shared.py              # classify_http_error（按 status code）/ SSE 解析 / usage 统一
 ```
 
@@ -163,16 +164,20 @@ engine = AgentEngine(
 
 OpenAI 不再由一个“兼容客户端”猜协议。业务按 endpoint 显式选择：
 
-| 客户端 | endpoint | 图片 wire | 状态恢复 |
-| --- | --- | --- | --- |
-| `OpenAIChatClient` | `/v1/chat/completions` | `image_url.url = data:<mime>;base64,...` | Chat message/tool history |
-| `OpenAIResponsesClient` | `/v1/responses` | `input_image.image_url = data:<mime>;base64,...` | JSONL 中的 ordered items + encrypted reasoning state |
-| `OpenAICompatClient` | 兼容 `/chat/completions` | 不支持，网络前拒绝 | 原 text-only 行为不变 |
+| 客户端 | endpoint | 图片 wire | 文件（PDF）wire | 状态恢复 |
+| --- | --- | --- | --- | --- |
+| `OpenAIChatClient` | `/v1/chat/completions` | `image_url.url = data:<mime>;base64,...` | `{"type": "file", "file": {file_data, filename}}` | Chat message/tool history |
+| `OpenAIResponsesClient` | `/v1/responses` | `input_image.image_url = data:<mime>;base64,...` | `input_file`（`file_data` + `filename`） | JSONL 中的 ordered items + encrypted reasoning state |
+| `OpenAICompatClient` | 兼容 `/chat/completions` | 不支持，网络前拒绝 | 不支持，网络前拒绝 | 原 text-only 行为不变 |
 
-原生 `GeminiClient` / `AnthropicClient` 同样是 **text-only**：与 `OpenAICompatClient` 走同一道
-`assert_text_only_request` 门控，含 `ImagePart` 的请求在组 payload 时即抛 `UnsupportedModalityError`，
-不会让 pydantic part 泄漏进 JSON encoder；纯文本 `list[TextPart]` content 映射为各自 wire 形状
-（Gemini `{text}`、Anthropic `{type: "text", text}`），空文本项丢弃。二者的图片输入能力**未声明**，另立。
+原生 `GeminiClient` / `AnthropicClient` 声明 `input_modalities={"text", "file"}`：组 payload 前经
+`_modality_gate.assert_request_modalities` 按自身声明门控——含 `ImagePart` 的请求即抛 `UnsupportedModalityError`
+（图片输入能力**未声明**，另立），`FilePart` 映射为 Anthropic `document` 块（base64 source，有文件名时带 `title`）/
+Gemini `inlineData`；纯文本 `list[TextPart]` content 映射为各自 wire 形状（Gemini `{text}`、Anthropic
+`{type: "text", text}`），空文本项丢弃，不会让 pydantic part 泄漏进 JSON encoder。`OpenAICompatClient`（含
+`DeepSeekClient`）与 `LiteLLMClient` 走 text-only 门 `assert_text_only_request`，图片与文件都在序列化前拒绝；
+LiteLLM 的 part 列表按 OpenAI content part 形状序列化后再交给 litellm。文件只允许出现在 user 消息，任何 provider
+在 assistant / tool 消息里遇到 `FilePart` 都抛 `InvalidHistoryError`。
 
 `CodexResponsesClient` 是显式 `provider=codex, protocol=responses` 的独立客户端，不属于 OpenAI
 兼容分支，也不提供 Chat fallback。它要求业务提供合法 API-root `base_url`，endpoint 固定由
@@ -207,7 +212,9 @@ done items 承担，噪声吞不掉输出事实。
 
 图片 token 预算使用可注入 `InputCostEstimator`；GPT-5.6 Sol/Terra/Luna 按 32×32 patch、detail resize/patch budget 与 1.2 multiplier 估算，未知模型走 policy 的非零上界。公共 `AgentEngine.estimate_tokens()` 与 turn preflight 复用同一策略、估算器和 entry model。最终 OpenAI/Codex wire JSON 均受 `ContextBudget.max_request_bytes` 精确 UTF-8 字节门禁。
 
-普通 request capture 与 strict attempt observer 共用敏感请求脱敏：图片正文替换为 descriptor，`encrypted_content` 键和值均移除。strict request intent 使用 V2 safe projection、排序唯一的 RFC 6901 redaction manifest 与脱敏前 canonical attempt SHA-256；observer 从不接收图片正文或 ciphertext。Chat 仅在 `[DONE]` 或非空 `finish_reason` 后完成；Chat/Responses 都通过可取消 SSE 行迭代器竞争 read 与 turn token，使 stalled 网络读取可被立即中断。
+文件（PDF）输入与图片同构（契约见 [llm-file-input](capabilities/llm-file-input.md)）：`FileAttachmentV1` canonical base64 落 conversation，业务显式注入 `FileInputPolicy(enabled=True, ...)` 且 client 声明 `"file"` 才放行；admission 校验数量、MIME 白名单、canonical base64、size / SHA-256 与 PDF 头尾结构；token 估算按 PDF 页数 × 每页上界，页数未知或策略未启用时取非零固定上界。图片与文件共用 `attachment_codec.decode_canonical_base64`。
+
+普通 request capture 与 strict attempt observer 共用敏感请求脱敏：图片 / 文件正文替换为 descriptor（文件保留 MIME / size / SHA-256 / filename，strict manifest kind 为 `file_base64`），`encrypted_content` 键和值均移除。strict request intent 使用 V2 safe projection、排序唯一的 RFC 6901 redaction manifest 与脱敏前 canonical attempt SHA-256；observer 从不接收图片正文或 ciphertext。Chat 仅在 `[DONE]` 或非空 `finish_reason` 后完成；Chat/Responses 都通过可取消 SSE 行迭代器竞争 read 与 turn token，使 stalled 网络读取可被立即中断。
 
 ## 重试与失败转移
 

@@ -51,6 +51,7 @@ from _setups import (  # noqa: E402
     SEARCH_TARGET,
 )
 from capability_matrix import SCENARIOS, _verdict, run_scenario  # noqa: E402
+from test_codex_file_input import preflight_codex_file_input  # noqa: E402
 from test_codex_image_matrix import preflight_codex_image_matrix  # noqa: E402
 from test_openai_image_matrix import preflight_openai_image_matrix  # noqa: E402
 
@@ -167,6 +168,11 @@ async def main() -> None:
         print("  ✅  codex_image     instructions/list/done/state/脱敏预检")
     except Exception as exc:  # noqa: BLE001 —— 汇总所有零消耗预检失败
         failures.append(f"codex_image: {type(exc).__name__}: {exc}")
+    try:
+        preflight_codex_file_input()
+        print("  ✅  codex_file      PDF 结构/input_file wire/脱敏预检")
+    except Exception as exc:  # noqa: BLE001 —— 汇总所有零消耗预检失败
+        failures.append(f"codex_file: {type(exc).__name__}: {exc}")
     for sc in SCENARIOS:
         routes = SIM_ROUTES.get(sc.demo_id)
         if routes is None:

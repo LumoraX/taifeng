@@ -8,6 +8,7 @@ from taifeng.llm.errors import InvalidHistoryError
 from taifeng.llm.providers._mid_history import mid_history_system_text
 from taifeng.llm.providers.openai._shared import (
     enforce_openai_wire_size,
+    responses_input_file,
     tool_output_content,
 )
 from taifeng.llm.types import (
@@ -16,6 +17,7 @@ from taifeng.llm.types import (
     ApiMessageItem,
     ApiProviderStateItem,
     ApiRequest,
+    FilePart,
     ImagePart,
     TextPart,
 )
@@ -46,6 +48,11 @@ def _message_content(item: ApiMessageItem) -> list[dict[str, Any]]:
                     "detail": part.detail,
                 }
             )
+            continue
+        if isinstance(part, FilePart):
+            if item.role != "user":
+                raise InvalidHistoryError("Codex files are only valid in user messages")
+            content.append(responses_input_file(part))
     return content
 
 

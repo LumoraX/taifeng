@@ -21,7 +21,9 @@ if TYPE_CHECKING:
 class ModelCapabilities:
     """Model client 输入协议能力的只读描述。"""
 
-    input_modalities: frozenset[Literal["text", "image"]]
+    input_modalities: frozenset[Literal["text", "image", "file"]]
+    """user 消息能承载的模态。``"file"``（文档文件，首批 PDF）与 ``"image"`` 同规矩：
+    默认不含，只由专用协议客户端显式声明，不得据模型名或域名推断。"""
     provider: str
     protocol: str
     accepts_provider_state: bool = False

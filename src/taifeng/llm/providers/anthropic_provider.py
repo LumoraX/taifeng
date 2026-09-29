@@ -19,9 +19,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from taifeng.llm.client import ModelClient, OneNetworkAttemptModelClient
+from taifeng.llm.client import ModelCapabilities, ModelClient, OneNetworkAttemptModelClient
 from taifeng.llm.errors import (
     ContentFilterError,
+    InvalidHistoryError,
     InvalidRequestError,
     InvalidResponseError,
     LLMError,
@@ -42,8 +43,8 @@ from taifeng.llm.events import (
     tool_call_done,
 )
 from taifeng.llm.providers._mid_history import mid_history_system_text
+from taifeng.llm.providers._modality_gate import assert_request_modalities
 from taifeng.llm.providers._shared import (
-    assert_text_only_request,
     classify_http_error,
     extract_rate_limit_snapshot,
     extract_request_id,
@@ -62,7 +63,7 @@ from taifeng.llm.providers.anthropic_thinking import (
     resolve_thinking_budget,
     thinking_blocks_from_state,
 )
-from taifeng.llm.types import ApiRequest, ImagePart, TextPart, TokenUsage
+from taifeng.llm.types import ApiRequest, FilePart, ImagePart, TextPart, TokenUsage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -76,19 +77,31 @@ _DEFAULT_MAX_TOKENS = 4096
 
 
 
-def _anthropic_blocks(content: list[TextPart | ImagePart]) -> list[dict[str, Any]]:
-    """把纯文本 parts 映射为 Anthropic text block(``{type: text, text}``)。
+# Anthropic 原生能力声明：文字 + 文件（document 块）；图片输入未声明（另立）
+ANTHROPIC_CAPABILITIES = ModelCapabilities(
+    input_modalities=frozenset({"text", "file"}),
+    provider="anthropic",
+    protocol="messages",
+)
+
+
+def _anthropic_blocks(
+    content: list[TextPart | ImagePart | FilePart], *, role: str = "user"
+) -> list[dict[str, Any]]:
+    """把 provider-neutral parts 映射为 Anthropic content block。
 
     参照 ``openai/_shared.py`` 的 part 映射范式,差异:本 provider **未声明 image
-    输入能力**(见 capabilities/tool-image-attachment.md「另立」),故只映射文本;
-    图片由 ``_build_payload`` 开头的 ``assert_text_only_request`` 在序列化前拒掉。
+    输入能力**(见 capabilities/tool-image-attachment.md「另立」),图片在
+    ``_build_payload`` 开头的模态门控处即被拒;文件映射为 ``document`` 块
+    (``source.type=base64``,有 ``filename`` 时作为 ``title``)。
 
     此前调用点是裸 ``content_blocks.extend(msg.content)``,注释称「业务侧直接传
-    Anthropic 形状 → 透传」—— 与类型声明矛盾:``PartContent`` 是
-    ``str | list[TextPart | ImagePart]``,裸 dict 根本不合法,不存在透传路径。
+    Anthropic 形状 → 透传」—— 与类型声明矛盾:``PartContent`` 是 provider-neutral
+    part 列表,裸 dict 根本不合法,不存在透传路径。
 
     Args:
         content: 核心层 ``PartContent`` 的 list 形态。
+        role: 所属消息角色;``document`` 块只允许出现在 user 消息。
 
     Returns:
         可 JSON 序列化的 Anthropic block 列表;空文本项丢弃。
@@ -96,14 +109,30 @@ def _anthropic_blocks(content: list[TextPart | ImagePart]) -> list[dict[str, Any
     Raises:
         UnsupportedModalityError: 含 ImagePart。正常路径已被门控先拒;这里再拒一次,
             保证直接调用本函数也不会悄悄丢图(禁止 silent fallback)。
+        InvalidHistoryError: 非 user 消息里出现文件 part。
     """
     mapped: list[dict[str, Any]] = []
     for part in content:
         if isinstance(part, ImagePart):
             raise UnsupportedModalityError("image input is not supported by this client")
-        if part.text:
+        if isinstance(part, FilePart):
+            mapped.append(_anthropic_document(part, role=role))
+        elif part.text:
             mapped.append({"type": "text", "text": part.text})
     return mapped
+
+
+def _anthropic_document(part: FilePart, *, role: str) -> dict[str, Any]:
+    """``FilePart`` → Anthropic ``document`` 块(base64 source,不落盘、不上传)。"""
+    if role != "user":
+        raise InvalidHistoryError("Anthropic documents are only valid in user messages")
+    block: dict[str, Any] = {
+        "type": "document",
+        "source": {"type": "base64", "media_type": part.media_type, "data": part.base64_data},
+    }
+    if part.filename is not None:
+        block["title"] = part.filename
+    return block
 
 
 def _to_anthropic_messages(
@@ -166,9 +195,9 @@ def _to_anthropic_messages(
                         {"type": "text", "text": msg.content},
                     )
             elif isinstance(msg.content, list):
-                # 逐 part 映射成 Anthropic block(类型只允许 TextPart / ImagePart,
+                # 逐 part 映射成 Anthropic block(类型只允许 provider-neutral part,
                 # 不存在"业务侧直接传 Anthropic 形状"的透传路径)
-                content_blocks.extend(_anthropic_blocks(msg.content))
+                content_blocks.extend(_anthropic_blocks(msg.content, role=msg.role))
 
             # assistant 的 tool_calls → tool_use blocks
             if msg.role == "assistant" and msg.tool_calls:
@@ -268,8 +297,8 @@ class AnthropicSession:
         pass
 
     def _build_payload(self, request: ApiRequest) -> dict[str, Any]:
-        # 与 openai_compat 同一道门控:未声明 image 输入能力,序列化前显式拒图
-        assert_text_only_request(request)
+        # 与 openai_compat 同一道门控:按本 provider 声明的模态拒图(文件放行)
+        assert_request_modalities(request, ANTHROPIC_CAPABILITIES.input_modalities)
         cache_indexes = {bp.index for bp in request.cache_breakpoints}
         control = resolve_cache_control(request.cache_breakpoints, self._cache_ttl_seconds)
         system_str, messages = _to_anthropic_messages(
@@ -535,7 +564,7 @@ class AnthropicSession:
 
 
 class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
-    """Session 级 Anthropic native 客户端。
+    """Session 级 Anthropic native 客户端（文字 + 文件 document 输入）。
 
     构造参数：
         api_key: ANTHROPIC_API_KEY（业务侧从环境变量读后注入）
@@ -553,6 +582,8 @@ class AnthropicClient(OneNetworkAttemptModelClient, ModelClient):
         cache_ttl_seconds: 统一覆盖本客户端所有缓存标记的 TTL，只接受 300 / 3600
             （1 小时档写入价更高、适合长间隔会话）；None = 按请求断点声明（默认 300）。
     """
+
+    capabilities = ANTHROPIC_CAPABILITIES
 
     def __init__(
         self,

@@ -10,7 +10,7 @@
 
 - 公共客户端名为 `CodexResponsesClient`，稳定导入路径为 `taifeng.CodexResponsesClient` 与
   `taifeng.llm.providers.codex.CodexResponsesClient`。
-- `ModelCapabilities.provider` 必须为 `codex`，`protocol` 必须为 `responses`，并声明文字、图片与
+- `ModelCapabilities.provider` 必须为 `codex`，`protocol` 必须为 `responses`，并声明文字、图片、文件与
   provider state 输入能力。
 - Codex provider 只实现 `/responses`，不得实现或回退到 `/chat/completions`。
 - `OpenAIChatClient`、`OpenAIResponsesClient` 与 `OpenAICompatClient` 的 wire、capability 和默认行为
@@ -99,6 +99,10 @@ Codex 图片输入规范性继承 [LLM 图片输入契约](llm-image-input.md)�
 启用业务图片输入；调用方仍须显式注入默认关闭的 `ImageInputPolicy`，并在 durable acceptance 前完成 canonical
 base64、MIME/文件签名、宽高/单帧、单项/总尺寸、SHA-256 与图片数量门禁。GPT-5.6 输入 token 估算和最终请求
 字节门禁必须复用该契约的同一 estimator/policy，不得在 Codex client 另设宽松路径。
+
+文件（PDF）输入同理规范性继承 [LLM 文件输入契约](llm-file-input.md)：user message content 中的
+`{"type": "input_file", "file_data": "data:<mime>;base64,…", "filename": …}`，须显式注入默认关闭的
+`FileInputPolicy`；assistant/system 中的文件在网络前拒绝。
 
 ### 3.2 Tool、function output 与 structured output
 
@@ -283,6 +287,6 @@ SHA-256 digest；digest 在内存中计算，不得先把原文写入临时文�
   未授权 sink 脱敏。
 
 Sim/Mock 只证明协议、持久化与故障语义，不证明视觉理解。真实矩阵必须使用 `provider=codex`，覆盖纯文本
-instructions、单图、多图顺序、图片工具调用、encrypted state 热重放与 JSONL 冷恢复。只有代理返回合法非零
+instructions、单图、多图顺序、图片工具调用、encrypted state 热重放、JSONL 冷恢复与文件（PDF）输入。只有代理返回合法非零
 usage、语义断言通过且敏感正文未泄漏到授权 durable store 之外时才能记为 PASS；否则台账必须记录 FAIL 或
 NOT_EXECUTED。

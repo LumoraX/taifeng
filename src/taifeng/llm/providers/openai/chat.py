@@ -44,7 +44,7 @@ class OpenAIChatSession(OpenAICompatSession):
         for message in req.messages:
             wire: dict[str, Any] = {
                 "role": message.role,
-                "content": chat_content(message.content),
+                "content": chat_content(message.content, role=message.role),
             }
             if message.tool_call_id is not None:
                 wire["tool_call_id"] = message.tool_call_id
@@ -94,10 +94,10 @@ class OpenAIChatSession(OpenAICompatSession):
 
 
 class OpenAIChatClient(OpenAICompatClient):
-    """OpenAI 官方 Chat 协议客户端，显式支持文字与图片输入。"""
+    """OpenAI 官方 Chat 协议客户端，显式支持文字、图片与文件（PDF）输入。"""
 
     capabilities = ModelCapabilities(
-        input_modalities=frozenset({"text", "image"}),
+        input_modalities=frozenset({"text", "image", "file"}),
         provider="openai",
         protocol="chat",
     )

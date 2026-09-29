@@ -272,7 +272,7 @@ class RedactionEntryV1(JournalModel):
     """request 安全投影中一个被删除值的稳定地址。"""
 
     path: NonEmptyStr
-    kind: Literal["image_base64", "provider_encrypted_content"]
+    kind: Literal["image_base64", "file_base64", "provider_encrypted_content"]
 
 
 class LlmRequestCommittedV2(PayloadModelV2):

@@ -27,7 +27,6 @@ from taifeng.llm.errors import (
     AuthenticationError,
     ContentFilterError,
     ContextOverflowError,
-    InvalidHistoryError,
     InvalidRequestError,
     InvalidResponseError,
     LLMError,
@@ -35,30 +34,11 @@ from taifeng.llm.errors import (
     ServerError,
     TransientNetworkError,
     TransportPhase,
-    UnsupportedModalityError,
 )
 from taifeng.llm.types import (
-    ApiProviderStateItem,
-    ApiRequest,
-    ImagePart,
     RateLimitSnapshot,
     TokenUsage,
 )
-
-
-def assert_text_only_request(request: ApiRequest) -> None:
-    """在序列化前拒绝图片与不透明 provider state。
-
-    旧 provider adapter 只能消费兼容 messages view；显式检查可避免 Pydantic
-    part 泄漏到 JSON encoder，或在切换协议时静默丢失 Responses 状态。
-    """
-    if any(isinstance(item, ApiProviderStateItem) for item in request.input_items):
-        raise InvalidHistoryError("provider state is not supported by this protocol")
-    for message in request.messages:
-        if isinstance(message.content, list) and any(
-            isinstance(part, ImagePart) for part in message.content
-        ):
-            raise UnsupportedModalityError("image input is not supported by this client")
 
 # ---------------------------------------------------------------------------
 # G3：响应头解析（request-id 回流 + 结构化 rate-limit 窗口）

@@ -223,6 +223,7 @@ class EngineGate:
             history_to_api_messages(
                 [item],
                 image_input_policy=self._engine._image_input_policy,
+                file_input_policy=self._engine._file_input_policy,
                 model_capabilities=model_capabilities(self._engine._model_client),
             )
             async with self._engine._lock:

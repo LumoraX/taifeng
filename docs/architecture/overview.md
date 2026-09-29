@@ -280,6 +280,8 @@ Taifeng 提供 **native 四件套 + LiteLLM 兜底** 的双层 provider 架构�
 
 图片输入是业务 opt-in：只在注入 `ImageInputPolicy(enabled=True, ...)` 且 client capability 声明 `image` 时可进入 durable conversation。核心只持久化 canonical base64；两套 OpenAI adapter 在网络边界各自转换 wire。完整契约见 [LLM 图片输入](capabilities/llm-image-input.md)。
 
+文件（首批 PDF）输入同构且同为 opt-in：注入 `FileInputPolicy(enabled=True, ...)` 且 client 声明 `file`（OpenAI Chat / Responses、Codex、Anthropic、Gemini）时才可进入 durable conversation；OpenAI-compat 与 LiteLLM 保持 text-only。完整契约见 [LLM 文件输入](capabilities/llm-file-input.md)。
+
 native 路径优势：
 - 错误分类基于 httpx 异常类型（`ConnectError` / `ReadTimeout` 直接 → `TransientNetworkError`，可被 `retry_async` 重试），不再被 LiteLLM 黑盒包成 `InternalServerError` 误判
 - cache 元数据精准（Anthropic `cache_creation_input_tokens` / DeepSeek `prompt_cache_hit_tokens` / Gemini `cachedContentTokenCount` 各自直读）

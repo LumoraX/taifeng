@@ -31,6 +31,7 @@ from taifeng.llm.providers.sim.script import (
     SimTurn,
 )
 from taifeng.llm.providers.sim.server import (
+    FileInputDescriptor,
     ImageInputDescriptor,
     RecordedRequest,
     RequestLedger,
@@ -43,6 +44,7 @@ from taifeng.llm.providers.sim.shape import (
 )
 
 __all__ = [
+    "FileInputDescriptor",
     "ImageInputDescriptor",
     "RecordedRequest",
     "RequestContractValidator",

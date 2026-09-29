@@ -53,6 +53,7 @@ from _setups import (  # noqa: E402
     setup_skill_inference,
     setup_tool_output_guard,
 )
+from test_codex_file_input import run_codex_file_matrix  # noqa: E402
 from test_codex_image_matrix import run_codex_image_matrix  # noqa: E402
 from test_openai_image_matrix import (  # noqa: E402
     ImageMatrixResult,
@@ -524,6 +525,13 @@ async def main() -> None:
                 base_url=base_url,
                 logs_dir=logs_dir / "codex-image",
             )
+            # 文件（PDF）输入：同属 codex provider 专属场景（llm-file-input）
+            image_results.extend(await run_codex_file_matrix(
+                api_key=api_key,
+                model=resolved_model,
+                base_url=base_url,
+                logs_dir=logs_dir / "codex-file",
+            ))
             for result in image_results:
                 icon = "✅" if result.verdict == "PASS" else "❌"
                 print(
