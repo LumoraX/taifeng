@@ -22,9 +22,13 @@ detached task 跑），或纯只读查询（join），不独占父 turn 资源�
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
+from taifeng.tool.builtins.selection_gate import check_selection_gate_by_id
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+if TYPE_CHECKING:
+    from taifeng.skill.selection import SkillSelectionGate
 
 
 class SpawnCoordinator(Protocol):
@@ -102,8 +106,13 @@ async def _emit_rejected(ctx: ToolContext, data: dict[str, Any]) -> None:
 # ===========================================================================
 
 
-def make_spawn_skill_tool() -> ToolSpec:
-    """构造 spawn_skill ToolSpec —— LLM 分离发起一个子 skill（非阻塞）。"""
+def make_spawn_skill_tool(*, selection_gate: SkillSelectionGate | None = None) -> ToolSpec:
+    """构造 spawn_skill ToolSpec —— LLM 分离发起一个子 skill（非阻塞）。
+
+    Args:
+        selection_gate: 选择置信度分流门（相位 3，ADR 0088）；None = 不启用。与
+            ``call_skill`` 用同一道门，模型不能靠改用分离派发绕过。
+    """
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         # 边界校验：skill_id / reason 必填且为字符串（系统边界，禁静默占位）
@@ -125,6 +134,9 @@ def make_spawn_skill_tool() -> ToolSpec:
         coordinator = _coordinator(ctx)
         if coordinator is None:
             return ToolResult.error("spawn_unavailable", reason="config_error")
+        gated = await check_selection_gate_by_id(selection_gate, skill_id, ctx)
+        if gated is not None:
+            return gated
         # 转发到 engine.spawn_skill（门控 / 配额 / detached task 启动均由 engine 负责）。
         # 准入拒绝是预期内的结果而非工具故障：按稳定分类回给模型并打拒绝事件
         # （ADR 0078）；其余异常照常上抛，由 tool runtime 统一落 tool_error。

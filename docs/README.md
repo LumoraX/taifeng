@@ -126,6 +126,7 @@ Later ADRs:
 85. [ADR 0085: 输入来源标记——内核记来源、汇总透出，不做裁决](decisions/0085-input-origin-tagging.md): 上下文里外部内容越来越多，内核却不记录内容是谁给的，业务无从实现「读过外部内容后先问人」。决策：送入方声明来源（Op 的 `origin`、`ToolSpec.output_trust`），派生内容继承不可信标记，汇总经 `input_taint` 交给工具与 hook；标记不进 prompt，内核不裁决。
 86. [ADR 0086: 出站消息归一化——最终回答经 hook 归一后再交给业务](decisions/0086-outbound-message-normalization.md): 内核没有「这一轮的最终回答」事件，也没有改写它的入口，业务只能自己拼接增量再处理。决策：hook 类型 `outbound_message`（`text_override` 链式改写、不可否决）+ 同名事件（先于 `turn_completed`）；只改出站文本不改 history；只对 root turn 真终态；内核自带 opt-in 的渠道无关归一化。
 87. [ADR 0087: 后台延迟压缩——先在后台算摘要，下一轮开始时应用](decisions/0087-background-deferred-compaction.md): 摘要类压缩发生在用户提交消息之后、模型回答之前，长会话里首字延迟多出十几秒。决策：包装策略在 history 快照上后台计算，下一次 pre_turn 核对前缀后应用；逼近硬阈值或后台失败过则同步；只在 pre_turn 起后台与应用；须为唯一策略；pool 关闭时收尾。
+88. [ADR 0088: 按选择置信度分流——低置信候选不可直接派发](decisions/0088-skill-selection-confidence-gate.md): 相位 2 只把置信度交给模型自行掂量，低置信误派发要到子 skill 跑完才暴露。决策：`proceed` / `trial` / `escalate` 三档；`search_skills` 标注 `route`，`call_skill` / `spawn_skill` 在派发处强制；`trial` 须先 `read_skill` 或试用门放行，`escalate` 本轮不可派发；判定由 history 推导；只约束本轮经召回看到的 skill；默认不启用。
 
 ### Fourth Pass: Gap Tracking
 

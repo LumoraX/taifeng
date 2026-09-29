@@ -53,6 +53,8 @@ MsgKind = Literal[
     "pre_compact_hook_skipped",
     "compaction_deferred",
     "outbound_message",
+    "skill_selection_routed",
+    "skill_selection_gated",
     "thread_resumed",
     "subagent_policy_overridden",
     "turn_completed",
@@ -227,6 +229,31 @@ class SkillCandidatesVerified(_Msg):
     """
 
     kind: Literal["skill_candidates_verified"] = "skill_candidates_verified"
+
+
+class SkillSelectionRouted(_Msg):
+    """相位 3 验证：search_skills 按选择置信度给候选分流时打点（skill-selection-gate）。
+
+    data = {"proceed": int, "trial": int, "escalate": int, "routes": dict[str, str]}
+    - proceed / trial / escalate: 各档候选数
+    - routes: skill_id → 分流结论
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["skill_selection_routed"] = "skill_selection_routed"
+
+
+class SkillSelectionGated(_Msg):
+    """相位 3 验证：call_skill 派发一个经发现选中的 skill 时，分流门的裁决。
+
+    data = {"skill_id": str, "call_id": str, "route": str, "confidence": float | None,
+            "admitted": bool, "basis": str}
+    - basis: ``route_proceed`` / ``read_skill`` / ``trial_judge``（放行）；
+      ``needs_trial`` / ``trial_rejected`` / ``low_confidence``（拦下）
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["skill_selection_gated"] = "skill_selection_gated"
 
 
 class SkillSpawnRejected(_Msg):
@@ -1016,6 +1043,8 @@ Msg = Union[
     PreCompactHookSkipped,
     CompactionDeferred,
     OutboundMessage,
+    SkillSelectionRouted,
+    SkillSelectionGated,
     TurnSuspended,
     SuspensionResolved,
     SuspensionPartiallyResolved,

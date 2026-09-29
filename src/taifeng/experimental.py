@@ -59,6 +59,16 @@ from taifeng.skill.fitness_shadow import (
     ShadowObserver,
     SkillFitnessShadow,
 )
+from taifeng.skill.selection import (
+    RoutedCandidate,
+    SelectionCandidate,
+    SelectionConfidencePolicy,
+    SkillSelectionGate,
+    ThresholdSelectionPolicy,
+    TrialJudge,
+    TrialVerdict,
+    VerifierTrialJudge,
+)
 from taifeng.skill.working_set import (
     FitnessScorer,
     SkillFitnessScore,
@@ -106,6 +116,15 @@ __all__ = [
     "WorkingSetPlan",
     "WorkingSetPolicy",
     "plan_working_set",
+    # 按选择置信度分流（skill-selection-gate，🧪）
+    "RoutedCandidate",
+    "SelectionCandidate",
+    "SelectionConfidencePolicy",
+    "SkillSelectionGate",
+    "ThresholdSelectionPolicy",
+    "TrialJudge",
+    "TrialVerdict",
+    "VerifierTrialJudge",
     # 输入来源标记（input-origin，🧪）
     "InputOrigin",
     "InputTaint",

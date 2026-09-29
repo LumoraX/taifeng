@@ -413,6 +413,9 @@ LLM 调 search_skills(query, top_k?)
             └─ 全不适用 / 空 → ToolResult.ok(json({"no_match": true, "hint": ...}))
 ```
 
+启用按置信度分流（`selection_gate`）时，两条返回候选的分支都会给每个候选追加 `route` / `route_reason`，
+全部为 `escalate` 时改返回带 `low_confidence` 的 `no_match`；详见 [skill-selection-gate](skill-selection-gate.md)。
+
 ### per-turn 工具裁剪（`src/taifeng/loop/turn.py`）
 
 `search_skills` 在 `pool.create` 时**全局注册**，但只在 `_deferred_exposure_active()`（即 `effective_child_recall == "deferred"`）的 entry 上暴露；append 前按已加入工具名集合**去重**（作者在 `tool_names` 显式声明 `search_skills` 时不重复）。

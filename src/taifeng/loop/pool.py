@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.audit_config import AuditConfig
+    from taifeng.skill.selection import SkillSelectionGate
     from taifeng.skill.watcher import SkillFileWatcher
     from taifeng.telemetry.sink import TelemetrySink
     from taifeng.tool.spec import ToolSpec
@@ -252,6 +253,7 @@ def _prepare_factory_components(
     recall_max_top_k: int,
     extra_tools: list[ToolSpec] | None,
     compressors: list[CompressionStrategy] | None,
+    selection_gate: SkillSelectionGate | None = None,
 ) -> tuple[
     SkillRecall | None,
     SkillVerifier | None,
@@ -267,7 +269,7 @@ def _prepare_factory_components(
         resolved_verifier = LlmSkillVerifier(model_client)
     tools = ToolRegistry()
     tools.register(make_read_skill_tool())
-    tools.register(make_call_skill_tool())
+    tools.register(make_call_skill_tool(selection_gate=selection_gate))
     tools.register(make_run_script_tool())
     if resolved_recall is not None:
         tools.register(
@@ -276,6 +278,7 @@ def _prepare_factory_components(
                 default_top_k=recall_default_top_k,
                 max_top_k=recall_max_top_k,
                 verifier=resolved_verifier,
+                selection_policy=selection_gate.policy if selection_gate else None,
             )
         )
     for tool in extra_tools or []:
@@ -591,6 +594,7 @@ class EnginePool:
         image_input_policy: ImageInputPolicy | None = None,
         input_cost_estimator: InputCostEstimator | None = None,
         file_input_policy: FileInputPolicy | None = None,
+        selection_gate: SkillSelectionGate | None = None,
     ) -> EnginePool:
         """便捷构造。
 
@@ -660,6 +664,7 @@ class EnginePool:
                     recall_max_top_k=recall_max_top_k,
                     extra_tools=extra_tools,
                     compressors=compressors,
+                    selection_gate=selection_gate,
                 )
             )
             pool = cls(
