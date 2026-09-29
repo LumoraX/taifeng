@@ -182,7 +182,12 @@ async def drive_pinned_periodic(engine: Any, res: Any) -> None:
 
     区分点：第 2 轮后宿主直接改 store 追加 BADGE 条目——它从未出现在任何用户消息或工具
     结果里，模型第 4 轮能说出它，只能是周期重注把最新清单送进了上下文。每轮结束时的
-    periodic 累计次数须为 [0, 1, 1, 2]（节奏本身也在断言内）。
+    periodic 累计次数须为 [0, 1, 1, 2]（节奏本身也在断言内）；第 4 轮请求的最后一项须是
+    含 BADGE 的 system 注入（尾部追加，内核侧证据）。
+
+    第 4 轮只问「与门禁有关的那一项」而不是「列出最新清单」：codex wire 把中段 system
+    上提进顶层 instructions，新旧两版清单并列、失去先后，真实模型会沿用对话里 todo_write
+    输出的旧清单（首轮真实回归 2/2 次）。只问 BADGE 那一项，旧清单里没有可混淆的答案。
     """
     store = res.state["todo_store"]
     counts: list[int] = []
@@ -198,14 +203,18 @@ async def drive_pinned_periodic(engine: Any, res: Any) -> None:
                                   "status": "pending"}])
     await _run_turn(engine, res, "搬迁当天大概需要几个人手？一句话回答。", 3)
     counts.append(_periodic_count(res))
-    answer = await _run_turn(engine, res, "不要调用工具，直接按你看到的最新任务清单，"
-                             "列出所有待办项里出现的编号。", 4)
+    answer = await _run_turn(engine, res, "不要调用工具。任务清单里有一项和门禁有关，"
+                             "请把那一项原样写出来（括号里的内容也照抄）。", 4)
     counts.append(_periodic_count(res))
     assert counts == [0, 1, 1, 2], f"周期重注节奏不符：每轮累计 {counts}，期望 [0, 1, 1, 2]"
     injected = [it.payload.get("text", "") for it in engine.history_snapshot()
                 if it.kind == "system_injection"
                 and it.payload.get("source") == pinned_injection_source("todo")]
     assert injected and PINNED_HOST_TOKEN in injected[-1], "最近一次重注内容不含宿主追加的条目"
+    last_req = _requests(res)[-1]
+    tail = (last_req.get("input_items") or last_req.get("messages") or [{}])[-1]
+    assert tail.get("role") == "system" and PINNED_HOST_TOKEN in str(tail.get("content")), (
+        f"第 4 轮请求的最后一项不是含 {PINNED_HOST_TOKEN} 的重注: {tail}")
     assert PINNED_HOST_TOKEN in answer, f"第 4 轮未复述经重注送达的条目: {answer!r}"
     print(f"  [pinned] periodic 累计 {counts}；第 4 轮复述 {PINNED_HOST_TOKEN}")
 

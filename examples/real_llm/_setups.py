@@ -136,11 +136,15 @@ PINNED_HOST_TOKEN = "BADGE-6614"   # 第 2 轮后由宿主直接改 store 追加
 
 
 def setup_pinned_periodic(root: Path, client: Any) -> ScenarioSetup:
-    """TodoStore(reinject_every_turns=2) 同时作 todo_write 后端与 pinned source。"""
+    """TodoStore(reinject_every_turns=2) 同时作 todo_write 后端与 pinned source。
+
+    开 request 留痕：driver 据此确认重注项确实追加在请求尾部（内核侧证据，与模型是否
+    用上它分开取证）。
+    """
     store = TodoStore(reinject_every_turns=PINNED_REINJECT_EVERY)
     return ScenarioSetup(
         extra_tools=[make_todo_write_tool(store)],
-        pool_kwargs={"pinned_state_sources": [store]},
+        pool_kwargs={"pinned_state_sources": [store], "enable_request_capture": True},
         state={"todo_store": store},
     )
 

@@ -94,7 +94,7 @@ EXTRA_SIM_ROUTES = {
             SimTurn(text="已建立"),
             SimTurn(text="确认新址的网络与门禁已开通。"),
             SimTurn(text="大约需要六个人。"),
-            SimTurn(text=f"{PINNED_FIRST_TOKEN}、{PINNED_HOST_TOKEN}"),
+            SimTurn(text=f"[ ] 领取门禁临时卡（凭证号 {PINNED_HOST_TOKEN}）"),
         ],
     },
     "file_search": {
