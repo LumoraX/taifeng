@@ -110,12 +110,12 @@ async def drive_thread_rewind(engine: Any, res: Any) -> None:
 
 
 async def drive_spawn_join(engine: Any, res: Any) -> None:
-    """并发 spawn 多专科 → 错峰 HITL 各自 Resume → join-barrier 聚合。"""
+    """并发 spawn 多专家 → 错峰 HITL 各自 Resume → join-barrier 聚合。"""
     await engine.submit(taifeng.UserMessage(
-        text="患者男 58 岁，确诊高血压十年，近期空腹血糖 7.9：请按会诊流程并发安排"
-             "心血管与代谢两个专科分析，最后汇总联合结论。"))
+        text="我们准备上线新的订单接口：请按联合评审流程并发安排安全与性能"
+             "两个专家评审，最后汇总联合结论。"))
     resumed: set[str] = set()
-    # 两个专科各自 HITL 挂起（错峰），逐个回填答案
+    # 两个专家各自 HITL 挂起（错峰），逐个回填答案
     for _ in range(2):
         susp = await _wait_for(
             res,
@@ -128,7 +128,7 @@ async def drive_spawn_join(engine: Any, res: Any) -> None:
         resumed.add(child_tid)
         await engine.submit(Resume(
             thread_id=child_tid,
-            resolutions={req_id: {"answer": "血压 150/95，未规律服药；空腹血糖 7.9。"}},
+            resolutions={req_id: {"answer": "接口对外网开放，OAuth2 鉴权；预估峰值 QPS 3000，日增数据约 200 万行。"}},
         ))
     await _wait_for(res, lambda m: m.kind == "join_barrier_fired",
                     what="join_barrier_fired", wait_seconds=300.0)
@@ -136,7 +136,7 @@ async def drive_spawn_join(engine: Any, res: Any) -> None:
         res,
         lambda m: m.kind == "spawn_completed"
         and res.kinds.get("spawn_completed", 0) >= 2,
-        what="两个专科 spawn_completed", wait_seconds=300.0,
+        what="两个专家 spawn_completed", wait_seconds=300.0,
     )
 
 

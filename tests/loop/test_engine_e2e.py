@@ -22,7 +22,7 @@ async def test_pool_engine_basic_turn(skills_dir: Path, threads_dir: Path) -> No
         SimTurn(text="分析中...", tool_calls=[
             {"id": "c1", "name": "read_skill", "arguments": '{"skill_id": "style-checker"}'}
         ], usage=TokenUsage(input_tokens=100, output_tokens=20, total_tokens=120)),
-        SimTurn(text="最终结论：右上叶 8mm 结节。", usage=TokenUsage(input_tokens=200, output_tokens=30, total_tokens=230)),
+        SimTurn(text="最终结论：第 8 行存在空指针风险。", usage=TokenUsage(input_tokens=200, output_tokens=30, total_tokens=230)),
     ])
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, threads_dir=threads_dir, model_client=client, compressors=[],

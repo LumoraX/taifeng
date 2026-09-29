@@ -5,7 +5,7 @@
 > 想先确定「某个功能 tf 有没有 / 落地了没 / 入口是哪个」，先看 [**能力总览矩阵 capability-matrix.md**](capability-matrix.md)；
 > 想查某个参数的字段级语义，看 [configurable-knobs.md](configurable-knobs.md)。
 >
-> 下面的代码骨架覆盖常用能力；**完整能力清单（含 suspend/resume、turn-rewind、detached-spawn 多专家会诊、MCP server、结构化输出、overflow 自愈、mid-turn steering 等）以 [能力矩阵](capability-matrix.md) 为准**，每条都带对应 example 与契约链接。
+> 下面的代码骨架覆盖常用能力；**完整能力清单（含 suspend/resume、turn-rewind、detached-spawn 多专家并行评审、MCP server、结构化输出、overflow 自愈、mid-turn steering 等）以 [能力矩阵](capability-matrix.md) 为准**，每条都带对应 example 与契约链接。
 
 ## 安装
 
@@ -150,7 +150,7 @@ await engine.submit(taifeng.loop.CancelTurn(submission_id=running_sub_id))
 ```python
 await engine.submit(
     taifeng.loop.InjectSystemMessage(
-        text="用户已升级到 pro tier，可以使用 oncology-deep-analysis",
+        text="用户已升级到 pro tier，可以使用 premium-deep-analysis",
         source="subscription",
     )
 )
@@ -602,7 +602,7 @@ pool = await EnginePool.create(..., script_executors={"shell": FirejailScriptExe
 | --- | --- | --- |
 | HITL 挂起 / 跨实例 Resume | [suspend_resume/](../examples/suspend_resume/) | [suspend-resume.md](architecture/capabilities/suspend-resume.md) |
 | turn 回访重跑（rewind） | [turn_rewind/](../examples/turn_rewind/) | [turn-rewind.md](architecture/capabilities/turn-rewind.md) |
-| 分离式并发 spawn + 联合会诊 | [multi_expert_consult/](../examples/multi_expert_consult/) | [detached-spawn.md](architecture/capabilities/detached-spawn.md) |
+| 分离式并发 spawn + 联合评审 | [multi_expert_consult/](../examples/multi_expert_consult/) | [detached-spawn.md](architecture/capabilities/detached-spawn.md) |
 | 并发 fan-out / 声明式编排 | [concurrent_fanout/](../examples/concurrent_fanout/) · [orchestration/](../examples/orchestration/) | [skill-orchestration.md](architecture/capabilities/skill-orchestration.md) |
 | mid-turn 输入注入（steering） | [web_ui/](../examples/web_ui/) | [midturn-input-steering.md](architecture/capabilities/midturn-input-steering.md) |
 | overflow 有界自愈 | [test_turn_overflow_recovery](../tests/loop/test_turn_overflow_recovery.py) | [reactive-compaction-recovery.md](architecture/capabilities/reactive-compaction-recovery.md) |

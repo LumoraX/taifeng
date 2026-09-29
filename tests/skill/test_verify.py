@@ -77,7 +77,7 @@ def test_verified_candidate_is_frozen() -> None:
     """VerifiedCandidate 为 frozen dataclass：recall_confidence / verify_confidence 分离。"""
     vc = VerifiedCandidate(
         skill_id="analyzer",
-        description="分析患者数据",
+        description="分析申请资料",
         recall_confidence=0.9,
         applicable=True,
         verify_confidence=0.75,

@@ -47,7 +47,7 @@
 3. **准入失败 = 该次工具调用判错**，不上抛出批。上抛会留下无 output 的悬空 `function_call`，配对断裂直接 400；转为 `is_error` 的 fco 既保配对又如实告知模型。
 4. **两类失败分明**：
    - **准入期**（策略未启用 / sha256 不符 / 超限 / 帧数非法）→ **如实抛**，这是配置或数据错误。
-   - **能力期**（协议或模型收不下图）→ **in-band 文本占位符降级**，不炸 turn。理由：模型不支持图片是选型事实而非错误；炸 turn 会让一条专科轨拖垮整个 join-barrier，降级把失败留在轨内且模型可见。
+   - **能力期**（协议或模型收不下图）→ **in-band 文本占位符降级**，不炸 turn。理由：模型不支持图片是选型事实而非错误；炸 turn 会让一条子 skill 轨拖垮整个 join-barrier，降级把失败留在轨内且模型可见。
 5. **降级是兜底不是主路径**：主路径是 `requires.modalities` 的**路由期**门控——拿不到图片能力时该 skill 根本不进 `available_child_skills`。占位符只覆盖门控之外的残余场景（未声明要求、热重载换 client、业务标签漏报）。
 6. **图片留在 fco 内部**，不合成 `user_message`。后者会污染五处把 `kind == "user_message"` 当 turn 边界锚点的消费者（`count_turns` 的 `t{k}` 节点号、编排种子定位、resume 重放区间、按轮截断），且在并行工具场景下打断同轮合并、把一次采样劈成两条 assistant（thinking 模型 400）。
 7. **投影单一真相**：`_tool_output_content` 同时服务 Chat 与 Responses 两条渲染路径，与 user 消息侧共用取图 / 建 part 的 helper。文本在首项、图片按 attachment 顺序在后；文本为空时不生成空 `TextPart`。
@@ -108,7 +108,7 @@ call）。结果落 `docs/real-llm-ledger.md`。
 ## 能力边界（如实记录）
 
 - **只接受完整内联 canonical base64** 的 PNG / JPEG / WebP / 非动画 GIF。不支持 URL、临时路径、file id、音频、视频、PDF、图片生成。
-- **无跨 thread 图片共享**：兄弟 skill 之间、join-barrier 聚合轨与专科轨之间不传图。codex 有多 agent 亦不传图；跨 agent 传图属产品编排层，非内核机制缺口。
+- **无跨 thread 图片共享**：兄弟 skill 之间、join-barrier 聚合轨与各子 skill 轨之间不传图。codex 有多 agent 亦不传图；跨 agent 传图属产品编排层，非内核机制缺口。
 - **无累计图片预算**：`max_images` 是单次调用的约束，thread 内累计张数靠 `ContextBudget` + 压缩策略被动淘汰，无独立上限旋钮。
 - **无图片版 offload**：`OffloadStrategy` 回避带附件条目——图片落盘后 `file_read` 回来是文本、模型看不见，无法兑现其无损可回溯契约。物化↔digest 双向回溯留作后续。
 - **strict SessionJournal 不支持**：其原子批形态是「单个 tool_outcome_committed + 唯一 fco 会话项」，附件需要第二条会话项，属能力契约违约 → fail closed。

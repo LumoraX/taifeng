@@ -27,19 +27,19 @@ def _line(msg: object) -> str:
 
 def test_skill_search_invoked_event() -> None:
     """skill_search_invoked：kind 固定 + data 字段（query/top_k/pool_size）可读。"""
-    ev = SkillSearchInvoked(data={"query": "代谢分析", "top_k": 5, "pool_size": 120})
+    ev = SkillSearchInvoked(data={"query": "日志分析", "top_k": 5, "pool_size": 120})
     assert ev.kind == "skill_search_invoked"
-    assert ev.data["query"] == "代谢分析"
+    assert ev.data["query"] == "日志分析"
     assert ev.data["top_k"] == 5
     assert ev.data["pool_size"] == 120
 
 
 def test_skill_candidates_returned_event() -> None:
     """skill_candidates_returned：kind 固定 + data 字段（count/top_ids）可读。"""
-    ev = SkillCandidatesReturned(data={"count": 2, "top_ids": ["metabolic", "lung-nodule"]})
+    ev = SkillCandidatesReturned(data={"count": 2, "top_ids": ["log-analyzer", "report-writer"]})
     assert ev.kind == "skill_candidates_returned"
     assert ev.data["count"] == 2
-    assert ev.data["top_ids"] == ["metabolic", "lung-nodule"]
+    assert ev.data["top_ids"] == ["log-analyzer", "report-writer"]
 
 
 def test_both_kinds_in_msgkind_union() -> None:
@@ -51,10 +51,10 @@ def test_both_kinds_in_msgkind_union() -> None:
 
 def test_skill_search_invoked_has_dedicated_render() -> None:
     """skill_search_invoked：专用 tag + 字段渲染，不落 evt 兜底、非 raw dump。"""
-    line = _line(SkillSearchInvoked(data={"query": "代谢分析", "top_k": 5, "pool_size": 120}))
+    line = _line(SkillSearchInvoked(data={"query": "日志分析", "top_k": 5, "pool_size": 120}))
     assert " evt " not in line, f"不应落 evt 兜底：{line}"
     assert "skill_search_invoked {" not in line, "不应是 raw data dump"
-    assert "代谢分析" in line
+    assert "日志分析" in line
     assert "top_k=5" in line
     assert "pool=120" in line
 
@@ -62,9 +62,9 @@ def test_skill_search_invoked_has_dedicated_render() -> None:
 def test_skill_candidates_returned_has_dedicated_render() -> None:
     """skill_candidates_returned：专用 tag + 字段渲染，不落 evt 兜底、非 raw dump。"""
     line = _line(
-        SkillCandidatesReturned(data={"count": 2, "top_ids": ["metabolic", "lung-nodule"]})
+        SkillCandidatesReturned(data={"count": 2, "top_ids": ["log-analyzer", "report-writer"]})
     )
     assert " evt " not in line, f"不应落 evt 兜底：{line}"
     assert "skill_candidates_returned {" not in line, "不应是 raw data dump"
     assert "count=2" in line
-    assert "metabolic" in line
+    assert "log-analyzer" in line

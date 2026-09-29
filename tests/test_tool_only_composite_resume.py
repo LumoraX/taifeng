@@ -77,7 +77,7 @@ def _routing_client():
         "CHILD_MARK": [
             SimTurn(text="子向用户采集", tool_calls=[
                 {"id": "call_rui1", "name": "request_user_input",
-                 "arguments": '{"prompt": "请补充近三月体检报告"}'},
+                 "arguments": '{"prompt": "请补充近三个月的运行日志"}'},
             ]),
             SimTurn(text="子分析完成 CHILD_DONE_MARK"),
         ],

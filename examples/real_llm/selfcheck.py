@@ -51,7 +51,7 @@ SIM_ROUTES = {
     },
     "thread_rewind": {
         # turn_rewind analyzer body 标记(被 spawn 的子 thread:首跑 + 重推各一)
-        "专科分析": [
+        "专项分析": [
             SimTurn(text="子结论 v1：影响轻微。"),
             SimTurn(text="子结论 v2（重推）：存在显著个体差异。"),
         ],

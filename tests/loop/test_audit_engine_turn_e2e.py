@@ -121,7 +121,7 @@ async def test_engine_call_skill_turn_durably_records_tool_and_skill_lineage(
     client = _observed(
         SimClient(
             turns=[
-                # 父 entry：LLM 决定 call_skill 派发子专科 style-checker
+                # 父 entry：LLM 决定 call_skill 派发子 skill style-checker
                 SimTurn(
                     text="派发风格审查子技能",
                     tool_calls=[

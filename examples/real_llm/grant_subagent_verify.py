@@ -55,15 +55,15 @@ from taifeng.skill import DispatchPolicy  # noqa: E402
 
 _ENTRY = """---
 name: mdt-entry
-description: 会诊入口
+description: 评审入口
 version: 1.0.0
 type: composite
 entry: true
 child_skills: [mid-specialist]
 max_call_depth: 4
 ---
-# 会诊入口
-用户要求「会诊」时：**第一步就调用 `call_skill`**，参数严格为
+# 评审入口
+用户要求「评审」时：**第一步就调用 `call_skill`**，参数严格为
 `{"skill_id": "mid-specialist", "args": {}}`。等 mid-specialist 返回后，用一句话综合。
 """
 
@@ -125,7 +125,7 @@ async def _watch(engine, events: list):
 
 async def _drive(engine, events: list) -> None:
     before = sum(1 for m in events if m.kind in ("turn_completed", "turn_failed"))
-    await engine.submit(taifeng.UserMessage(text="请发起会诊。"))
+    await engine.submit(taifeng.UserMessage(text="请发起评审。"))
     for _ in range(2400):
         if sum(1 for m in events
                if m.kind in ("turn_completed", "turn_failed")) > before:
@@ -135,7 +135,7 @@ async def _drive(engine, events: list) -> None:
 
 
 async def _run(mode: str, root: Path):
-    """跑一次会诊；返回 (事件列表, grant 命中的 target 列表, prompter 调用数)。"""
+    """跑一次评审；返回 (事件列表, grant 命中的 target 列表, prompter 调用数)。"""
     skills = root / mode
     _write(skills)
     grant_hits: list[str] = []

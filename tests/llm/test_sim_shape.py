@@ -39,7 +39,7 @@ def _text_stream() -> list[ResponseEvent]:
         created(),
         server_model("secret-model-name"),
         text_delta("这是一段敏感"),
-        text_delta("的患者文本内容"),
+        text_delta("的客户文本内容"),
         prompt_cache(cache_read=100, cache_creation=50),
         completed(response_id="resp-1", usage=_usage(), end_turn=True, request_id="req-abc"),
     ]
@@ -123,14 +123,14 @@ def test_structured_output_payload_not_expanded() -> None:
     events = [
         created(),
         server_model("m"),
-        text_delta('{"diagnosis": "x"}'),
-        structured_output(parsed={"diagnosis": "敏感内容"}, raw_text='{"diagnosis": "敏感内容"}'),
+        text_delta('{"verdict": "x"}'),
+        structured_output(parsed={"verdict": "敏感内容"}, raw_text='{"verdict": "敏感内容"}'),
         completed(response_id=None, usage=_usage(), end_turn=True),
     ]
     sig = extract_shape(events)
     shapes = dict(sig.field_shapes)
     assert shapes["structured_output.parsed"] == "dict"
-    assert "structured_output.parsed.diagnosis" not in shapes
+    assert "structured_output.parsed.verdict" not in shapes
 
 
 def test_type_class_union_across_events() -> None:
@@ -169,7 +169,7 @@ def test_presence_flags() -> None:
 def test_signature_leaks_no_text_or_numbers() -> None:
     """脱敏结构性保证：签名序列化全文不含文本内容 / 具体 token 数 / model 名。"""
     blob = repr(extract_shape(_text_stream()).to_dict())
-    for secret in ("敏感", "患者", "secret-model-name", "1234", "567", "resp-1", "req-abc"):
+    for secret in ("敏感", "客户", "secret-model-name", "1234", "567", "resp-1", "req-abc"):
         assert secret not in blob
 
 

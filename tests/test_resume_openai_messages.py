@@ -102,7 +102,7 @@ def test_root_history_after_child_resume_renders_valid() -> None:
     """
     tid = "root"
     hist = [
-        user_message("患者数据", thread_id=tid),
+        user_message("申请资料", thread_id=tid),
         assistant_message("先做初诊", thread_id=tid, model="m"),
         function_call("CS1", "call_skill", '{"reason": "测试派发", "skill_id":"initial-scan"}', thread_id=tid),
         # resume 回填：output 必须用 CS1（与上面的 function_call 配对）
@@ -158,7 +158,7 @@ def _routing_client():
         "CHILD_MARK": [
             SimTurn(text="向用户采集", tool_calls=[
                 {"id": "call_rui1", "name": "request_user_input",
-                 "arguments": '{"prompt":"补充体检"}'}]),
+                 "arguments": '{"prompt":"补充日志"}'}]),
             SimTurn(text="子完成 CHILD_DONE"),
         ],
     })

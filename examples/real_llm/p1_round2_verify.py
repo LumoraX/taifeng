@@ -58,7 +58,7 @@ max_call_depth: 2
 # ── 场景 2/3:peer 互通 ──
 _COORD = """---
 name: coordinator
-description: 会诊协调者
+description: 评审协调者
 version: 1.0.0
 type: composite
 entry: true
@@ -66,7 +66,7 @@ child_skills: [expert]
 tool_names: [spawn_skill, send_message, wait_peer]
 max_call_depth: 3
 ---
-# 会诊协调者
+# 评审协调者
 - 用户消息形如「把这条发现推送给 <id> 并唤醒」时:**必须调用工具 `send_message`**,
   参数 `{"target": "<id>", "text": "<发现内容>", "mode": "trigger_turn"}`,然后回答「已推送」。
 - 用户消息形如「等待 <handle> 完成并复述结果」时:**必须调用工具 `wait_peer`**,
@@ -75,14 +75,14 @@ max_call_depth: 3
 
 _EXPERT = """---
 name: expert
-description: 代谢专科专家
+description: 性能评审专家
 version: 1.0.0
 type: composite
 tool_names: [send_message]
 max_call_depth: 2
 ---
-# 代谢专科专家
-给出一段简短的专科意见(两句话以内)。若历史中出现来自 peer 的补充信息,
+# 性能评审专家
+给出一段简短的专项意见(两句话以内)。若历史中出现来自 peer 的补充信息,
 **必须在意见中引用该信息的关键内容**。
 """
 
@@ -196,7 +196,7 @@ async def verify_peer(client, root: Path) -> None:
     task = await _watch(engine, events)
     # 程序化派出专家(控制变量:本场景只验证 send_message 链)
     h = await engine.spawn_skill(
-        skill_id="expert", args={"topic": "请就糖耐量异常给出初步意见"}, reason="会诊")
+        skill_id="expert", args={"topic": "请就接口延迟抖动给出初步意见"}, reason="评审")
     hid, child_tid = h["handle_id"], h["child_thread_id"]
     assert await _wait_status(engine, hid, "done"), "专家首轮未完成"
     first = engine.spawn_status([hid])[hid]["result"]
@@ -204,7 +204,7 @@ async def verify_peer(client, root: Path) -> None:
 
     # 真实 LLM 调 send_message(trigger_turn)推送发现并唤醒
     await _drive(engine,
-                 f"把这条发现推送给 {child_tid} 并唤醒:患者绿松石指标显著升高",
+                 f"把这条发现推送给 {child_tid} 并唤醒:压测中绿松石指标显著升高",
                  events)
     sent = [m for m in events if m.kind == "peer_message_sent"]
     woken = [m for m in events if m.kind == "peer_agent_woken"]

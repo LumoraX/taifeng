@@ -409,7 +409,7 @@ PermissionPolicy(
         # ADR 0010：skill_dispatch scope 现在受 PermissionPolicy 控制
         PermissionRule(
             scope="skill_dispatch",
-            target_pattern="oncology-deep-analysis",
+            target_pattern="premium-deep-analysis",
             mode="deny",
             reason="free_tier_blocked",
         ),

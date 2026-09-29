@@ -9,7 +9,7 @@
 的瞬时抖动，重试即过。
 
 **后果**：taifeng 把 ``content_filter`` 判为终态不可重试（``ContentFilterError``），
-一次瞬时抖动就把整个 turn 判死（业务侧表现为「专科分析失败(content_filter)」且
+一次瞬时抖动就把整个 turn 判死（业务侧表现为「专项分析失败(content_filter)」且
 提示不可恢复）。
 
 本用例钉死的契约：接入方**显式声明**端点 finish_reason 不可信时（``trust_finish_reason=False``），

@@ -214,7 +214,7 @@ class JoinBarrierCoordinator:
         cancel = eng._root_cancel.child(f"barrier:{barrier.barrier_id}")  # noqa: SLF001
         runner = eng._build_child_runner(  # noqa: SLF001
             target, then_thread_id, seed, cancel, history=[seed])
-        # 先广播 fired，再启动聚合 turn：订阅方要用 then_thread_id 预先开会诊轨。
+        # 先广播 fired，再启动聚合 turn：订阅方要用 then_thread_id 预先开聚合轨。
         # 若先启动 child runner，极快的模型可能抢在 fired 事件前发 assistant_text，
         # 下游只能把这段文本归到未知/root 轨。
         # (幂等守卫已由调用方 _check_barriers 在进入本方法前置位,此处不再重复置位)

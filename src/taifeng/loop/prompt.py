@@ -189,7 +189,7 @@ TOOL_IMAGE_OMITTED_TEMPLATE = (
 参照 codex ``sanitize_mcp_tool_result_for_model``（差异 Y：taifeng 按
 ``tool_output_modalities`` 判定，而非按 provider 硬编码）。**不抛异常**的理由：
 模型不支持图片是选型事实而非错误，炸掉整个 turn 在多 skill 场景下会让一条
-专科轨拖垮整个 join barrier；占位符让失败留在轨内，且模型能看见「这里本来有图」。
+子 skill 轨拖垮整个 join barrier；占位符让失败留在轨内，且模型能看见「这里本来有图」。
 准入期失败（策略未启用 / 校验不过）仍然如实抛 —— 见 ``admit_tool_attachments``。
 """
 

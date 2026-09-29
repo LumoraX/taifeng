@@ -18,7 +18,7 @@
   {"id": "content-slogan-create", "name": "品牌口号", "description": "为品牌或产品提炼朗朗上口、传达核心价值的品牌标语", "task": "我们是做儿童编程教育的，帮我想几个简洁有记忆点的品牌口号"},
   {"id": "content-cta-optimize", "name": "CTA优化", "description": "将模糊或平淡的行动号召按钮文案改写为驱动转化的高点击文案", "task": "我的落地页底部那个按钮写着提交，感觉没什么吸引力，帮我换几个更有冲动感的说法"},
   {"id": "content-localize-cn", "name": "本土化改写", "description": "将面向海外受众的原文内容改写为贴近中国文化语境和表达习惯的版本", "task": "这是英文版的产品介绍，翻译成中文后很生硬，帮我彻底本土化一下，让中国用户读起来自然"},
-  {"id": "content-simplify-audience", "name": "受众简化", "description": "将专业术语密集的文本转化为目标受众（如普通用户/儿童/老人）易于理解的表达", "task": "这份医疗说明书写给患者看太难懂了，帮我用大白话重新解释一遍"},
+  {"id": "content-simplify-audience", "name": "受众简化", "description": "将专业术语密集的文本转化为目标受众（如普通用户/儿童/老人）易于理解的表达", "task": "这份保险条款写给普通用户看太难懂了，帮我用大白话重新解释一遍"},
   {"id": "content-fact-check-text", "name": "事实一致性核查", "description": "检查文章内部的数据、时间线和声明是否相互一致，标记潜在矛盾点", "task": "帮我通读这篇稿子，看看里面有没有数字或者说法前后矛盾的地方"},
   {"id": "content-citation-format", "name": "引用格式化", "description": "将参考资料或脚注按照指定引用规范（如APA、MLA）整理格式", "task": "我论文里的参考文献乱七八糟，帮我按APA格式统一整理好"},
   {"id": "content-hashtag-suggest", "name": "话题标签推荐", "description": "根据内容主题和平台特性推荐最优的社交媒体话题标签组合", "task": "我这篇健身打卡内容要发ins，帮我推荐一些能带来流量的标签"},

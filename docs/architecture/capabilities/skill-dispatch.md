@@ -17,7 +17,7 @@ LLM 调用 `call_skill(target_skill_id, args, reason?)` 工具时，系统 SHALL
 7. `skill_dispatched` EventMsg 的 `data` SHALL 含 `reason` 字段
 
 #### Scenario: DispatchPolicy 通过但 PermissionPolicy 拒绝
-- **WHEN** target 在 child_skills 白名单内，但 `PermissionRule(scope='skill_dispatch', target='oncology-deep-analysis', mode='deny')` 命中
+- **WHEN** target 在 child_skills 白名单内，但 `PermissionRule(scope='skill_dispatch', target='premium-deep-analysis', mode='deny')` 命中
 - **THEN** ToolResult.error("skill_dispatch_denied: ...")
 - **AND** SHALL NOT 启动子 TurnRunner
 - **AND** 父 turn 继续，LLM 收到 error 决定后续动作

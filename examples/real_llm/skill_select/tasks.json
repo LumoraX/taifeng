@@ -196,7 +196,7 @@
     "expected": "content-localize-cn"
   },
   {
-    "task": "这份医疗说明书写给患者看太难懂了，帮我用大白话重新解释一遍",
+    "task": "这份保险条款写给普通用户看太难懂了，帮我用大白话重新解释一遍",
     "expected": "content-simplify-audience"
   },
   {
@@ -308,7 +308,7 @@
     "expected": "data-normalize-text"
   },
   {
-    "task": "我们对接了一家医院系统，它返回的数据全是XML格式的病历报文，我需要从里面把诊断编码、费用项目这些字段单独抠出来。",
+    "task": "我们对接了一家物流系统，它返回的数据全是XML格式的运单报文，我需要从里面把网点编码、费用项目这些字段单独抠出来。",
     "expected": "data-xml-extract"
   },
   {
@@ -596,8 +596,8 @@
     "expected": "doc-policy-diff"
   },
   {
-    "task": "患者带来一叠手写和打印混合的就诊记录，我需要快速了解他的主要诊断和目前在吃什么药，能帮我整理出来吗？",
-    "expected": "doc-medical-record-struct"
+    "task": "客户送来一叠手写和打印混合的维修单，我需要快速了解设备的主要故障和已经换过哪些零件，能帮我整理出来吗？",
+    "expected": "doc-repair-record-struct"
   },
   {
     "task": "今天下午三点的产品评审开完了，我把录音文字粘进来了，帮我捋一下今天都聊了什么、最后拍板定了哪些事情。",

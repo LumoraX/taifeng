@@ -75,7 +75,7 @@ tool_names: [echo]
 max_call_depth: 3
 ---
 # 护栏验证入口
-- 用户要求「会诊」时：**必须调用 `call_skill`**，参数
+- 用户要求「评审」时：**必须调用 `call_skill`**，参数
   `{"skill_id": "specialist", "args": {}}`。
 - 用户要求「三连击」时：**连续调用工具 `echo` 三次**（每轮一次，参数 `{}`），
   三次之后再回答「完成」。
@@ -83,18 +83,18 @@ max_call_depth: 3
 
 _SPECIALIST = """---
 name: specialist
-description: 专科
+description: 专项
 version: 1.0.0
 type: composite
 tool_names: [echo]
 max_call_depth: 2
 ---
-# 专科
+# 专项
 直接给一句结论。
 """
 
-_BIG_DOC = ("《临床指南》第 1 节：糖代谢异常的分层管理要点。"
-            + "空腹血糖受损与糖耐量异常的干预阈值、生活方式处方与随访周期细则。" * 120)
+_BIG_DOC = ("《运维手册》第 1 节：容量规划的分层管理要点。"
+            + "峰值流量评估、扩容阈值、降级预案与复盘周期细则。" * 120)
 
 
 def _fetch_doc_tool() -> ToolSpec:
@@ -195,7 +195,7 @@ async def verify_breaker(client, root: Path) -> None:
     engine = await pool.get_or_create(session_id="p1b", entry_skill_id="guard-entry")
     events: list = []
     task = await _watch(engine, events)
-    await _drive_turns(engine, ["请发起会诊。"], events)
+    await _drive_turns(engine, ["请发起评审。"], events)
 
     opened = [m for m in events if m.kind == "denial_circuit_open"]
     denied = [m for m in events if m.kind == "skill_dispatch_permission_denied"]

@@ -18,7 +18,7 @@ def test_skill_candidate_is_frozen() -> None:
     """SkillCandidate 为不可变 frozen dataclass：score / confidence 分离落字段。"""
     cand = SkillCandidate(
         skill_id="analyzer",
-        description="分析患者数据",
+        description="分析申请资料",
         score=3.5,
         confidence=0.87,
         matched_snippet="分析",
@@ -42,10 +42,10 @@ def test_skill_candidate_is_frozen() -> None:
 
 def test_recall_entry_is_frozen() -> None:
     """RecallEntry 为不可变 frozen dataclass：召回语料池里的一项。"""
-    entry = RecallEntry(skill_id="analyzer", description="分析患者数据")
+    entry = RecallEntry(skill_id="analyzer", description="分析申请资料")
     assert dataclasses.is_dataclass(entry)
     assert entry.skill_id == "analyzer"
-    assert entry.description == "分析患者数据"
+    assert entry.description == "分析申请资料"
     try:
         entry.skill_id = "other"  # type: ignore[misc]
         raise AssertionError("RecallEntry 应为 frozen")

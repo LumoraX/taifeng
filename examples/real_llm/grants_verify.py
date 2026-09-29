@@ -41,7 +41,7 @@ from taifeng.permission import (  # noqa: E402
     PermissionRequest,
 )
 
-# ── 验证用 skill：composite 入口 + 一个专科子 skill（call_skill 受 skill_dispatch 门控）──
+# ── 验证用 skill：composite 入口 + 一个专项子 skill（call_skill 受 skill_dispatch 门控）──
 _ENTRY = """---
 name: grant-entry
 description: grant 验证入口
@@ -52,17 +52,17 @@ child_skills: [specialist]
 max_call_depth: 3
 ---
 # grant 验证入口
-用户要求「会诊」时：**必须调用 `call_skill`**，参数
-`{"skill_id": "specialist", "args": {}}`；拿到专科结论后用一句话综合。
+用户要求「评审」时：**必须调用 `call_skill`**，参数
+`{"skill_id": "specialist", "args": {}}`；拿到专项结论后用一句话综合。
 """
 
 _SPECIALIST = """---
 name: specialist
-description: 专科
+description: 专项
 version: 1.0.0
 type: atomic
 ---
-# 专科
+# 专项
 直接给一句结论。
 """
 
@@ -132,7 +132,7 @@ async def verify_grant(client, root: Path) -> None:
     engine = await pool.get_or_create(session_id="grant", entry_skill_id="grant-entry")
     events: list = []
     task = await _watch(engine, events)
-    await _drive(engine, "请发起会诊。", events)
+    await _drive(engine, "请发起评审。", events)
 
     dispatched = [m for m in events if m.kind == "skill_dispatched"]
     hits = [p for k, p in grant_events if k == "permission_grant_hit"]
@@ -172,7 +172,7 @@ async def verify_revoke(client, root: Path) -> None:
     engine = await pool.get_or_create(session_id="grant2", entry_skill_id="grant-entry")
     events: list = []
     task = await _watch(engine, events)
-    await _drive(engine, "请发起会诊。", events)
+    await _drive(engine, "请发起评审。", events)
 
     denied = [m for m in events if m.kind == "skill_dispatch_permission_denied"]
     called = any(m.kind == "tool_call_completed" for m in events) or denied

@@ -317,7 +317,7 @@ async def test_prompter_timeout_emits_event() -> None:
     await policy.check(
         PermissionRequest(
             scope="skill_dispatch",
-            target="oncology",
+            target="premium",
             thread_id="t1",
             submission_id="s1",
             call_chain=("entry", "mid"),
@@ -327,7 +327,7 @@ async def test_prompter_timeout_emits_event() -> None:
     kind, payload = emitted[0]
     assert kind == "permission_prompt_timeout"
     assert payload["scope"] == "skill_dispatch"
-    assert payload["target"] == "oncology"
+    assert payload["target"] == "premium"
     assert payload["timeout_seconds"] == 0.05
     assert payload["call_chain"] == ["entry", "mid"]
 

@@ -148,8 +148,8 @@ async def main() -> None:
         # 第二轮对话（同 session → 验证 prompt cache 命中）
         # ─────────────────────────────────────────
         question_2 = (
-            "如果这个结节在 3 个月后复查 CT 显示增大到 10mm，"
-            "且出现轻微毛刺征，下一步应该怎么处理？"
+            "如果把这段改成参数化查询、并拆成三个函数，"
+            "还有哪些风险需要关注？"
         )
         print(f"\n[user] {question_2}\n")
         sub_id_2 = await engine.submit(taifeng.UserMessage(text=question_2))
