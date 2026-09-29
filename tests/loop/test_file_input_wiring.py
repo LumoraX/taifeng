@@ -85,6 +85,7 @@ async def test_pool_injects_enabled_file_policy_into_request(
     assert content[1].base64_data == attachment["content"]
     (descriptor,) = recorded.file_inputs()
     assert (descriptor.filename, descriptor.sha256) == ("note.pdf", attachment["sha256"])
+    assert client.ledger.violations == []
 
 
 async def test_mixed_image_and_file_attachments_keep_submission_order(
