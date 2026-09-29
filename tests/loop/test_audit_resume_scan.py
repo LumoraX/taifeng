@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from taifeng.conversation.journal.framing import encode_batch
 from taifeng.conversation.journal.models import ActorRef, JournalEnvelope, JournalRecord
@@ -99,6 +100,64 @@ def test_find_unsettled_effects_outcome_without_reference_raises() -> None:
     envelopes = _envelopes(_record("outcome", "tool_outcome_committed", {"status": "success"}))
 
     with pytest.raises(ValueError, match="intent_record_id"):
+        find_unsettled_effects(envelopes)
+
+
+def _recovery_payload(**overrides: object) -> dict[str, object]:
+    """合法的 tool_recovery_committed payload（悬空 intent、回查未执行）。"""
+    payload: dict[str, object] = {
+        "payload_version": 1,
+        "intent_record_id": "intent",
+        "call_id": "c1",
+        "name": "remote_write",
+        "effect_kind": "reconcilable",
+        "basis": "reconcile",
+        "verdict": "not_executed",
+        "reconcile_status": "not_executed",
+        "output": "not executed",
+        "is_error": True,
+        "recovery_operation_id": "ses:resume:1",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_find_unsettled_effects_recovery_record_settles_dangling_intent() -> None:
+    """tool_recovery_committed 是悬空 intent 的终态（ADR 0070）。"""
+    envelopes = _envelopes(
+        _record("intent", "tool_intent_committed"),
+        _record("recovery", "tool_recovery_committed", _recovery_payload()),
+    )
+
+    assert find_unsettled_effects(envelopes) == ()
+
+
+def test_find_unsettled_effects_recovery_record_settles_unknown_outcome() -> None:
+    """改判 unknown outcome 的恢复记录让该 outcome 不再待对账；其余 unknown 照旧列出。"""
+    envelopes = _envelopes(
+        _record("intent", "tool_intent_committed"),
+        _record("outcome", "tool_outcome_committed",
+                {"intent_record_id": "intent", "status": "unknown"}),
+        _record("intent_2", "tool_intent_committed"),
+        _record("outcome_2", "tool_outcome_committed",
+                {"intent_record_id": "intent_2", "status": "unknown"}),
+        _record("recovery", "tool_recovery_committed", _recovery_payload(
+            outcome_record_id="outcome", output=None, is_error=None,
+        )),
+    )
+
+    assert find_unsettled_effects(envelopes) == ("outcome_2",)
+
+
+def test_find_unsettled_effects_malformed_recovery_record_raises() -> None:
+    """新记录类型严格校验：依据 / 结论错配即 Journal 不可信，不当作已结算。"""
+    envelopes = _envelopes(
+        _record("intent", "tool_intent_committed"),
+        _record("recovery", "tool_recovery_committed",
+                _recovery_payload(basis="effect_kind")),
+    )
+
+    with pytest.raises(ValidationError):
         find_unsettled_effects(envelopes)
 
 

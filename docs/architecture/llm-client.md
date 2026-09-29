@@ -341,18 +341,31 @@ native provider 实现可在请求里带额外 header（如 `extra_headers`）�
 只有顶层 system 字段：两家 provider 把这些消息**原位**改写为 `<system-reminder>` 包裹的 user 文本并与相邻 user 合并；
 OpenAI 系原样透传 `role="system"`。契约见 `capabilities/llm-provider-native.md`。
 
-## Journal 确定性回放（journal-replay，ADR 0054）
+## Journal 确定性回放（journal-replay，ADR 0054 / 0070）
 
-`JournalReplayClient.from_records(records)` 把 strict audit Journal 录下的 LLM 调用反过来当成 `ModelClient`：
-每个新请求按录制侧同一规则（`project_attempt_request(provider, model, request)`，空模型以录制模型补齐）算
-`canonical_attempt_sha256`，按摘要取对应录制的 `llm_response_committed.normalized_items` 还原为
-`reasoning_delta` / `text_delta` / `tool_call_done` / `completed` 事件流。
+`JournalReplayClient.from_records(records, capabilities=None)` 把 strict audit Journal 录下的 LLM 调用反过来当成
+`ModelClient`（实现：`llm/providers/replay.py` + `replay_match.py`）。每条录制 = V2 `llm_request_committed` 的安全投影
+`api_request_safe` 与完整摘要 `canonical_attempt_sha256` + `llm_response_committed` 的 `normalized_items` / `usage`。
 
-- **按摘要而非顺序匹配**：并发 call_skill 子 turn 的请求顺序不稳定；同摘要多次录制按录制顺序消费。
-- **分叉即报错**：无匹配 → `ReplayDivergenceError`（`failure_class=invalid_request`），turn 以 `turn_failed` 终止——
-  这正是回归信号；`remaining` / `consumed` 供断言「新运行是否少走 / 多走了调用」。
-- **边界**：只回放 Chat 协议录制（Responses 输入项带 thread 派生的 sample id，跨运行不可复现 → 构造期
-  `ReplayUnsupportedError`）；只回放 `status=complete`；provider 专有回传状态（thinking 签名等）不还原。
+- **两段式匹配**（空模型以录制模型补齐，逐一尝试录制出现过的 provider / model）：
+  1. 定位：按录制侧同一规则投影新请求（`project_attempt_request`），把输入项里由运行身份派生的采样 id
+     （`{thread}:{submission}:turn:{i}:llm:{j}`，见 `loop/turn_helpers._responses_sample_id`）按首次出现顺序换成
+     位置占位符后算摘要，找候选；`legacy:*` 等确定 id 不改；
+  2. 复核：把完整请求（含脱敏掉的图片正文与 provider 密文）按位置映射改写回录制的采样 id，用
+     `canonical_attempt_digest`（录制侧同一 preimage）复算，必须与录制摘要逐字节相等。
+  判据是「采样 id 一致双射重命名下逐字节相同」：采样 id 从不进入 provider wire，只做内核内部归组。脱敏内容或归组
+  不同都复核失败，不因重命名放宽匹配。
+- **按内容而非顺序匹配**：并发 call_skill 子 turn 的请求顺序不稳定；同一请求的多次录制按录制顺序消费。
+- **分叉即报错**：无匹配 → `ReplayDivergenceError`（`failure_class=invalid_request`，仅复核失败时消息标明「脱敏内容或
+  采样归组不同」），turn 以 `turn_failed` 终止——这正是回归信号；`remaining` / `consumed` 供断言「新运行是否少走 /
+  多走了调用」。
+- **还原**：Chat 录制还原为 `reasoning_delta` / `text_delta` / `tool_call_done`，并从同一响应 batch 的会话项
+  （`causation_id` 指向响应记录）还原 `provider_reasoning`（→ `reasoning_state`，thinking 签名）与 function_call 的
+  `extra_content`；Responses 录制把 `normalized_items` 原样经 `normalized_output` 交回（reasoning 的
+  `encrypted_content` 随之还原），另发可见文本 delta 供流式展示。
+- **能力声明**：默认按录制协议声明（text 输入；Responses 时 `accepts_provider_state=True`）。录制 client 声明的能力若
+  影响 prompt 组装（如图片），须以 `capabilities=` 传入同样的声明；录制混杂两种协议、声明与录制协议不符、输出项既非
+  Chat kind 也非合法 Responses terminal item（含 refusal），构造期 `ReplayUnsupportedError`。只回放 `status=complete`。
 
 ## Cache 统计
 

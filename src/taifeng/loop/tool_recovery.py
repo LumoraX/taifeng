@@ -20,6 +20,10 @@ Resume 机制把裁决权交给人。
 
 幂等：所有补写项 id 由 (thread / sample, call_id) 确定性派生；恢复途中再崩溃，下次恢复时
 已补写的调用不再悬空，已挂起的调用由活跃挂起集合排除，不会重复处置。
+
+strict audit 会话不走本模块的落盘路径（Journal 自有 UNKNOWN 语义，见 ``audit_resume_tools``），
+但复用这里的分流原语：可安全重发的副作用集合、回填文案、回查执行与确定性 id 派生
+（``RETRY_SAFE_EFFECTS`` / ``safe_to_retry_text`` / ``run_reconcile`` / ``stable_recovery_id``）。
 """
 
 from __future__ import annotations
@@ -28,39 +32,56 @@ import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.conversation.models import ResponseItem, function_call
 from taifeng.loop.tool_batch import parse_tool_arguments
 from taifeng.suspend.reason import PendingRequest, SuspendReason
 from taifeng.suspend.record import SuspensionRecord
+from taifeng.tool.spec import ReconcileVerdict
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from taifeng.conversation.store import MessageStore
     from taifeng.tool.registry import ToolRegistry
-    from taifeng.tool.spec import ReconcileVerdict, ToolSpec
+    from taifeng.tool.spec import ToolSpec
 
 logger = logging.getLogger(__name__)
 
 ToolRecoveryMode = Literal["suspend", "report"]
 """非幂等且无法回查的悬空调用怎么处置：挂起交人（默认）/ 回填「结果未知」（旧行为）。"""
 
-Disposition = Literal["safe_to_retry", "reconciled", "awaiting_operator", "reported_unknown"]
+Disposition = Literal[
+    "safe_to_retry", "reconciled", "awaiting_operator", "reported_unknown", "operator_resolved",
+]
+"""悬空调用的处置结论。``operator_resolved`` 只出现在 strict audit resume：人的裁决经
+``AuditConfig.tool_outcome_resolver`` 在接管时提交（审计会话不能挂起，见 ADR 0070）。"""
 
-# 可在不知结局时安全重发的副作用分类
-_RETRY_SAFE_EFFECTS = frozenset({"pure", "idempotent"})
+RETRY_SAFE_EFFECTS = frozenset({"pure", "idempotent"})
+"""可在不知结局时安全重发的副作用分类。"""
 
 _SAFE_TO_RETRY_TEXT = (
     "tool call interrupted by process recovery before its result was recorded; "
     "the tool is declared {effect} and may be called again safely"
 )
-_NOT_EXECUTED_TEXT = (
+NOT_EXECUTED_TEXT = (
     "tool call interrupted by process recovery; reconciliation confirmed it was "
     "not executed, so it may be called again safely"
 )
+"""回查确认未执行时回填给模型的文本（is_error=True）。"""
+
+OPERATOR_ABORTED_TEXT = (
+    "tool_outcome_unknown: aborted by operator after crash recovery; not retried"
+)
+"""人裁决放弃查明结局、接受未知并继续时回填的文本（前缀不暗示「确定没执行」）。"""
+
 _UNKNOWN_TEXT = "tool outcome unknown after process recovery; not retried"
+
+
+def safe_to_retry_text(effect_kind: str) -> str:
+    """副作用声明为可安全重发时回填给模型的文本（is_error=True）。"""
+    return _SAFE_TO_RETRY_TEXT.format(effect=effect_kind)
 
 
 @dataclass(frozen=True)
@@ -162,19 +183,41 @@ def find_dangling_calls(history: tuple[ResponseItem, ...]) -> list[DanglingCall]
     return dangling
 
 
-async def _run_reconcile(spec: ToolSpec, call: DanglingCall) -> ReconcileVerdict | None:
-    """调工具的回查函数；参数坏 / 抛异常 / 超时一律视为查不清（返回 None）。"""
+async def run_reconcile(
+    spec: ToolSpec, arguments: dict[str, Any], call_id: str,
+) -> ReconcileVerdict | None:
+    """调工具的回查函数；抛异常 / 超时 / 返回值类型不对一律视为查不清（返回 None）。
+
+    回查受 ``spec.timeout_seconds`` 限时（R4）。失败不阻断恢复，由调用方降级为交人裁决
+    （有日志，非静默）。
+
+    Args:
+        spec: 提供了 ``reconcile`` 的工具声明。
+        arguments: 该次调用的参数对象。
+        call_id: 待回查的调用 id。
+    """
     assert spec.reconcile is not None
+    try:
+        verdict = await asyncio.wait_for(
+            spec.reconcile(arguments, call_id), timeout=spec.timeout_seconds)
+    except Exception:
+        # 回查是恢复的辅助手段：失败不阻断恢复，降级为交人裁决（有日志，非静默）
+        logger.exception("tool reconcile failed for %s (%s)", spec.name, call_id)
+        return None
+    if not isinstance(verdict, ReconcileVerdict):
+        # 业务回查函数违约：同样视为查不清，不猜测其含义
+        logger.error("tool reconcile for %s (%s) returned %s, not ReconcileVerdict",
+                     spec.name, call_id, type(verdict).__name__)
+        return None
+    return verdict
+
+
+async def _reconcile_dangling(spec: ToolSpec, call: DanglingCall) -> ReconcileVerdict | None:
+    """非审计路径：参数取自 transcript 原始串；参数非法即视为查不清。"""
     arguments, error = parse_tool_arguments(call.arguments)
     if error is not None:
         return None
-    try:
-        return await asyncio.wait_for(
-            spec.reconcile(arguments, call.call_id), timeout=spec.timeout_seconds)
-    except Exception:
-        # 回查是恢复的辅助手段：失败不阻断恢复，降级为交人裁决（有日志，非静默）
-        logger.exception("tool reconcile failed for %s (%s)", call.name, call.call_id)
-        return None
+    return await run_reconcile(spec, arguments, call.call_id)
 
 
 async def _decide(
@@ -182,19 +225,19 @@ async def _decide(
 ) -> tuple[Disposition, str | None, bool]:
     """给出一个悬空调用的处置：(disposition, 回填文本 | None=挂起, is_error)。"""
     if spec is not None and spec.reconcile is not None:
-        verdict = await _run_reconcile(spec, call)
+        verdict = await _reconcile_dangling(spec, call)
         if verdict is not None and verdict.status == "completed":
             return "reconciled", verdict.output, verdict.is_error
         if verdict is not None and verdict.status == "not_executed":
-            return "safe_to_retry", _NOT_EXECUTED_TEXT, True
-    elif spec is not None and spec.effect_kind in _RETRY_SAFE_EFFECTS:
-        return "safe_to_retry", _SAFE_TO_RETRY_TEXT.format(effect=spec.effect_kind), True
+            return "safe_to_retry", NOT_EXECUTED_TEXT, True
+    elif spec is not None and spec.effect_kind in RETRY_SAFE_EFFECTS:
+        return "safe_to_retry", safe_to_retry_text(spec.effect_kind), True
     if mode == "report":
         return "reported_unknown", _UNKNOWN_TEXT, True
     return "awaiting_operator", None, True
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
+def stable_recovery_id(prefix: str, *parts: str) -> str:
     """由恢复语境派生确定性 id（恢复幂等的基础）。"""
     digest = hashlib.sha256("\0".join(parts).encode()).hexdigest()
     return f"{prefix}_{digest[:24]}"
@@ -206,7 +249,7 @@ def _recovery_output(call: DanglingCall, text: str, is_error: bool) -> ResponseI
     metadata = {"origin_llm_sample_id": call.llm_sample_id} if call.llm_sample_id else {}
     return ResponseItem(
         kind="function_call_output",
-        id=_stable_id("item_recovery", scope, call.call_id),
+        id=stable_recovery_id("item_recovery", scope, call.call_id),
         thread_id=call.thread_id,
         payload={"call_id": call.call_id, "output": text, "is_error": is_error},
         metadata={**metadata, "recovered": True},
@@ -216,7 +259,7 @@ def _recovery_output(call: DanglingCall, text: str, is_error: bool) -> ResponseI
 def _operator_pending(call: DanglingCall, spec: ToolSpec | None) -> PendingRequest:
     """构造交人裁决的挂起请求（detail 供业务渲染裁决 UI）。"""
     return PendingRequest(
-        request_id=_stable_id("req_recovery", call.thread_id, call.call_id),
+        request_id=stable_recovery_id("req_recovery", call.thread_id, call.call_id),
         reason=SuspendReason.TOOL_OUTCOME_UNKNOWN,
         payload_schema={
             "type": "object",
@@ -281,7 +324,9 @@ async def recover_dangling_tool_calls(
             fc = function_call(
                 call.call_id, call.name, call.arguments,
                 thread_id=call.thread_id, extra_content=call.extra_content,
-            ).model_copy(update={"id": _stable_id("item_recovery_fc", call.thread_id, call.call_id)})
+            ).model_copy(update={
+                "id": stable_recovery_id("item_recovery_fc", call.thread_id, call.call_id),
+            })
             plain_items.append(fc)
         if text is None:
             operator.append(_operator_pending(call, spec))
@@ -293,7 +338,7 @@ async def recover_dangling_tool_calls(
     await _persist_recovery(store, plain_items, outputs_by_sample)
     if operator:
         record = SuspensionRecord(
-            record_id=_stable_id("rec_recovery", thread_id, *(p.request_id for p in operator)),
+            record_id=stable_recovery_id("rec_recovery", thread_id, *(p.request_id for p in operator)),
             thread_id=thread_id,
             submission_id="recovery",
             turn_index=0,
@@ -327,11 +372,18 @@ async def _persist_recovery(
 
 
 __all__ = [
+    "NOT_EXECUTED_TEXT",
+    "OPERATOR_ABORTED_TEXT",
+    "RETRY_SAFE_EFFECTS",
     "DanglingCall",
+    "Disposition",
     "RecoveredCall",
     "ToolRecoveryMode",
     "active_suspension_call_ids",
     "find_dangling_calls",
     "recover_dangling_tool_calls",
+    "run_reconcile",
+    "safe_to_retry_text",
+    "stable_recovery_id",
     "validate_tool_recovery_mode",
 ]

@@ -44,20 +44,24 @@ verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
   首个 Journal IO / 完整性 / ack 不确定失败即关闭 effect gate（freeze），且**每 Session 独立**——一个
   Session 冻结不影响其他 Session。
 - **resume（Journal 接管）**：`get_or_create(resume_thread_id=...)` 经投影 marker 定位 Journal Session →
-  `open_existing` 接管（epoch+1）→ 存在未结算 effect（intent 无 outcome / 已落 unknown / submission 未 applied）
-  即 `AuditResumeError("audit_resume_recovery_required")` 并列出 record id，否则用 root thread 已提交
+  `open_existing` 接管（epoch+1）→ root thread 上结果未知的工具调用（intent 无 outcome / outcome 已落 unknown）
+  按副作用分流收敛：可回查的回查、幂等的判可安全重发、其余经 `AuditConfig.tool_outcome_resolver` 征求人裁决，
+  结论作为 `tool_recovery_committed`（+ 补写的 `function_call_output` 会话项）原子追加（ADR 0070）；其余未结算
+  effect（LLM attempt / skill 派发 / submission 未 applied）或仍需人裁决的调用即
+  `AuditResumeError("audit_resume_recovery_required")` 并列出 record id。通过后用 root thread 已提交
   `conversation_item` 重建 history、复用并核对既有投影 thread 后续跑；已 `session_ended` 的 Session 不可重开。
   resume 失败只释放 lease，不写 `session_ended`。
 - **current recovery exclusions（本阶段不支持）**：custom store/directory、IndexHook、hooks、permission/HITL、
   compressor、memory、instruction layers、orchestration、spawn/peer、非 attempt-observable client、可
-  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。未结算 effect 的
-  repair/reconcile/unfreeze、历史迁移仍不在本阶段范围（resume 只 fail closed，不替运维裁决）。
+  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。工具以外未结算
+  effect 的 repair/unfreeze、子 thread 工具调用的收敛、历史迁移仍不在本阶段范围（resume 只 fail closed）。
 
 完整数据契约与边界以
 [SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)、
 [SessionJournal Durable Core 能力契约](capabilities/session-journal-core.md)、
-[ADR 0025](../decisions/0025-session-journal-source-of-truth.md) 和
-[ADR 0053](../decisions/0053-audited-session-resume-and-writer-takeover.md) 为准。
+[ADR 0025](../decisions/0025-session-journal-source-of-truth.md)、
+[ADR 0053](../decisions/0053-audited-session-resume-and-writer-takeover.md) 和
+[ADR 0070](../decisions/0070-audit-resume-reconcile-and-responses-replay.md) 为准。
 
 ## 三协议总览
 

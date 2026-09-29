@@ -23,7 +23,7 @@
 | **`failure_suspend_max_auto_retries`** | `None` | TTL 自动 retry 的谱系上限（resource-limit-retry-semantics）：同一失败谱系经 N 次「到期自动 retry → 再失败再挂起」后,下次到期强制 abort 并在 `suspension_expired.data` 标注 `auto_retry_exhausted: true`。None = 不限——**配 `on_expire="retry"` 时强烈建议设置**,否则确定性失败会无界自动循环烧钱。人工 Resume 不计数 | — |
 | **`failure_suspend_ttl_seconds`** / **`failure_suspend_on_expire`** | `None` / `"abort"` | 内核自产挂起（SYSTEM_RETRY / RESOURCE_LIMIT）的存活期与到期动作（suspension-ttl）。None = 永不过期；无人值守部署配 ttl + `"retry"` 实现「限流/触顶到期自动续跑」。业务挂起的 ttl 在 `make_request_user_input_tool(ttl_seconds=...)` 工厂声明（DATA 到期恒 abort）。详见 [capabilities/suspend-resume.md](architecture/capabilities/suspend-resume.md) §挂起存活期 | — |
 | **`now_factory`** | `time.time` | 壁钟工厂（TTL 到期计算用）；测试注入固定时钟可让到期立即触发 | — |
-| **`tool_recovery`** | `"suspend"` | 冷恢复时，执行途中崩溃、非幂等且无法回查的工具调用怎么处置：`"suspend"` 落 `TOOL_OUTCOME_UNKNOWN` 挂起交人（retry / provide / abort）；`"report"` 回填「结果未知，不重试」。pure / idempotent 工具与提供 `ToolSpec.reconcile` 的工具不受影响（ADR 0045） | ADR 0025 recovery |
+| **`tool_recovery`** | `"suspend"` | 冷恢复时，执行途中崩溃、非幂等且无法回查的工具调用怎么处置：`"suspend"` 落 `TOOL_OUTCOME_UNKNOWN` 挂起交人（retry / provide / abort）；`"report"` 回填「结果未知，不重试」。pure / idempotent 工具与提供 `ToolSpec.reconcile` 的工具不受影响（ADR 0045）。只作用于非审计路径：strict audit resume 从不自动回填「结果未知」，人裁决走 `AuditConfig.tool_outcome_resolver`（ADR 0070） | ADR 0025 recovery |
 | **`max_parallel_tool_calls`** | `1` | 单 turn 内**一批** tool call 的最大并发数（一条 assistant 消息里的多个 tool call / call_skill）。默认 `1` = 严格串行（等同历史行为，零回归）；设 `>1` 开启并发 fan-out。安全由 `ToolCallRuntime` 的 RwLock 兜底（parallel_safe 读类重叠、写类独占；call_skill 跳锁真并行）。结果按发起序配对回填历史，cache / resume 不受影响。声明式编排（SKILL.md `orchestration`）的 parallel 段同样受此旋钮限流，serial 段无论该值多大都强制串行。详见 `docs/architecture/agent-loop.md` 并发派发段 + 编排 turn 段 | codex `tools/parallel.rs` |
 | **`reasoning_passback`** | `True` | thinking 模型 reasoning 回传开关（reasoning-content-passback）。开：prompt 重建把落史的 `reasoning` item 附回该采样轮的合并 assistant 消息，provider 组装为 `reasoning_content`（deepseek-v4 等 thinking 模型对带 tool_calls 的 assistant 消息的续传硬性要求，不回传则挂起恢复/多轮续跑被 400 拒）。回传天然自限：history 无 reasoning item 即不回传，非 thinking 模型零变化；关闭场景仅限同 thread 中途从 thinking 切换到严格拒绝未知字段的 provider。落史本身无旋钮（R5）。详见 `docs/architecture/llm-client.md` reasoning 回传节 | — |
 | **`image_input_policy`** | `None`（= disabled） | 图片输入总闸与资源策略。只有显式传 `ImageInputPolicy(enabled=True, max_images=..., max_item_bytes=..., max_total_bytes=..., allowed_media_types=...)` 才接受图片；在 durable append 前验证 canonical base64、decoded size、SHA-256、MIME/header、dimensions 与单帧约束。root/child/spawn/resume runner 均继承 | — |
@@ -73,7 +73,7 @@
 | `sink` | `None` | `TelemetrySink` —— 事件外发后端；`None` 不外发（R3 仍在总线上） | codex telemetry |
 | `permission_policy` | `None` | `PermissionPolicy` —— HITL 审批策略；`None` 则工具全放行 | claw-code permission |
 | `request_metadata` | `None` | 透传给 provider 的请求级 metadata（业务侧标签） | — |
-| `audit` | `None` | `AuditConfig` —— 开启审计模式（strict 下与多 attempt 客户端互斥，见 ADR 0037） | — |
+| `audit` | `None` | `AuditConfig` —— 开启审计模式（strict 下与多 attempt 客户端互斥，见 ADR 0037）。`AuditConfig.tool_outcome_resolver`（默认 `None`）：resume 时对回查也查不清的结果未知工具调用征求人裁决（`provide` / `abort`，以 operator actor 落账）；`None` = 不问人，这类调用令 resume 拒绝（ADR 0070） | — |
 | `hook_runner` | `None` | `HookRunner` —— PreToolUse / PostToolUse / PreCompact / PreTurn / PostTurn 钩子编排 | claw-code hooks |
 | `initial_history` | `None` | engine 构造时预置的 history（冷恢复重建用） | — |
 | `compaction_degradation_threshold` | `3` | 连续压缩无进展多少次后 emit `CompactionDegradationWarning` | — |

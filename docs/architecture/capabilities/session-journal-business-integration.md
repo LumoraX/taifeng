@@ -1,10 +1,11 @@
 # SessionJournal 普通业务主链接入能力契约
 
-> 状态：Experimental。关联 ADR 0025、ADR 0053。依赖 `session-journal-core`（Phase 1 + Phase 2 写者接管）。
+> 状态：Experimental。关联 ADR 0025、ADR 0053、ADR 0070。依赖 `session-journal-core`（Phase 1 + Phase 2 写者接管）。
 
 ## 1. 范围
 
-本能力覆盖显式启用审计的新 Session，以及从 Journal 接管恢复、且不存在未结算 effect 的已有 Session（§13）：
+本能力覆盖显式启用审计的新 Session，以及从 Journal 接管恢复的已有 Session（§13）：root thread 上结果未知的工具调用
+在接管时按副作用分流收敛（§13.1），其余未结算 effect 仍 fail closed：
 
 ```text
 UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
@@ -15,7 +16,8 @@ Journal durable ack 之后的内存态或可重建投影，不得领先 Journal�
 
 未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。本阶段不支持 HITL/审批、suspend、
 compaction/rewind、memory、instruction 更新、hooks、orchestration、detached spawn、barrier、peer、
-未结算 effect 的 repair/reconcile/unfreeze、Timeline/export 通用 redaction、加密、WORM 或外置 blob。LLM request intent
+工具以外（LLM attempt / skill 派发 / submission）未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
+加密、WORM 或外置 blob。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
 
 ## 2. 唯一事实源与提交顺序
@@ -315,7 +317,7 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
 | 维度 | 允许 | 拒绝 |
 | --- | --- | --- |
 | Op | UserMessage、CancelTurn、Shutdown | 其他 Op |
-| Session | 新建；resume（Journal 接管，§13） | 已终结 Session、存在未结算 effect、writer 仍存活 |
+| Session | 新建；resume（Journal 接管，§13；root 工具调用的 UNKNOWN 按 §13.1 收敛） | 已终结 Session、存在无法收敛的未结算 effect、writer 仍存活 |
 | Store | 默认 JSONL 可重建投影 | custom store/directory、IndexHook |
 | Hook/approval | 无 | hooks、permission、HITL |
 | Context | 无 compressor/memory/instruction update | compaction、rewind、memory、instruction |
@@ -337,14 +339,16 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
 2. 只读预检（不持锁）：strict 读取 committed envelopes，做下述第 4 步校验——注定被拒的请求不写接管记录；
 3. `open_existing(journal_session_id, writer_id=AuditConfig.writer_id, operation_id="<session>:resume:<随机>")`
    以 epoch+1 接管（跨进程写者锁保证原 writer 仍存活时 Busy）；
-4. 持锁后权威重读：初始化 batch 的 root thread 必须等于 `resume_thread_id`；存在任一**未结算 effect** 即
-   fail closed——`llm_request_committed` 无对应 `llm_response_checkpoint`、`tool_intent_committed` 无对应
-   `tool_outcome_committed`、`skill_selected` 无同 operation 的 `skill_dispatch_finished`、
-   `submission_accepted` 无对应 `submission_applied`，或任一终态已 durable 为 `unknown`（ADR 0025：未匹配
-   intent 一律 UNKNOWN，恢复不自动重复任何 effect）；
-5. 用 root thread 已提交 `conversation_item` 按 seq 重建 initial history；audited turn index 从 Journal 已
-   accepted 的最大值 +1 续编；
-6. coordinator 使用新 lease 与 `expected_seq = 接管 ack.last_seq`；projector 复用既有投影 thread，并以
+4. 持锁后权威重读：初始化 batch 的 root thread 必须等于 `resume_thread_id`；收集**未结算 effect**——
+   `llm_request_committed` 无对应 `llm_response_checkpoint`、`tool_intent_committed` 无对应
+   `tool_outcome_committed` / `tool_recovery_committed`、`skill_selected` 无同 operation 的
+   `skill_dispatch_finished`、`submission_accepted` 无对应 `submission_applied`，或任一终态已 durable 为
+   `unknown` 且未被 `tool_recovery_committed` 改判（ADR 0025：未匹配 intent 一律 UNKNOWN）。root thread 的工具
+   调用按 §13.1 收敛并把结论原子追加；其余任一未结算 effect，或任一工具调用仍需人裁决，即 fail closed。恢复
+   从不自动重复任何 effect；
+5. 用 root thread 已提交 `conversation_item`（含 §13.1 补写的 output）按 seq 重建 initial history；audited turn
+   index 从 Journal 已 accepted 的最大值 +1 续编；
+6. coordinator 使用新 lease 与 `expected_seq` = 最后一次 ack 的 `last_seq`（有恢复 batch 时为它，否则为接管 ack）；projector 复用既有投影 thread，并以
    Journal 为真相核对：投影是 Journal items 的前缀（含相等）则补齐缺失后缀、watermark = 最后 conversation
    seq，并关闭 generation replay 窗口；投影领先 / 分叉只标 stale（不改写、不冻结，可删除重放）；Session
    identity 不符按 audited 不变量违约拒绝；
@@ -356,7 +360,8 @@ release 与新建 Session 相同：terminal batch + `session_ended` + `close_ses
 
 audited Session 已在本 pool live 时，`resume_thread_id` 等于其 root thread 则返回缓存 Engine，否则拒绝。
 
-所有拒绝抛 `AuditResumeError`（`code` 稳定，`record_ids` 仅 recovery_required 时非空，不携带底层异常文本）：
+所有拒绝抛 `AuditResumeError`（`code` 稳定，`record_ids` 仅 recovery_required / resolution_invalid 时非空，不携带
+底层异常文本）：
 
 | code | 含义 |
 | --- | --- |
@@ -368,11 +373,29 @@ audited Session 已在本 pool live 时，`resume_thread_id` 等于其 root thre
 | `audit_resume_journal_invalid` | Journal 完整性 / 解码违约，或缺初始化 batch |
 | `audit_resume_busy` | 另一进程 / 实例仍持有 writer |
 | `audit_resume_session_ended` | Journal 已有 `session_ended`，终结 Session 不可重开 |
-| `audit_resume_recovery_required` | 物理尾损，或存在未结算 effect（`record_ids` 列出需人工对账的 record） |
+| `audit_resume_recovery_required` | 物理尾损，或存在本次无法收敛的未结算 effect（`record_ids` 列出需要人处置的 record：有工具以外的未结算项时列出全部未结算 record，否则只列仍需人裁决的工具调用） |
+| `audit_resume_resolution_invalid` | `tool_outcome_resolver` 的裁决不适用于该调用（返回类型不对，或对已有结果的调用 `provide`；`record_ids` 为该 record） |
 | `audit_resume_thread_mismatch` | Journal root thread 与 `resume_thread_id` 不符 |
 | `audit_resume_projection_conflict` | 投影 Session identity 不变量违约 |
-| `audit_resume_open_failed` | 其他 core 错误或 core 返回值不满足 trust boundary |
+| `audit_resume_open_failed` | 其他 core 错误（含恢复 batch 追加失败），或 core 返回值 / 恢复后重读不满足 trust boundary |
 | `audit_resume_session_active` | 同一 Session 已 live 且绑定另一 thread |
+
+### 13.1 结果未知的工具调用收敛（ADR 0070）
+
+root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `tool_outcome_committed` 按
+[tool-crash-reconciliation § strict audit 路径](tool-crash-reconciliation.md) 分流：有 `ToolSpec.reconcile` →
+回查；悬空调用的落账与当前 `effect_kind` 都属 pure / idempotent → 可安全重发；其余经
+`AuditConfig.tool_outcome_resolver` 征求人裁决（`AuditToolOutcomeResolution(action="provide"|"abort", operator_id)`，
+以 `operator` actor 落账）；都给不出结论即拒绝。
+
+- 结论写成新的 `tool_recovery_committed`（`ToolRecoveryCommittedV1`）+ 需要时补写的 `function_call_output` 会话项，
+  全部调用都有结论才作为**一个** batch 以接管 lease 原子追加；不改写任何历史记录。
+- 回查与 resolver 只在持写者锁之后调用；只读预检把「无回查、不可安全重发、无 resolver」的调用直接拒绝、不写接管记录；
+  需回查或需征求 resolver 才能判定的调用若最终被拒，接管记录已写（epoch 已 +1），与 Engine 构造失败同类。
+- 已有 durable 结果的调用只接受「回查确认未执行」或人 `abort`，且不补第二条 output。
+- 恢复结论随 `thread_resumed.recovered_tool_calls` 透出（`reconciled` / `safe_to_retry` / `operator_resolved`）。
+- core strict verify 只校验结构与 hash chain，新记录类型天然通过；resume 扫描按 DTO 严格校验，形状违约即
+  `audit_resume_journal_invalid`。没有该记录的旧 Journal 冷读行为不变。
 
 ## 14. 验收门槛
 
@@ -380,8 +403,10 @@ audited Session 已在本 pool live 时，`resume_thread_id` 等于其 root thre
 - cancel 四窗口、并行部分完成、projection stale、Session 隔离和 lifecycle race 全覆盖；
 - legacy mode 回归不变；
 - resume 端到端：崩溃（writer 消失、无 `session_ended`）后新 pool 接管，history 与投影一致、续跑新 turn、
-  verify 通过且含 epoch 2 接管记录；正常关停后拒绝；未结算 tool intent 拒绝并列出 record 且不写接管；
-  writer 存活 Busy；resume 后 Engine 失败只释放 lease、可再次接管；
+  verify 通过且含 epoch 2 接管记录；正常关停后拒绝；无回查、非幂等且无 resolver 的未结算 tool intent 拒绝并列出
+  record 且不写接管；writer 存活 Busy；resume 后 Engine 失败只释放 lease、可再次接管；
+- 工具收敛（§13.1）：回查完成 / 未执行 / 查不清 / 抛错、幂等可安全重发、人 provide / abort（operator actor）、
+  resolver 返回 None / 抛错 / 裁决不适用、durable unknown outcome 只落结论、二次崩溃冷读恢复记录视为已结算；
 - full Ruff changed-files、full mypy、full pytest、Sim selfcheck、OpenSpec strict validation 全绿；
 - living architecture 与 `docs/capability-matrix.md` 同步；
 - 获得明确外部 provider 授权后运行真实 LLM capability matrix，并在最终代码 head 刷新两份 ledger。

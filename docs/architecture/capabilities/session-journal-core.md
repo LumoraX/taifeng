@@ -10,7 +10,9 @@
 也不从 `taifeng.conversation` 顶层导出（业务接入见 `session-journal-business-integration`）。
 
 本能力不提供 recovery lease、repair/reconcile/unfreeze 状态机、legacy migration、redaction、blob 外置或
-签名/WORM。调用方不能把本阶段描述为完整审计真相源集成。
+签名/WORM。调用方不能把本阶段描述为完整审计真相源集成。业务层的恢复结论（如审计 resume 写入的
+`tool_recovery_committed`，ADR 0070）对 core 而言是普通业务 record：同样经 `append_batch` 进入 hash chain，
+strict verify 只校验 frame / 结构 / hash / epoch，不解释业务 payload。
 
 ## 2. 数据契约
 

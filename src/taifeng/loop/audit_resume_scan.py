@@ -2,21 +2,29 @@
 
 ADR 0025：effect 遵循「durable intent → 至多一次 live dispatch → durable outcome 或
 UNKNOWN」。崩溃遗留的**未匹配 intent 一律视为 UNKNOWN**——effect 可能已经发生，也
-可能没有；resume 不能替运维猜，只能 fail closed 列出这些 record 交人裁决。已经
-durable 落为 ``unknown`` 终态的 outcome 同理（写入它的 Session 当时即已冻结）。
+可能没有；resume 不能替运维猜。已经 durable 落为 ``unknown`` 终态的 outcome 同理（写入
+它的 Session 当时即已冻结）。
+
+工具调用的这两类 UNKNOWN 可由恢复路径写一条 ``tool_recovery_committed``（ADR 0070）结算：
+本扫描把它视为对应 intent（及被改判的 unknown outcome）的终态。其余未结算 effect 仍一律
+fail closed。
 
 本模块只读 committed envelopes，不做 IO，不依赖 Engine。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from taifeng.conversation.journal.records import (
     ConversationItemV1,
     SubmissionAcceptedV1,
     deserialize_response_item,
+)
+from taifeng.conversation.journal.recovery_records import (
+    TOOL_RECOVERY_RECORD_TYPE,
+    ToolRecoveryCommittedV1,
 )
 
 if TYPE_CHECKING:
@@ -47,53 +55,72 @@ def _payload_ref(envelope: JournalEnvelope, key: str) -> str:
     return value
 
 
-def _settled_references(
-    envelopes: Sequence[JournalEnvelope],
-) -> tuple[set[str], set[str], set[str], set[str], list[str]]:
-    """收集各类终态记录引用的 intent，以及已 durable 为 unknown 的终态 record。"""
-    llm_settled: set[str] = set()
-    tool_settled: set[str] = set()
-    skill_settled: set[str] = set()
-    applied: set[str] = set()
-    unknown: list[str] = []
+@dataclass(slots=True)
+class _Settlement:
+    """各类终态记录引用的 intent，以及已 durable 为 unknown、尚未被恢复改判的终态。"""
+
+    llm: set[str] = field(default_factory=set)
+    tool: set[str] = field(default_factory=set)
+    skill: set[str] = field(default_factory=set)
+    applied: set[str] = field(default_factory=set)
+    unknown: set[str] = field(default_factory=set)
+    recovered_outcomes: set[str] = field(default_factory=set)
+
+
+def _settled_references(envelopes: Sequence[JournalEnvelope]) -> _Settlement:
+    """收集各类终态记录引用的 intent，以及已 durable 为 unknown 的终态 record。
+
+    Raises:
+        ValueError / pydantic.ValidationError: 终态记录缺引用或恢复记录形状违约。
+    """
+    settled = _Settlement()
     for envelope in envelopes:
         kind = envelope.record_type
         if kind == "llm_response_checkpoint":
-            llm_settled.add(_payload_ref(envelope, "request_record_id"))
+            settled.llm.add(_payload_ref(envelope, "request_record_id"))
         elif kind == "tool_outcome_committed":
-            tool_settled.add(_payload_ref(envelope, "intent_record_id"))
+            settled.tool.add(_payload_ref(envelope, "intent_record_id"))
+        elif kind == TOOL_RECOVERY_RECORD_TYPE:
+            # 恢复结论是 intent 的终态；改判 unknown outcome 时该 outcome 也随之结算。
+            # 新记录类型一律按 DTO 严格校验，形状违约即 Journal 不可信
+            recovery = ToolRecoveryCommittedV1.model_validate(envelope.payload)
+            settled.tool.add(recovery.intent_record_id)
+            if recovery.outcome_record_id is not None:
+                settled.recovered_outcomes.add(recovery.outcome_record_id)
+            continue
         elif kind == "skill_dispatch_finished" and envelope.operation_id is not None:
             # skill 的 selected 与 finished 共享同一 skill operation identity
-            skill_settled.add(envelope.operation_id)
+            settled.skill.add(envelope.operation_id)
         elif kind == "submission_applied":
-            applied.add(_payload_ref(envelope, "accepted_record_id"))
+            settled.applied.add(_payload_ref(envelope, "accepted_record_id"))
         else:
             continue
         # 已 durable 的 unknown 终态同样不可自动续跑
         if envelope.payload.get("status") == _UNKNOWN_STATUS:
-            unknown.append(envelope.record_id)
-    return llm_settled, tool_settled, skill_settled, applied, unknown
+            settled.unknown.add(envelope.record_id)
+    settled.unknown -= settled.recovered_outcomes
+    return settled
 
 
 def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, ...]:
-    """返回需要人工对账的 record id（按 Journal seq 排序）。
+    """返回尚未结算、需要恢复处置的 record id（按 Journal seq 排序）。
 
     - ``llm_request_committed`` 没有对应 ``llm_response_checkpoint``；
-    - ``tool_intent_committed`` 没有对应 ``tool_outcome_committed``；
+    - ``tool_intent_committed`` 没有对应 ``tool_outcome_committed`` / ``tool_recovery_committed``；
     - ``skill_selected`` 没有同 operation 的 ``skill_dispatch_finished``；
     - ``submission_accepted`` 没有对应 ``submission_applied``；
-    - 任一终态 record 的 ``status`` 为 ``unknown``。
+    - 任一终态 record 的 ``status`` 为 ``unknown``，且未被 ``tool_recovery_committed`` 改判。
     """
-    llm, tool, skill, applied, unknown = _settled_references(envelopes)
+    settled = _settled_references(envelopes)
     pending: list[str] = []
     for envelope in envelopes:
         kind = envelope.record_type
         unsettled = (
-            (kind == "llm_request_committed" and envelope.record_id not in llm)
-            or (kind == "tool_intent_committed" and envelope.record_id not in tool)
-            or (kind == "skill_selected" and envelope.operation_id not in skill)
-            or (kind == "submission_accepted" and envelope.record_id not in applied)
-            or envelope.record_id in unknown
+            (kind == "llm_request_committed" and envelope.record_id not in settled.llm)
+            or (kind == "tool_intent_committed" and envelope.record_id not in settled.tool)
+            or (kind == "skill_selected" and envelope.operation_id not in settled.skill)
+            or (kind == "submission_accepted" and envelope.record_id not in settled.applied)
+            or envelope.record_id in settled.unknown
         )
         if unsettled:
             pending.append(envelope.record_id)

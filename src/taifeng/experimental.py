@@ -22,6 +22,10 @@ from taifeng.llm.providers.replay import (
     recorded_calls,
 )
 from taifeng.loop.audit_config import AuditCapabilityError, AuditConfig
+from taifeng.loop.audit_resume_resolution import (
+    AuditToolOutcomeRequest,
+    AuditToolOutcomeResolution,
+)
 from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
 from taifeng.mcp.http_client import McpHttpClient
 from taifeng.skill.fitness import (
@@ -37,6 +41,9 @@ __all__ = [
     "AuditCapabilityError",
     "AuditConfig",
     "JsonlSessionJournalCore",
+    # 审计 resume 时人对结果未知工具调用的裁决（ADR 0070，🧪）
+    "AuditToolOutcomeRequest",
+    "AuditToolOutcomeResolution",
     # Journal 确定性回放（journal-replay，🧪）
     "JournalReplayClient",
     "RecordedCall",

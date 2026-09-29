@@ -12,7 +12,8 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 | **实验层** | `taifeng.experimental.__all__` | 可在任意发布中不兼容地变化，变化记入 ADR | 契约（`docs/architecture/capabilities/`）标 🧪 的能力入口放这里；契约转 ✅ 后晋升顶层，并在本层保留同名导出至少一个发布版本 |
 | **内部** | 其余子模块中未经上述两处导出的符号 | 无 | 随时可改；子包自己的 `__all__`（如 `taifeng.tool.builtins`）只表示模块内的组织，不构成稳定承诺，除非同时出现在顶层 |
 
-当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`）、
+当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`、
+审计 resume 人裁决 `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`）、
 Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
 （`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）。
 

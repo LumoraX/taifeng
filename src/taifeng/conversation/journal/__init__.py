@@ -85,6 +85,10 @@ from taifeng.conversation.journal.records import (
     stable_error,
     validate_attachments,
 )
+from taifeng.conversation.journal.recovery_records import (
+    TOOL_RECOVERY_RECORD_TYPE,
+    ToolRecoveryCommittedV1,
+)
 from taifeng.conversation.journal.writer_lock import (
     FcntlWriterLockAdapter,
     WriterLockAdapter,
@@ -93,6 +97,7 @@ from taifeng.conversation.journal.writer_lock import (
 
 __all__ = [
     "SESSION_ENDED_RECORD_TYPE",
+    "TOOL_RECOVERY_RECORD_TYPE",
     "WRITER_TAKEOVER_RECORD_TYPE",
     "ActorRef",
     "ApprovedSafeMessage",
@@ -149,6 +154,7 @@ __all__ = [
     "ThreadTerminalV1",
     "ToolIntentCommittedV1",
     "ToolOutcomeCommittedV1",
+    "ToolRecoveryCommittedV1",
     "ToolStatus",
     "TurnCancelledV1",
     "TurnCompletedV1",

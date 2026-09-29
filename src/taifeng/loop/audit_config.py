@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         SessionOpenResult,
     )
     from taifeng.llm.client import ModelClient
+    from taifeng.loop.audit_resume_resolution import AuditToolOutcomeResolver
     from taifeng.skill.registry import SkillSnapshot
 
 
@@ -74,17 +75,24 @@ class AuditJournalCore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class AuditConfig:
-    """调用方注入的 strict audit per-pool 配置。"""
+    """调用方注入的 strict audit per-pool 配置。
+
+    ``tool_outcome_resolver``：resume 时对「结果未知、回查也查不清」的工具调用征求人的裁决
+    （ADR 0070）。None = 不问人，这类调用令 resume 以 ``audit_resume_recovery_required`` 拒绝。
+    """
 
     journal_core: AuditJournalCore
     writer_id: str
     max_attachment_bytes: int
     max_total_attachment_bytes: int
+    tool_outcome_resolver: AuditToolOutcomeResolver | None = None
 
     def __post_init__(self) -> None:
         """拒绝不能形成稳定 bootstrap/附件边界的基础配置。"""
         if type(self.writer_id) is not str or not self.writer_id:
             raise ValueError("audit_writer_id_empty")
+        if self.tool_outcome_resolver is not None and not callable(self.tool_outcome_resolver):
+            raise ValueError("audit_tool_outcome_resolver_invalid")
         if (
             type(self.max_attachment_bytes) is not int
             or self.max_attachment_bytes <= 0
