@@ -35,6 +35,7 @@ from taifeng.hooks.types import (
 )
 from taifeng.permission.types import PermissionRequest
 from taifeng.tool.builtins.selection_gate import check_selection_gate
+from taifeng.tool.builtins.skill_authorization import authorize_outside_whitelist
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -166,6 +167,21 @@ async def _call_skill_handler(
     # ============================================================
     target = snapshot.get(skill_id)
     verdict = policy.check(stack=stack, caller=caller, target=target)
+    if (
+        verdict.reason == "not_in_whitelist"
+        and policy.authorization is not None
+        and target is not None
+    ):
+        # 阶段 1a：白名单外授权（相位 4，ADR 0089）——放行后只豁免白名单一层
+        refused = await authorize_outside_whitelist(
+            policy.authorization, caller=caller, target=target, snapshot=snapshot,
+            stack=stack, dispatch_reason=dispatch_reason, ctx=ctx,
+        )
+        if refused is not None:
+            return refused
+        verdict = policy.check(
+            stack=stack, caller=caller, target=target, authorized_outside_whitelist=True
+        )
     if not verdict.allowed:
         return ToolResult.error(
             f"dispatch_rejected: {verdict.reason} "

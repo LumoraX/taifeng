@@ -32,6 +32,10 @@ if TYPE_CHECKING:
     from taifeng.loop.submission import CompactNow
 
 
+# 获批后须在 turn 内重跑的工具：它们依赖 TurnRunner 提供的调用栈与调度器
+_TURN_BOUND_TOOLS = frozenset({"call_skill"})
+
+
 class SuspensionAccess:
     """挂起访问层协作器（持 engine 引用，自身无状态）。"""
 
@@ -226,6 +230,16 @@ class SuspensionAccess:
         return [p for p in record.pending
                 if p.related_call_id is None
                 or p.related_call_id not in settled_call_ids]
+
+    def runs_in_turn(self, call_id: str) -> bool:
+        """该挂起调用获批后是否须在 turn 内重跑。
+
+        派发类工具依赖 TurnRunner（调用栈、调度器），engine 层构造的最小上下文跑不了它。
+        """
+        for item in reversed(self._engine._history):
+            if item.kind == "function_call" and item.payload.get("call_id") == call_id:
+                return item.payload.get("name") in _TURN_BOUND_TOOLS
+        return False
 
     async def execute_resumed_tool(self, call_id: str) -> None:
         """resume 时对一个被批准的挂起 tool call 真正执行，回填 function_call_output。

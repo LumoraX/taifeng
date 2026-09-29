@@ -105,6 +105,7 @@ class EngineRunner:
         seed_pending_call_id: str | None = None,
         cache_break_expected_reason: str | None = None,
         auto_retry_count: int = 0,
+        extra_seed_call_ids: tuple[str, ...] = (),
     ) -> None:
         """构造并运行一轮，最后一次性回写 Engine 状态。"""
         runner = self._engine._new_turn_runner(
@@ -115,6 +116,9 @@ class EngineRunner:
         )
         # turn-rewind retry_tool：让 runner 采样前先补跑被保留的悬空 call
         runner._seed_pending_call_id = seed_pending_call_id  # noqa: SLF001
+        if extra_seed_call_ids:
+            # Resume 一次批准了多个派发类调用：其余的随 seed 补跑一并重跑
+            runner._tooling.extra_seed_call_ids = extra_seed_call_ids  # noqa: SLF001
         # turn-rewind R2：rewind 蓄意回退 anchor → 首采样的 cache 失效记为 expected
         if cache_break_expected_reason is not None:
             runner._next_cache_break_expected = True  # noqa: SLF001

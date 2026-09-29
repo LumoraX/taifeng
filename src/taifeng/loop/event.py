@@ -55,6 +55,8 @@ MsgKind = Literal[
     "outbound_message",
     "skill_selection_routed",
     "skill_selection_gated",
+    "skill_authorization_granted",
+    "skill_authorization_denied",
     "thread_resumed",
     "subagent_policy_overridden",
     "turn_completed",
@@ -254,6 +256,25 @@ class SkillSelectionGated(_Msg):
     """
 
     kind: Literal["skill_selection_gated"] = "skill_selection_gated"
+
+
+class SkillAuthorizationGranted(_Msg):
+    """相位 4 准入：一次白名单外派发获得授权（skill-authorization，ADR 0089）。
+
+    data = {"caller_skill_id": str, "target_skill_id": str, "call_id": str,
+            "origin": "call_skill", "reason": str, "request_reason": str,
+            "call_chain": list[str]}
+    - reason: 授权策略给出的依据；request_reason: 模型自陈的派发理由
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["skill_authorization_granted"] = "skill_authorization_granted"
+
+
+class SkillAuthorizationDenied(_Msg):
+    """相位 4 准入：一次白名单外派发被授权策略拒绝。data 同 ``SkillAuthorizationGranted``。"""
+
+    kind: Literal["skill_authorization_denied"] = "skill_authorization_denied"
 
 
 class SkillSpawnRejected(_Msg):
@@ -1045,6 +1066,8 @@ Msg = Union[
     OutboundMessage,
     SkillSelectionRouted,
     SkillSelectionGated,
+    SkillAuthorizationGranted,
+    SkillAuthorizationDenied,
     TurnSuspended,
     SuspensionResolved,
     SuspensionPartiallyResolved,

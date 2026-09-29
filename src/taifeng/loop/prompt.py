@@ -78,6 +78,11 @@ _DEFERRED_CHILD_BLOCK = """子 skill 较多（共 {child_count} 个），未逐�
 3. 观察+反思：读候选 description / confidence；若无贴切候选或 confidence 普遍偏低，换一组关键词再 search。
 4. 选定后立即用 call_skill(skill_id, args) 派发，不要停在检索。"""
 
+# 启用白名单外授权（相位 4，ADR 0089）且确有可发现的白名单外 skill 时追加在 child 块之后。
+_OUTSIDE_DISCOVERY_NOTE = """
+
+More skills beyond your pre-approved set can be found with `search_skills(query)`. A candidate marked `requires_authorization` is outside that set: calling it goes through an authorization check first and may be denied."""
+
 
 def _render_instructions_block(instructions: list[ResolvedInstruction]) -> str:
     """把 ResolvedInstruction 列表渲染为 XML 块串联，每层一个独立块。
@@ -108,6 +113,7 @@ def render_system_prompt(
     *,
     recall_threshold: int = DEFAULT_RECALL_THRESHOLD,
     has_recall_backend: bool = False,
+    outside_discovery: bool = False,
 ) -> str:
     """生成入口 system prompt（只管文本，不碰 per-turn tools 列表）。
 
@@ -138,6 +144,8 @@ def render_system_prompt(
         has_recall_backend: 是否注入了 SkillRecall 召回后端。``False`` → 默认 inline
             （LLM 自己找）；显式 ``child_recall=deferred`` 但无后端会抛
             ``SkillValidationError``（见 ``effective_child_recall``）。
+        outside_discovery: 本 entry 能否发现白名单之外的 skill（相位 4）。``True`` 时在
+            child 块之后追加一段说明；与 ``search_skills`` 的暴露同一判定，整 turn 稳定。
 
     spec Requirement: 装配顺序 = system_instructions → entry_skill →
     available_child_skills → dispatch_policy。``instructions=None`` 或空时
@@ -165,6 +173,8 @@ def render_system_prompt(
         child_block = _INLINE_CHILD_BLOCK.format(
             child_lines="\n".join(child_lines) if child_lines else "  (none)"
         )
+    if outside_discovery:
+        child_block += _OUTSIDE_DISCOVERY_NOTE
     body = SKILLS_INSTRUCTIONS_HEADER.format(
         id=entry.id,
         name=entry.name,
@@ -550,6 +560,7 @@ def build_api_request(
     image_input_policy: ImageInputPolicy | None = None,
     model_input_capabilities: ModelCapabilities | None = None,
     file_input_policy: FileInputPolicy | None = None,
+    outside_discovery: bool = False,
 ) -> ApiRequest:
     resolved_policy = image_input_policy or DISABLED_IMAGE_POLICY
     resolved_file_policy = file_input_policy or DISABLED_FILE_POLICY
@@ -561,6 +572,7 @@ def build_api_request(
         capabilities=_with_modality_tags(capabilities, resolved_capabilities),
         recall_threshold=recall_threshold,
         has_recall_backend=has_recall_backend,
+        outside_discovery=outside_discovery,
     )
     contains_provider_state = any(
         item.kind == "reasoning" and item.payload.get("provider_state") is not None

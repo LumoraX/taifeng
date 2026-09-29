@@ -190,6 +190,8 @@ _PERMISSION_ALIAS_TABLE: dict[str, dict[str, Any]] = {
     "ShellExec":  {"scope": "shell_exec"},
     # 子 skill 派发 —— payload 匹配目标 skill id
     "Skill":      {"scope": "skill_dispatch"},
+    # 白名单外 skill 的派发授权 —— payload 匹配目标 skill id（ADR 0089）
+    "SkillAuthorization": {"scope": "skill_authorization"},
     # SKILL.md 脚本 —— payload 匹配 "<skill_id>/<script_name>"
     "Script":     {"scope": "script_exec"},
     # 文件 IO —— payload 匹配解析后的绝对路径

@@ -99,6 +99,23 @@ class EngineResume:
                 data={"reason": str(e), "record_id": record.record_id, "detail": {}})))
             return
 
+        # 2.5 派发类调用获批后须在续跑的 turn 内重跑（engine 层没有调用栈与调度器）。
+        # 续跑只在 record 全量核销后发生，故这类批准必须出现在结清 record 的那次 Resume 里
+        turn_bound = tuple(
+            call_id for call_id in plan.execute_tool_call_ids
+            if self._engine._suspend_access.runs_in_turn(call_id)
+        )
+        if turn_bound and any(
+            pending.request_id not in resolutions
+            for pending in self._engine._unsettled_pendings(
+                record, list(self._engine._history))
+        ):
+            await self._engine._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(
+                data={"reason": "dispatch_approval_requires_full_resolution",
+                      "record_id": record.record_id,
+                      "detail": {"call_ids": list(turn_bound)}})))
+            return
+
         # 3. 应用 plan：补齐 history gap（挂起点的 function_call 缺 function_call_output）
         import json
         async with self._engine._lock:
@@ -126,6 +143,11 @@ class EngineResume:
                 await self._engine._store.append(out)
         # 3c. permission allow → 真正执行 tool（复用 runtime，不绕 RwLock）
         for call_id in plan.execute_tool_call_ids:
+            if call_id in turn_bound:
+                # 预批准留给 turn 内的重跑消费，避免它再次触发 prompter
+                if self._engine._permission_policy is not None:
+                    self._engine._permission_policy.preapprove(call_id)
+                continue
             await self._engine._execute_resumed_tool(call_id)
 
         # 3.5 + 4. record 级结算判定(per-record 锁串行化并发 Resume)+ 落 marker:
@@ -174,4 +196,6 @@ class EngineResume:
         self._engine._pending[sub.id] = _PendingTurn(submission_id=sub.id, cancel=turn_cancel)
         await self._engine._build_and_run_runner(
             sub.id, turn_cancel, list(self._engine._last_resolved or []),
-            auto_retry_count=auto_retries)
+            auto_retry_count=auto_retries,
+            seed_pending_call_id=turn_bound[0] if turn_bound else None,
+            extra_seed_call_ids=turn_bound[1:])

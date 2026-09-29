@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         PermissionPolicy,
         PermissionRequest,
     )
+    from taifeng.skill.authorization import SkillAuthorizationPolicy
     from taifeng.skill.definition import SkillDefinition
 
 
@@ -138,6 +139,13 @@ class DispatchPolicy:
     subagent_approval_mode: SubagentApprovalMode = "inherit"
     """子 skill 派发时 PermissionPolicy ``ask`` 的处理策略。"""
 
+    authorization: SkillAuthorizationPolicy | None = None
+    """白名单外 skill 的授权策略（相位 4，ADR 0089）。
+
+    None（默认）= 白名单是硬边界。注入后，调用方可经 ``search_skills`` 发现白名单外的
+    skill，每次派发由该策略裁决；``check`` 本身仍只做结构性判定。
+    """
+
     def __post_init__(self) -> None:
         if self.subagent_approval_mode not in (
             "inherit", "auto_deny", "auto_allow",
@@ -155,6 +163,7 @@ class DispatchPolicy:
         target: SkillDefinition | None,
         *,
         allow_entry_target: bool = False,
+        authorized_outside_whitelist: bool = False,
     ) -> DispatchVerdict:
         """派发准入裁决。
 
@@ -164,6 +173,10 @@ class DispatchPolicy:
         恰是其正当用法（与 ``set_join_barrier`` 的 ``then_skill`` 已豁免 entry 同理）。
         故 spawn 路径传 ``True`` 跳过「不可调 entry」门，其余四层（存在 / 深度 / 环 /
         白名单）仍照常裁决。
+
+        ``authorized_outside_whitelist``：调用方已就这次派发取得白名单外授权
+        （``SkillAuthorizationPolicy.authorize`` 放行）时传 ``True``，只跳过白名单一层，
+        存在 / 深度 / 环 / entry 照常裁决。
         """
         if target is None:
             return DispatchVerdict.reject("unknown_skill", stack.path())
@@ -178,7 +191,7 @@ class DispatchPolicy:
                 "cycle_detected", stack.path() + [target.id]
             )
 
-        if target.id not in caller.child_skills:
+        if target.id not in caller.child_skills and not authorized_outside_whitelist:
             return DispatchVerdict.reject(
                 "not_in_whitelist", [caller.id, target.id]
             )

@@ -9,6 +9,8 @@ Composite skill 通过 `call_skill` 派发到子 skill；静态 + 动态环检�
 LLM 调用 `call_skill(target_skill_id, args, reason?)` 工具时，系统 SHALL 按以下顺序执行：
 
 1. `DispatchPolicy.check`（既有：白名单 / 深度 / 环检测）—— 失败立即返回 `ToolResult.error("dispatch_rejected: {verdict.reason}")`，**不**进入后续步骤
+   - 1a. 拒绝原因是 `not_in_whitelist` 且 `DispatchPolicy.authorization` 非空时，先过白名单外授权（[skill-authorization](skill-authorization.md)）；放行后以 `authorized_outside_whitelist=True` 重新裁决，只豁免白名单一层
+   - 1b. 注入了 `selection_gate` 时过选择置信度分流门（[skill-selection-gate](skill-selection-gate.md)）
 2. `HookRunner.run("pre_skill_dispatch", PreSkillDispatchHook(...))` —— 任一 hook deny → 返回 `ToolResult.error("skill_dispatch_hook_denied: {reason}")` + emit `skill_dispatch_hook_denied`
 3. `PermissionPolicy.check(PermissionRequest.for_skill_dispatch(..., reason=arguments.get("reason", "")))` —— deny → 返回 `ToolResult.error("skill_dispatch_denied: {reason}")` + emit `skill_dispatch_permission_denied`（含 `request_reason` 字段）
 4. push call_stack，构造子 ToolContext，调 `dispatcher.run_sub_skill(...)`

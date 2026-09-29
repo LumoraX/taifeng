@@ -14,6 +14,7 @@ HITL 权限门：`PermissionRequest` / `PermissionRule` / `PermissionPolicy` / `
 | `network` | `http_request`（含每一跳 redirect） | `"<METHOD> <URL>"` |
 | `script_exec` | `run_script` | `"<skill_id>/<script_name>"` |
 | `skill_dispatch` | `call_skill` / `spawn_skill` | 目标 skill id |
+| `skill_authorization` | `PermissionSkillAuthorization`（`call_skill` 派发白名单外的 skill，见 [skill-authorization](skill-authorization.md)） | 目标 skill id |
 | `compaction` | 压缩触发 | 策略名 |
 | `tool_use` | **兜底**：无更细效果的工具（业务 `for_tool_call`） | 工具名；`metadata["args"]` 为原始参数 |
 
@@ -251,6 +252,7 @@ pattern 三态语义：
 | `FileWrite(p)` | `file_write` | p（匹配绝对路径） |
 | `Network(p)` | `network` | p 匹配 `"<METHOD> <URL>"`；p 不以 `re:` 开头且首 token 不是 HTTP method 时前缀 `"* "` 后归一（任意 method 命中） |
 | `Skill(p)` | `skill_dispatch` | p（匹配 skill id） |
+| `SkillAuthorization(p)` | `skill_authorization` | p（匹配 skill id） |
 | `Script(p)` | `script_exec` | p（匹配 `"<skill_id>/<script_name>"`） |
 | `ApplyPatch(p)` | `file_write` | p（匹配绝对路径）—— `FileWrite` 的同义别名，`apply_patch` 按路径发 `file_write` |
 

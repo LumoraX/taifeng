@@ -58,6 +58,23 @@ class TurnGuards:
         )
         return mode == "deferred"
 
+    def outside_discovery_active(self) -> bool:
+        """本 entry 能否发现白名单之外的 skill（相位 4，ADR 0089）。
+
+        注入了授权策略、有召回后端、且确有可发现的白名单外 skill 时为 True：此时即便
+        child 列表是 inline，也要暴露 ``search_skills``，否则模型无从发现它们。
+        """
+        from taifeng.skill.authorization import discoverable_outside
+
+        owner = self.__guards_owner
+        authorization = owner.dispatch_policy.authorization
+        if authorization is None or not owner.has_recall_backend:
+            return False
+        return bool(discoverable_outside(
+            owner.entry_skill, owner.snapshot, authorization, owner.capabilities,
+            on_stack=owner.call_stack.path(),
+        ))
+
     def system_retry_pending(self, e: Exception) -> Any:
         """构造 LLM 失败挂起的 SYSTEM_RETRY PendingRequest(policy 裁决 SUSPEND 后用)。
 

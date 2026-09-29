@@ -1613,15 +1613,14 @@ class AgentEngine:
         seed_pending_call_id: str | None = None,
         cache_break_expected_reason: str | None = None,
         auto_retry_count: int = 0,
+        extra_seed_call_ids: tuple[str, ...] = (),
     ) -> None:
         """构造并运行一轮，最后一次性回写 Engine 状态。"""
         await self._runner.build_and_run_runner(
-            submission_id,
-            turn_cancel,
-            resolved_for_turn,
+            submission_id, turn_cancel, resolved_for_turn,
             seed_pending_call_id=seed_pending_call_id,
             cache_break_expected_reason=cache_break_expected_reason,
-            auto_retry_count=auto_retry_count,
+            auto_retry_count=auto_retry_count, extra_seed_call_ids=extra_seed_call_ids,
         )
 
     async def _fire_post_turn_hook(

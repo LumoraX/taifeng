@@ -46,6 +46,13 @@ from taifeng.loop.failure_policy import (
 )
 from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
 from taifeng.mcp.http_client import McpHttpClient
+from taifeng.skill.authorization import (
+    CallbackSkillAuthorization,
+    PermissionSkillAuthorization,
+    SkillAuthorizationDecision,
+    SkillAuthorizationPolicy,
+    SkillAuthorizationRequest,
+)
 from taifeng.skill.fitness import (
     InMemorySkillFitnessStore,
     SkillFitness,
@@ -116,6 +123,12 @@ __all__ = [
     "WorkingSetPlan",
     "WorkingSetPolicy",
     "plan_working_set",
+    # 白名单外 skill 的派发授权（skill-authorization，🧪）
+    "CallbackSkillAuthorization",
+    "PermissionSkillAuthorization",
+    "SkillAuthorizationDecision",
+    "SkillAuthorizationPolicy",
+    "SkillAuthorizationRequest",
     # 按选择置信度分流（skill-selection-gate，🧪）
     "RoutedCandidate",
     "SelectionCandidate",

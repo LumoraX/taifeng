@@ -36,6 +36,7 @@ PermissionScope = Literal[
     "network",         # make a network request
     "compaction",      # trigger compaction
     "skill_dispatch",  # dispatch to a child skill
+    "skill_authorization",  # dispatch a skill outside the caller's whitelist
     "script_exec",     # run a script (Python / Bash / business scripts)
     "custom",
 ]

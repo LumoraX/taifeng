@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from taifeng.skill.authorization import REQUIRES_AUTHORIZATION_FIELD, discoverable_outside
 from taifeng.skill.recall import RecallEntry
 from taifeng.skill.selection import ROUTE_FIELD, SelectionCandidate
 from taifeng.skill.visibility import visible_child_skills
@@ -115,6 +116,33 @@ _LOW_CONFIDENCE_HINT = (
     "找到的候选置信度都太低，本轮不可派发。请换关键词重新搜索；仍找不到时如实说明"
     "没有匹配的 skill，或向用户确认需求"
 )
+
+
+def _outside_pool(
+    ctx: ToolContext,
+    caller: SkillDefinition,
+    snapshot: SkillSnapshot,
+    capabilities: RuntimeCapabilities | None,
+) -> list[RecallEntry]:
+    """当前 skill 在白名单外可发现的 skill；未启用白名单外授权时为空。"""
+    authorization = getattr(ctx.extras.get("dispatch_policy"), "authorization", None)
+    if authorization is None:
+        return []
+    stack = ctx.extras.get("call_stack")
+    return [
+        RecallEntry(skill_id=item.skill_id, description=item.description)
+        for item in discoverable_outside(
+            caller, snapshot, authorization, capabilities,
+            on_stack=stack.path() if stack is not None else (),
+        )
+    ]
+
+
+def _mark_outside(payload: list[dict[str, Any]], outside_ids: frozenset[str]) -> None:
+    """给白名单外的候选标上「派发须经授权」。"""
+    for entry in payload:
+        if entry["skill_id"] in outside_ids:
+            entry[REQUIRES_AUTHORIZATION_FIELD] = True
 
 
 async def _routed_result(
@@ -213,13 +241,17 @@ def _make_search_skills_handler(
             RecallEntry(skill_id=v.skill_id, description=v.description)
             for v in visible
         ]
+        # 启用白名单外授权（相位 4，ADR 0089）时，可发现的白名单外 skill 一并入池；
+        # 它们的派发须逐次授权，结果里单独标记
+        outside = _outside_pool(ctx, caller, snapshot, capabilities)
+        pool.extend(outside)
+        outside_ids = frozenset(entry.skill_id for entry in outside)
 
         # ---- 可观测：发起检索打点（pool_size = 过滤后的可见池规模）----
-        await _emit_event(
-            ctx,
-            "skill_search_invoked",
-            {"query": query, "top_k": top_k, "pool_size": len(pool)},
-        )
+        invoked: dict[str, Any] = {"query": query, "top_k": top_k, "pool_size": len(pool)}
+        if outside_ids:
+            invoked["outside_pool_size"] = len(outside_ids)
+        await _emit_event(ctx, "skill_search_invoked", invoked)
 
         # ---- 调召回后端（白名单封闭由内核钉死：pool 即可召回的全集）----
         candidates = await recall.recall(query, pool, top_k=top_k, cancel=ctx.cancel)
@@ -243,6 +275,7 @@ def _make_search_skills_handler(
                 }
                 for c in candidates
             ]
+            _mark_outside(payload, outside_ids)
             return await _routed_result(ctx, payload, selection_policy)
 
         # ---- 启用验证：召回与 verify 之间再 check 取消（R4：长链路尽早中断）----
@@ -303,6 +336,7 @@ def _make_search_skills_handler(
             }
             for v in verified
         ]
+        _mark_outside(payload, outside_ids)
         return await _routed_result(ctx, payload, selection_policy)
 
     return _handler
@@ -362,6 +396,7 @@ def make_search_skills_tool(
             "列在 available_child_skills 时用它发现目标）。返回候选含 skill_id / "
             "description / confidence / matched_snippet；据此再 call_skill 派发。"
             "可用不同关键词多次调用以精炼召回。"
+            "候选带 requires_authorization 时表示它不在预授权范围内，派发会先过授权、可能被拒绝。"
         ),
         input_schema=SEARCH_SKILLS_SCHEMA,
         handler=_make_search_skills_handler(
