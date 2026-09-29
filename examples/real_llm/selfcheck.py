@@ -38,8 +38,8 @@ SIM_ROUTES = {
         "信息采集助手": [
             SimTurn(text="先确认信息。", tool_calls=[{
                 "id": "ask1", "name": "request_user_input",
-                "arguments": '{"prompt": "请提供年龄、慢性病史与近期不适"}'}]),
-            SimTurn(text="收到，根据您的情况建议规律作息并复查。"),
+                "arguments": '{"prompt": "请提供出发城市、预算范围与出行日期"}'}]),
+            SimTurn(text="收到，建议提前两周订票并预留机动预算。"),
         ],
     },
     "turn_rewind": {

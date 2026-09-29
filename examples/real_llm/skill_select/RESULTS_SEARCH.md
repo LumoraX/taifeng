@@ -1,6 +1,6 @@
 # 选择基准结果快照（deferred 召回版 · search_skills）
 
-> **数据集变更说明（2026-09-29）**：为满足仓库「不含业务领域措辞」红线，任务集中三条医疗类任务已替换为同构的中性任务（`content-simplify-audience` 的任务文本改为保险条款；`doc-medical-record-struct` 改为 `doc-repair-record-struct` 维修记录提取；`data-xml-extract` 的任务文本改为物流运单报文）。下文数字仍是替换前数据集上的结果，未重跑；三条任务的考点（受众简化 / 非结构化文书抽取 / XML 抽取）不变。
+> **数据集变更说明（2026-09-29）**：为满足仓库「不含业务领域措辞」红线，任务集中三条业务领域任务已替换为同构的中性任务（`content-simplify-audience` 的任务文本改为保险条款；`doc-medical-record-struct` 改为 `doc-repair-record-struct` 维修记录提取；`data-xml-extract` 的任务文本改为物流运单报文）。下文数字仍是替换前数据集上的结果，未重跑；三条任务的考点（受众简化 / 非结构化文书抽取 / XML 抽取）不变。
 
 
 > 本文件是 `bench_search.py`（deferred 召回版）的结果台账，与 `RESULTS.md`（inline 基线）成对照。

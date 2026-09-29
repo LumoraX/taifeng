@@ -39,12 +39,12 @@ def _root_completions(res: Any) -> int:
 async def drive_suspend_resume(engine: Any, res: Any) -> None:
     """HITL 挂起 → Resume 续跑：真实 LLM 调 request_user_input → 回填答案。"""
     await engine.submit(taifeng.UserMessage(
-        text="我想做一次健康咨询，请按你的流程先向我确认必要信息。"))
+        text="我想咨询一次出行安排，请按你的流程先向我确认必要信息。"))
     susp = await _wait_for(res, lambda m: m.kind == "turn_suspended", what="turn_suspended")
     req_id = susp.data["pending"][0]["request_id"]
     await engine.submit(Resume(
         thread_id=engine.thread_id,
-        resolutions={req_id: {"answer": "今年 42 岁，无慢性病史，最近容易疲劳。"}},
+        resolutions={req_id: {"answer": "从上海出发，预算 8000 元，10 月 1 日出行。"}},
     ))
     await _wait_for(res, lambda m: _root_completions(res) >= 1, what="续跑 root turn_completed")
 

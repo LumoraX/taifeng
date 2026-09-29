@@ -78,7 +78,7 @@ async def main() -> None:
         _u = TokenUsage(input_tokens=10, output_tokens=4)
         client = SimClient(turns=[
             SimTurn(text="结论一:指标 A 偏高", usage=_u),
-            SimTurn(text="结论二:结合上轮,建议复查 A", usage=_u),
+            SimTurn(text="结论二:结合上轮,建议再核对 A", usage=_u),
         ])
         pool = await taifeng.EnginePool.create(
             skills_dir=skills, threads_dir=threads,
@@ -99,7 +99,7 @@ async def main() -> None:
                 if ev.msg.kind in ("turn_failed", "turn_suspended"):
                     return  # 这两类终态不触发 post_turn,避免卡死
 
-        for i, text in enumerate(["分析一下指标 A", "那要不要复查?"]):
+        for i, text in enumerate(["分析一下指标 A", "那要不要再核对?"]):
             print(f"\n用户轮 {i}: {text}")
             waiter = asyncio.create_task(_wait_post_turn_fired())
             await asyncio.sleep(0)  # 让 waiter 先注册到 subscribe_all,避免漏事件
