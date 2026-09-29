@@ -214,7 +214,7 @@ reasoning provider state、function call 和后续 `origin_llm_sample_id` 工具
 | --- | --- |
 | `system_injection`，`source == memory_pre_evict`（压缩 salvage digest） | 暂存，等下一个 `compacted` 时挪到 placeholder 之后（复现热内存 `insert_at = summary_index + 1` 行为） |
 | `compacted`（带 `replaced_range=(s, e)`） | 把 `logical[s:e]` 折叠掉：`logical = logical[:s] + [placeholder] + ([salvage] if salvage else []) + logical[e:]` |
-| `system_injection`，`source ∈ {rewind, rollback}` | 截断信号：`logical = logical[:cut_index]`（`cut_index` 从 payload 读）；payload 另带 `drop_index` 时再去掉保留范围内那一条旧 `function_call_output`（并行批次 retry_tool，ADR 0079；越界或指向的不是 `function_call_output` 即 `ValueError`）。**marker 本身不进 logical** |
+| `system_injection`，`source ∈ {rewind, rollback}` | 截断信号：`logical = logical[:cut_index]`（`cut_index` 从 payload 读）；payload 另带 `drop_index` 时再去掉保留范围内那一条旧 `function_call_output`（并行批次 retry_tool，ADR 0079；越界或指向的不是 `function_call_output` 即 `ValueError`）；payload 带 `undo_compaction` 时不截断，而是把 logical 还原为该压缩条目之前的那一份（去掉压缩动作写下的抢救摘要 / 钉回项，ADR 0081；指向未知压缩或 `cut_index` 与还原后长度不符即 `ValueError`）。**marker 本身不进 logical** |
 | `skill_outcome`（战绩旁路记账） | `logical.append(item)`（正常追加，保留在 logical history 供后续相位读取）；但 `build_api_request` 在构建 LLM 消息序列时**跳过**此 kind——旁路语义，不进 LLM 视图 |
 | `tool_intent`（工具派发前的 write-ahead 意图，Chat 协议路径） | `logical.append(item)`；`build_api_request` 跳过；冷恢复据「有意图、无 output」识别在飞调用（见 [tool-crash-reconciliation](capabilities/tool-crash-reconciliation.md)） |
 | `spawn_settled`（spawn 句柄终态锚，落子 thread） | `logical.append(item)`；`build_api_request` 同样跳过（与 `spawn` / `suspension` 等记账 item 同类）；rewind 截断时随 `cut_index` 一并折叠，重推后由新终态再落一条（冷推断取最后一条） |

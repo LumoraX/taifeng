@@ -24,7 +24,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from taifeng.conversation.models import system_injection
-from taifeng.loop.engine_ops import plan_rewind, rewrite_call_args
+from taifeng.loop.engine_ops import plan_rewind, rewind_mode_mismatch, rewrite_call_args
 from taifeng.loop.event import EventMsg, RewindRejected, TurnRewound
 from taifeng.loop.rewind import derive_rewind_log
 from taifeng.loop.spawn_handle import SpawnDrivePlan
@@ -127,10 +127,13 @@ class SpawnRewindChain:
         if cp is None:
             await self._reject(sub.id, op.node_id, "unknown_node")
             return
-        if op.mode == "retry_tool" and (
-            cp.kind != "dispatch" or cp.inner_history_len is None
-        ):
+        if rewind_mode_mismatch(cp, op.mode):
             await self._reject(sub.id, op.node_id, "mode_kind_mismatch")
+            return
+        if cp.kind == "compaction":
+            # 压缩节点的还原只在 root thread 支持(ADR 0081):子 thread 由后台驱动,
+            # 「只还原不重推」在句柄状态机里没有对应状态
+            await self._reject(sub.id, op.node_id, "unsupported_node_kind")
             return
         # 规划与根路径同一函数:retry_tool 按批次(保同批其他调用与结果),其余截到采样前;
         # 挂起态另过挂起态守卫

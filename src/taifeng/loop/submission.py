@@ -167,6 +167,9 @@ class Rewind(BaseModel):
     - ``retry_tool``:仅 dispatch 节点。保留 assistant「决定调它」的 function_call,
       只用 ``new_args``(或原 args)重跑该工具/子 skill、替换其 output;若 ``new_args``
       改了入参,同步改写 function_call.arguments 保持历史自洽。
+    - ``restore``:仅 compaction 节点(且仅 root thread)。把 history 还原到那次压缩之前,
+      **不重推**;之后由业务决定下一步(调整预算、继续提问等)。compaction 节点上的
+      ``re_reason`` = 还原后从那里重推,仅当还原后的 history 轮到模型说话时可用。
 
     ``new_args`` 仅 ``retry_tool`` + dispatch 节点有意义,其余模式忽略。
 
@@ -178,7 +181,7 @@ class Rewind(BaseModel):
 
     kind: Literal["rewind"] = "rewind"
     node_id: str
-    mode: Literal["retry_tool", "re_reason"] = "re_reason"
+    mode: Literal["retry_tool", "re_reason", "restore"] = "re_reason"
     new_args: dict[str, Any] | None = None
     thread_id: str | None = None
 

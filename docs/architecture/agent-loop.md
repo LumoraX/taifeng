@@ -533,11 +533,13 @@ actor 模型下提交 `Rewind` 时上一 turn 已结束或已挂起（engine 空
 ```
 Rewind(node_id, mode, new_args?)
   → 查 checkpoint（缺 → rewind_rejected(unknown_node)）
-  → retry_tool 仅 dispatch 节点（否则 rewind_rejected(mode_kind_mismatch)）
+  → retry_tool 仅 dispatch 节点、restore 仅 compaction 节点（否则 rewind_rejected(mode_kind_mismatch)）
   → 活跃挂起 → rewind_rejected(turn_suspended)   # 挂起态 rewind v1 不支持
   → 冷 engine 首次操作：_last_resolved 为空 + _history 非空
       → 惰性按构造时 entry skill resolve 指令层（resolve 失败 → log warning，不 silent suppress）
-  → 选截点：retry_tool=inner_history_len（保 fc）/ re_reason=history_len
+  → 选截点：retry_tool=按批次规划（保同批其他调用与结果）/ re_reason=history_len
+             / compaction 节点=还原到那次压缩之前（从 transcript 重放，ADR 0081）
+  → restore：落 marker + emit turn_rewound{redriven:false} 后结束，不建 runner
   → 截断 history + 回退 anchor（锁内；store append-only，旧 items 不删）
   → re_reason：新 runner 从截点重采样（LLM 重决下游）
     retry_tool：新 runner 先 _complete_seed_call 补跑悬空 call（复用 dispatch_batch +

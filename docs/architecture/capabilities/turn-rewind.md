@@ -15,18 +15,18 @@ ADR：[0014](../../../docs/decisions/0014-turn-rewind.md)（热场景）、[0016
 
 | 字段 | 含义 |
 | --- | --- |
-| `node_id` | turn 限定稳定唯一 id（`t{k}:it{n}` / `t{k}:disp{m}`，`k` = 累积 user_message 数，1-based） |
+| `node_id` | turn 限定稳定唯一 id（`t{k}:it{n}` / `t{k}:disp{m}` / `t{k}:cmp{m}`，`k` = 逻辑 history 中累积 user_message 数；压缩折叠掉此前全部用户消息时 `k` 为 0） |
 | `turn_index` | 所属 turn 的 k 值（与 node_id 中的 `t{k}` 一致），供按 turn 过滤 |
-| `kind` | `iteration` \| `dispatch`（`turn_root` 收敛进首个 iteration 节点 `t{k}:it1`） |
-| `history_len` | re_reason 截点 = 该 history 长度 |
+| `kind` | `iteration` \| `dispatch` \| `compaction`（`turn_root` 收敛进首个 iteration 节点 `t{k}:it1`） |
+| `history_len` | re_reason 截点 = 该 history 长度；compaction 节点为 placeholder 在逻辑 history 中的下标（rewind 不按它截断） |
 | `cache_anchor` | 回退时还原的 `cache_anchor_index` |
 | `iteration_index` | 所属采样圈 |
-| `call_id` / `target_id` | 仅 dispatch：被派发的 call_id / 工具名 |
+| `call_id` / `target_id` | dispatch：被派发的 call_id / 工具名；compaction：`target_id` = 压缩条目（`compacted` item）的 id |
 | `inner_history_len` | 仅 dispatch：`function_call` 后 / `function_call_output` 前；单调用批次的 retry_tool 切点（多调用批次的实际截断见 `plan_retry_cut`） |
 | `args_digest` | 仅 dispatch：原始 args 摘要（供 UI / 审计） |
 
 ### `Rewind` Op（`loop/submission.py`）
-`{ node_id, mode ∈ {re_reason, retry_tool}, new_args?, thread_id? }`。`new_args` 仅 `retry_tool` + dispatch 节点有意义。`thread_id` 缺省 None = root thread（向后兼容，既有语义零变更）；指向某 detached spawn 句柄的 `child_thread_id` 时走子 thread rewind 路径（见下「thread 寻址」Requirement）。
+`{ node_id, mode ∈ {re_reason, retry_tool, restore}, new_args?, thread_id? }`。`new_args` 仅 `retry_tool` + dispatch 节点有意义；`restore` 仅 compaction 节点。`thread_id` 缺省 None = root thread（向后兼容，既有语义零变更）；指向某 detached spawn 句柄的 `child_thread_id` 时走子 thread rewind 路径（见下「thread 寻址」Requirement）。
 
 ## Requirements
 
@@ -160,6 +160,52 @@ turn 处于挂起态（存在活跃挂起 record）时，`Rewind` 的语义是�
 - **WHEN** 对 `p1` 提交 `Rewind(mode=retry_tool)`
 - **THEN** `rewind_rejected(sibling_calls_pending)`；history 不变，`p1` 未被重跑，挂起仍可 `Resume`
 
+### Requirement: 压缩是回访节点——回到某次压缩之前（ADR 0081）
+
+逻辑 history 里每个仍在的 `compacted` 条目 SHALL 产生一个 `compaction` 节点（`derive_rewind_log` 是唯一产出方；
+手动压缩 `CompactNow` 之后节点表随即重算）。被后续压缩折叠掉的旧 placeholder 不产节点。compaction 节点不占用
+iteration / dispatch 节点的编号。
+
+对 compaction 节点 rewind = 把 history **还原到那次压缩之前**（`conversation/reconstruct.py::reconstruct_before_compaction`）：
+
+- 还原结果由该 thread 的完整 transcript 重放得到：重放到该压缩条目之前为止，此前的压缩、rewind、rollback 照常生效；
+- 不含该压缩的 placeholder，也不含压缩动作自己写下的旁路项——紧邻 placeholder 之前、`source` 为
+  `memory_pre_evict`（抢救摘要）或 `pinned:*`（钉回项）的 `system_injection`；
+- 被折叠的原始条目以**原 id** 回到 history；
+- `cache_anchor` 回退到压缩替换区间起点之前；
+- rewind marker 的 payload 为 `{cut_index: <还原后长度>, undo_compaction: <压缩条目 id>}`；冷重建遇到它时还原为
+  同一份 history（`undo_compaction` 指向未知压缩、或 `cut_index` 与还原后长度不符 → `ValueError`）。
+
+两种模式：
+
+| mode | 行为 | 前提 |
+| --- | --- | --- |
+| `restore` | 只还原、**不重推**；`turn_rewound.redriven == false`，该事件即这次 submission 的终结；节点表随即按还原后的 history 重算 | 无 |
+| `re_reason` | 还原后从那里重推（新 root TurnRunner 采样） | 还原后的 history 轮到模型说话：最后一条对话项是 `user_message` 或 `function_call_output`（注入项与记账项不算对话项）；否则 `rewind_rejected(nothing_to_redrive)` |
+
+- `restore` 之后的下一步由业务决定：先 `UpdateBudget` 再继续提问、对还原出的节点再做 rewind 等。还原后 history 可能
+  超过预算，下一次 turn 的 pre-turn 压缩检查照常进行。
+- 挂起态下同样适用「挂起态下的 rewind」守卫。
+- 仅 root thread：对 spawn 子 thread 的 compaction 节点提交 rewind → `rewind_rejected(unsupported_node_kind)`。
+- `turn_rewound.data.undo_compaction` = 被撤销的压缩条目 id；非 compaction 节点为 null。
+
+#### Scenario: 手动压缩后还原
+- **GIVEN** 三轮对话后 `CompactNow(force=true)` 成功
+- **WHEN** 对节点表里的 compaction 节点提交 `Rewind(mode=restore)`
+- **THEN** `turn_rewound{mode: "restore", node_kind: "compaction", redriven: false}`
+- **AND** history 逐项（含条目 id）等于压缩之前；节点表不再有 compaction 节点
+- **AND** 另起进程冷加载该 thread，逻辑 history 与热内存逐项相同
+
+#### Scenario: 两轮之间的压缩不能直接重推
+- **GIVEN** 压缩发生在上一轮结束之后（压缩之前最后一条是模型的回答）
+- **WHEN** 对该 compaction 节点提交 `Rewind(mode=re_reason)`
+- **THEN** `rewind_rejected(nothing_to_redrive)`，history 不变
+
+#### Scenario: 采样前的压缩还原后重推
+- **GIVEN** 压缩发生在某轮采样之前（压缩之前最后一条是该轮的用户消息）
+- **WHEN** 对该 compaction 节点提交 `Rewind(mode=re_reason)`
+- **THEN** history 还原到压缩之前，随后重采样并以新的回答结束该轮
+
 ### Requirement: 校验失败显式拒绝（禁 silent fallback）
 
 下列情形 SHALL emit `rewind_rejected` 并**不改 history**，绝不静默 no-op：
@@ -167,7 +213,9 @@ turn 处于挂起态（存在活跃挂起 record）时，`Rewind` 的语义是�
 | reason | 触发 |
 | --- | --- |
 | `unknown_node` | `node_id` 不在节点表（含被折叠 turn 的节点、冷加载未传 `initial_history` 时的空表） |
-| `mode_kind_mismatch` | 对非 dispatch 节点用 `retry_tool` |
+| `mode_kind_mismatch` | 对非 dispatch 节点用 `retry_tool`，或对非 compaction 节点用 `restore` |
+| `nothing_to_redrive` | 对 compaction 节点用 `re_reason`，但压缩之前的最后一条对话项不是用户消息 / 工具结果 |
+| `unsupported_node_kind` | 对 spawn 子 thread 的 compaction 节点提交 rewind（仅 thread 寻址路径） |
 | `turn_suspended` | 挂起态下截断后挂起 record 仍在保留范围内（节点在挂起之后，正常不出现） |
 | `sibling_calls_pending` | 挂起态下截断后仍留着没有结果的调用，且不是本次 `retry_tool` 要重跑的那一个 |
 | `unknown_thread` | `thread_id` 不属于任何 spawn 句柄的 `child_thread_id`（仅 thread 寻址路径） |
@@ -199,6 +247,9 @@ turn 处于挂起态（存在活跃挂起 record）时，`Rewind` 的语义是�
 - rewind 已 done 且 barrier 已 fired 的 spawn：重推得新结果但**不自动重聚合**（fired 守卫幂等）；业务要重聚合需自行再 `set_join_barrier`。
 - 多实例部署下"中断遗留 running"的活性不可见（live 运行表是单 engine 实例内闭合）；多实例互斥是业务侧部署约束。
 - 挂起态下对同批**已有结果**的调用做 `retry_tool`：拒绝（`sibling_calls_pending`）；需要时先 `Resume` 或改用 `re_reason`。
-- replay 模式（录后确定性重放整条 call 图）、压缩等内核动作作为节点：留待后续（见设计 §8）。
+- replay 模式（录后确定性重放整条 call 图）：留待后续（见设计 §8）。
+- compaction 节点只覆盖产生 `compacted` 条目的压缩（sliding / handoff）；就地改写 payload 的策略（surgical_trim / offload）
+  不产生条目，不进节点表。指令热更等其他内核动作在 history 中不留条目，同样不进节点表。
+- spawn 子 thread 的 compaction 节点可见（`rewind_nodes_for`）但不可 rewind（`unsupported_node_kind`）。
 - **冷 rewind 不还原历史 entry-skill 指令层**：若 thread 历史跨多个不同 entry skill 的 turn，冷 rewind 到旧 turn 时使用当前构造时传入的 entry skill 指令层，不还原"该旧 turn 当时"的指令——v1 范围约束，与「只 root turn 入表」同级。
 - **自定义 CompressionStrategy 孤儿 salvage note 边界**：若自定义策略 `success=True` 却 `summary_item_id=None` 并触发了 salvage note，会写出孤儿 note；`reconstruct_logical_history` 在此情形下显式校验（而非静默误配），作为系统边界记录。内置 `sliding` / `handoff` 不触发此边界。
