@@ -5,6 +5,10 @@ durable 为 ``unknown`` 的 ``tool_outcome_committed``）按副作用分流收�
 ``tool_recovery_committed`` 记录追加进 Journal——不改写任何历史记录，hash chain 与 durable 语义
 由 core 照常保证；resume 扫描以它为该 intent 的结算依据。
 
+另一类待收敛的调用是**从未登记意图**的调用（ADR 0075）：``function_call`` 会话项已随模型回复
+durable，进程却在意图 batch 落账前死亡。意图先于任何派发落账，这些调用确定没有执行，恢复时
+写一条 ``tool_call_undispatched`` 并补「未执行」结果。
+
 独立成模块而不并入 ``records.py``：后者已超 800 行红线，且本记录只由恢复路径产生。
 """
 
@@ -91,10 +95,36 @@ class ToolRecoveryCommittedV1(PayloadModel):
         return self
 
 
+TOOL_CALL_UNDISPATCHED_RECORD_TYPE = "tool_call_undispatched"
+"""从未登记意图的工具调用在恢复时的结论 record_type。"""
+
+
+class ToolCallUndispatchedV1(PayloadModel):
+    """一个从未登记意图（因而确定未执行）的工具调用在恢复时的 durable 结论。
+
+    Attributes:
+        function_call_record_id: 该调用的 ``function_call`` 会话项 record。
+        call_id / name / arguments_raw: 模型发出的调用（取自会话项，原样保留）。
+        output: 随同 batch 补写给模型的 ``function_call_output`` 文本。
+        is_error: 恒为 True——调用没有产生结果。
+        recovery_operation_id: 本次 resume 接管的 operation id（与 ``writer_takeover`` 同源）。
+    """
+
+    function_call_record_id: NonEmptyStr
+    call_id: NonEmptyStr
+    name: NonEmptyStr
+    arguments_raw: str
+    output: NonEmptyStr
+    is_error: Literal[True] = True
+    recovery_operation_id: NonEmptyStr
+
+
 __all__ = [
+    "TOOL_CALL_UNDISPATCHED_RECORD_TYPE",
     "TOOL_RECOVERY_RECORD_TYPE",
     "ReconcileStatus",
     "RecoveryBasis",
     "RecoveryVerdict",
+    "ToolCallUndispatchedV1",
     "ToolRecoveryCommittedV1",
 ]

@@ -54,9 +54,11 @@ ToolRecoveryMode = Literal["suspend", "report"]
 
 Disposition = Literal[
     "safe_to_retry", "reconciled", "awaiting_operator", "reported_unknown", "operator_resolved",
+    "not_dispatched",
 ]
-"""悬空调用的处置结论。``operator_resolved`` 只出现在 strict audit resume：人的裁决经
-``AuditConfig.tool_outcome_resolver`` 在接管时提交（审计会话不能挂起，见 ADR 0070）。"""
+"""悬空调用的处置结论。``operator_resolved`` 与 ``not_dispatched`` 只出现在 strict audit resume：
+前者是人的裁决经 ``AuditConfig.tool_outcome_resolver`` 在接管时提交（审计会话不能挂起，见
+ADR 0070）；后者是调用从未登记意图、确定未执行（ADR 0075）。"""
 
 RETRY_SAFE_EFFECTS = frozenset({"pure", "idempotent"})
 """可在不知结局时安全重发的副作用分类。"""
@@ -70,6 +72,12 @@ NOT_EXECUTED_TEXT = (
     "not executed, so it may be called again safely"
 )
 """回查确认未执行时回填给模型的文本（is_error=True）。"""
+
+NOT_DISPATCHED_TEXT = (
+    "not_executed: the process stopped before this tool call was registered for "
+    "dispatch, so it never ran and may be called again safely"
+)
+"""调用从未登记意图（确定未执行）时回填给模型的文本（is_error=True）。"""
 
 OPERATOR_ABORTED_TEXT = (
     "tool_outcome_unknown: aborted by operator after crash recovery; not retried"

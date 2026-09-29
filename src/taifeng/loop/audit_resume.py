@@ -7,8 +7,10 @@
 3. ``open_existing`` 以更高 writer epoch 接管 Journal（跨进程 flock 互斥）；
 4. 持锁后 strict 重读全部 committed envelopes：root thread 必须等于 ``resume_thread_id``；
    root thread 上「结果未知」的工具调用按副作用分流收敛（``audit_resume_tools``，ADR 0070），
-   结论作为 ``tool_recovery_committed``（+ output 会话项）原子追加；其余未结算 effect、以及
-   无法自动收敛且无人裁决的调用一律 fail closed（``audit_resume_recovery_required`` + record id）；
+   结论作为 ``tool_recovery_committed``（+ output 会话项）；从未登记意图的调用确定未执行
+   （``audit_resume_undispatched``，ADR 0075），结论作为 ``tool_call_undispatched``（+ output
+   会话项）；两类结论同一 batch 原子追加。其余未结算 effect、以及无法自动收敛且无人裁决的调用
+   一律 fail closed（``audit_resume_recovery_required`` + record id）；
 5. 用 root thread 已提交 ``conversation_item`` 重建 initial history；
 6. coordinator 用新 lease / expected_seq，projector 复用既有投影 thread 并以 Journal 为
    真相核对（缺后缀补齐，分叉只标 stale）。
@@ -41,6 +43,7 @@ from taifeng.loop.audit_bootstrap import AuditedSessionState, _emergency_close
 from taifeng.loop.audit_resume_resolution import AuditToolResolutionError
 from taifeng.loop.audit_resume_scan import (
     ResumedHistory,
+    find_undispatched_calls,
     find_unsettled_effects,
     rebuild_root_history,
     root_thread_id,
@@ -50,6 +53,12 @@ from taifeng.loop.audit_resume_tools import (
     needs_operator_without_lock,
     plan_audited_tool_recovery,
     split_unsettled,
+)
+from taifeng.loop.audit_resume_undispatched import (
+    UndispatchedCall,
+    needs_operator,
+    plan_undispatched_recovery,
+    undispatched_call,
 )
 
 if TYPE_CHECKING:
@@ -186,11 +195,15 @@ class _Triage:
     pending: tuple[str, ...]
     tool_calls: tuple[UnresolvedToolCall, ...]
     others: tuple[str, ...]
+    undispatched: tuple[UndispatchedCall, ...] = ()
+    """已随模型回复落账、但从未登记意图的调用（确定未执行，ADR 0075）。"""
 
     def ordered(self, record_ids: tuple[str, ...]) -> tuple[str, ...]:
         """按 Journal seq 顺序输出给定 record id。"""
         wanted = set(record_ids)
-        return tuple(record_id for record_id in self.pending if record_id in wanted)
+        return tuple(
+            envelope.record_id for envelope in self.envelopes if envelope.record_id in wanted
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,12 +234,16 @@ async def _read_triage(
             )
         pending = find_unsettled_effects(envelopes)
         tool_calls, others = split_unsettled(envelopes, pending, thread_id)
+        undispatched = tuple(
+            undispatched_call(envelope)
+            for envelope in find_undispatched_calls(envelopes, thread_id)
+        )
     except (JournalError, ValidationError, ValueError) as exc:
         # 完整性 / 解码违约：Journal 不可信，不得续跑
         raise AuditResumeError(
             "audit_resume_journal_invalid", session_id=session_id, thread_id=thread_id
         ) from exc
-    return _Triage(envelopes, pending, tool_calls, others)
+    return _Triage(envelopes, pending, tool_calls, others, undispatched)
 
 
 def _refuse(triage: _Triage, record_ids: tuple[str, ...], *, session_id: str,
@@ -259,7 +276,7 @@ def _precheck(
         call.record_id
         for call in triage.tool_calls
         if needs_operator_without_lock(call, tool_registry, config.tool_outcome_resolver)
-    )
+    ) + tuple(call.record_id for call in triage.undispatched if needs_operator(call))
     if hopeless:
         raise _refuse(triage, hopeless, session_id=session_id, thread_id=thread_id)
 
@@ -324,13 +341,14 @@ async def _recover_tool_calls(
     session_id: str,
     thread_id: str,
 ) -> tuple[tuple[JournalEnvelope, ...], int, tuple[RecoveredCall, ...]]:
-    """持锁收敛 root thread 的结果未知工具调用；返回 (envelopes, expected_seq, 处置结论)。
+    """持锁收敛 root thread 的待收敛工具调用；返回 (envelopes, expected_seq, 处置结论)。
 
-    全部调用都得出结论才原子追加一个 batch；任一仍需人裁决即整批不写并拒绝。追加后 strict
-    重读，确认已无未结算 effect 且 tail 与 ack 一致。
+    待收敛的调用有两类：结果未知（有意图）与从未登记意图。全部调用都得出结论才原子追加
+    一个 batch；任一仍需人裁决即整批不写并拒绝。追加后 strict 重读，确认已无待收敛项且 tail
+    与 ack 一致。
     """
     ids = {"session_id": session_id, "thread_id": thread_id}
-    if not triage.tool_calls:
+    if not triage.tool_calls and not triage.undispatched:
         return triage.envelopes, opened.ack.last_seq, ()
     try:
         plan = await plan_audited_tool_recovery(
@@ -347,16 +365,27 @@ async def _recover_tool_calls(
             thread_id=thread_id,
             record_ids=(exc.record_id,),
         ) from exc
-    if plan.pending:
-        raise _refuse(triage, plan.pending, **ids)
-    last_seq = await _append_recovery(config, opened, plan.records, **ids)
+    undispatched = plan_undispatched_recovery(
+        triage.undispatched, session_id=session_id, recovery_operation_id=operation_id
+    )
+    pending = plan.pending + undispatched.pending
+    if pending:
+        raise _refuse(triage, pending, **ids)
+    last_seq = await _append_recovery(
+        config, opened, plan.records + undispatched.records, **ids
+    )
     reread = await _read_triage(config, **ids)
-    if reread is None or reread.pending or reread.envelopes[-1].seq != last_seq:
+    if (
+        reread is None
+        or reread.pending
+        or reread.undispatched
+        or reread.envelopes[-1].seq != last_seq
+    ):
         # 恢复记录已 durable 却读不回一致状态：core 返回值不满足 trust boundary
         raise AuditResumeError(
             "audit_resume_open_failed", session_id=session_id, thread_id=thread_id
         )
-    return reread.envelopes, last_seq, plan.recovered
+    return reread.envelopes, last_seq, plan.recovered + undispatched.recovered
 
 
 async def _append_recovery(

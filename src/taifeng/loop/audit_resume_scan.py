@@ -9,6 +9,9 @@ UNKNOWN」。崩溃遗留的**未匹配 intent 一律视为 UNKNOWN**——effec
 本扫描把它视为对应 intent（及被改判的 unknown outcome）的终态。其余未结算 effect 仍一律
 fail closed。
 
+另有一类不属于「未结算 effect」的残留：``function_call`` 会话项已落账、意图却从未登记
+（``find_undispatched_calls``，ADR 0075）。它没有 intent，上面的配对扫描看不见它。
+
 本模块只读 committed envelopes，不做 IO，不依赖 Engine。
 """
 
@@ -23,7 +26,9 @@ from taifeng.conversation.journal.records import (
     deserialize_response_item,
 )
 from taifeng.conversation.journal.recovery_records import (
+    TOOL_CALL_UNDISPATCHED_RECORD_TYPE,
     TOOL_RECOVERY_RECORD_TYPE,
+    ToolCallUndispatchedV1,
     ToolRecoveryCommittedV1,
 )
 
@@ -127,6 +132,63 @@ def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, .
     return tuple(pending)
 
 
+def _call_id_of(envelope: JournalEnvelope) -> str | None:
+    """取与工具调用配对有关的 record 的 call id；无关 record 返回 None。
+
+    Raises:
+        ValueError / pydantic.ValidationError: 相关 record 缺 call id 或形状违约。
+    """
+    kind = envelope.record_type
+    if kind == "conversation_item":
+        if envelope.payload.get("item_kind") not in {"function_call", "function_call_output"}:
+            return None
+        item = ConversationItemV1.model_validate(envelope.payload)
+        call_id = item.payload.get("call_id")
+        if not isinstance(call_id, str):
+            raise ValueError(f"conversation item missing call_id: {envelope.record_id}")
+        return call_id
+    if kind == "tool_intent_committed":
+        return _payload_ref(envelope, "call_id")
+    if kind == TOOL_CALL_UNDISPATCHED_RECORD_TYPE:
+        # 新记录类型一律按 DTO 严格校验，形状违约即 Journal 不可信
+        return ToolCallUndispatchedV1.model_validate(envelope.payload).call_id
+    return None
+
+
+def find_undispatched_calls(
+    envelopes: Sequence[JournalEnvelope],
+    thread_id: str,
+) -> tuple[JournalEnvelope, ...]:
+    """返回该 thread 上已落账、但从未登记意图也没有结果的 ``function_call`` 会话项。
+
+    按 Journal seq 顺序配对：``function_call`` 之后出现的同 call id 的意图、结果会话项或
+    ``tool_call_undispatched`` 结论都会结算它（意图出现即归「结果未知」路径处理）。同一 thread
+    内 call id 被复用时，先发出的调用先被结算。
+
+    Raises:
+        ValueError / pydantic.ValidationError: 相关 record 形状违约（Journal 不可信）。
+    """
+    open_calls: dict[str, list[JournalEnvelope]] = {}
+    for envelope in envelopes:
+        if envelope.thread_id != thread_id:
+            continue
+        call_id = _call_id_of(envelope)
+        if call_id is None:
+            continue
+        is_function_call = (
+            envelope.record_type == "conversation_item"
+            and envelope.payload.get("item_kind") == "function_call"
+        )
+        if is_function_call:
+            open_calls.setdefault(call_id, []).append(envelope)
+            continue
+        waiting = open_calls.get(call_id)
+        if waiting:
+            waiting.pop(0)
+    remaining = [envelope for waiting in open_calls.values() for envelope in waiting]
+    return tuple(sorted(remaining, key=lambda envelope: envelope.seq))
+
+
 def root_thread_id(envelopes: Sequence[JournalEnvelope]) -> str:
     """初始化 batch 第二条 ``thread_created`` 即 Session 的 root thread。"""
     if len(envelopes) < 3 or envelopes[1].record_type != "thread_created":
@@ -167,6 +229,7 @@ def rebuild_root_history(
 
 __all__ = [
     "ResumedHistory",
+    "find_undispatched_calls",
     "find_unsettled_effects",
     "rebuild_root_history",
     "root_thread_id",

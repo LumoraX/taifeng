@@ -46,7 +46,9 @@ verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
 - **resume（Journal 接管）**：`get_or_create(resume_thread_id=...)` 经投影 marker 定位 Journal Session →
   `open_existing` 接管（epoch+1）→ root thread 上结果未知的工具调用（intent 无 outcome / outcome 已落 unknown）
   按副作用分流收敛：可回查的回查、幂等的判可安全重发、其余经 `AuditConfig.tool_outcome_resolver` 征求人裁决，
-  结论作为 `tool_recovery_committed`（+ 补写的 `function_call_output` 会话项）原子追加（ADR 0070）；其余未结算
+  结论作为 `tool_recovery_committed`（+ 补写的 `function_call_output` 会话项）原子追加（ADR 0070）；已随模型
+  回复落账、却从未登记意图的调用确定未执行，结论作为 `tool_call_undispatched`（+ 补写的「未执行」结果）随同一
+  batch 追加（ADR 0075）；其余未结算
   effect（LLM attempt / skill 派发 / submission 未 applied）或仍需人裁决的调用即
   `AuditResumeError("audit_resume_recovery_required")` 并列出 record id。通过后用 root thread 已提交
   `conversation_item` 重建 history、复用并核对既有投影 thread 后续跑；已 `session_ended` 的 Session 不可重开。

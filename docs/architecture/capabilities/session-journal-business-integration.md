@@ -344,8 +344,8 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
    `tool_outcome_committed` / `tool_recovery_committed`、`skill_selected` 无同 operation 的
    `skill_dispatch_finished`、`submission_accepted` 无对应 `submission_applied`，或任一终态已 durable 为
    `unknown` 且未被 `tool_recovery_committed` 改判（ADR 0025：未匹配 intent 一律 UNKNOWN）。root thread 的工具
-   调用按 §13.1 收敛并把结论原子追加；其余任一未结算 effect，或任一工具调用仍需人裁决，即 fail closed。恢复
-   从不自动重复任何 effect；
+   调用按 §13.1 收敛并把结论原子追加；已随模型回复落账、却从未登记意图的调用按 §13.2 收敛；其余任一未结算
+   effect，或任一工具调用仍需人裁决，即 fail closed。恢复从不自动重复任何 effect；
 5. 用 root thread 已提交 `conversation_item`（含 §13.1 补写的 output）按 seq 重建 initial history；audited turn
    index 从 Journal 已 accepted 的最大值 +1 续编；
 6. coordinator 使用新 lease 与 `expected_seq` = 最后一次 ack 的 `last_seq`（有恢复 batch 时为它，否则为接管 ack）；projector 复用既有投影 thread，并以
@@ -393,9 +393,22 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
 - 回查与 resolver 只在持写者锁之后调用；只读预检把「无回查、不可安全重发、无 resolver」的调用直接拒绝、不写接管记录；
   需回查或需征求 resolver 才能判定的调用若最终被拒，接管记录已写（epoch 已 +1），与 Engine 构造失败同类。
 - 已有 durable 结果的调用只接受「回查确认未执行」或人 `abort`，且不补第二条 output。
-- 恢复结论随 `thread_resumed.recovered_tool_calls` 透出（`reconciled` / `safe_to_retry` / `operator_resolved`）。
+- 恢复结论随 `thread_resumed.recovered_tool_calls` 透出（`reconciled` / `safe_to_retry` / `operator_resolved`；
+  §13.2 的调用为 `not_dispatched`）。
 - core strict verify 只校验结构与 hash chain，新记录类型天然通过；resume 扫描按 DTO 严格校验，形状违约即
   `audit_resume_journal_invalid`。没有该记录的旧 Journal 冷读行为不变。
+
+### 13.2 从未登记意图的工具调用收敛（ADR 0075）
+
+模型回复与工具意图是两个相继的 batch。进程死在两者之间时，Journal 里没有任何未结算 effect，root thread 末尾却
+留着没有结果的 `function_call`。意图先于任何派发落账，这些调用确定没有执行：恢复时为每个调用追加
+`tool_call_undispatched`（`ToolCallUndispatchedV1`）+ 补写的 `function_call_output` 会话项（`not_executed:` 开头、
+`is_error=true`），与 §13.1 的结论同属一个 batch。数据契约与识别规则见
+[tool-crash-reconciliation § 从未登记意图的调用](tool-crash-reconciliation.md)。
+
+- 不回查、不看副作用声明、不征求 resolver；恢复不执行工具。
+- call id 无法构成 operation identity 的调用交人：预检即拒，`record_ids` 为该 `function_call` record。
+- 处置结论以 `not_dispatched` 随 `thread_resumed.recovered_tool_calls` 透出。
 
 ## 14. 验收门槛
 
@@ -407,6 +420,8 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
   record 且不写接管；writer 存活 Busy；resume 后 Engine 失败只释放 lease、可再次接管；
 - 工具收敛（§13.1）：回查完成 / 未执行 / 查不清 / 抛错、幂等可安全重发、人 provide / abort（operator actor）、
   resolver 返回 None / 抛错 / 裁决不适用、durable unknown outcome 只落结论、二次崩溃冷读恢复记录视为已结算；
+- 从未登记意图的调用（§13.2）：单个 / 并行批次全部收敛且顺序一致、结论 durable 且 verify 通过、二次崩溃不重复
+  收敛、call id 无法构成 identity 时预检即拒且不写接管、正常跑完的调用不被误判；
 - full Ruff changed-files、full mypy、full pytest、Sim selfcheck、OpenSpec strict validation 全绿；
 - living architecture 与 `docs/capability-matrix.md` 同步；
 - 获得明确外部 provider 授权后运行真实 LLM capability matrix，并在最终代码 head 刷新两份 ledger。

@@ -124,6 +124,10 @@ resume 持写者锁后 strict 读取 Journal，root thread 上满足以下任一
 - **durable unknown outcome**：`tool_outcome_committed.status == "unknown"` 且未被恢复记录改判（取消 / 超时判不清，
   模型已看到一条错误结果，Session 当时即冻结）。
 
+- **从未登记意图**：`function_call` 会话项已随模型回复 durable，之后同 thread 上没有同 call id 的
+  `tool_intent_committed`、`function_call_output` 会话项或 `tool_call_undispatched`（崩溃在模型回复落账与意图
+  batch 落账之间）。这类调用的结局是确定的，见下文「从未登记意图的调用」。
+
 子 thread 的调用、引用缺失的 outcome、缺 operation lineage 的 intent 不参与，连同 LLM / skill / submission 未结算项
 一律 fail closed。
 
@@ -160,6 +164,45 @@ record id `{tool operation}:tool_recovery_committed:none:0`，挂在原 intent �
 补写的 `function_call_output` 会话项 record id 为 `{tool operation}:conversation_item:none:1`（与 live outcome 的
 ordinal 0 永不相撞），item id 由 (thread, call_id) 确定性派生，metadata 带 `recovered: true`，Responses 调用另带
 `origin_llm_sample_id`。
+
+### 从未登记意图的调用（ADR 0075）
+
+strict audit 下整批意图先于任何派发原子落账，所以**没有意图即没有执行**。这类调用不回查、不看副作用声明、
+不征求人裁决，恢复时直接落结论：
+
+- 识别按 Journal seq 顺序配对：`function_call` 之后出现的同 call id 的意图、结果会话项或既有结论都会结算它；
+  同一 thread 内 call id 被复用时先发出的调用先被结算。
+- 结论记录 `tool_call_undispatched`，record id `{tool operation}:tool_call_undispatched:none:0`，挂在该调用**本应
+  使用**的 tool operation 下；`causation_id` = `function_call` 会话项 record，`correlation_id` = 接管 operation id，
+  actor 为 `system/recovery`。payload `ToolCallUndispatchedV1`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `function_call_record_id` | 该调用的 `function_call` 会话项 record |
+| `call_id` / `name` / `arguments_raw` | 模型发出的调用，取自会话项，原样保留 |
+| `output` | 补写给模型的文本，以 `not_executed:` 开头 |
+| `is_error` | 恒为 `true` |
+| `recovery_operation_id` | 接管 operation id（与 `writer_takeover` 同源） |
+
+- 同 batch 补写 `function_call_output` 会话项，record id `{tool operation}:conversation_item:none:1`，item id 由
+  (thread, call_id, `function_call` record id) 确定性派生，metadata 带 `recovered: true`，Responses 调用另带
+  `origin_llm_sample_id`。
+- 与「结果未知」的结论同属一个恢复 batch，遵守同一条全有或全无规则。
+- call id 为空或含 `:`、无法构成 operation identity 的调用无法自动收敛：只读预检即以
+  `audit_resume_recovery_required` 拒绝并列出该 `function_call` record，不写接管记录。
+- 处置结论以 `not_dispatched` 随 `thread_resumed.recovered_tool_calls` 透出。
+
+#### Scenario: 崩溃在模型回复与意图落账之间
+- **GIVEN** 审计会话里模型回复含两个工具调用，回复已 durable，意图 batch 落账前进程死亡
+- **WHEN** 另一进程 resume
+- **THEN** Journal 原子追加两条 `tool_call_undispatched` 与两条补写的 `function_call_output` 会话项，顺序与模型发出
+  调用的顺序一致，strict verify 为 HEALTHY；工具 handler 未被调用
+- **AND** 续跑的新 turn 请求里两个调用都带着 `not_executed:` 结果，配对完整
+
+#### Scenario: 已收敛的调用不重复处理
+- **GIVEN** 上述 resume 之后进程再次死亡
+- **WHEN** 再次 resume
+- **THEN** 不再追加 `tool_call_undispatched`，history 中每个调用仍只有一条结果
 
 ### 行为契约
 
