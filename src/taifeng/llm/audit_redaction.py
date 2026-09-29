@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from taifeng.conversation.journal.canonical import canonical_bytes
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from taifeng.llm.types import ApiRequest
 
 type RedactionKind = Literal["image_base64", "provider_encrypted_content"]
@@ -142,6 +144,24 @@ def _redact_value(
     }
 
 
+def canonical_attempt_digest(
+    provider: str,
+    model: str,
+    api_request: Mapping[str, Any],
+) -> str:
+    """attempt 摘要的唯一 preimage 定义：``{provider, model, api_request}`` 的 RFC 8785 SHA-256。
+
+    ``api_request`` 是 ``ApiRequest.model_dump(mode="json")`` 形状的 JSON 对象。录制侧
+    （``project_attempt_request``）与 Journal 回放的复核（``llm/providers/replay.py``）共用本函数，
+    保证两边对「同一请求」的判定逐字节一致。
+    """
+    return hashlib.sha256(
+        canonical_bytes(
+            {"provider": provider, "model": model, "api_request": dict(api_request)}
+        )
+    ).hexdigest()
+
+
 def project_attempt_request(
     provider: str,
     model: str,
@@ -149,11 +169,7 @@ def project_attempt_request(
 ) -> AttemptRequestProjection:
     """在内存中生成安全投影，并绑定脱敏前 provider-neutral request。"""
     full = request.model_dump(mode="json")
-    digest = hashlib.sha256(
-        canonical_bytes(
-            {"provider": provider, "model": model, "api_request": full}
-        )
-    ).hexdigest()
+    digest = canonical_attempt_digest(provider, model, full)
     redactions: list[RequestRedaction] = []
     safe = _redact_value(full, (), redactions)
     assert isinstance(safe, dict)
@@ -174,5 +190,6 @@ __all__ = [
     "AttemptRequestProjection",
     "RequestRedaction",
     "SensitiveRequestShapeError",
+    "canonical_attempt_digest",
     "project_attempt_request",
 ]
