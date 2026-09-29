@@ -16,12 +16,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from taifeng.conversation.journal.models import ActorRef
 from taifeng.conversation.journal.records import (
+    AttachmentV1,
     JournalIdentities,
     JournalRecordFactory,
     ToolIntentCommittedV1,
@@ -29,8 +30,11 @@ from taifeng.conversation.journal.records import (
     ToolStatus,
     conversation_item_record,
     stable_error,
+    validate_attachments,
 )
 from taifeng.conversation.models import function_call_output
+from taifeng.llm.errors import LLMError
+from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, admit_tool_attachments
 from taifeng.loop.audit_support import SessionAuditFrozenError
 from taifeng.tool.spec import ToolResult
 
@@ -38,6 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from taifeng.conversation.models import ResponseItem
+    from taifeng.llm.image_input import ImageInputPolicy
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.tool_batch import ToolCallOutcome, ToolCallRequest
@@ -90,6 +95,23 @@ def _classify_outcome(
     return ToolStatus.SUCCESS
 
 
+def _attachment_summary(attachments: list[dict[str, Any]]) -> dict[str, Any]:
+    """outcome record 里的附件摘要：类型、大小与摘要值，不含正文。"""
+    if not attachments:
+        return {}
+    return {
+        "attachments": [
+            {
+                "kind": item["kind"],
+                "media_type": item["media_type"],
+                "size": item["size"],
+                "sha256": item["sha256"],
+            }
+            for item in attachments
+        ]
+    }
+
+
 class _AuditedToolConvergence:
     """一批 Tool call 的 durable 意图提交与取消无关的终态收敛。"""
 
@@ -104,9 +126,11 @@ class _AuditedToolConvergence:
         registry: object,
         cancel: CancellationToken,
         origin_sample_ids: Mapping[str, str] | None = None,
+        image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY,
     ) -> None:
         """冻结本批 identity 派生器与按 call-index 有序的请求视图。"""
         self._state = state
+        self._image_input_policy = image_input_policy
         self._coordinator = state.coordinator
         self._cancel = cancel
         self._iteration = iteration
@@ -210,6 +234,26 @@ class _AuditedToolConvergence:
             fco_items.append(fco_item)
         return fco_items
 
+    def _admitted_attachments(
+        self, result: ToolResult,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """工具结果的附件过准入；返回 (可落账的附件, 拒绝说明)。
+
+        先过图片策略（数量、MIME、尺寸），再过审计 Session 的字节上限（与用户附件同一组）。
+        """
+        if not result.attachments:
+            return [], None
+        try:
+            admitted = admit_tool_attachments(result.attachments, self._image_input_policy)
+            validate_attachments(
+                [AttachmentV1.model_validate(item) for item in admitted],
+                max_item_bytes=self._state.max_attachment_bytes,
+                max_total_bytes=self._state.max_total_attachment_bytes,
+            )
+        except (LLMError, ValueError) as exc:
+            return [], f"tool_attachment_rejected: {exc}"
+        return admitted, None
+
     async def _commit_outcome(
         self,
         req: ToolCallRequest,
@@ -217,14 +261,16 @@ class _AuditedToolConvergence:
         duration_ms: int,
         status: ToolStatus,
     ) -> ResponseItem:
-        """原子提交单个 tool_outcome_committed + 唯一 function_call_output 会话项。"""
-        # strict audit 的批形态是「单个 outcome + 唯一 fco 会话项」，图片附件需要
-        # 第二条会话项才能表达，属能力契约违约 → fail closed 冻结整个 Session。
-        # 不静默丢图：丢了模型看不见、审计也无从追溯，比直接停下更危险。
-        if result.attachments:
-            raise self._coordinator.freeze(
-                RuntimeError("audit_tool_attachment_unsupported")
-            )
+        """原子提交单个 tool_outcome_committed + 唯一 function_call_output 会话项。
+
+        图片附件随 function_call_output 会话项落账（完整正文），outcome record 只记摘要
+        （ADR 0095）。附件在落账前过准入；不合格的附件使这次调用的结果变成错误，
+        与非审计路径的处置一致——不丢图，也不让脏条目进 Journal。
+        """
+        attachments, rejection = self._admitted_attachments(result)
+        if rejection is not None:
+            result = ToolResult.error(rejection, reason="tool_attachment_rejected")
+            status = ToolStatus.ERROR
         operation_id = self._identities.tool(self._turn_id, req.call_id)
         intent_record_id = self._intent_ids[req.call_id]
         is_error = status is not ToolStatus.SUCCESS
@@ -238,7 +284,7 @@ class _AuditedToolConvergence:
                 name=req.name,
                 status=status,
                 output=result.output,
-                data={},
+                data=_attachment_summary(attachments),
                 duration_ms=float(duration_ms),
                 stable_error=failure,
             ),
@@ -252,6 +298,7 @@ class _AuditedToolConvergence:
             output=result.output,
             thread_id=self._state.thread_id,
             is_error=is_error,
+            attachments=attachments or None,
         )
         origin_sample_id = self._origin_sample_ids.get(req.call_id)
         if origin_sample_id:
@@ -304,6 +351,7 @@ async def audited_tool_batch(
     cancel: CancellationToken,
     finalization_timeout: float,
     origin_sample_ids: Mapping[str, str] | None = None,
+    image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY,
 ) -> list[ResponseItem]:
     """audit 模式下一批 Tool 的端到端收敛：意图 → 派发 → 终态 → projection。
 
@@ -320,6 +368,7 @@ async def audited_tool_batch(
         registry=registry,
         cancel=cancel,
         origin_sample_ids=origin_sample_ids,
+        image_input_policy=image_input_policy,
     )
     # 取消无关的有界 finalization：意图落账 + 收敛都在 shield 内，无论外层取消与否
     # 每个已提交意图都必须收敛出唯一终态。

@@ -133,6 +133,7 @@ Later ADRs:
 92. [ADR 0092: 预热——在用户输入到来之前做掉首轮采样的准备工作](decisions/0092-prewarm.md): 首轮采样承担全部冷启动开销，内核没有入口利用用户开口前的空闲。决策：`Prewarm` Op 三步（指令层 / 工作集 / 模型侧）；模型侧是协议 `ModelPrewarmer`，参考实现用一次输出极短的采样；预热请求与真实采样同一套组装；持 root gate 但给用户消息让路；不留痕迹；失败不传染；消耗记进会话账。
 93. [ADR 0093: ContextEngine 可插拔槽位——history 不动，只改发出去的视图](decisions/0093-context-engine-slot.md): 发给模型的内容恒等于 history，非破坏性的上下文管理没有入口。决策：槽位只管视图装配与轮后通知，不接管压缩；视图可含 history 外的条目；内核只做结构校验，不合法即失败不退回；预算与压缩触发按视图估算；同一 history 版本只装配一次；缓存影响由引擎声明；引擎挂在压缩协调器上。
 94. [ADR 0094: 审计模式放开折叠式上下文压缩与预算提示](decisions/0094-audit-mode-compaction.md): 审计模式拒绝任何压缩，长会话只能跑到溢出；预算提示绕过 Journal 直写投影。决策：只放开折叠式策略并由策略声明；`context_compacted` 与摘要条目同批；摘要的 LLM 调用经内核提供的会话落账，失败也落；先落账后改 hot history；只在采样之间压缩；回写时排除被折叠的条目；预算提示一并落账。
+95. [ADR 0095: 审计模式接受文件附件与工具结果里的图片](decisions/0095-audit-mode-attachments.md): 带文件的用户消息在审计模式被拒，工具返回图片会冻结 Session。决策：文件附件另立 DTO（不改图片附件的字节形状），按 `kind` 区分；准入与非审计路径同一口径外加 Session 字节上限；工具图片随结果对话项落账、outcome 只记摘要；不合格时结果变成错误而不冻结。
 
 ### Fourth Pass: Gap Tracking
 

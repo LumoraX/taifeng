@@ -698,6 +698,7 @@ class TurnSample:
                     self.__sample_owner.audit_state.coordinator.finalization_timeout
                 ),
                 origin_sample_ids=origin_samples,
+                image_input_policy=self.__sample_owner.image_input_policy,
             )
             self.__sample_owner.history_buffer.extend(fco_items)
             return assistant_text, True

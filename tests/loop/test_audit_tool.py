@@ -101,6 +101,7 @@ async def _run(
     *,
     cancel: CancellationToken | None = None,
     dispatch_probe=None,
+    **kwargs,
 ):
     """驱动 audited_tool_batch，run_dispatch 返回注入的 outcomes。"""
     token = cancel or CancellationToken(name="turn")
@@ -120,6 +121,7 @@ async def _run(
         run_dispatch=run_dispatch,
         cancel=token,
         finalization_timeout=5.0,
+        **kwargs,
     )
 
 
@@ -423,15 +425,90 @@ async def test_parallel_partial_completion_orders_outcomes_by_index(
     assert state.coordinator.health is AuditHealth.HEALTHY
 
 
-@pytest.mark.anyio
-async def test_tool_attachments_are_unsupported_and_fail_closed(
-    tmp_path: Path,
-) -> None:
-    """strict audit 的批形态是「单个 outcome + 唯一 fco 会话项」，附件需要第二条
-    会话项 → 能力契约违约，必须冻结整个 Session 而非静默丢图。"""
+def _png_attachment():
+    """一张 1×1 的 PNG 附件。"""
     from taifeng.llm.image_input import ImageAttachmentV1
 
-    state, _core = await _bootstrapped_state(tmp_path)
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        + (1).to_bytes(4, "big") + (1).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    return ImageAttachmentV1.from_bytes(png, media_type="image/png")
+
+
+@pytest.mark.anyio
+async def test_tool_attachment_is_journaled_with_its_output(tmp_path: Path) -> None:
+    """图片策略启用：附件随 function_call_output 会话项落账，outcome 只记摘要（ADR 0095）。"""
+    from taifeng.llm.image_input import ImageInputPolicy
+
+    state, core = await _bootstrapped_state(tmp_path)
+    req = _request(0, "call_a", "screenshot")
+    registry = _Registry({"screenshot": _spec(
+        "screenshot", effect_kind="pure", reconciliation="none",
+    )})
+    attachment = _png_attachment()
+    result = ToolResult.ok("frame", attachments=(attachment,))
+
+    items = await _run(
+        state, [req], registry, lambda: [_outcome(req, result)],
+        image_input_policy=ImageInputPolicy(enabled=True),
+    )
+
+    assert state.coordinator.health is AuditHealth.HEALTHY
+    assert items[0].payload["attachments"] == [attachment.model_dump()]
+    envelopes = [e async for e in core.load("session_1")]
+    (outcome,) = [e for e in envelopes if e.record_type == "tool_outcome_committed"]
+    assert outcome.payload["status"] == "success"
+    assert outcome.payload["data"] == {"attachments": [{
+        "kind": "image", "media_type": "image/png",
+        "size": attachment.size, "sha256": attachment.sha256,
+    }]}
+    # 正文只在对话项里，outcome record 不重复保存
+    assert attachment.content not in repr(outcome.payload)
+    (conversation,) = [
+        e for e in envelopes
+        if e.record_type == "conversation_item"
+        and e.payload["item_kind"] == "function_call_output"
+    ]
+    stored = ConversationItemV1.model_validate(conversation.payload)
+    assert stored.payload["attachments"][0]["content"] == attachment.content
+
+
+@pytest.mark.anyio
+async def test_tool_attachment_over_the_session_limit_is_rejected(tmp_path: Path) -> None:
+    """超过审计 Session 的附件字节上限：结果变成错误，不落图，也不冻结。"""
+    from taifeng.llm.image_input import ImageInputPolicy
+
+    state, core = await _bootstrapped_state(tmp_path)
+    object.__setattr__(state, "max_attachment_bytes", 8)
+    req = _request(0, "call_a", "screenshot")
+    registry = _Registry({"screenshot": _spec(
+        "screenshot", effect_kind="pure", reconciliation="none",
+    )})
+    result = ToolResult.ok("frame", attachments=(_png_attachment(),))
+
+    items = await _run(
+        state, [req], registry, lambda: [_outcome(req, result)],
+        image_input_policy=ImageInputPolicy(enabled=True),
+    )
+
+    assert state.coordinator.health is AuditHealth.HEALTHY
+    assert items[0].payload["is_error"] is True
+    assert items[0].payload["output"].startswith("tool_attachment_rejected:")
+    assert "attachments" not in items[0].payload
+    (outcome,) = [
+        e async for e in core.load("session_1") if e.record_type == "tool_outcome_committed"
+    ]
+    assert (outcome.payload["status"], outcome.payload["data"]) == ("error", {})
+
+
+@pytest.mark.anyio
+async def test_tool_attachment_without_image_policy_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """图片策略未启用：附件不落账，这次调用的结果变成错误；Session 不冻结。"""
+    state, core = await _bootstrapped_state(tmp_path)
     req = _request(0, "call_a", "file_write")
     registry = _Registry(
         {"file_write": _spec(
@@ -440,15 +517,14 @@ async def test_tool_attachments_are_unsupported_and_fail_closed(
             reconciliation="manual",
         )}
     )
-    png = (
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-        + (1).to_bytes(4, "big") + (1).to_bytes(4, "big")
-        + b"\x08\x02\x00\x00\x00\x00\x00\x00\x00IEND\xaeB`\x82"
-    )
-    attachment = ImageAttachmentV1.from_bytes(png, media_type="image/png")
-    result = ToolResult.ok("frame", attachments=(attachment,))
+    result = ToolResult.ok("frame", attachments=(_png_attachment(),))
 
-    with pytest.raises(SessionAuditFrozenError):
-        await _run(state, [req], registry, lambda: [_outcome(req, result)])
+    items = await _run(state, [req], registry, lambda: [_outcome(req, result)])
 
-    assert state.coordinator.health is not AuditHealth.HEALTHY
+    assert state.coordinator.health is AuditHealth.HEALTHY
+    assert items[0].payload["is_error"] is True
+    assert items[0].payload["output"].startswith("tool_attachment_rejected:")
+    (outcome,) = [
+        e async for e in core.load("session_1") if e.record_type == "tool_outcome_committed"
+    ]
+    assert outcome.payload["status"] == "error"

@@ -6,13 +6,22 @@ import base64
 import binascii
 import hashlib
 import re
+from collections.abc import Sequence  # noqa: TC003  # 运行期签名需要
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003  # Pydantic 运行期需要
 from enum import StrEnum
 from typing import Annotated, Literal, Self, get_args
 
-from pydantic import BeforeValidator, Field, field_validator, model_validator
+from pydantic import (
+    BeforeValidator,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 
+from taifeng.conversation.journal.attachment_records import FileAttachmentRecordV1
 from taifeng.conversation.journal.canonical import (
     canonical_hash,
     model_canonical_data,
@@ -170,13 +179,26 @@ class AttachmentV1(PayloadModel):
         return decoded
 
 
+def _attachment_shape(value: object) -> str:
+    """按 ``kind`` 区分附件形状：``file`` 走文件 DTO，其余走 ``AttachmentV1``。"""
+    kind = value.get("kind") if isinstance(value, dict) else getattr(value, "kind", None)
+    return "file" if kind == "file" else "inline"
+
+
+AcceptedAttachment = Annotated[
+    Annotated[AttachmentV1, Tag("inline")] | Annotated[FileAttachmentRecordV1, Tag("file")],
+    Discriminator(_attachment_shape),
+]
+"""一条已接受的附件：图片（``AttachmentV1``）或文件（``FileAttachmentRecordV1``，ADR 0095）。"""
+
+
 class SubmissionAcceptedV1(PayloadModel):
     """按 op_kind 严格区分 UserMessage/CancelTurn/Shutdown 的 durable acceptance。"""
 
     op_kind: Literal["user_message", "cancel_turn", "shutdown"]
     turn_index: NonNegativeInt | None = None
     text: str | None = None
-    attachments: tuple[AttachmentV1, ...] | None = None
+    attachments: tuple[AcceptedAttachment, ...] | None = None
     source: NonEmptyStr | None = None
     target_submission_id: NonEmptyStr | None = None
 
@@ -913,7 +935,7 @@ def stable_error(
 
 
 def validate_attachments(
-    attachments: tuple[AttachmentV1, ...] | list[AttachmentV1],
+    attachments: Sequence[AttachmentV1 | FileAttachmentRecordV1],
     *,
     max_item_bytes: int,
     max_total_bytes: int,

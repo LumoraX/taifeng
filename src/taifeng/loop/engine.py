@@ -645,6 +645,7 @@ class AgentEngine:
                     sub,
                     image_input_policy=self._image_input_policy,
                     model_input_capabilities=model_capabilities(self._model_client),
+                    file_input_policy=self._file_input_policy,
                 )
             if prepared is None:
                 async with self._audited_admission_lock:

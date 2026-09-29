@@ -319,6 +319,24 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
 附件只接受完整 inline base64 content，并在 acceptance 前校验 media type、size、SHA-256、单项和总大小
 上限。临时路径、引用型输入、缺失正文、digest/size 不符或超限写安全 submission rejection，不冻结。
 
+附件有两种 durable 形状，按 `kind` 区分（ADR 0095）：
+
+| `kind` | DTO | 字段 |
+| --- | --- | --- |
+| `file` | `FileAttachmentRecordV1` | `media_type`（首批仅 `application/pdf`）、`size`、`sha256`、`encoding`、`content`、`filename`（展示名，可空；不得含路径分隔符与控制字符） |
+| 其余 | `AttachmentV1` | `kind`、`media_type`、`size`、`sha256`、`encoding`、`content`、`detail` |
+
+去掉 `payload_version` 后即是对话项里的附件形状，与非审计路径逐项相同。图片附件的 canonical bytes
+没有因引入文件附件而改变。文件的准入与非审计路径同一口径：模型声明支持文件输入、文件策略启用、
+数量与大小在策略之内、PDF 结构合法。
+
+工具结果里的图片附件随 `function_call_output` 对话项落账（完整正文）；`tool_outcome_committed.data`
+只记摘要 `{"attachments": [{kind, media_type, size, sha256}]}`。附件在落账前先过图片策略，再过
+Session 的附件字节上限；不合格时这次调用的结果变成错误（`tool_attachment_rejected: …`，
+`status=error`），不落图、不冻结。
+
+LLM request 落账时图片与文件的正文都按 §8 脱敏（`image_base64` / `file_base64`）。
+
 ## 12. Capability gate
 
 | 维度 | 允许 | 拒绝 |
@@ -331,7 +349,8 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
 | Skill | atomic/composite、同步 call_skill | orchestration、suspension |
 | Spawn/peer | 无 | detached spawn、barrier、peer |
 | LLM | attempt-observable | opaque attempt/retry |
-| Tool | audit metadata 完整且 non-suspending | metadata 缺失或可 suspend |
+| Tool | audit metadata 完整且 non-suspending；结果可带图片附件 | metadata 缺失或可 suspend |
+| 附件 | 用户消息里的图片与文件（PDF）、工具结果里的图片 | 引用型输入、Data URL、超限、策略未启用或模型不支持的模态 |
 
 静态配置在 EnginePool 构造期验证，Op 在 submission gateway 验证，动态 effect 在 TurnRunner gate 再验证。
 拒绝必须发生在 effect 前。

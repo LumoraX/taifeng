@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import anyio
 
+from taifeng.conversation.journal.attachment_records import FileAttachmentRecordV1
 from taifeng.conversation.journal.canonical import canonical_hash, model_canonical_data
 from taifeng.conversation.journal.errors import JournalIntegrityError
 from taifeng.conversation.journal.framing import validate_envelope_chain
@@ -32,13 +33,18 @@ from taifeng.conversation.journal.records import (
     validate_attachments,
 )
 from taifeng.conversation.models import ResponseItem
-from taifeng.llm.errors import UnsupportedModalityError
 from taifeng.loop.audit_descriptor import user_message_input_descriptor_hash
 from taifeng.loop.submission import Submission, UserMessage
+
+JournalAttachment = AttachmentV1 | FileAttachmentRecordV1
+"""一条已通过准入的附件：图片或文件（ADR 0095）。"""
+
+_ATTACHMENT_TYPES = (AttachmentV1, FileAttachmentRecordV1)
 
 if TYPE_CHECKING:
     from taifeng.conversation.journal.projector import JournalConversationProjector
     from taifeng.llm.client import ModelCapabilities
+    from taifeng.llm.file_input import FileInputPolicy
     from taifeng.llm.image_input import ImageInputPolicy
     from taifeng.loop.audit import JournalAppendReceipt, SessionAuditCoordinator
     from taifeng.loop.audit_lifecycle import AcceptedWork
@@ -104,7 +110,7 @@ class AuditedUserMessageSubmission:
     submitted_at: datetime
     accepted_turn_index: int
     text: str
-    attachments: tuple[AttachmentV1, ...]
+    attachments: tuple[JournalAttachment, ...]
 
     def __post_init__(self) -> None:
         """拒绝无法形成稳定 Journal identity 的内部值。"""
@@ -131,7 +137,7 @@ class _PreparedUserMessage:
     submission_id: str
     submitted_at: datetime
     text: str
-    attachments: tuple[AttachmentV1, ...]
+    attachments: tuple[JournalAttachment, ...]
 
     def __post_init__(self) -> None:
         """拒绝 dataclass 注解不能在运行期阻止的非 V1 值。"""
@@ -139,8 +145,8 @@ class _PreparedUserMessage:
             raise ValueError("submission_id must be a non-empty string")
         if type(self.text) is not str:
             raise TypeError("UserMessage text must be a string")
-        if any(type(attachment) is not AttachmentV1 for attachment in self.attachments):
-            raise TypeError("attachments must contain only AttachmentV1 values")
+        if any(type(attachment) not in _ATTACHMENT_TYPES for attachment in self.attachments):
+            raise TypeError("attachments must contain only journal attachment DTOs")
 
     def accept(self, turn_index: int) -> AuditedUserMessageSubmission:
         """在 admission 顺序点绑定唯一 turn index。"""
@@ -314,7 +320,7 @@ class _InvalidAcceptedUserMessageError(Exception):
     """内部 accepted token 不能证明完整 admission batch。"""
 
 
-def _conversation_attachment_data(attachment: AttachmentV1) -> dict[str, object]:
+def _conversation_attachment_data(attachment: JournalAttachment) -> dict[str, object]:
     """把 Journal 嵌套 payload 投影为 conversation canonical attachment。"""
     data: dict[str, object] = dict(model_canonical_data(attachment))
     data.pop("payload_version", None)
@@ -324,18 +330,17 @@ def _conversation_attachment_data(attachment: AttachmentV1) -> dict[str, object]
 def _validated_attachments(
     op: UserMessage,
     state: AuditedAdmissionState,
-) -> tuple[AttachmentV1, ...]:
+) -> tuple[JournalAttachment, ...]:
     """把自由 attachment mapping 收敛为 canonical V1 DTO 并校验内容上限。"""
     if type(op.attachments) is not list:
         raise TypeError("UserMessage attachments must be a list")
     if any(type(attachment) is not dict for attachment in op.attachments):
         raise TypeError("UserMessage attachments must contain plain mappings")
-    # strict Journal 的 AttachmentV1 只有图片形状（无 filename）：文件附件在 acceptance
-    # 前显式拒绝（durable submission_rejected），而不是被当作形状错误偶然拒掉
-    if any(attachment.get("kind") == "file" for attachment in op.attachments):
-        raise UnsupportedModalityError("strict audit journal does not accept file attachments")
+    # 文件附件有自己的 durable 形状（带文件名，ADR 0095）；其余按图片形状校验
     attachments = tuple(
-        AttachmentV1.model_validate(attachment)
+        FileAttachmentRecordV1.model_validate(attachment)
+        if attachment.get("kind") == "file"
+        else AttachmentV1.model_validate(attachment)
         for attachment in op.attachments
     )
     validate_attachments(
@@ -353,6 +358,7 @@ def prepare_user_message(
     submitted_at: datetime | None = None,
     image_input_policy: ImageInputPolicy | None = None,
     model_input_capabilities: ModelCapabilities | None = None,
+    file_input_policy: FileInputPolicy | None = None,
 ) -> _PreparedUserMessage:
     """在 Engine 第一个 await 前复制并 canonicalize legacy Submission。"""
     if not isinstance(submission.op, UserMessage):
@@ -378,6 +384,7 @@ def prepare_user_message(
     history_to_api_messages(
         [candidate],
         image_input_policy=image_input_policy,
+        file_input_policy=file_input_policy,
         model_capabilities=model_input_capabilities,
     )
     return _PreparedUserMessage(
