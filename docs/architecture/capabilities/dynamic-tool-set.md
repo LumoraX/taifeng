@@ -38,15 +38,15 @@ EnginePool 订阅共享注册表，变更时向每个活跃 engine emit（`submi
 
 | 符号 | 含义 |
 | --- | --- |
-| `McpClient`（Protocol） | `list_tools` / `call_tool` / `server_info` / `add_tools_changed_listener` |
+| `McpClient`（Protocol） | `list_tools`（跟完 `nextCursor` 分页后的完整列表）/ `call_tool` / `server_info` / `add_tools_changed_listener` |
 | `McpStdioClient` | stdio 传输；server 主动消息交 `ServerMessageRouter`，`notifications/tools/list_changed` 以 task 调度监听者 |
-| `McpHttpClient.connect(url, headers=, request_timeout_seconds=, listen_notifications=, elicitation_handler=)` | streamable HTTP：POST JSON-RPC，响应 JSON 或 SSE；`Mcp-Session-Id` 与协商后的 `MCP-Protocol-Version` 带回；GET 推送流（405 = 不支持，不监听）；close 时 DELETE 会话 |
+| `McpHttpClient.connect(url, headers=, request_timeout_seconds=, listen_notifications=, elicitation_handler=, max_list_pages=, max_stream_resumptions=, stream_resume_delay_seconds=)` | streamable HTTP：POST JSON-RPC，响应 JSON 或 SSE（断流按 `Last-Event-ID` 续传）；`Mcp-Session-Id` 与协商后的 `MCP-Protocol-Version` 带回；GET 推送流（405 = 不支持，不监听；被关闭后带 `Last-Event-ID` 重连）；close 时 DELETE 会话 |
 | `bind_mcp_tools(client, registry, tool_prefix=, parallel_safe=, timeout_seconds=, watch=True, trust_annotations=False, attach_images=False) -> McpToolBinding` | 注册并随 list_changed 同步；`trust_annotations` 见下文「副作用分类」；`attach_images` 见 [mcp-client § 结果投影](mcp-client.md) |
-| `McpToolBinding.sync() -> (added, removed, replaced)` / `.detach()` | 手动同步 / 卸载本绑定拥有的全部工具 |
+| `McpToolBinding.sync() -> (added, removed, replaced)` / `.detach()` | 手动同步 / 卸载本绑定拥有的全部工具；同名工具在描述 / inputSchema / 副作用分类 / outputSchema 任一变化时替换（outputSchema 校验见 [mcp-client](mcp-client.md)） |
 | `register_mcp_tools_async(...)` | 一次性注册（旧接口；= `bind_mcp_tools(watch=False)`） |
 
-传输失败、HTTP 非 2xx、超时统一为 `McpToolError(-32000, ...)`；JSON-RPC error 保留原 code；
-协议版本不受支持为其子类 `McpProtocolVersionError(-32602)`。
+传输失败、HTTP 非 2xx、超时、续传失败统一为 `McpToolError(-32000, ...)`；JSON-RPC error 保留原 code；
+协议版本不受支持为其子类 `McpProtocolVersionError(-32602)`；`tools/list` 翻页失控为其子类 `McpPaginationError(-32000)`。
 
 ## 行为契约
 

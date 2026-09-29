@@ -14,7 +14,10 @@
     - 把 MCP tool 注册为 Taifeng ToolSpec，通过统一 ToolRegistry 派发；
       ``bind_mcp_tools`` 随 list_changed 自动增删 / 替换（dynamic-tool-set）
     - tools/call 结果无损投影：图片进 ``ToolResult.attachments``、structuredContent 进
-      ``ToolResult.data``、resource / audio 显式标注（``taifeng.mcp.content``）
+      ``ToolResult.data``、resource / audio 显式标注（``taifeng.mcp.content``）；工具声明了
+      ``outputSchema`` 时校验 structuredContent，不合规判错（``taifeng.mcp.output_schema``）
+    - 本端超时 / 取消放弃请求时发 ``notifications/cancelled``（``taifeng.mcp.cancellation``）
+    - streamable HTTP 断流按 ``Last-Event-ID`` 续传、推送流断开后重连（``taifeng.mcp.sse``）
     - server → client 请求：``ping`` 应答；``elicitation/create`` 交宿主注入的
       ``ElicitationHandler``（未注入回 -32601）；``notifications/cancelled`` 取消在飞应答
 
@@ -22,6 +25,8 @@
     - stdio transport
     - initialize / tools/list / tools/call（暴露 ``run_skill_turn`` meta-tool）
     - resources/list / resources/read（SKILL.md 作为 ``taifeng://skill/<id>`` 资源）
+    - server → client 请求按客户端在 initialize 声明的能力门控：未声明 ``elicitation`` 不发
+      ``elicitation/create``，``McpPrompter`` 立即 fail-closed 判 deny
     - CLI 入口 ``python -m taifeng mcp serve <skills_dir> --storage <dir>``
 
 不支持（后续）：
@@ -43,6 +48,7 @@ from taifeng.mcp.protocol import (
     McpProtocolVersionError,
 )
 from taifeng.mcp.server import McpServerInitiatedRequestError, McpStdioServer
+from taifeng.mcp.server_capabilities import McpClientCapabilityError
 from taifeng.mcp.stdio_client import (
     McpStdioClient,
     McpToolError,
@@ -57,6 +63,7 @@ __all__ = [
     "ElicitationRequest",
     "ElicitationResult",
     "McpClient",
+    "McpClientCapabilityError",
     "McpContentError",
     "McpHttpClient",
     "McpPaginationError",
