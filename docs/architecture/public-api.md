@@ -14,7 +14,7 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 
 当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`）、
 Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
-（`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）。
+（`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
 
 ## 弃用流程
 

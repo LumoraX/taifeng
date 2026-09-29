@@ -187,7 +187,7 @@ report = await rebuild_index(writer, directory, *, dry_run=False, sink=None)
 
 ## reconstruct_logical_history（冷加载逻辑 history 重建）
 
-图片 user item 把完整 `ImageAttachmentV1` 作为 canonical JSON 保存（MIME、decoded size、SHA-256、裸 base64、detail）；不保存 provider Data URL。冷加载后 prompt 层重新执行 admission，因此磁盘内容被篡改、策略收紧或换到 text-only client 时都会在网络前 fail closed。
+图片 user item 把完整 `ImageAttachmentV1` 作为 canonical JSON 保存（MIME、decoded size、SHA-256、裸 base64、detail）；文件 user item 同样保存完整 `FileAttachmentV1`（MIME、decoded size、SHA-256、裸 base64、可选 filename），两者同在 `payload.attachments`、以 `kind` 区分并保持提交顺序。都不保存 provider Data URL。冷加载后 prompt 层按当前策略与 client 能力重新执行 admission，因此磁盘内容被篡改、策略收紧或换到不支持该模态的 client 时都会在网络前 fail closed。
 
 OpenAI/Codex Responses 的一个 terminal sample 通过 `append_atomic_batch(items, batch_id=llm_sample_id)` 写为 begin/items/commit frames；sample ID 由 `(thread_id, sample_scope_id, turn_index, iteration)` 确定性生成。通常 sample scope 等于 submission id；detached child Resume/Rewind 的事件仍归因到 child thread，但 sample scope 使用本次操作 submission id，保证每次主动重入是新的逻辑 sample。reader 只发布 digest 与 item ids 完整匹配的首个 commit；崩溃留下的半 batch 不可见，同 batch 同 digest 幂等，不同 digest 报 conflict。默认 JSONL 的普通 append 与原子 batch 共用 `<thread>.lock` advisory file lock，committed 检查和 durable append 在同一跨 writer 临界区；文件读写、flush/fsync 和阻塞锁调用均在 anyio worker thread，不阻塞主 actor。
 

@@ -2,7 +2,7 @@
 
 ## 范围
 
-本能力仅接受完整内联 canonical base64 的 PNG、JPEG、WebP 与非动画 GIF 图片输入。它不支持 URL、临时路径、file id、音频、视频、PDF 或图片生成。
+本能力仅接受完整内联 canonical base64 的 PNG、JPEG、WebP 与非动画 GIF 图片输入。它不支持 URL、临时路径、file id、音频、视频、PDF 或图片生成（PDF 等文档文件走同构的 [llm-file-input](llm-file-input.md)）。
 
 **入口限于 user 消息。** 工具经 `function_call_output` 回传图片是另一条能力，
 见 [tool-image-attachment](tool-image-attachment.md)——它复用本契约的
