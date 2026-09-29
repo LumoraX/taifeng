@@ -87,7 +87,7 @@
 - 新增 resume code `audit_resume_resolution_invalid`；`AuditResumeError.record_ids` 在 `recovery_required` 时只列出本次
   无法自动结算、需要人处置的 record（存在工具以外的未结算 effect 时列出全部未结算 record）。
 - `thread_resumed.recovered_tool_calls` 在审计 resume 时同样透出处置结论，新增取值 `operator_resolved`。
-- 需回查才能判定的调用可能在接管后才被拒，epoch 随之 +1（与「resume 后 Engine 构造失败」同类，不影响正确性）。
+- 需回查或需征求 resolver 才能判定的调用可能在接管后才被拒，epoch 随之 +1（与「resume 后 Engine 构造失败」同类，不影响正确性）。
 - 实验层 API 变化（ADR 0066）：`RecordedCall` 新增必填 `api_request_safe` 与可选的回传状态字段；
   `JournalReplayClient(calls, *, capabilities=None)` 与 `from_records(..., capabilities=)`；实验层导出
   `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`。
@@ -97,7 +97,8 @@
 - 审计 resume：`tests/loop/test_audit_resume_tools.py`（引擎级：handler 执行途中关闭 core 模拟进程死亡，另一 core 实例
   resume）覆盖回查完成 / 回查未执行 / 回查查不清与抛错 / 幂等可安全重发 / 非幂等预检即拒不写接管 / 人 provide 以
   operator actor 落账 / 人 abort 后二次崩溃冷读新记录视为已结算 / 已 durable unknown 的 outcome 回查未执行只落结论 /
-  对已有结果 provide 判 invalid / resolver 抛错与返回 None；`tests/loop/test_audit_resume_scan.py` 覆盖扫描结算；
+  对已有结果 provide 判 invalid / resolver 抛错与返回 None；`tests/loop/test_audit_resume_resolution.py` 覆盖裁决 DTO
+  构造期校验；`tests/loop/test_audit_resume_scan.py` 覆盖扫描结算；
   `tests/conversation/journal/test_recovery_records.py` 覆盖 DTO 组合矩阵与 core verify / 冷读。
 - 回放：`tests/llm/test_journal_replay_responses.py`（真实 `OpenAIResponsesClient` / `AnthropicClient` 经 MockTransport
   在审计 pool 录制，新 thread / submission 回放）覆盖两轮 Responses 会话全部消费且密文还原、密文被替换判分叉、输入不同

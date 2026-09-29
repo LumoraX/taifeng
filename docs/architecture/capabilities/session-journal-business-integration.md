@@ -391,7 +391,7 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
 - 结论写成新的 `tool_recovery_committed`（`ToolRecoveryCommittedV1`）+ 需要时补写的 `function_call_output` 会话项，
   全部调用都有结论才作为**一个** batch 以接管 lease 原子追加；不改写任何历史记录。
 - 回查与 resolver 只在持写者锁之后调用；只读预检把「无回查、不可安全重发、无 resolver」的调用直接拒绝、不写接管记录；
-  需回查才能判定的调用若最终被拒，接管记录已写（epoch 已 +1），与 Engine 构造失败同类。
+  需回查或需征求 resolver 才能判定的调用若最终被拒，接管记录已写（epoch 已 +1），与 Engine 构造失败同类。
 - 已有 durable 结果的调用只接受「回查确认未执行」或人 `abort`，且不补第二条 output。
 - 恢复结论随 `thread_resumed.recovered_tool_calls` 透出（`reconciled` / `safe_to_retry` / `operator_resolved`）。
 - core strict verify 只校验结构与 hash chain，新记录类型天然通过；resume 扫描按 DTO 严格校验，形状违约即
