@@ -774,7 +774,9 @@ Resume(thread_id, resolutions)
   批次、`spawn_settled` + `thread_terminal`），不写锚点条目。子 runner 由 `_build_child_runner(audit_state=)`
   带上子 thread 的审计状态（`root=False`，turn 从 0 编号）。接管时 `audit_resume` 把 Journal 里的派发
   交给 `remember_spawns`，`rebuild_from_history` 据此重建句柄表；没有终态的派发由
-  `audit_resume_spawn` 在恢复批次里落 `cancelled`。
+  `audit_resume_spawn` 在恢复批次里落 `cancelled`。join-barrier 同理：`JoinBarrierCoordinator` 的登记、
+  点火经 `spawn_ledger` 分流，审计模式下聚合 turn 由 `run_audited_barrier` 包着跑，跑完落
+  `barrier_settled`；接管时 barrier 表与已点火集合由记录重建。
 - **cancellation**：每个 active turn 有目标取消子树（CancelTurn 只取消其目标 turn/子树），Session root 取消
   保留给 freeze 与 Shutdown；LLM checkpoint 与 Tool outcome 的落账均为取消无关（shield）。
 - **Session isolation**：coordinator/writer 健康态每 Session 独立；一个 Session freeze 不影响其他 Session 的

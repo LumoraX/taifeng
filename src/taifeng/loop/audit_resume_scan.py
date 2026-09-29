@@ -32,6 +32,8 @@ from taifeng.conversation.journal.recovery_records import (
     ToolRecoveryCommittedV1,
 )
 from taifeng.conversation.journal.spawn_records import (
+    BARRIER_FIRED_RECORD_TYPE,
+    BARRIER_SETTLED_RECORD_TYPE,
     SPAWN_SETTLED_RECORD_TYPE,
     SPAWN_STARTED_RECORD_TYPE,
 )
@@ -113,6 +115,9 @@ def _settled_references(envelopes: Sequence[JournalEnvelope]) -> _Settlement:
         elif kind == SPAWN_SETTLED_RECORD_TYPE:
             settled.spawn.add(_payload_ref(envelope, "started_record_id"))
             continue
+        elif kind == BARRIER_SETTLED_RECORD_TYPE:
+            settled.spawn.add(_payload_ref(envelope, "fired_record_id"))
+            continue
         else:
             continue
         # 已 durable 的 unknown 终态同样不可自动续跑
@@ -129,6 +134,7 @@ def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, .
     - ``tool_intent_committed`` 没有对应 ``tool_outcome_committed`` / ``tool_recovery_committed``；
     - ``skill_selected`` 没有同 operation 的 ``skill_dispatch_finished``；
     - ``spawn_started`` 没有对应 ``spawn_settled``（ADR 0098）；
+    - ``barrier_fired`` 没有对应 ``barrier_settled``（ADR 0099）；
     - ``submission_accepted`` 没有对应 ``submission_applied``；
     - 任一终态 record 的 ``status`` 为 ``unknown``，且未被 ``tool_recovery_committed`` 改判。
 
@@ -149,7 +155,10 @@ def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, .
                 and envelope.record_id not in awaited
             )
             or (kind == "skill_selected" and envelope.operation_id not in settled.skill)
-            or (kind == SPAWN_STARTED_RECORD_TYPE and envelope.record_id not in settled.spawn)
+            or (
+                kind in (SPAWN_STARTED_RECORD_TYPE, BARRIER_FIRED_RECORD_TYPE)
+                and envelope.record_id not in settled.spawn
+            )
             or (kind == "submission_accepted" and envelope.record_id not in settled.applied)
             or envelope.record_id in settled.unknown
         )

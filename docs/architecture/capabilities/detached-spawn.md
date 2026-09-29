@@ -293,7 +293,11 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 
 ### Requirement: 终态写入单点收敛
 
-句柄终态写入必须经唯一收敛点完成「状态回写 + 子 thread `spawn_settled` 锚 + 终态事件 emit + barrier 重查」四件套，禁止任何路径手写其中一件（历史事故：abort 裁决分支漏调 barrier 重查 → 被等待句柄虽落终态但聚合 turn 永不触发、联合评审挂死）：
+句柄终态写入必须经唯一收敛点完成「终态持久化 + 状态回写 + 终态事件 emit + barrier 重查」四件套，
+`_finalize_spawn` 与 `_settle_failed` 按这个顺序进行：句柄表里出现终态时它已经持久化，事件在其后。
+持久化期间该句柄记为正在收敛，其他收敛路径见到即让开；持久化失败时状态照样回写（句柄不停在
+running），异常上抛。持久化的去处：非审计是子 thread 的 `spawn_settled` 锚，审计是 `spawn_settled` 记录。
+禁止任何路径手写其中一件（历史事故：abort 裁决分支漏调 barrier 重查 → 被等待句柄虽落终态但聚合 turn 永不触发、联合评审挂死）：
 
 | 终态 | 唯一收敛点 | 覆盖路径 |
 | --- | --- | --- |
@@ -388,9 +392,11 @@ Concurrency Observability）。若先启动聚合 runner 再广播，快模型�
 
 注入 `AuditConfig` 的 Session 里，发起与终态记在 Journal 的记录里（`spawn_started` / `spawn_settled`），
 不写 `spawn` 与 `spawn_settled` 锚点条目；完整契约见
-[session-journal-business-integration §18](session-journal-business-integration.md)。与非审计模式的差异：
+[session-journal-business-integration §18–§19](session-journal-business-integration.md)。与非审计模式的差异：
 
-- 可用的操作是发起、终止、查询、等待；join-barrier、peer 消息不可用（静态门拒绝）。
+- 可用的操作是发起、终止、查询、等待与 join-barrier；peer 消息不可用（静态门拒绝）。
+- barrier 的登记、点火与聚合 turn 的终态记在 `barrier_registered` / `barrier_fired` / `barrier_settled`
+  里，不写 `join_barrier` 与 `join_barrier_fired` 锚点条目（§19）。
 - 子 thread 上的调用不能停下等人作答：错峰 HITL 在审计模式下不可用。
 - 接管时句柄表由记录重建；进程死的时候还在运行的派发落 `cancelled`（`end_reason = process_recovery`），
   不会停在 `running`。

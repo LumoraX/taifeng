@@ -13,15 +13,16 @@ UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
 采样之间：折叠式上下文压缩 / 预算提示（§15）
 工具调用处停下等人（审批 / 填表 / 给数据）→ Resume → 续跑（§17）
 分离式派发：子 skill 在独立子 thread 上后台运行（§18）
+join-barrier：一批派发全部结束后起聚合 turn（§19）
 ```
 
 SessionJournal 是执行事实和对话项的唯一可靠事实源。hot history、MessageStore 和 EventMsg 都是
 Journal durable ack 之后的内存态或可重建投影，不得领先 Journal，也不得被声明为第二事实源。
 
 未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。hook 与权限裁决见 §16，
-在工具调用处停下等人作答的挂起与恢复见 §17，分离式派发见 §18。
+在工具调用处停下等人作答的挂起与恢复见 §17，分离式派发见 §18，join-barrier 见 §19。
 本阶段不支持其余原因的挂起（子 skill 挂起、失败处置、资源护栏、带到期时间的挂起）、手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
-join-barrier、peer 消息、后台 shell 任务、
+peer 消息、后台 shell 任务、
 LLM attempt / submission 未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
 加密、WORM 或外置 blob。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
@@ -355,7 +356,7 @@ LLM request 落账时图片与文件的正文都按 §8 脱敏（`image_base64` 
 | Hook/approval | 内核的 `HookRunner`；内核的 `PermissionPolicy`（规则、可复用授权、当场作答或挂起式的 prompter）（§16、§17） | 其他类型的 hook 运行器 / 权限策略对象 |
 | Context | 无压缩策略，或全部策略声明 `audit_support` 为 `fold` / `fold_model`（§15） | 未声明或原地改写条目的压缩策略、ContextEngine、rewind、memory、instruction |
 | Skill | atomic/composite、同步 call_skill | orchestration、子 skill 内的挂起 |
-| Spawn/peer | 分离式派发：`spawn_skill` / `kill_skill` / `join_skill` / `wait_peer` / `wait_any`（§18） | join-barrier（`await_skills`）、peer 消息（`send_message`）、后台 shell 任务（`run_in_background` / `wait_for_task`） |
+| Spawn/peer | 分离式派发：`spawn_skill` / `kill_skill` / `join_skill` / `wait_peer` / `wait_any`（§18）；join-barrier：`await_skills`（§19） | peer 消息（`send_message`）、后台 shell 任务（`run_in_background` / `wait_for_task`） |
 | LLM | attempt-observable | opaque attempt/retry |
 | Tool | audit metadata 完整；结果可带图片附件；声明 `can_suspend=True` 的工具可以停下等人（§17） | metadata 缺失；未声明却自行挂起（运行期冻结） |
 | 附件 | 用户消息里的图片与文件（PDF）、工具结果里的图片 | 引用型输入、Data URL、超限、策略未启用或模型不支持的模态 |
@@ -773,7 +774,7 @@ spawn_settled + thread_terminal（子 thread）
 - 种子输入无法规范化时拒绝发起（`SpawnRejectedError`，分类 `arguments_not_canonical`），什么都不写，
   不占配额。
 - 子 thread 的 turn 从 0 编号，submission id 取子 thread id。
-- 终态记录先于 `spawn_completed` / `spawn_failed` / `spawn_cancelled` 事件。
+- 终态的顺序是「记录 → 句柄状态 → 事件」：查询与等待看到终态时，终态记录已经写下。
 - Session 已冻结或已封口时终态不写；这次派发在接管时按 18.5 处置。
 
 ### 18.4 对话项
@@ -797,12 +798,71 @@ spawn_settled + thread_terminal（子 thread）
 - 审计模式下一次工具调用必须在收敛期限内给出结果（§9）。`wait_peer` / `wait_any` 的等待时长因此
   不超过收敛期限的一半；到点返回 `timeout`，可以再等一次。
 - 发起它的工具调用与这次派发经 outcome 里的 `handle_id` 关联，记录之间没有直接的引用字段。
-- join-barrier、peer 消息、被唤醒重跑、子 thread 的 rewind 不在范围内。
+- peer 消息、被唤醒重跑、子 thread 的 rewind 不在范围内。
 
 ### 18.7 验收
 
-静态门放行五个工具、拒绝 barrier 与 peer 消息；发起批次先于发起它的工具调用结算、子 skill 的 LLM
+静态门放行五个工具、拒绝 peer 消息；发起批次先于发起它的工具调用结算、子 skill 的 LLM
 调用记在子 thread 名下且在发起批次之后；终态记录与子 thread 的 `thread_terminal` 相邻；任何 thread
 上都没有锚点条目；查询与等待工具读回结果；两个派发并行；kill 落 `cancelled`；无法规范化的种子输入
 被拒且不占配额；子 thread 停下等人冻结 Session；等待时长有上限；释放时取消仍在运行的派发并正常
 终结；接管后由 Journal 重建句柄表；崩溃时仍在运行的派发在接管时落终态；strict verify 通过。
+
+## 19. join-barrier（ADR 0099）
+
+barrier 等一批派发全部结束，然后在一个新 thread 上起聚合 turn。聚合 thread 上的 LLM 调用、工具调用、
+hook 与权限裁决按本契约落账，记在聚合 thread 名下。
+
+### 19.1 记录
+
+三条记录共用一个 operation：barrier id。
+
+| record type | 何时 | 要点 |
+| --- | --- | --- |
+| `barrier_registered` | 登记 | `handle_ids`（按登记顺序，不得重复）、`then_skill_id`、`then_args_template`（没有为空） |
+| `barrier_fired` | 成员全部结束之后 | `registered_record_id`、`then_thread_id`、`members`（各成员点火时的终态）、`arguments`（交给聚合 skill 的输入）、聚合 skill 定义与正文的摘要 |
+| `barrier_settled` | 聚合 turn 结束 | `fired_record_id`、`status`（`done` / `error` / `cancelled`）、`end_reason`、`result` |
+
+`then_thread_id` 由 Session id 与 barrier id 确定性派生。
+
+### 19.2 顺序
+
+```text
+tool_intent_committed（await_skills）               经工具登记时
+barrier_registered
+tool_outcome_committed（await_skills）              结果含 barrier_id
+    ── 成员各自 spawn_settled ──
+barrier_fired + thread_created + thread_bound + conversation_item（种子，聚合 thread）
+    ── 聚合 thread：llm_request_committed … ──
+barrier_settled + thread_terminal（聚合 thread）
+```
+
+- 登记记录 ack 之后 barrier 才进入 barrier 表；自定义输入无法规范化时拒绝登记
+  （`ValueError: then_args_not_canonical`），什么都不写。
+- 点火批次 ack 之后聚合 turn 才开始运行。登记时成员已经全部结束的，登记之后立即点火。
+- 每个 barrier 至多点火一次。
+- 不往任何 thread 写 `join_barrier` / `join_barrier_fired` 锚点条目（理由同 §18.4）。
+
+### 19.3 释放与接管
+
+- 释放 Session 时仍在运行的聚合 turn 被取消，落 `barrier_settled(cancelled)`，之后才是 Session 的
+  terminal batch。
+- 接管时 barrier 表由 `barrier_registered` 重建，有 `barrier_fired` 的记为已点火。
+- 登记了、没点火的 barrier：接管把没有终态的成员落 `cancelled`（§18.5）之后，barrier 随即点火，
+  聚合输入里这些成员的终态是 `cancelled`。
+- 已点火、聚合 turn 没有终态的 barrier：聚合 thread 上的工具调用按 §13.1–13.3 结算，然后落
+  `barrier_settled(cancelled, process_recovery)` 与聚合 thread 的 `thread_terminal`。不再点火。
+
+### 19.4 边界
+
+- 聚合 thread 上的调用不能停下等人作答（§17.1）。
+- 聚合 turn 的结果只在 `barrier_settled` 里，不登记为句柄，不能用 `join_skill` 查询。
+- 仅「全部结束」触发；任一结束触发、超时触发不在范围内。
+
+### 19.5 验收
+
+静态门放行 `await_skills`；成员没有全部结束时不点火；点火在成员终态之后、点火批次带着聚合 thread 的
+创建与种子、聚合 skill 的 LLM 调用记在聚合 thread 名下；默认输入是各成员的终态与结果；
+经工具登记且成员已结束时立即点火、自定义输入原样交给聚合 skill；无法规范化的自定义输入被拒；
+任何 thread 上都没有锚点条目；释放时取消仍在运行的聚合 turn；登记了没点火的 barrier 在接管后点火；
+被中断的聚合 turn 在接管时落终态且不再点火；strict verify 通过。

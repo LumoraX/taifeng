@@ -137,6 +137,7 @@ Later ADRs:
 96. [ADR 0096: 审计模式放开 hook 与不挂起的权限裁决](decisions/0096-audit-mode-hooks-and-permission.md): 审计模式拒绝任何 hook 与权限策略，而需要审计的部署最需要它们。决策：业务的 handler 与策略原样运行，内核按 turn 绑定一层，裁决先落账再生效；每个 handler 每次裁决一条 `hook_evaluated`，改写内容落账、其余 metadata 只记键名；`permission_decided` 记请求与裁决；上下文无法落账的请求被拒；挂起式审批另行立项。
 97. [ADR 0097: 审计模式放开挂起与恢复](decisions/0097-audit-mode-suspension-and-resume.md): 需要审计的部署里审批人很少在线等着，而审计模式拒绝一切挂起。决策：只放开「在工具调用处停下等人作答」的挂起（挂起式审批，及声明 `can_suspend` 的工具发问）；等人的调用保持未结算，结果记在原来的 operation 下；`Resume` 先准入落账再入队，且须答复全部请求；`resume_applied` 写在续跑之前；等待期间释放写 `session_detached` 而不终结，可被接管；子 skill 内的挂起、带到期时间的挂起不做。
 98. [ADR 0098: 审计模式放开分离式派发](decisions/0098-audit-mode-detached-spawn.md): 审计 Session 里直接调 `engine.spawn_skill()` 时子 skill 照常运行却不进 Journal。决策：发起是 `spawn_started` 与子 thread 创建、种子同批，终态是 `spawn_settled` 与 `thread_terminal`；不写锚点条目（避免两个写者打乱投影顺序）；句柄表由记录重建；接管时没有终态的派发落 `cancelled` 不续跑；子 thread 上的调用不能停下等人；等待工具的时长设上限；barrier 与 peer 消息另行立项。
+99. [ADR 0099: 审计模式放开 join-barrier](decisions/0099-audit-mode-join-barrier.md): 只有派发没有 barrier，「并行铺开、全部跑完后汇总」在审计模式下要靠模型自己轮询。决策：`barrier_registered` / `barrier_fired` / `barrier_settled` 三条记录，点火记下各成员的终态与聚合输入，聚合 turn 的终态要落账；登记了没点火的在接管后点火，被中断的聚合 turn 落 `cancelled` 不再点火；两种模式下终态顺序改为「持久化 → 句柄状态 → 事件」。
 
 ### Fourth Pass: Gap Tracking
 

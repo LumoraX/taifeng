@@ -17,16 +17,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from taifeng.conversation.models import user_message
-from taifeng.loop.audit_spawn import take_spawns
+from taifeng.loop.audit_spawn import take_detached
 from taifeng.loop.event import (
     EventMsg,
     JoinBarrierFired,
     JoinBarrierRegistered,
 )
 from taifeng.loop.spawn_handle import JoinBarrier
+from taifeng.loop.spawn_ledger import (
+    anchor_barrier_fired,
+    barrier_run,
+    open_barrier,
+    register_barrier,
+)
 
 if TYPE_CHECKING:
+    from taifeng.loop.audit_spawn import JournaledDetached
     from taifeng.loop.spawn_driver import SpawnDriver
     from taifeng.loop.spawn_handle import SpawnStatus
 
@@ -106,21 +112,9 @@ class JoinBarrierCoordinator:
             then_skill_id=then_skill_id,
             then_args_template=then_args_template,
         )
+        # 4. 登记持久化(冷恢复可重建 barrier;失败则不登记)+ emit 登记事件
+        await register_barrier(eng, barrier)
         drv._spawn_handles.barriers[barrier_id] = barrier  # noqa: SLF001
-
-        # 4. parent thread 落登记锚(冷恢复可重建 barrier)+ emit 登记事件
-        from taifeng.conversation.models import join_barrier_item
-
-        anchor = join_barrier_item(
-            barrier_id=barrier_id,
-            handle_ids=list(handle_ids),
-            then_skill_id=then_skill_id,
-            then_args_template=then_args_template,
-            thread_id=eng._thread_id,  # noqa: SLF001
-        )
-        async with eng._lock:  # noqa: SLF001
-            eng._history.append(anchor)  # noqa: SLF001
-        await eng._store.append(anchor)  # noqa: SLF001
         await eng._emit(EventMsg(  # noqa: SLF001
             submission_id=barrier_id,
             msg=JoinBarrierRegistered(data={
@@ -177,8 +171,6 @@ class JoinBarrierCoordinator:
         Args:
             barrier: 已全终态、待触发的 barrier。
         """
-        import json
-
         drv = self._driver
         eng = drv._engine  # noqa: SLF001
         # 默认聚合输入:每个 handle 的终态 {status, result}(含取消/失败,不丢)
@@ -198,23 +190,20 @@ class JoinBarrierCoordinator:
                 f"join_barrier_skill_missing: {barrier.then_skill_id}")
 
         # 起独立聚合 child thread + 种子 user_message(聚合输入 JSON)
-        then_thread_id = await eng._store.create_thread(  # noqa: SLF001
-            cwd=None,
-            entry_skill_id=barrier.then_skill_id,
-            source=f"join_barrier:{barrier.barrier_id}",
-            extra={
-                "parent_thread_id": eng._thread_id,  # noqa: SLF001
-                "barrier_id": barrier.barrier_id,
-            },
-        )
-        seed = user_message(
-            json.dumps(args, ensure_ascii=False), thread_id=then_thread_id)
-        await eng._store.append(seed)  # noqa: SLF001
+        members = []
+        for hid in barrier.handle_ids:
+            member = drv._spawn_handles.get(hid)  # noqa: SLF001
+            assert member is not None
+            members.append((hid, member.status))
+        opened = await open_barrier(
+            eng, barrier=barrier, target=target, args=args, members=members)
+        then_thread_id, seed = opened.child_thread_id, opened.seed
 
         assert eng._root_cancel is not None  # barrier 仅在 run 启动后可触发  # noqa: SLF001
         cancel = eng._root_cancel.child(f"barrier:{barrier.barrier_id}")  # noqa: SLF001
         runner = eng._build_child_runner(  # noqa: SLF001
-            target, then_thread_id, seed, cancel, history=[seed])
+            target, then_thread_id, seed, cancel, history=[seed],
+            audit_state=opened.audit_state)
         # 先广播 fired，再启动聚合 turn：订阅方要用 then_thread_id 预先开聚合轨。
         # 若先启动 child runner，极快的模型可能抢在 fired 事件前发 assistant_text，
         # 下游只能把这段文本归到未知/root 轨。
@@ -229,21 +218,14 @@ class JoinBarrierCoordinator:
 
         # 聚合 turn 后台独立跑(不阻塞主 actor / 不回写本 engine 状态)。
         drv._start_owned_task(  # noqa: SLF001
-            runner.run(),
+            barrier_run(
+                eng, barrier_id=barrier.barrier_id, opened=opened, runner=runner),
             name=f"barrier:{barrier.barrier_id}",
         )
 
         # 持久化 fired 标记，供冷恢复幂等重建。
-        from taifeng.conversation.models import join_barrier_fired_item
-
-        marker = join_barrier_fired_item(
-            barrier_id=barrier.barrier_id,
-            then_thread_id=then_thread_id,
-            thread_id=eng._thread_id,  # noqa: SLF001
-        )
-        async with eng._lock:  # noqa: SLF001
-            eng._history.append(marker)  # noqa: SLF001
-        await eng._store.append(marker)  # noqa: SLF001
+        await anchor_barrier_fired(
+            eng, barrier_id=barrier.barrier_id, then_thread_id=then_thread_id)
 
     # -----------------------------------------------------------------
     # detached-spawn 冷恢复:从 parent thread 持久项重建句柄表 + barrier + 守卫集
@@ -277,18 +259,7 @@ class JoinBarrierCoordinator:
         # 不依赖偶然的 await 时序（与 spawn_skill 同一就绪保障）。
         await drv._await_root_cancel_ready()  # noqa: SLF001
         if eng._audit_state is not None:  # noqa: SLF001
-            # 审计模式:运行态由 Journal 的记录重建,不看对话项(ADR 0098)
-            for spawn in take_spawns(eng._audit_state):  # noqa: SLF001
-                drv._spawn_handles.register(  # noqa: SLF001
-                    handle_id=spawn.handle_id, skill_id=spawn.skill_id,
-                    child_thread_id=spawn.child_thread_id,
-                )
-                # 接管时没有终态的派发已由恢复落为 cancelled;读不到终态即 Journal 不一致
-                assert spawn.status is not None, spawn.handle_id
-                drv._spawn_handles.set_result(  # noqa: SLF001
-                    spawn.handle_id, status=cast("SpawnStatus", spawn.status),
-                    result=spawn.result,
-                )
+            self._rebuild_from_journal(take_detached(eng._audit_state))  # noqa: SLF001
             await drv._check_barriers()  # noqa: SLF001
             return
         # 扫一遍 parent history,按 kind 分类处理三类锚
@@ -322,6 +293,29 @@ class JoinBarrierCoordinator:
         # 已 fired 的因守卫集存在被 _check_barriers 跳过(幂等 no-op)。
         # 经 driver 转发器走:保持 monkeypatch 注入点单一。
         await drv._check_barriers()  # noqa: SLF001
+
+    def _rebuild_from_journal(self, detached: JournaledDetached) -> None:
+        """审计模式:运行态由 Journal 的记录重建,不看对话项(ADR 0098 / 0099)。"""
+        drv = self._driver
+        for spawn in detached.spawns:
+            drv._spawn_handles.register(  # noqa: SLF001
+                handle_id=spawn.handle_id, skill_id=spawn.skill_id,
+                child_thread_id=spawn.child_thread_id,
+            )
+            # 接管时没有终态的派发已由恢复落为 cancelled;读不到终态即 Journal 不一致
+            assert spawn.status is not None, spawn.handle_id
+            drv._spawn_handles.set_result(  # noqa: SLF001
+                spawn.handle_id, status=cast("SpawnStatus", spawn.status),
+                result=spawn.result,
+            )
+        for known in detached.barriers:
+            drv._spawn_handles.barriers[known.barrier_id] = JoinBarrier(  # noqa: SLF001
+                barrier_id=known.barrier_id, handle_ids=known.handle_ids,
+                then_skill_id=known.then_skill_id,
+                then_args_template=known.then_args_template,
+            )
+            if known.fired:
+                drv._fired_barriers.add(known.barrier_id)  # noqa: SLF001
 
     async def _infer_spawn_status_from_child(
         self, handle_id: str, child_thread_id: str

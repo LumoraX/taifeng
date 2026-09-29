@@ -212,10 +212,10 @@ _BOOLEAN_CAPABILITY_RULES = (
     ("skill_suspension_enabled", "audit_skill_suspension_unsupported"),
 )
 
-# 分离式派发（spawn_skill / kill_skill / join_skill / wait_peer / wait_any）已接入（ADR 0098）；
-# 以下仍在能力面之外：后台 shell 任务、join-barrier、peer 消息。
+# 分离式派发（spawn_skill / kill_skill / join_skill / wait_peer / wait_any）与 join-barrier
+# （await_skills）已接入（ADR 0098 / 0099）；以下仍在能力面之外：后台 shell 任务、peer 消息。
 _SPAWN_TOOL_NAMES = frozenset({"run_in_background"})
-_BARRIER_TOOL_NAMES = frozenset({"await_skills", "wait_for_task"})
+_BARRIER_TOOL_NAMES = frozenset({"wait_for_task"})
 _PEER_TOOL_NAMES = frozenset({"send_message"})
 _MISSING = object()
 

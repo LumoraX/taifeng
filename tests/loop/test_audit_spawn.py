@@ -1,4 +1,4 @@
-"""审计模式下的分离式派发（ADR 0098）：发起、查询、终止、释放与接管。"""
+"""审计模式下的分离式派发与 join-barrier（ADR 0098 / 0099）。"""
 
 from __future__ import annotations
 
@@ -11,13 +11,23 @@ import pytest
 import taifeng
 from taifeng.conversation.journal import JournalHealth
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
-from taifeng.conversation.journal.spawn_records import SpawnSettledV1, SpawnStartedV1
+from taifeng.conversation.journal.spawn_records import (
+    BarrierFiredV1,
+    BarrierSettledV1,
+    SpawnSettledV1,
+    SpawnStartedV1,
+)
 from taifeng.llm.audit import AttemptObservableClientAdapter
 from taifeng.llm.providers.sim import RoutingSimClient, SimTurn
 from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
 from taifeng.loop.audit_config import AuditCapabilityError, AuditConfig
 from taifeng.loop.audit_resume_scan import find_unsettled_effects
-from taifeng.loop.audit_spawn import child_thread_id_of, spawn_handles_from_journal
+from taifeng.loop.audit_spawn import (
+    barrier_thread_id_of,
+    barriers_from_journal,
+    child_thread_id_of,
+    spawn_handles_from_journal,
+)
 from taifeng.loop.spawn import SpawnRejectedError
 from taifeng.permission import (
     PermissionPolicy,
@@ -51,11 +61,22 @@ version: 1.0.0
 type: composite
 entry: true
 model: mock-model
-child_skills: [worker]
-tool_names: [spawn_skill, join_skill, kill_skill, wait_peer, wait_any]
+child_skills: [worker, merge]
+tool_names: [spawn_skill, join_skill, kill_skill, wait_peer, wait_any, await_skills]
 max_call_depth: 3
 ---
 ROOT-BODY
+"""
+
+_MERGE = """---
+name: merge
+description: 汇总的
+version: 1.0.0
+type: composite
+model: mock-model
+tool_names: [slow]
+---
+MERGE-BODY
 """
 
 _WORKER = """---
@@ -72,7 +93,7 @@ WORKER-BODY
 
 def _skills(tmp_path: Path) -> Path:
     root = tmp_path / "skills"
-    for name, body in (("entry", _ENTRY), ("worker", _WORKER)):
+    for name, body in (("entry", _ENTRY), ("worker", _WORKER), ("merge", _MERGE)):
         (root / name).mkdir(parents=True, exist_ok=True)
         (root / name / "SKILL.md").write_text(body, encoding="utf-8")
     return root
@@ -88,7 +109,7 @@ def _spawn_tools() -> list[ToolSpec]:
 
     return [audited(make()) for make in (
         make_spawn_skill_tool, make_join_skill_tool, make_kill_skill_tool,
-        make_wait_peer_tool, make_wait_any_tool,
+        make_wait_peer_tool, make_wait_any_tool, make_await_skills_tool,
     )]
 
 
@@ -139,11 +160,13 @@ class _Run:
         *,
         root: list[SimTurn] | None = None,
         worker: list[SimTurn] | None = None,
+        merge: list[SimTurn] | None = None,
         resume_thread_id: str | None = None,
         extra_tools: list[ToolSpec] | None = None,
     ) -> None:
         self.sim = RoutingSimClient(routes={
             "WORKER-BODY": worker or [],
+            "MERGE-BODY": merge or [],
             "ROOT-BODY": root or [],
         })
         self.core = JsonlSessionJournalCore(self.tmp_path / "journal")
@@ -206,7 +229,6 @@ async def test_spawn_tools_are_admitted_and_the_rest_stay_out(tmp_path: Path) ->
     await run.pool.close()
 
     for make, code in (
-        (make_await_skills_tool, "audit_barrier_unsupported"),
         (make_send_message_tool, "audit_peer_unsupported"),
     ):
         other = _Run(tmp_path / code)
@@ -532,6 +554,225 @@ async def test_a_spawn_interrupted_by_a_crash_is_settled_on_takeover(tmp_path: P
     assert find_unsettled_effects(envelopes) == ()
     events = await resumed.ask("继续")
     assert events[-1].msg.kind == "turn_completed", events[-1].msg.data
+    await resumed.pool.close()
+    verification = await JsonlSessionJournalCore(tmp_path / "journal").verify(_SESSION)
+    assert verification.health is JournalHealth.HEALTHY
+
+
+# ====================================================================
+# join-barrier
+# ====================================================================
+
+
+async def _journal_has(run: _Run, record_type: str, count: int = 1) -> list[JournalEnvelope]:
+    found: list[JournalEnvelope] = []
+
+    async def ready() -> bool:
+        found[:] = _of(await run.journal(), record_type)
+        return len(found) >= count
+
+    for _ in range(600):
+        if await ready():
+            return found
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{record_type} x{count} 没有出现")
+
+
+async def test_barrier_fires_after_every_member_has_settled(tmp_path: Path) -> None:
+    run = _Run(tmp_path)
+    await run.start(
+        worker=[
+            SimTurn(text="甲的结论"),
+            SimTurn(tool_calls=[_call("slow", "s1")]),
+            SimTurn(text="乙的结论"),
+        ],
+        merge=[SimTurn(text="汇总完毕")],
+    )
+    first = await run.engine.spawn_skill(skill_id="worker", args={"n": 1}, reason="甲")
+    await run.settled(first["handle_id"], "done")
+    second = await run.engine.spawn_skill(skill_id="worker", args={"n": 2}, reason="乙")
+    await asyncio.wait_for(run.slow_entered.wait(), timeout=10)
+    members = [first["handle_id"], second["handle_id"]]
+
+    out = await run.engine.set_join_barrier(members, "merge")
+
+    assert _of(await run.journal(), "barrier_fired") == []
+    run.slow_release.set()
+    (settled,) = await _journal_has(run, "barrier_settled")
+    envelopes = await run.journal()
+    barrier_id = out["barrier_id"]
+    then_thread = barrier_thread_id_of(_SESSION, barrier_id)
+    (registered,) = _of(envelopes, "barrier_registered")
+    assert registered.payload["handle_ids"] == members
+    assert registered.operation_id == barrier_id
+    (fired,) = _of(envelopes, "barrier_fired")
+    payload = BarrierFiredV1.model_validate(fired.payload)
+    assert payload.registered_record_id == registered.record_id
+    assert payload.then_thread_id == then_thread
+    assert [(m.handle_id, m.status) for m in payload.members] == [
+        (members[0], "done"), (members[1], "done"),
+    ]
+    assert payload.arguments == {
+        members[0]: {"status": "done", "result": "甲的结论"},
+        members[1]: {"status": "done", "result": "乙的结论"},
+    }
+    # 点火在成员全部结束之后；点火批次带着聚合 thread 的创建与种子
+    assert max(e.seq for e in _of(envelopes, "spawn_settled")) < fired.seq
+    index = envelopes.index(fired)
+    batch = envelopes[index:index + 4]
+    assert [e.record_type for e in batch] == [
+        "barrier_fired", "thread_created", "thread_bound", "conversation_item",
+    ]
+    assert [e.thread_id for e in batch[1:]] == [then_thread] * 3
+    requests = [e for e in _of(envelopes, "llm_request_committed") if e.thread_id == then_thread]
+    assert len(requests) == 1
+    assert requests[0].seq > batch[3].seq
+    end = BarrierSettledV1.model_validate(settled.payload)
+    assert (end.status, end.end_reason, end.result) == ("done", "completed", "汇总完毕")
+    assert end.fired_record_id == fired.record_id
+    terminal = envelopes[envelopes.index(settled) + 1]
+    assert (terminal.record_type, terminal.thread_id) == ("thread_terminal", then_thread)
+    kinds = {e.payload["item_kind"] for e in _of(envelopes, "conversation_item")}
+    assert kinds.isdisjoint({"join_barrier", "join_barrier_fired"})
+    assert find_unsettled_effects(envelopes) == ()
+    await run.pool.close()
+    verification = await JsonlSessionJournalCore(tmp_path / "journal").verify(_SESSION)
+    assert verification.health is JournalHealth.HEALTHY
+
+
+async def test_barrier_registered_through_the_tool_fires_at_once_when_members_are_done(
+    tmp_path: Path,
+) -> None:
+    run = _Run(tmp_path)
+    await run.start(worker=[SimTurn(text="结论")], merge=[SimTurn(text="汇总")])
+    out = await run.engine.spawn_skill(skill_id="worker", args={}, reason="先跑完")
+    await run.settled(out["handle_id"], "done")
+    run.sim._routes["ROOT-BODY"] = [  # noqa: SLF001
+        SimTurn(text="登记", tool_calls=[_call(
+            "await_skills", "a1", handle_ids=[out["handle_id"]], then_skill_id="merge",
+            then_args_template={"note": "自定义输入"},
+        )]),
+        SimTurn(text="已登记"),
+    ]
+
+    events = await run.ask()
+
+    assert events[-1].msg.kind == "turn_completed", events[-1].msg.data
+    await _journal_has(run, "barrier_settled")
+    envelopes = await run.journal()
+    (fired,) = _of(envelopes, "barrier_fired")
+    assert fired.payload["arguments"] == {"note": "自定义输入"}
+    (outcome,) = [
+        e for e in _of(envelopes, "tool_outcome_committed") if e.payload["call_id"] == "a1"
+    ]
+    assert json.loads(outcome.payload["output"]) == {"barrier_id": fired.payload["barrier_id"]}
+    # 登记先于发起它的工具调用结算
+    assert _of(envelopes, "barrier_registered")[0].seq < outcome.seq
+    await run.pool.close()
+
+
+async def test_unjournalable_barrier_input_is_rejected(tmp_path: Path) -> None:
+    run = _Run(tmp_path)
+    await run.start(worker=[SimTurn(text="结论")])
+    out = await run.engine.spawn_skill(skill_id="worker", args={}, reason="成员")
+    await run.settled(out["handle_id"], "done")
+
+    with pytest.raises(ValueError, match="then_args_not_canonical"):
+        await run.engine.set_join_barrier([out["handle_id"]], "merge", {"x": object()})
+
+    envelopes = await run.journal()
+    assert _of(envelopes, "barrier_registered") == []
+    assert _of(envelopes, "barrier_fired") == []
+    await run.pool.close()
+
+
+async def test_release_cancels_a_running_aggregation(tmp_path: Path) -> None:
+    run = _Run(tmp_path)
+    await run.start(
+        worker=[SimTurn(text="结论")],
+        merge=[SimTurn(text="先干慢活", tool_calls=[_call("slow", "m1")])],
+    )
+    out = await run.engine.spawn_skill(skill_id="worker", args={}, reason="成员")
+    await run.settled(out["handle_id"], "done")
+    await run.engine.set_join_barrier([out["handle_id"]], "merge")
+    await asyncio.wait_for(run.slow_entered.wait(), timeout=10)
+
+    await run.pool.close()
+
+    envelopes = await run.journal()
+    (settled,) = _of(envelopes, "barrier_settled")
+    assert settled.payload["status"] == "cancelled"
+    assert len(_of(envelopes, "session_ended")) == 1
+    verification = await JsonlSessionJournalCore(tmp_path / "journal").verify(_SESSION)
+    assert verification.health is JournalHealth.HEALTHY
+
+
+async def _crash(run: _Run) -> str:
+    thread_id = run.engine.thread_id
+    await run.core.close()
+    with pytest.raises(AuditSessionReleaseError):
+        await run.pool.close()
+    return thread_id
+
+
+async def test_a_pending_barrier_fires_after_takeover(tmp_path: Path) -> None:
+    """登记了、没点火，成员在崩溃时还在跑：接管把成员落终态，barrier 随即点火。"""
+    run = _Run(tmp_path)
+    await run.start(
+        root=[SimTurn(text="你好")],
+        worker=[SimTurn(text="先干慢活", tool_calls=[_call("slow", "s1")])],
+    )
+    await run.ask()
+    out = await run.engine.spawn_skill(skill_id="worker", args={}, reason="崩溃时还在跑")
+    await asyncio.wait_for(run.slow_entered.wait(), timeout=10)
+    registered = await run.engine.set_join_barrier([out["handle_id"]], "merge")
+    thread_id = await _crash(run)
+    (barrier,) = barriers_from_journal(await run.journal())
+    assert (barrier.barrier_id, barrier.fired) == (registered["barrier_id"], False)
+
+    resumed = _Run(tmp_path)
+    await resumed.start(merge=[SimTurn(text="成员没跑完")], resume_thread_id=thread_id)
+
+    (settled,) = await _journal_has(resumed, "barrier_settled")
+    envelopes = await resumed.journal()
+    (fired,) = _of(envelopes, "barrier_fired")
+    assert fired.payload["members"] == [
+        {"handle_id": out["handle_id"], "status": "cancelled", "payload_version": 1},
+    ]
+    assert settled.payload["result"] == "成员没跑完"
+    await resumed.pool.close()
+    verification = await JsonlSessionJournalCore(tmp_path / "journal").verify(_SESSION)
+    assert verification.health is JournalHealth.HEALTHY
+
+
+async def test_an_interrupted_aggregation_is_settled_and_not_fired_again(
+    tmp_path: Path,
+) -> None:
+    run = _Run(tmp_path)
+    await run.start(
+        root=[SimTurn(text="你好")],
+        worker=[SimTurn(text="结论")],
+        merge=[SimTurn(text="先干慢活", tool_calls=[_call("slow", "m1")])],
+    )
+    await run.ask()
+    out = await run.engine.spawn_skill(skill_id="worker", args={}, reason="成员")
+    await run.settled(out["handle_id"], "done")
+    await run.engine.set_join_barrier([out["handle_id"]], "merge")
+    await asyncio.wait_for(run.slow_entered.wait(), timeout=10)
+    thread_id = await _crash(run)
+
+    resumed = _Run(tmp_path)
+    await resumed.start(root=[SimTurn(text="接着来")], resume_thread_id=thread_id)
+    events = await resumed.ask("继续")
+
+    assert events[-1].msg.kind == "turn_completed", events[-1].msg.data
+    envelopes = await resumed.journal()
+    (settled,) = _of(envelopes, "barrier_settled")
+    end = BarrierSettledV1.model_validate(settled.payload)
+    assert (end.status, end.end_reason) == ("cancelled", "process_recovery")
+    assert len(_of(envelopes, "barrier_fired")) == 1
+    assert not resumed.engine.has_live_spawns()
+    assert find_unsettled_effects(envelopes) == ()
     await resumed.pool.close()
     verification = await JsonlSessionJournalCore(tmp_path / "journal").verify(_SESSION)
     assert verification.health is JournalHealth.HEALTHY

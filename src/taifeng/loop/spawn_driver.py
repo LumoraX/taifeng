@@ -39,6 +39,7 @@ from taifeng.loop.spawn_handle import (
     SpawnDrivePlan,
     SpawnHandle,
     SpawnHandleRegistry,
+    SpawnStatus,
 )
 from taifeng.loop.spawn_ledger import anchor_spawn, open_spawn, settle_spawn
 from taifeng.loop.spawn_resume import SpawnResumeChain
@@ -100,6 +101,8 @@ class SpawnDriver:
         self._thread_locks: dict[str, asyncio.Lock] = {}
         # 审计模式：handle_id → 子 thread 的审计状态（子 runner 的效果记在子 thread 名下）。
         self._audit_children: dict[str, Any] = {}
+        # 终态正在持久化的句柄:其他收敛路径见到即让开(终态恰好一次)。
+        self._settling: set[str] = set()
         # 子协调器（spawn-module-structure 契约:无自有状态,经本 driver 访问
         # 上述运行态表;公共入口由本类同名转发器暴露,外部契约不变）。
         self._peers = PeerMailbox(self)
@@ -456,23 +459,20 @@ class SpawnDriver:
         由被取消的 live runner 退栈后唯一一次走到本方法 emit SpawnCancelled；
         而 kill 一个 suspended spawn（无 live runner 驱动本方法）由 kill_spawn
         内联收敛。两路径合计对同一句柄**恰好一次** SpawnCancelled。
+
+        终态的顺序是「持久化 → 句柄状态 → 事件」(见 ``_settle``):读句柄表的人看到
+        终态时,它已经持久化了。
         """
         eng = self._engine
-        # 终态幂等：已收敛的句柄不再二次处理（防 running-kill 双发 spawn_cancelled）。
-        if self._spawn_handles.is_terminal(handle_id):
+        # 终态幂等：已收敛（或正在收敛）的句柄不再二次处理（防 running-kill 双发 spawn_cancelled）。
+        if self._spawn_handles.is_terminal(handle_id) or handle_id in self._settling:
             return
         end = outcome.end_reason
         if end == "completed":
-            self._spawn_handles.set_result(
-                handle_id, status="done", result=outcome.final_text
+            await self._settle(
+                handle_id, "done", outcome.final_text, end,
+                SpawnCompleted(data={"handle_id": handle_id, "result": outcome.final_text}),
             )
-            await self._persist_settled(child_thread_id, "done", outcome.final_text, end)
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle_id,
-                msg=SpawnCompleted(data={
-                    "handle_id": handle_id, "result": outcome.final_text,
-                }),
-            ))
         elif end == "suspended":
             # 子 thread 内已落 SuspensionRecord 并 emit turn_suspended；句柄标 suspended。
             # Resume(thread_id=child_thread_id) 经 match_suspended_spawn 命中后由
@@ -501,25 +501,17 @@ class SpawnDriver:
                 }),
             ))
         elif end == "cancelled":
-            self._spawn_handles.set_result(
-                handle_id, status="cancelled", result=outcome.error
+            await self._settle(
+                handle_id, "cancelled", outcome.error, end,
+                SpawnCancelled(data={"handle_id": handle_id}),
             )
-            await self._persist_settled(child_thread_id, "cancelled", outcome.error, end)
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle_id,
-                msg=SpawnCancelled(data={"handle_id": handle_id}),
-            ))
         else:
             # error / max_iterations / resource_limit 等非成功终态 → error
             err = outcome.error or end
-            self._spawn_handles.set_result(
-                handle_id, status="error", result=err
+            await self._settle(
+                handle_id, "error", err, end,
+                SpawnFailed(data={"handle_id": handle_id, "error": err}),
             )
-            await self._persist_settled(child_thread_id, "error", err, end)
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle_id,
-                msg=SpawnFailed(data={"handle_id": handle_id, "error": err}),
-            ))
         # join-barrier:本 spawn 进入终态(含 suspended——但 suspended 非终态,
         # all_terminal 不满足 → 不触发),检查是否凑齐某 barrier 的全终态条件。
         await self._check_barriers(handle_id)
@@ -551,18 +543,13 @@ class SpawnDriver:
                 unhandled exception;False(正常控制流,如 abort 裁决分支)
                 时自然向上传播,禁 silent fallback。
         """
-        eng = self._engine
-        # 终态幂等:已收敛句柄不二次处理(终态事件恰好一次)。
-        if self._spawn_handles.is_terminal(handle_id):
+        # 终态幂等:已收敛(或正在收敛)的句柄不二次处理(终态事件恰好一次)。
+        if self._spawn_handles.is_terminal(handle_id) or handle_id in self._settling:
             return
-        handle = self._spawn_handles.get(handle_id)
-        assert handle is not None  # is_terminal 已判存在
-        self._spawn_handles.set_result(handle_id, status="error", result=error)
-        await self._persist_settled(handle.child_thread_id, "error", error)
-        await eng._emit(EventMsg(  # noqa: SLF001
-            submission_id=handle_id,
-            msg=SpawnFailed(data={"handle_id": handle_id, "error": error}),
-        ))
+        await self._settle(
+            handle_id, "error", error, "error",
+            SpawnFailed(data={"handle_id": handle_id, "error": error}),
+        )
         # join-barrier:本句柄进入 error 终态,可能凑齐某 barrier 的全终态条件。
         try:
             await self._check_barriers(handle_id)
@@ -574,6 +561,26 @@ class SpawnDriver:
             logger.exception(
                 "join-barrier recheck failed after spawn settled error: %s",
                 handle_id)
+
+    async def _settle(
+        self, handle_id: str, status: SpawnStatus, result: str | None, end_reason: str,
+        msg: Any,
+    ) -> None:
+        """终态三步:持久化 → 句柄状态 → 事件。
+
+        句柄状态在持久化之后才变:查询与等待读的是句柄表,它们看到终态时这个终态已经
+        写下了。持久化期间句柄记在 ``_settling`` 里,其他收敛路径据此让开(终态恰好一次)。
+        持久化失败时状态照样回写(句柄不停在 running),异常继续上抛。
+        """
+        handle = self._spawn_handles.get(handle_id)
+        assert handle is not None, handle_id
+        self._settling.add(handle_id)
+        try:
+            await self._persist_settled(handle.child_thread_id, status, result, end_reason)
+        finally:
+            self._settling.discard(handle_id)
+            self._spawn_handles.set_result(handle_id, status=status, result=result)
+        await self._engine._emit(EventMsg(submission_id=handle_id, msg=msg))  # noqa: SLF001
 
     async def _persist_settled(
         self, child_thread_id: str, status: str, result: str | None,
