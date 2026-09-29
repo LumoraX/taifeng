@@ -97,13 +97,19 @@ ContextBudget(
     hard_limit_ratio=0.95,       # 必须压缩否则报错的占比
     preserve_tail_messages=4,    # 压缩时保留尾部消息数
     max_request_bytes=None,      # 发送前请求体字节硬上限（G2b）
-    output_reserve_tokens=0,     # 输出预留：soft/hard 按「窗口 - 预留」计算（ADR 0043）
+    output_reserve_tokens=0,     # 输出预留下限：soft/hard 按「窗口 - 生效预留」计算（ADR 0043）；
+                                 # 生效预留 = max(本值, entry skill 的 inference.max_output_tokens)（ADR 0071）
     max_tool_result_bytes=128 * 1024,  # 单条工具结果进历史前的字节上限，超限保头尾；None=不限；配 OffloadStrategy 时不生效（ADR 0061）
 )
 ```
 
 > 占用估算以 provider 实测 usage 校准（ADR 0043）：首次采样后 `engine.estimate_tokens()` =
 > 实测 prompt token + 之后新增条目粗估，不再只是 `len/3.5`。
+>
+> 输出预留联动（ADR 0071）：每个 turn 的 soft / hard 按 `max(output_reserve_tokens, entry skill 的
+> inference.max_output_tokens)` 扣除后计算（`TurnRunner.effective_budget`）；call_skill / spawn 子 turn 各按
+> 自己 entry skill 的声明。未声明时与配置值一致；声明值 `>= context_window` → 该 turn 以
+> `OutputReserveExceedsWindowError` 显式 `turn_failed`（`UpdateBudget` 缩小窗口后同理）。
 
 ### §1.1 InstructionLayer 字段（instructions-injection）
 
@@ -358,7 +364,7 @@ model: claude-sonnet-4-6     # entry skill 偏好模型（空 → 用 client 默
 inference:                   # 推理参数（可选，atomic / composite 通用；未声明 → provider 默认）
   reasoning_effort: high     # none | minimal | low | medium | high
   temperature: 0             # [0, 2]
-  max_output_tokens: 2048    # >= 1；非法值 / 未知键加载期报错
+  max_output_tokens: 2048    # >= 1；非法值 / 未知键加载期报错；同时抬高本 turn 的上下文输出预留（ADR 0071）
 child_skills: [...]          # composite 必填
 tool_names: [...]            # 显式允许的额外工具
 max_call_depth: 6            # 递归深度上限
@@ -974,7 +980,7 @@ pool = await EnginePool.create(
 
 **K1 配额 nuance**：`max_concurrent_spawns` 只统计 running（in-flight runner）的 spawn；suspended spawn 释放 slot，不计入并发额度；resume / rewind 重推重新占用，满额排队（见 §1.0）。
 
-### 6.7 `glob` / `grep` —— 沙盒内只读文件搜索（ADR 0064）
+### 6.7 `glob` / `grep` —— 沙盒内只读文件搜索（ADR 0064 / 0071）
 
 **opt-in**：不在 `EnginePool.create` 默认注入，经 `extra_tools=` 显式传入，入口 skill 在 `tool_names` 声明。纯 Python 实现（不依赖 rg），只读、可并行（`parallel_safe=True`、`effect_kind="pure"`）。契约见 [tool-builtins-extended § glob / grep](architecture/capabilities/tool-builtins-extended.md)。
 
@@ -994,10 +1000,11 @@ pool = await EnginePool.create(
         make_grep_tool(
             root_dir="./workspace",
             policy=my_policy,
-            max_results=200,                  # 结果条数上限（content 按匹配行，其余按文件）
-            max_line_chars=500,               # content 模式单行字符上限
+            max_results=200,                  # 结果名额（content 按输出行：匹配行 + 上下文行；其余按文件）
+            max_line_chars=500,               # content 单行 / multiline 单个片段的字符上限
             max_file_bytes=2 * 1024 * 1024,   # 更大的文件跳过并在尾注列出
             exclude_dirs=DEFAULT_SEARCH_EXCLUDE_DIRS | {"dist"},  # 不下探的目录名
+            respect_gitignore=True,           # 按沙盒内 .gitignore 跳过路径（默认开）
         ),
     ],
 )
@@ -1011,13 +1018,14 @@ pool = await EnginePool.create(
 | `max_line_chars` | — | ✓ | `500` | 单行截断并注明原长度 |
 | `max_file_bytes` | — | ✓ | `2MB` | 超大文件跳过并列出名字 |
 | `exclude_dirs` | ✓ | ✓ | `DEFAULT_SEARCH_EXCLUDE_DIRS` | `.git` `.hg` `.svn` `node_modules` `.venv` `__pycache__` `.mypy_cache` `.pytest_cache` `.ruff_cache` `.tox` |
+| `respect_gitignore` | ✓ | ✓ | `True` | 读沙盒根到基点沿途及遍历中子目录的 `.gitignore`，命中路径跳过（目录不下探）并在尾注计数；显式基点自身不受影响。支持注释 / `!` / 尾斜杠 / `**` / 锚定 `/`，POSIX 字符类等不支持的行计数告知且不生效。`False` = 不读 |
 | `timeout_seconds` | ✓ | ✓ | `30.0` | ToolSpec 级超时 |
 
-**LLM 视角**：`glob({"pattern": "**/*.py", "path"?})` → 每行一个路径；`grep({"pattern": "<re>", "path"?, "include"?, "ignore_case"?, "output_mode"?: "content"|"files_with_matches"|"count"})` → `路径:行号:行`（行号 1 基，`file_read` 的 `offset = 行号 - 1`）。结果按路径排序、路径相对沙盒根；二进制 / 非 UTF-8 / 超大文件 / 被跳过的符号链接都以 `[skipped ...]` 尾注告知。
+**LLM 视角**：`glob({"pattern": "**/*.py", "path"?})` → 每行一个路径；`grep({"pattern": "<re>", "path"?, "include"?, "ignore_case"?, "output_mode"?: "content"|"files_with_matches"|"count", "context_before"?, "context_after"?, "context"?, "multiline"?})` → `路径:行号:行`（行号 1 基，`file_read` 的 `offset = 行号 - 1`）；带上下文时上下文行为 `路径-行号-行`、不相邻组以 `--` 分隔（仅 `content`，占结果名额）；`multiline=true` 时整文件按 `re.MULTILINE | re.DOTALL` 匹配，每个匹配 `路径:起始行-结束行:"片段"`。结果按路径排序、路径相对沙盒根；二进制 / 非 UTF-8 / 超大文件 / 被跳过的符号链接 / 被 .gitignore 忽略的路径都以 `[skipped ...]` 尾注告知。
 
-### 6.8 `memory` —— 模型主动检索 / 写入长期记忆（ADR 0064）
+### 6.8 `memory` —— 模型主动检索 / 写入 / 删除长期记忆（ADR 0064 / 0071）
 
-K3 `memory_store` 的模型侧入口：`search` 委托 `store.prefetch`、`save` 委托 `store.writeback`，内核不带后端。**opt-in**，同一 store 双注入：
+K3 `memory_store` 的模型侧入口：`search` 委托 `store.prefetch`、`save` 委托 `store.writeback`、`delete` 委托 `store.forget`（仅当 store 实现可选协议 `ForgettableMemoryStore`），内核不带后端。**opt-in**，同一 store 双注入：
 
 ```python
 from taifeng.tool.builtins import make_memory_tool
@@ -1031,17 +1039,20 @@ pool = await EnginePool.create(
 
 # 只读知识库（继承 NullMemoryStore 只覆写 prefetch）：只开 search
 make_memory_tool(knowledge_base, actions=("search",))
+
+# store 实现了 forget(target, *, thread_id) -> int 但不想开放删除
+make_memory_tool(store, actions=("search", "save"))
 ```
 
 | 工厂参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `store` | 必填 | `MemoryStore` 实现 |
-| `actions` | `("search", "save")` | 启用的动作子集；决定 schema 与副作用分类（含 save → 串行 + `external_non_idempotent`/`manual`；仅 search → 可并行 + `pure`） |
+| `actions` | `None` | 启用的动作子集；`None` = `search` + `save`，store 可遗忘时再加 `delete`。显式含 `delete` 而 store 不可遗忘 → `ValueError`。决定 schema 与副作用分类（含 save / delete → 串行 + `external_non_idempotent`/`manual`；仅 search → 可并行 + `pure`） |
 | `max_result_chars` | `4000` | search 返回文本的字符上限（协议返回单段文本，按字符计），超出截断并注明 |
 | `max_save_chars` | `2000` | save 单条上限，超出以 `too_large` 拒绝（不截断写入） |
 | `timeout_seconds` | `30.0` | ToolSpec 级超时 |
 
-`save` 写入一条 `assistant_message`，`metadata={"source": "memory_tool", "call_id": ...}`——后端据此区分模型主动记忆与 turn 结束的脏页写回、或按 call_id 去重。后端异常以 `reason="memory_error"` 显式返回给模型（不同于被动钩子的 best-effort）。
+`save` 写入一条 `assistant_message`，`metadata={"source": "memory_tool", "call_id": ...}`——后端据此区分模型主动记忆与 turn 结束的脏页写回、或按 call_id 去重。`delete` 的 `target` 是后端在 search 结果里展示的记忆标识或该条记忆原文（`prefetch` 只返回文本，模型能表达的只有文本），`forget` 返回实际删除条数，0 是正常结果。`NullMemoryStore` 不实现 `forget`；`CompositeMemoryStore` 有可遗忘子时才可遗忘。后端异常以 `reason="memory_error"` 显式返回给模型（不同于被动钩子的 best-effort）。
 
 ## 7. LLM 强类型输出（structured_output / P1）
 
