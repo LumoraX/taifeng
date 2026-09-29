@@ -36,6 +36,7 @@ from taifeng.loop.event import (
 )
 from taifeng.loop.failure_policy import resolve_recovery
 from taifeng.loop.iteration_budget import IterationBudget
+from taifeng.loop.outbound import emit_outbound
 from taifeng.loop.rewind import RewindLog
 from taifeng.loop.turn_compaction import TurnCompaction
 from taifeng.loop.turn_context import TurnContextLoad
@@ -646,6 +647,7 @@ class TurnRunner:
                 )
             )
         else:
+            await emit_outbound(self, outcome, is_root=is_root)
             await self._emit(
                 TurnCompleted(
                     data={
@@ -682,16 +684,13 @@ class TurnRunner:
         """计算 prompt 结构指纹 —— 用于归因 cache 失效的结构性原因（G-CACHE）。"""
         return self._sample.compute_prompt_fingerprint(tools)
 
-    def _detect_structural_break_reason(
-        self, current: dict[str, str]
-    ) -> str | None:
+    def _detect_structural_break_reason(self, current: dict[str, str]) -> str | None:
         """对比上一轮指纹，判定本轮 cache 失效的结构性原因（无变更 → None）。"""
         return self._sample.detect_structural_break_reason(current)
 
     async def _sample_once(self, iteration: int) -> tuple[str, bool]:
         """一次 LLM 采样 + 工具调度，返回 (本轮 assistant text, 是否有 tool call)。"""
         return await self._sample.sample_once(iteration)
-
 
     async def _note_tool_outcome(
         self, name: str, result: Any, arguments_raw: str = ""

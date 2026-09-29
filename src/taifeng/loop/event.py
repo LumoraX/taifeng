@@ -52,6 +52,7 @@ MsgKind = Literal[
     "post_turn_hook_fired",
     "pre_compact_hook_skipped",
     "compaction_deferred",
+    "outbound_message",
     "thread_resumed",
     "subagent_policy_overridden",
     "turn_completed",
@@ -602,6 +603,22 @@ class CompactionDeferred(_Msg):
     kind: Literal["compaction_deferred"] = "compaction_deferred"
 
 
+class OutboundMessage(_Msg):
+    """root turn 的最终回答，已经过 ``outbound_message`` hook 归一（ADR 0086）。
+
+    仅在注册了 ``outbound_message`` handler 时发出，先于本 turn 的 ``turn_completed``。
+    history 里模型的原话不受改写影响。
+
+    data = {"text": str, "rewritten": bool, "raw_chars": int, "end_reason": str,
+            "success": bool, "thread_id": str}
+    - text: 归一后的出站文本
+    - rewritten: 与模型原话是否不同
+    - raw_chars: 模型原话的字符数
+    """
+
+    kind: Literal["outbound_message"] = "outbound_message"
+
+
 class SubagentPolicyOverridden(_Msg):
     """G3 subagent-isolation-policy: 子 turn 派发时 PermissionPolicy 被包装。
 
@@ -998,6 +1015,7 @@ Msg = Union[
     PostTurnHookFired,
     PreCompactHookSkipped,
     CompactionDeferred,
+    OutboundMessage,
     TurnSuspended,
     SuspensionResolved,
     SuspensionPartiallyResolved,

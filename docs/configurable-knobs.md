@@ -491,6 +491,7 @@ return PermissionDecision.allow(grant=PermissionGrant(scope="tool_use", target_p
 | `pre_turn` | `AgentEngine._run_turn_for`：user_message 已持久化 + instruction resolve 完成后，TurnRunner 实例化前 | deny → emit `pre_turn_hook_denied` + `turn_failed`；TurnRunner 不实例化；`_turn_index` 仍 +1 |
 | `post_turn` | `AgentEngine._fire_post_turn_hook`（`_build_and_run_runner` 收尾）：状态回写后、本 turn task 内（**收尾的同步一步**），仅 root turn 真终态（suspended/cancelled 跳过） | 审计型不可否决；deny/异常仅写日志；emit `post_turn_hook_fired`；R4 经 `ctx.extras["cancel"]` 传 token。**引擎不串行化相邻 turn**——要跨 turn 顺序须等 `post_turn_hook_fired` 再提交下一轮 |
 | `pre_compact` | `TurnRunner._maybe_compress`：budget 阈值判断后，`CompactionStarted` 之前（pre_turn / mid_turn / manual 三阶段都触发） | deny → emit `pre_compact_hook_skipped`；history / cache_anchor 不动；turn 继续 |
+| `outbound_message` | `TurnRunner.run`：root turn 真终态、`turn_completed` 之前（挂起不触发） | 不可否决；`HookDecision.ok(text_override="...")` 链式改写出站文本并 emit `outbound_message`；只改事件里的文本，history 不变。内核自带 `make_outbound_normalizer_hook()`（去推理块 / 规整换行与空白，代码块内不动）可直接注册（ADR 0086） |
 | `pre_tool_use` | 工具执行前 | deny → ToolResult.error（reason=`hook_denied`） |
 | `post_tool_use` | 工具执行后 | 仅审计 |
 | **`pre_skill_dispatch`** *(ADR 0010)* | call_skill：DispatchPolicy 通过后、PermissionPolicy 之前 | deny → ToolResult.error + emit `skill_dispatch_hook_denied` |
