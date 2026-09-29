@@ -335,6 +335,14 @@ tool call 的扩展字段全程透传：`tool_call_done` → `function_call` 落
 accumulator 因此按 `index` 优先、缺失时按 `id` 分组，避免把多个独立 tool call 的 arguments 拼成一个
 malformed JSON。
 
+### 写坏的 tool call 参数回放（tool-args-replay，ADR 0074）
+
+模型偶尔会产出不是合法 JSON 对象的 tool call 参数。派发层以 `invalid_arguments` 拒绝执行并把错误结果落史；
+下一次请求要把这条 tool call 连同错误结果一起回放给模型。OpenAI 系协议的参数是字符串，原样送回。
+Anthropic / Gemini 要求参数是对象，两家统一经 `providers/_tool_args.replay_tool_arguments` 转换：解析失败时回放
+带错误分类与原始文本的显式标记对象，并记 warning，不改成 `{}`、不抛异常。契约见
+`capabilities/llm-provider-native.md`。
+
 ## Sticky 路由 & subagent 头
 
 native provider 实现可在请求里带额外 header（如 `extra_headers`），供业务侧 provider gateway

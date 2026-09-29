@@ -407,6 +407,39 @@ gemini provider 组装 `contents` 时，tool 角色消息的 `functionResponse.n
 - **WHEN** 请求含 assistant `tool_calls`（`id=call_1`, `name=read_file`）与配对的 tool 消息
 - **THEN** 渲染出的 `functionResponse.name` SHALL 为 `read_file`
 
+### Requirement: 历史 tool call 参数回放不得静默改写（tool-args-replay）
+
+Anthropic `tool_use.input` 与 Gemini `functionCall.args` 要求 JSON 对象。两家 provider 把历史 assistant
+`tool_calls` 的参数转成对象时 SHALL 统一走 `llm/providers/_tool_args.replay_tool_arguments`：
+
+| 历史里的参数 | 回放结果 |
+| --- | --- |
+| 已是对象 | 原对象（浅拷贝） |
+| 空串 / 全空白 | `{}`（无参工具的合法空对象） |
+| 合法 JSON 对象字符串 | 解析结果 |
+| 非法 JSON | `{"__invalid_arguments__": "invalid_json: <错误> (pos N)", "__raw_arguments__": <原始文本>}` |
+| 合法 JSON 但不是对象 / 其他类型 | `{"__invalid_arguments__": "not_an_object: got <类型>", "__raw_arguments__": <原始文本>}` |
+
+- 解析失败 SHALL NOT 回放为 `{}`，SHALL NOT 把非对象值原样送出；
+- 解析失败 SHALL NOT 抛异常——历史不可改写，抛错会让该会话此后每次请求都失败；
+- `__raw_arguments__` 超过 4000 字符时截前缀并注明原长度；
+- 每次按标记回放 SHALL 记一条 warning 日志（含工具名与错误分类，不含原始文本）；
+- 同一输入 SHALL 得到逐字节相同的输出（不破坏 provider 侧缓存前缀）。
+
+错误分类文案与派发层 `invalid_arguments` 裁决（[tool-whitelist](tool-whitelist.md)）一致，模型在历史里看到的
+「当初发出的参数」与「随后收到的错误结果」相互对应。OpenAI 系协议以字符串回放参数，原样送回，不经此入口。
+
+#### Scenario: 写坏的参数如实回放
+- **GIVEN** 历史里某次 tool call 的参数是 `{"q": "cats"`（括号未闭合）
+- **WHEN** 向 Anthropic / Gemini 组装下一次请求
+- **THEN** 该 tool call 的参数对象 SHALL 含 `__raw_arguments__ == '{"q": "cats"'` 与 `invalid_json:` 开头的 `__invalid_arguments__`
+- **AND** SHALL NOT 为 `{}`
+
+#### Scenario: 非对象参数不穿透
+- **GIVEN** 历史里某次 tool call 的参数是 `[1, 2]`
+- **WHEN** 向 Anthropic / Gemini 组装下一次请求
+- **THEN** 送出的参数 SHALL 是对象，`__invalid_arguments__ == "not_an_object: got list"`
+
 ### Requirement: 无显式错误的空 completion 视为正常完成（loop 层不臆断）
 
 判据：**只有 LLM 显式报错才是错误；模型没产出内容本身不是错误。** turn loop 在某轮采样无 tool call 时，即按正常终止处理——即便该 turn 无任何文本产出。此时 turn SHALL `success=True`、`final_text=""`，`call_skill` SHALL 回 `ToolResult.ok("")`，父 turn 拿到空结果继续。

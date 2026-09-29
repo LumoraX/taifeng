@@ -48,6 +48,7 @@ from taifeng.llm.providers._shared import (
     parse_sse_data,
     transport_error,
 )
+from taifeng.llm.providers._tool_args import replay_tool_arguments
 from taifeng.llm.types import ApiRequest, FilePart, ImagePart, TextPart, TokenUsage
 
 if TYPE_CHECKING:
@@ -211,19 +212,14 @@ def _to_gemini_contents(
             if msg.role == "assistant" and msg.tool_calls:
                 for tc in msg.tool_calls:
                     fn = tc.get("function") or {}
-                    args_raw = fn.get("arguments", "{}")
-                    try:
-                        args = (
-                            json.loads(args_raw)
-                            if isinstance(args_raw, str)
-                            else args_raw
-                        )
-                    except json.JSONDecodeError:
-                        args = {}
+                    tool_name = fn.get("name", "")
+                    # 写坏的参数按显式标记回放，不静默改成 {}（ADR 0074）
                     fc_part: dict[str, Any] = {
                         "functionCall": {
-                            "name": fn.get("name", ""),
-                            "args": args,
+                            "name": tool_name,
+                            "args": replay_tool_arguments(
+                                fn.get("arguments", ""), tool_name=tool_name,
+                            ),
                         },
                     }
                     # thinking-passback：thinking 模型的 functionCall part 必须带回
