@@ -738,9 +738,9 @@ Resume(thread_id, resolutions)
 [SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)；此处只记模块协作。
 
 - **Submission admission（动态门）**：`AgentEngine.submit()` 在 audit 模式仅放行 UserMessage / CancelTurn /
-  Shutdown。UserMessage 的 durable acceptance（`submission_accepted` + user 会话项 + `submission_applied`
+  Shutdown / Resume。UserMessage 的 durable acceptance（`submission_accepted` + user 会话项 + `submission_applied`
   原子三记录）**先于**入队，actor 只应用已 ack 的 envelope 才更新 hot history/projection；非法输入落安全
-  `submission_rejected` 不入队；能力面外的 Op（CompactNow/Rewind/Resume/… 共 10 类）在执行前 durable 拒绝
+  `submission_rejected` 不入队；能力面外的 Op（CompactNow / Rewind / InjectSystemMessage 等）在执行前 durable 拒绝
   （`reject_unsupported_audited_op`，failure_class=capability），不入队、不执行。
 - **effect gate**：每个 durable 效果前 `coordinator.ensure_effect_allowed()`；首个 Journal IO / 完整性 /
   ack 不确定失败即 freeze（关闭 effect gate），此后该 Session 的 LLM/Tool/Skill 效果全部被拒。
@@ -753,8 +753,16 @@ Resume(thread_id, resolutions)
   `dispatch_batch`，让工具经 `ctx.cancel` 协作取消产出确定结果，而 outcome 落账不被外层取消打断；每个已提交
   意图恰好收敛到一个 `tool_outcome_committed`（success/error/rejected/cancelled/unknown）+ 唯一
   `function_call_output` 会话项，按 call-index 有序。整批派发前取消 → cancelled（不进 runtime）；dispatch
-  中途取消/超时对 reconcilable/external_non_idempotent → UNKNOWN（无法证明外部效果）→ 记录后 freeze；声明
-  non-suspending 却运行时挂起 → error 终态 + freeze（不进 HITL）。
+  中途取消/超时对 reconcilable/external_non_idempotent → UNKNOWN（无法证明外部效果）→ 记录后 freeze；未声明
+  `can_suspend` 却运行时挂起 → error 终态 + freeze。
+- **挂起与恢复**（`audit_suspension`）：停下等人作答的调用（挂起式审批，或声明 `can_suspend=True` 的工具发问）
+  在 `converge` 里保持未结算，`run_audited_tools` 把已有结果写进 history 后抛 `_BatchSuspend`；
+  `persist_suspension` 走 `commit_turn_suspended`（`turn_suspended` + `suspension` 对话项同批）。`Resume`
+  在 `submit()` 里先过准入并落 `resume_accepted` 才入队（`submit_audited_resume`）；actor 侧
+  `run_audited_resume` 依次结算被拒 / 直接作答的调用、落 `suspension_resolved` 与 `resume_applied`，
+  再把续跑的 turn 登记为可取消目标运行，获批的调用经 seed 机制在其中重跑（`rerun_awaited_calls`），
+  结果记在原来的 operation 下。续跑的 turn 发出终态事件之后不再写记录。`audit_awaiting` 记着此刻已落账
+  而未结清的挂起：释放 Session 时据此写 `session_detached` 而不是 `session_ended`，接管时由 Journal 重建。
 - **同步 call_skill lineage**（`audit_skill.AuditedSkillDispatch`）：复用根 coordinator/lease；外层 Tool 意图
   之后先 durable `skill_selected`（完整 definition/body 快照）→ 配额拒绝走 `skill_dispatch_finished(rejected)`
   无 child；接受走原子 `skill_dispatch_started`+`thread_created`+`thread_bound`+child-seed，子 runner 携

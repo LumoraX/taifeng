@@ -215,7 +215,6 @@ _BOOLEAN_CAPABILITY_RULES = (
 _SPAWN_TOOL_NAMES = frozenset({"spawn_skill", "kill_skill", "run_in_background"})
 _BARRIER_TOOL_NAMES = frozenset({"await_skills", "join_skill", "wait_for_task"})
 _PEER_TOOL_NAMES = frozenset({"send_message", "wait_peer"})
-_HITL_TOOL_NAMES = frozenset({"request_user_input"})
 _MISSING = object()
 
 
@@ -286,16 +285,13 @@ def _hooks_are_auditable(hooks: object) -> bool:
 
 
 def _permission_is_auditable(policy: object) -> bool:
-    """权限策略是内核的 ``PermissionPolicy``，且不以挂起的方式征求审批（ADR 0096）。
+    """权限策略是内核的 ``PermissionPolicy``（ADR 0096）。
 
-    以挂起方式审批需要挂起与恢复本身进 Journal，不在这里放行。
+    以挂起的方式征求审批同样可用：挂起与恢复本身进 Journal（ADR 0097）。
     """
     from taifeng.permission.policy import PermissionPolicy
-    from taifeng.permission.prompter import SuspendingPrompter
 
-    return isinstance(policy, PermissionPolicy) and not isinstance(
-        policy.prompter, SuspendingPrompter
-    )
+    return isinstance(policy, PermissionPolicy)
 
 
 # 字段 → 「这个具体的值可以在审计模式下使用」的判定；没有列出的字段一律拒绝
@@ -330,8 +326,6 @@ def _validate_tool_capabilities(tools: tuple[object, ...]) -> None:
             raise AuditCapabilityError("audit_barrier_unsupported")
         if name in _PEER_TOOL_NAMES:
             raise AuditCapabilityError("audit_peer_unsupported")
-        if name in _HITL_TOOL_NAMES:
-            raise AuditCapabilityError("audit_hitl_unsupported")
         _validate_tool_metadata(tool)
 
 
@@ -361,8 +355,8 @@ def _validate_tool_metadata(tool: object) -> None:
         or (effect_kind, reconciliation) not in AUDIT_TOOL_EFFECT_RECONCILIATION
     ):
         raise AuditCapabilityError("audit_tool_reconciliation_invalid")
-    if can_suspend is not False:
-        raise AuditCapabilityError("audit_tool_suspension_unsupported")
+    if type(can_suspend) is not bool:
+        raise AuditCapabilityError("audit_tool_metadata_incomplete")
 
 
 def _static_tool_attribute(tool: object, attribute: str) -> object:

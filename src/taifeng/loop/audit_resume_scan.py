@@ -31,6 +31,12 @@ from taifeng.conversation.journal.recovery_records import (
     ToolCallUndispatchedV1,
     ToolRecoveryCommittedV1,
 )
+from taifeng.conversation.journal.suspension_records import (
+    SUSPENSION_RESOLVED_RECORD_TYPE,
+    TURN_SUSPENDED_RECORD_TYPE,
+    SuspensionResolvedV1,
+    TurnSuspendedV1,
+)
 from taifeng.conversation.reconstruct import reconstruct_logical_history
 
 if TYPE_CHECKING:
@@ -116,14 +122,23 @@ def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, .
     - ``skill_selected`` 没有同 operation 的 ``skill_dispatch_finished``；
     - ``submission_accepted`` 没有对应 ``submission_applied``；
     - 任一终态 record 的 ``status`` 为 ``unknown``，且未被 ``tool_recovery_committed`` 改判。
+
+    在等人作答的调用不算未结算（ADR 0097）：它的意图被一次尚未结清的 ``turn_suspended`` 列为
+    待答，结果要等 ``Resume`` 给出。``resume_accepted`` 也不算：答复没处置完时挂起仍未结清，
+    可以重新提交。
     """
     settled = _settled_references(envelopes)
+    awaited = awaited_intent_ids(envelopes)
     pending: list[str] = []
     for envelope in envelopes:
         kind = envelope.record_type
         unsettled = (
             (kind == "llm_request_committed" and envelope.record_id not in settled.llm)
-            or (kind == "tool_intent_committed" and envelope.record_id not in settled.tool)
+            or (
+                kind == "tool_intent_committed"
+                and envelope.record_id not in settled.tool
+                and envelope.record_id not in awaited
+            )
             or (kind == "skill_selected" and envelope.operation_id not in settled.skill)
             or (kind == "submission_accepted" and envelope.record_id not in settled.applied)
             or envelope.record_id in settled.unknown
@@ -131,6 +146,34 @@ def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, .
         if unsettled:
             pending.append(envelope.record_id)
     return tuple(pending)
+
+
+def active_suspensions(envelopes: Sequence[JournalEnvelope]) -> tuple[TurnSuspendedV1, ...]:
+    """尚未结清的挂起（有 ``turn_suspended``、没有对应的 ``suspension_resolved``），按落账顺序。
+
+    Raises:
+        pydantic.ValidationError: 挂起 / 结清记录形状违约（Journal 不可信）。
+    """
+    resolved = {
+        SuspensionResolvedV1.model_validate(envelope.payload).suspension_id
+        for envelope in envelopes
+        if envelope.record_type == SUSPENSION_RESOLVED_RECORD_TYPE
+    }
+    suspended = [
+        TurnSuspendedV1.model_validate(envelope.payload)
+        for envelope in envelopes
+        if envelope.record_type == TURN_SUSPENDED_RECORD_TYPE
+    ]
+    return tuple(item for item in suspended if item.suspension_id not in resolved)
+
+
+def awaited_intent_ids(envelopes: Sequence[JournalEnvelope]) -> frozenset[str]:
+    """在等人作答的调用的意图 record id。"""
+    return frozenset(
+        request.intent_record_id
+        for suspension in active_suspensions(envelopes)
+        for request in suspension.awaited
+    )
 
 
 def _call_id_of(envelope: JournalEnvelope) -> str | None:
@@ -234,6 +277,8 @@ def rebuild_root_history(
 
 __all__ = [
     "ResumedHistory",
+    "active_suspensions",
+    "awaited_intent_ids",
     "find_undispatched_calls",
     "find_unsettled_effects",
     "rebuild_root_history",

@@ -226,6 +226,10 @@ def test_hook_runner_and_plain_policy_are_admitted() -> None:
     _validate_unsupported_fields(_inputs(
         permission_policy=PermissionPolicy(prompter=CallbackPrompter(approve)),
     ))
+    # 挂起式审批：turn 停下等人，答复经 Resume 回来（ADR 0097）
+    _validate_unsupported_fields(_inputs(
+        permission_policy=PermissionPolicy(prompter=SuspendingPrompter()),
+    ))
 
 
 @pytest.mark.parametrize(
@@ -233,13 +237,9 @@ def test_hook_runner_and_plain_policy_are_admitted() -> None:
     [
         ({"hooks": object()}, "audit_hooks_unsupported"),
         ({"permission_policy": object()}, "audit_permission_unsupported"),
-        (
-            {"permission_policy": PermissionPolicy(prompter=SuspendingPrompter())},
-            "audit_permission_unsupported",
-        ),
     ],
 )
-def test_unknown_or_suspending_gates_are_rejected(
+def test_unknown_gates_are_rejected(
     overrides: dict[str, Any], code: str,
 ) -> None:
     with pytest.raises(AuditCapabilityError) as raised:

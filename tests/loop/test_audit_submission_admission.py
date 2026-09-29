@@ -48,7 +48,6 @@ from taifeng.loop.submission import (
     CompactNow,
     InjectSystemMessage,
     RefreshSnapshot,
-    Resume,
     Rewind,
     Submission,
     ThreadRollback,
@@ -640,7 +639,6 @@ async def test_queued_user_messages_receive_unique_durable_turn_indexes(
     [
         CompactNow(),
         Rewind(node_id="n1"),
-        Resume(thread_id="t1", resolutions={}),
         InjectSystemMessage(text="x"),
         RefreshSnapshot(),
         ThreadRollback(),

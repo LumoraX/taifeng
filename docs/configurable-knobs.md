@@ -1159,6 +1159,10 @@ policy = PermissionPolicy(
 
 挂起后业务侧 emit / 持久化 pending（前端据 `payload_schema` 渲染审批 UI），收到决定后 `engine.submit(Resume(thread_id, {request_id: {"granted": True/False, "reason": "..."}}))` 续跑。
 
+审计模式（`audit=`）下同样可用（ADR 0097）：挂起、答复与处置都进 Journal；一次 `Resume` 必须答复该挂起的全部请求，
+不适用的 `Resume` 使 `submit()` 抛 `taifeng.experimental.AuditedResumeRejectedError`（`.reason` 为稳定原因）；
+等待期间释放 Session 不会终结它，之后以 `get_or_create(resume_thread_id=)` 接管再提交 `Resume`。
+
 ### 8.2 `request_user_input` 内置工具（opt-in 采集型 HITL）
 
 LLM 向人类发起结构化问询并等待回答的内置工具。**业务侧按需 register**（不默认注入）。调用即抛 `SuspendSignal(reason=data)`，turn 挂起；resume 时该 `request_id`（= call_id）的 payload 回填成该 call 的 `function_call_output`。`parallel_safe=False`，应作为该 step 唯一的工具调用。
@@ -1173,6 +1177,9 @@ await engine.submit(Resume(thread_id, {call_id: {"answer": "..."}}))
 ```
 
 `prompt` 必填非空（系统边界校验）；`response_schema` 不透明透传（R1，内核不解析）。
+
+审计模式下可用的条件：工具声明 `ToolSpec.can_suspend=True`（本工具已声明；自定义的发问工具同理），且不带
+`ttl_seconds`——带到期时间的挂起在审计模式下是能力违约。
 
 ### 8.3 retry-then-suspend（系统态挂起，复用 RetryConfig）
 

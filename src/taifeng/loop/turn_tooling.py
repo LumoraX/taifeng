@@ -214,6 +214,12 @@ class TurnTooling:
         owner = self.__tooling_owner
         call_ids = [call_id, *(cid for cid in self.extra_seed_call_ids if cid != call_id)]
         self.extra_seed_call_ids = ()
+        if owner.audit_state is not None:
+            # 审计模式：获批的调用重跑后，结果记在它们原来的调用名下（ADR 0097）
+            from taifeng.loop.audit_suspension import rerun_awaited_calls
+
+            await rerun_awaited_calls(owner, call_ids)
+            return
         calls = [self._seed_request(index, cid) for index, cid in enumerate(call_ids)]
         outcomes = await dispatch_batch(
             [request for request, _ in calls], runtime=owner.tool_runtime,

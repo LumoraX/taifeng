@@ -145,7 +145,7 @@ class AuditedCompactionModel:
         return tuple(request_ids)
 
 
-async def _commit_with_item(
+async def commit_record_with_item(
     *,
     state: AuditedSessionState,
     submission_id: str,
@@ -157,7 +157,10 @@ async def _commit_with_item(
     item: ResponseItem,
     cancel: CancellationToken,
 ) -> None:
-    """原子提交一条上下文 record 与它产生的对话项，ack 后推进投影。"""
+    """原子提交一条 turn 内的 record 与它产生的对话项，ack 后推进投影。
+
+    ``kind`` 是 operation 的种类（``compaction`` / ``budget_hint`` / ``suspension``）。
+    """
     coordinator = state.coordinator
     await coordinator.ensure_effect_allowed()
     identities = JournalIdentities(coordinator.session_id, state.thread_id, submission_id)
@@ -214,7 +217,7 @@ async def commit_audited_compaction(
     Raises:
         SessionAuditFrozenError: Journal 写入不确定，Session 已冻结。
     """
-    await _commit_with_item(
+    await commit_record_with_item(
         state=state, submission_id=submission_id, turn_index=turn_index,
         kind="compaction", ordinal=payload.ordinal,
         record_type=CONTEXT_COMPACTED_RECORD_TYPE, payload=payload,
@@ -233,7 +236,7 @@ async def commit_audited_budget_hint(
     cancel: CancellationToken,
 ) -> None:
     """提交一条预算提示：``budget_hint_injected`` 与提示条目同批落账。"""
-    await _commit_with_item(
+    await commit_record_with_item(
         state=state, submission_id=submission_id, turn_index=turn_index,
         kind="budget_hint", ordinal=ordinal,
         record_type=BUDGET_HINT_RECORD_TYPE, payload=payload,
@@ -251,6 +254,7 @@ def superseded_item_ids(
 
 __all__ = [
     "AuditedCompactionModel",
+    "commit_record_with_item",
     "commit_audited_budget_hint",
     "commit_audited_compaction",
     "superseded_item_ids",

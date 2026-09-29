@@ -58,6 +58,7 @@ from taifeng.loop.audit_mailbox import (
 from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shutdown
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.audit_support import _await_owned as audit_await_owned
+from taifeng.loop.audit_suspension import submit_audited_resume
 from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.child_resume_chain import ChildResumeChain
 from taifeng.loop.engine_events import EngineEvents
@@ -663,6 +664,8 @@ class AgentEngine:
                 return await self._submit_audited_user_message_locked(accepted)
         if self._audit_state is not None and isinstance(sub.op, CancelTurn):
             return await self._submit_audited_cancel_turn(sub)
+        if self._audit_state is not None and isinstance(sub.op, Resume):
+            return await submit_audited_resume(self, sub)
         if self._audit_state is not None and isinstance(sub.op, Shutdown):
             return await submit_audited_shutdown(
                 self._audit_state, sub, self._audited_admission_lock, self._audit_finish_owner)

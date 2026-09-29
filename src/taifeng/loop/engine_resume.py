@@ -52,6 +52,12 @@ class EngineResume:
         """
         assert isinstance(sub.op, Resume)
         op = sub.op
+        if self._engine._audit_state is not None:
+            # 审计模式：结算、结清、续跑都经 Journal（ADR 0097）
+            from taifeng.loop.audit_suspension import run_audited_resume
+
+            await run_audited_resume(self._engine, sub, root_cancel)
+            return
 
         # 子 thread resume：Resume.thread_id 指向 call_skill 派发的子 thread（≠ 根 thread）。
         # 挂起记录落在子 thread，根 self._engine._history 找不到 → 走专门的续跑链（先续跑子 thread

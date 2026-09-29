@@ -7,8 +7,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from taifeng.conversation.journal.records import StableErrorV1
+from taifeng.loop.audit_awaiting import awaiting_suspensions
 from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
-from taifeng.loop.audit_lifecycle import SessionFinishResult, ThreadTerminalRequest
+from taifeng.loop.audit_lifecycle import (
+    DETACHED_STATUS,
+    SessionFinishResult,
+    ThreadTerminalRequest,
+)
 from taifeng.loop.cancellation import CancelReason
 
 if TYPE_CHECKING:
@@ -278,6 +283,18 @@ async def _finish_audited_session(
     state = snapshot.audit_state
     if state is None:
         return None
+    waiting = awaiting_suspensions(state) if first is None else ()
+    if waiting:
+        # 在等人作答：释放写者但不终结 Session，之后可以接管并提交 Resume（ADR 0097）
+        return await state.coordinator.finish(
+            thread_terminals=(
+                ThreadTerminalRequest(
+                    thread_id=state.thread_id, status="suspended", end_reason=waiting[0],
+                ),
+            ),
+            reason="awaiting_resume",
+            status=DETACHED_STATUS,
+        )
     status = "complete"
     reason = "session_released"
     stable_error: StableErrorV1 | None = None

@@ -39,6 +39,7 @@ from taifeng.conversation.journal.projector import (
     ProjectionOrderError,
 )
 from taifeng.loop.audit import SessionAuditCoordinator
+from taifeng.loop.audit_awaiting import mark_awaiting
 from taifeng.loop.audit_bootstrap import AuditedSessionState, _emergency_close
 from taifeng.loop.audit_resume_dispatch import (
     RecoveryScope,
@@ -49,6 +50,7 @@ from taifeng.loop.audit_resume_dispatch import (
 from taifeng.loop.audit_resume_resolution import AuditToolResolutionError
 from taifeng.loop.audit_resume_scan import (
     ResumedHistory,
+    active_suspensions,
     find_unsettled_effects,
     rebuild_root_history,
     root_thread_id,
@@ -314,6 +316,9 @@ async def resume_audited_session(
             config, projection_store, opened.lease, expected_seq, resume_thread_id, history,
             children,
         )
+        for suspension in active_suspensions(envelopes):
+            # 接管的 Session 仍在等人作答：再次释放时照样只是离开，不是终结
+            mark_awaiting(state, suspension.suspension_id)
     except BaseException:
         await _emergency_close(config, opened.lease)
         raise

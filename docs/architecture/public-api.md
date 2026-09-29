@@ -13,7 +13,8 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 | **内部** | 其余子模块中未经上述两处导出的符号 | 无 | 随时可改；子包自己的 `__all__`（如 `taifeng.tool.builtins`）只表示模块内的组织，不构成稳定承诺，除非同时出现在顶层 |
 
 当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`、
-审计 resume 人裁决 `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`）、
+审计 resume 人裁决 `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`、
+审计模式下不适用的 `Resume` 抛出的 `AuditedResumeRejectedError`）、
 Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
 （`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitnessCatalog`、`SkillFitnessLedger`、`SkillFitness`、
 `SkillFitnessRecorder`、`InMemorySkillFitnessStore`）、按战绩算分与影子评估（`FitnessScorer`、`WilsonFitnessScorer`、

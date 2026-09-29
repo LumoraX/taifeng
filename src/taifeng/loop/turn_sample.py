@@ -35,7 +35,7 @@ from taifeng.loop.audit_llm import (
     model_session_for_turn,
     record_model_cache_read,
 )
-from taifeng.loop.audit_tool import audited_tool_batch
+from taifeng.loop.audit_tool import run_audited_tools
 from taifeng.loop.cancellation import interrupt_on_cancel
 from taifeng.loop.event import (
     AssistantReasoning,
@@ -685,22 +685,10 @@ class TurnSample:
         # + 唯一 function_call_output 会话项；任一 UNKNOWN 记录后冻结。fc 会话项已在
         # §7.6 最终响应批中 durable，此处只补 fco。
         if self.__sample_owner.audit_state is not None:
-            fco_items = await audited_tool_batch(
-                state=self.__sample_owner.audit_state,
-                submission_id=self.__sample_owner.submission_id,
-                turn_index=self.__sample_owner.turn_index,
-                iteration=iteration,
-                requests=requests,
-                registry=self.__sample_owner.tool_runtime._registry,  # noqa: SLF001
-                run_dispatch=_run_dispatch,
-                cancel=self.__sample_owner.cancel,
-                finalization_timeout=(
-                    self.__sample_owner.audit_state.coordinator.finalization_timeout
-                ),
-                origin_sample_ids=origin_samples,
-                image_input_policy=self.__sample_owner.image_input_policy,
+            await run_audited_tools(
+                self.__sample_owner, iteration=iteration, requests=requests,
+                run_dispatch=_run_dispatch, origin_sample_ids=origin_samples,
             )
-            self.__sample_owner.history_buffer.extend(fco_items)
             return assistant_text, True
 
         # tool-crash-reconciliation：Chat 路径的 function_call 要等执行完才与 output

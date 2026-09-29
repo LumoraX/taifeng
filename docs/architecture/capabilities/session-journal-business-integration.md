@@ -11,13 +11,15 @@
 ```text
 UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
 采样之间：折叠式上下文压缩 / 预算提示（§15）
+工具调用处停下等人（审批 / 填表 / 给数据）→ Resume → 续跑（§17）
 ```
 
 SessionJournal 是执行事实和对话项的唯一可靠事实源。hot history、MessageStore 和 EventMsg 都是
 Journal durable ack 之后的内存态或可重建投影，不得领先 Journal，也不得被声明为第二事实源。
 
-未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。hook 与不挂起的权限裁决见 §16。
-本阶段不支持以挂起方式进行的 HITL/审批、suspend、手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
+未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。hook 与权限裁决见 §16，
+在工具调用处停下等人作答的挂起与恢复见 §17。
+本阶段不支持其余原因的挂起（子 skill 挂起、失败处置、资源护栏、带到期时间的挂起）、手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
 detached spawn、barrier、peer、
 LLM attempt / submission 未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
 加密、WORM 或外置 blob。LLM request intent
@@ -291,8 +293,9 @@ observer/ack 不确定使 attempt 为 UNKNOWN、冻结 Session、禁止 retry。
 
 ## 9. Tool 终态收敛
 
-audit ToolSpec 必须声明 `effect_kind`、`reconciliation`、`can_suspend=False`。以挂起方式进行的审批、HITL 和
-可 suspend Tool 在 effect 前拒绝；hook 与不挂起的权限裁决先落账再生效（§16）。
+audit ToolSpec 必须声明 `effect_kind`、`reconciliation` 与布尔值的 `can_suspend`。hook 与权限裁决先落账再生效（§16）。
+停下等人作答的调用在答复之前保持未结算（§17）；未声明 `can_suspend=True` 的工具自行挂起是能力违约：
+记 error 终态后冻结 Session。
 
 一批 call 先按 call index 原子提交所有 executable/rejected intents，再 dispatch。每个 committed intent
 必须得到一个 terminal outcome：`success | error | rejected | cancelled | unknown`。
@@ -345,15 +348,15 @@ LLM request 落账时图片与文件的正文都按 §8 脱敏（`image_base64` 
 
 | 维度 | 允许 | 拒绝 |
 | --- | --- | --- |
-| Op | UserMessage、CancelTurn、Shutdown | 其他 Op |
+| Op | UserMessage、CancelTurn、Shutdown、Resume（§17） | 其他 Op |
 | Session | 新建；resume（Journal 接管，§13；root 工具调用的 UNKNOWN 按 §13.1 收敛） | 已终结 Session、存在无法收敛的未结算 effect、writer 仍存活 |
 | Store | 默认 JSONL 可重建投影 | custom store/directory、IndexHook |
-| Hook/approval | 内核的 `HookRunner`；内核的 `PermissionPolicy`（规则、可复用授权、当场作答的 prompter）（§16） | 其他类型的 hook 运行器 / 权限策略对象、`SuspendingPrompter`、HITL |
+| Hook/approval | 内核的 `HookRunner`；内核的 `PermissionPolicy`（规则、可复用授权、当场作答或挂起式的 prompter）（§16、§17） | 其他类型的 hook 运行器 / 权限策略对象 |
 | Context | 无压缩策略，或全部策略声明 `audit_support` 为 `fold` / `fold_model`（§15） | 未声明或原地改写条目的压缩策略、ContextEngine、rewind、memory、instruction |
-| Skill | atomic/composite、同步 call_skill | orchestration、suspension |
+| Skill | atomic/composite、同步 call_skill | orchestration、子 skill 内的挂起 |
 | Spawn/peer | 无 | detached spawn、barrier、peer |
 | LLM | attempt-observable | opaque attempt/retry |
-| Tool | audit metadata 完整且 non-suspending；结果可带图片附件 | metadata 缺失或可 suspend |
+| Tool | audit metadata 完整；结果可带图片附件；声明 `can_suspend=True` 的工具可以停下等人（§17） | metadata 缺失；未声明却自行挂起（运行期冻结） |
 | 附件 | 用户消息里的图片与文件（PDF）、工具结果里的图片 | 引用型输入、Data URL、超限、策略未启用或模型不支持的模态 |
 
 静态配置在 EnginePool 构造期验证，Op 在 submission gateway 验证，动态 effect 在 TurnRunner gate 再验证。
@@ -561,7 +564,7 @@ Journal 重放三者一致；strict verify 通过；resume 后 history 与崩溃
 | 参数 | 允许 | 拒绝 |
 | --- | --- | --- |
 | `hooks` | `HookRunner`（含子类） | 其他对象：`audit_hooks_unsupported` |
-| `permission_policy` | `PermissionPolicy`，且 `prompter` 不是 `SuspendingPrompter` | 其他对象、以挂起方式审批：`audit_permission_unsupported` |
+| `permission_policy` | `PermissionPolicy`（prompter 当场作答或以挂起方式审批，后者见 §17） | 其他对象：`audit_permission_unsupported` |
 
 业务注入的 handler 与策略原样运行；内核在 runner 构造时按 turn 绑定一层，裁决返回给调用方之前先落账。
 子 skill 的 runner 重新绑定到自己的 thread；子 turn 的权限策略照常按 `subagent_approval_mode` 包装。
@@ -609,13 +612,106 @@ Journal 重放三者一致；strict verify 通过；resume 后 history 与崩溃
 - `post_turn` 在 `turn_completed` 事件之后触发；Session 紧接着被关闭时，它可能来不及运行或落账
   （与非审计模式下该 hook 的时序相同）。
 - handler 给出的自由 metadata 只记键名；需要留存其值的业务自行记录。
-- 以挂起方式进行的审批与 HITL 需要挂起与恢复本身进 Journal，不在本节范围。
+- 以挂起方式进行的审批：裁决不在当场产生，挂起时不写 `permission_decided`；获批的调用在续跑里重跑时
+  写一条 `decision_reason = resume_preapproved` 的裁决，被拒的调用由 `suspension_resolved` 记录处置（§17）。
 
 ### 16.5 验收
 
-静态门放行内核的 hook 运行器与不挂起的权限策略、拒绝其他对象与挂起式审批；参数改写先于工具执行落账；
+静态门放行内核的 hook 运行器与权限策略、拒绝其他对象；参数改写先于工具执行落账；
 拒绝落账且工具不执行；多个 handler 逐个落账、拒绝之后的不运行；输出改写落账且到达模型；
 handler 出错落账且不含原文；`pre_turn` 拒绝落账且不发起 LLM 调用；turn 内各层 hook 连续编号、
 下一 turn 重新编号；子 skill 的裁决记在子 thread；strict verify 通过且恢复不受裁决记录影响；
 规则裁决、人工审批与签发的授权、命中已签发的授权、skill 派发审批、子 skill 按 subagent 模式裁决、
 无法规范化的请求被拒、策略的其余入口仍可用。
+
+## 17. 挂起与恢复（ADR 0097）
+
+turn 可以在工具调用处停下等人作答，之后由 `Resume` 带着答复继续。挂起、答复、处置都是 Journal 里的记录；
+Session 可以在等待期间被释放，由另一个进程接管后继续。
+
+### 17.1 允许的挂起
+
+| 等待原因 | 发起方 | 条件 |
+| --- | --- | --- |
+| `permission` | 权限策略（`SuspendingPrompter`） | 任何工具调用都可能遇到 |
+| `form` / `data` | 工具自己（抛 `SuspendSignal`） | 工具声明 `can_suspend=True`（内置的 `request_user_input` 已声明） |
+
+待答请求必须指向发起它的那次调用（`related_call_id` 等于调用 id），且不带到期时间。其余情形是能力违约，
+处置同 §9：未声明的工具自行挂起、子 skill 内的挂起、失败处置、资源护栏、带 `ttl_seconds` 的挂起。
+
+### 17.2 记录
+
+| record type | 何时 | 要点 |
+| --- | --- | --- |
+| `turn_suspended` | turn 停下 | `suspension_id`、`awaited`（每项：`request_id` / `reason` / `call_id` / `intent_record_id`）；同批提交 `suspension` 对话项 |
+| `resume_accepted` | `Resume` 提交时，入队之前 | 答复原文 `resolutions`、针对的 `suspension_id` 与 `turn_suspended` record、续跑 turn 的 `turn_index` |
+| `suspension_resolved` | 处置时 | 各请求的处置 `approved` / `denied` / `answered` 与已结算调用的 outcome record；同批提交结清标记（`system_injection`，`source = suspend_resolved`） |
+| `resume_applied` | 结清之后、续跑之前 | `result_status`：`resumed` / `aborted` / `rejected`；被拒时带 `rejection_reason` |
+| `session_detached` | Session 在等待期间被释放 | 仍在等待的 `suspension_ids`；不写 `thread_terminal` / `session_ended` |
+
+`turn_suspended` 与 `suspension_resolved` 的 operation 是 `{turn_id}:suspension:{n}`；`resume_accepted` 与
+`resume_applied` 的 operation 是这次 `Resume` 的 submission id。
+
+### 17.3 顺序
+
+```text
+tool_intent_committed（整批）
+tool_outcome_committed + function_call_output      同批里已有结果的调用照常结算
+turn_suspended + suspension 对话项                  等人的调用保持未结算
+    ── turn 以 suspended 结束；Session 可以被释放（session_detached）、被接管 ──
+resume_accepted                                     先于任何处置
+tool_outcome_committed + function_call_output      被拒 / 直接作答的调用各自结算
+suspension_resolved + 结清标记
+resume_applied
+    ── 续跑的 turn ──
+permission_decided（resume_preapproved）            获批的调用重跑前的裁决
+tool_outcome_committed + function_call_output      获批的调用结算
+llm_request_committed …                             续跑照常采样
+```
+
+- 等过人的调用的结果记在它原来的 operation 下，`intent_record_id` 指向挂起前落账的意图；不重写意图。
+- 被拒的调用结果状态为 `rejected`，直接作答的调用状态为 `success`，答复的 JSON 即调用结果。
+- 续跑的 turn 使用新的 `turn_index` 与这次 `Resume` 的 submission id；它发出终态事件之后不再写任何记录。
+- 续跑里重跑的调用可以再次停下等人（下一道审批），此时落一条新的 `turn_suspended`。
+- 续跑的 turn 登记为可取消的目标：`CancelTurn` 指向这次 `Resume` 的 submission id 即可取消它。
+
+### 17.4 `Resume` 的准入
+
+审计模式下一次 `Resume` 必须答复该挂起的每一个请求。不适用的 `Resume` 在入队之前被拒，
+落一条 `submission_rejected`（`op_kind = resume`，不含答复原文），`submit()` 抛 `AuditedResumeRejectedError`：
+
+| `reason` | 含义 |
+| --- | --- |
+| `resume_thread_not_root` | `thread_id` 不是这个 Session 的 root thread |
+| `no_active_suspension` | 没有在等待的挂起 |
+| `resume_must_resolve_every_request` | 答复的请求集合与挂起的请求集合不一致（少答、多答、答了不存在的请求） |
+| `resume_resolutions_not_canonical` | 答复内容无法规范化 |
+| `suspension_not_journaled` | 挂起不在 Journal 里 |
+| 答复形状错误的既有错误码（如 `invalid_payload_shape`） | 同 [suspend-resume](suspend-resume.md) 的边界校验 |
+
+被拒不改变任何状态：挂起仍在等待，可以再次提交。
+
+### 17.5 释放、接管与中断
+
+- Session 在等待期间被释放：写 `session_detached`，释放写者；Session 没有终结，之后可以按 §13 接管。
+  接管后再次释放仍是 `session_detached`；挂起结清之后的释放照常写 `session_ended`。
+- 进程在等待期间崩溃：接管时在等人作答的调用不算未结算 effect，不触发 §13.1 的收敛。
+- 处置到一半中断（`resume_accepted` 已落账、`suspension_resolved` 没有）：挂起仍在等待，重新提交同样的
+  答复即可；已经结算过的调用沿用已有的结果，不重复结算。
+- 结清之后、获批的调用重跑结束之前中断：该调用此时是普通的未结算 effect，按 §13.1 收敛。
+
+### 17.6 边界
+
+- `CancelTurn` 指向挂起中的 turn 不核销挂起（没有在跑的目标可取消）。要放弃一次挂起，提交 `Resume`
+  拒绝其中的请求。
+- 答复原文进 Journal（`resume_accepted.resolutions`）。答复里的敏感内容由业务在提交前处理。
+- 子 skill 内的挂起、带到期时间的挂起、失败处置挂起不在范围内。
+
+### 17.7 验收
+
+静态门放行挂起式审批与声明可挂起的工具；挂起落账且调用保持未结算、恢复扫描不把它算作未结算；
+同批里已有结果的调用照常结算；未声明的工具自行挂起冻结 Session；获批的调用以原 identity 重跑并结算；
+被拒的调用不执行且先于结清结算；答复成为发问工具的结果；两个等人的调用一次答复；
+五类不适用的 `Resume` 被拒且状态不变；没有挂起时的 `Resume` 被拒；等待期间释放写 `session_detached`、
+接管后继续、最终正常终结；等待期间崩溃后接管；处置到一半中断后重新提交不重复结算；
+`CancelTurn` 不核销挂起；strict verify 通过。

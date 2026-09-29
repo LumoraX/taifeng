@@ -523,8 +523,9 @@ def test_compacted_and_budget_hint_items_round_trip() -> None:
         ResponseItem(kind="system_injection", thread_id=_TID, payload={
             "text": "x", "source": "rewind", "cut_index": 2,
         }),
+        # 业务侧运行时注入不在审计能力面内
         ResponseItem(kind="system_injection", thread_id=_TID, payload={
-            "text": "x", "source": "suspend_resolved",
+            "text": "x", "source": "runtime_injection",
         }),
     ],
 )

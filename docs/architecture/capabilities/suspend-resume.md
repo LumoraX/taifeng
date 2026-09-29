@@ -270,6 +270,23 @@ Resume(thread_id, resolutions)
 - **WHEN** engine A 挂起后进程退出；engine B 从同 `thread_id` 重建（`resume_thread_id`），随后 `Resume`
 - **THEN** `_find_active_suspension` 从重建 history 还原 record，配对续跑成功
 
+### Requirement: 审计模式下的挂起与恢复
+
+注入 `AuditConfig` 的 Session 只允许「在工具调用处停下等人作答」的挂起：`permission`（挂起式审批）与
+工具声明 `can_suspend=True` 后发起的 `form` / `data`。挂起、答复与处置都先落 Journal 再生效，
+完整契约见 [session-journal-business-integration §17](session-journal-business-integration.md)。与非审计模式的差异：
+
+- 一次 `Resume` 必须答复该挂起的全部请求；不适用的 `Resume` 在入队之前被拒并留下记录，
+  `submit()` 抛 `AuditedResumeRejectedError`。
+- `CancelTurn` 不丢弃挂起；放弃一次挂起用 `Resume` 拒绝其中的请求。
+- 带 `ttl_seconds` 的挂起、子 skill 内的挂起、失败处置挂起、资源护栏挂起是能力违约（冻结 Session）。
+- Session 在等待期间被释放时写 `session_detached` 而不是终结；之后凭 `resume_thread_id` 接管并提交 `Resume`。
+
+#### Scenario: 审批挂起 → 释放 → 接管 → 批准
+- **WHEN** 审计 Session 的工具调用遇到挂起式审批，pool 关闭；新 pool 以 `resume_thread_id` 接管后提交批准的 `Resume`
+- **THEN** Journal 依次为 `turn_suspended` → `session_detached` → `resume_accepted` → `suspension_resolved` →
+  `resume_applied` → 该调用的 `tool_outcome_committed`（指向挂起前的意图）；Session 最终正常终结
+
 ## R1–R5 影响（见设计 §7）
 
 | 红线 | 影响与落实 |

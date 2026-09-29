@@ -135,6 +135,7 @@ Later ADRs:
 94. [ADR 0094: 审计模式放开折叠式上下文压缩与预算提示](decisions/0094-audit-mode-compaction.md): 审计模式拒绝任何压缩，长会话只能跑到溢出；预算提示绕过 Journal 直写投影。决策：只放开折叠式策略并由策略声明；`context_compacted` 与摘要条目同批；摘要的 LLM 调用经内核提供的会话落账，失败也落；先落账后改 hot history；只在采样之间压缩；回写时排除被折叠的条目；预算提示一并落账。
 95. [ADR 0095: 审计模式接受文件附件与工具结果里的图片](decisions/0095-audit-mode-attachments.md): 带文件的用户消息在审计模式被拒，工具返回图片会冻结 Session。决策：文件附件另立 DTO（不改图片附件的字节形状），按 `kind` 区分；准入与非审计路径同一口径外加 Session 字节上限；工具图片随结果对话项落账、outcome 只记摘要；不合格时结果变成错误而不冻结。
 96. [ADR 0096: 审计模式放开 hook 与不挂起的权限裁决](decisions/0096-audit-mode-hooks-and-permission.md): 审计模式拒绝任何 hook 与权限策略，而需要审计的部署最需要它们。决策：业务的 handler 与策略原样运行，内核按 turn 绑定一层，裁决先落账再生效；每个 handler 每次裁决一条 `hook_evaluated`，改写内容落账、其余 metadata 只记键名；`permission_decided` 记请求与裁决；上下文无法落账的请求被拒；挂起式审批另行立项。
+97. [ADR 0097: 审计模式放开挂起与恢复](decisions/0097-audit-mode-suspension-and-resume.md): 需要审计的部署里审批人很少在线等着，而审计模式拒绝一切挂起。决策：只放开「在工具调用处停下等人作答」的挂起（挂起式审批，及声明 `can_suspend` 的工具发问）；等人的调用保持未结算，结果记在原来的 operation 下；`Resume` 先准入落账再入队，且须答复全部请求；`resume_applied` 写在续跑之前；等待期间释放写 `session_detached` 而不终结，可被接管；子 skill 内的挂起、带到期时间的挂起不做。
 
 ### Fourth Pass: Gap Tracking
 

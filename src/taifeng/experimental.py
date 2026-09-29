@@ -49,6 +49,7 @@ from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeRequest,
     AuditToolOutcomeResolution,
 )
+from taifeng.loop.audit_suspension import AuditedResumeRejectedError
 from taifeng.loop.failure_policy import (
     RecipeDeclaringPolicy,
     RecoveryRecipeProvider,
@@ -111,6 +112,8 @@ __all__ = [
     # 审计 resume 时人对结果未知工具调用的裁决（ADR 0070，🧪）
     "AuditToolOutcomeRequest",
     "AuditToolOutcomeResolution",
+    # 审计模式下不适用的 Resume（ADR 0097，🧪）
+    "AuditedResumeRejectedError",
     # Journal 确定性回放（journal-replay，🧪）
     "JournalReplayClient",
     "RecordedCall",

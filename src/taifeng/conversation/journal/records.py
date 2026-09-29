@@ -29,6 +29,7 @@ from taifeng.conversation.journal.canonical import (
 )
 from taifeng.conversation.journal.context_items import (
     CompactedItemPayload,
+    SuspensionItemPayload,
     SystemInjectionItemPayload,
 )
 from taifeng.conversation.journal.models import (
@@ -54,7 +55,7 @@ from taifeng.llm.errors import (
 )
 from taifeng.tool.spec import ToolResult
 
-type SupportedItemKind = Literal["user_message", "assistant_message", "function_call", "function_call_output", "reasoning", "skill_outcome", "compacted", "system_injection"]  # noqa: E501
+type SupportedItemKind = Literal["user_message", "assistant_message", "function_call", "function_call_output", "reasoning", "skill_outcome", "compacted", "system_injection", "suspension"]  # noqa: E501
 
 _SUPPORTED_ITEM_KINDS = frozenset(get_args(SupportedItemKind.__value__))
 
@@ -599,8 +600,10 @@ class _SkillOutcomeItemPayload(JournalModel):
 
 
 # turn 内按序号编号的 operation：``{turn_id}:<kind>:<ordinal>``
-# 上下文维护（ADR 0094）、hook 与权限裁决（ADR 0096）
-_CONTEXT_OPERATIONS = frozenset({"compaction", "budget_hint", "hook", "permission"})
+# 上下文维护（ADR 0094）、hook 与权限裁决（ADR 0096）、挂起（ADR 0097）
+_CONTEXT_OPERATIONS = frozenset(
+    {"compaction", "budget_hint", "hook", "permission", "suspension"}
+)
 
 
 def _is_canonical_uint(value: str) -> bool:
@@ -812,6 +815,8 @@ def _validated_item_payload(
         model = CompactedItemPayload.model_validate(payload)
     elif kind == "system_injection":
         model = SystemInjectionItemPayload.model_validate(payload)
+    elif kind == "suspension":
+        model = SuspensionItemPayload.model_validate(payload)
     else:
         model = _SkillOutcomeItemPayload.model_validate(payload)
     return _canonical_mapping(model.model_dump(mode="python", exclude_unset=True))
