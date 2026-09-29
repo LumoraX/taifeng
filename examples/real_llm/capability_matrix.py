@@ -28,11 +28,15 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # examples/ 进 sys.path，import 共享 bootstrap
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _drivers import DRIVERS  # noqa: E402
+from _drivers_extra import DRIVERS_EXTRA  # noqa: E402
 from _ledger import LedgerWriter, R3Audit, ScenarioRecord  # noqa: E402
 from _provider_bootstrap import (  # noqa: E402
     ProviderBootstrapError,
@@ -41,6 +45,14 @@ from _provider_bootstrap import (  # noqa: E402
     resolve_bootstrap_env,
 )
 from _recorder import RecordingClient  # noqa: E402
+from _setups import (  # noqa: E402
+    ScenarioSetup,
+    setup_compaction_continuity,
+    setup_file_search,
+    setup_pinned_periodic,
+    setup_skill_inference,
+    setup_tool_output_guard,
+)
 from test_codex_image_matrix import run_codex_image_matrix  # noqa: E402
 from test_openai_image_matrix import (  # noqa: E402
     ImageMatrixResult,
@@ -96,7 +108,13 @@ class Scenario:
     forbid: set[str] = field(default_factory=set)  # 出现即 FAIL 的事件（防假 PASS）
     tools: tuple[str, ...] = ()    # 需注册的 extra_tools 工厂名
     pool_kwargs: dict[str, Any] = field(default_factory=dict)  # EnginePool.create 追加参数
+    # 运行时装配（root 临时目录, client）→ ScenarioSetup：需要临时文件 / 本次 client /
+    # 与 driver 共享状态的场景用（见 _setups.py）；None = 无额外装配
+    setup: Callable[[Path, Any], ScenarioSetup] | None = None
 
+
+# driver 注册表：_drivers（P0 高发链路）+ _drivers_extra（ADR 0056–0065 新增能力）
+ALL_DRIVERS: dict[str, Any] = {**DRIVERS, **DRIVERS_EXTRA}
 
 # Scenario.tools → extra_tools 工厂映射
 TOOL_FACTORIES = {
@@ -245,6 +263,47 @@ SCENARIOS: list[Scenario] = [
              capability="上下文 token 实测校准（预测下一轮 prompt，ADR 0043）",
              expect={"turn_completed"},
              driver="token_calibration"),
+    # ── ADR 0056–0065 新增能力（driver 内带「生效 / 未生效」区分断言，见 _drivers_extra）──
+    # skill 级推理参数：entry 与 call_skill 子 skill 的请求各带各自 SKILL.md inference 声明值
+    Scenario("skill_inference", "real_llm/skills_extra/skill_inference", "release-coordinator",
+             "",
+             capability="skill 级推理参数（SKILL.md inference 块按 skill 下发，ADR 0056）",
+             expect={"llm_request_recorded", "skill_dispatched", "skill_returned",
+                     "turn_completed"},
+             driver="skill_inference", setup=setup_skill_inference),
+    # PostToolUse 改写 + 结果上限：请求里无注入文本、有截断标记，模型仍据头尾作答
+    Scenario("tool_output_guard", "real_llm/skills_extra/tool_output_guard", "log-inspector",
+             "",
+             capability="PostToolUse 改写工具输出 + 工具结果字节上限（ADR 0061）",
+             expect={"llm_request_recorded", "tool_call_completed", "turn_completed"},
+             driver="tool_output_guard", setup=setup_tool_output_guard),
+    # pinned 周期重注：节奏 2 → 第 2、4 轮注入；禁压缩事件，证明注入来自周期而非压缩钉回
+    Scenario("pinned_periodic", "real_llm/skills_extra/pinned_periodic", "relocation-planner",
+             "",
+             capability="pinned 任务清单按用户轮数周期重注（ADR 0065）",
+             expect={"pinned_state_reinjected", "tool_call_completed", "turn_completed"},
+             forbid={"compaction_started"},
+             driver="pinned_periodic", setup=setup_pinned_periodic),
+    # glob / grep：只有 grep 能看到文件内容（未注册 file_read），回答须给出唯一命中文件
+    Scenario("file_search", "real_llm/skills_extra/file_search", "memo-finder",
+             "",
+             capability="opt-in glob / grep 只读搜索工具（ADR 0064）",
+             expect={"tool_call_started", "tool_call_completed", "turn_completed"},
+             driver="file_search", setup=setup_file_search),
+    # read_skill 附属文件：token 只在 references/detail.md，须经 read_skill(skill_id, path) 取得
+    Scenario("read_skill_path", "real_llm/skills_extra/read_skill_path", "handbook-desk",
+             "",
+             capability="read_skill 读取 skill 目录内附属文件（渐进加载第三层，ADR 0060）",
+             expect={"tool_call_started", "tool_call_completed", "turn_completed"},
+             driver="read_skill_path"),
+    # 压缩衔接：CompactNow 压掉全部历史后，约束原话逐字留在压缩条目，模型继续遵守
+    Scenario("compaction_continuity", "real_llm/skills_extra/compaction_continuity",
+             "backup-advisor",
+             "",
+             capability="压缩后衔接：保留用户原话 + 续接前言（handoff，ADR 0059）",
+             expect={"compaction_started", "compaction_completed", "turn_completed"},
+             forbid={"compaction_integrity_rolled_back"},
+             driver="compaction_continuity", setup=setup_compaction_continuity),
 ]
 
 
@@ -271,6 +330,7 @@ class Result:
     grants: int = 0
     duration_s: float = 0.0
     events: list = field(default_factory=list)  # driver 模式的全量 EventMsg（轮询用）
+    state: dict[str, Any] = field(default_factory=dict)  # ScenarioSetup.state（driver 取证用）
 
 
 async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
@@ -282,13 +342,17 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
     storage.mkdir(parents=True, exist_ok=True)
     skills_dir = EXAMPLES_DIR / sc.skills_subdir / "skills"
 
+    setup = sc.setup(root, client) if sc.setup is not None else ScenarioSetup()
+    res.state = setup.state
+
     prompter = AutoGrantPrompter()
     # 统一策略：默认放行，但对任意 skill 派发走 ask（→ 自动放行），
     # 让 HITL 路径在有派发的 demo 上真实触发并进事件流（可观测）。
     policy = PermissionPolicy.from_dict({"ask": ["Skill(*)"]}, prompter=prompter,
                                         prompter_timeout_seconds=60.0)
     compressors: list[object] = [SlidingWindowStrategy(keep_tail=2)] if sc.sliding else []
-    budget = ContextBudget(context_window=sc.ctx_window or 128_000)
+    compressors += setup.compressors
+    budget = ContextBudget(context_window=sc.ctx_window or 128_000, **setup.budget_kwargs)
 
     pool = await taifeng.EnginePool.create(
         skills_dir=skills_dir, storage_dir=storage,
@@ -297,8 +361,8 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
         script_executors={"shell": ShellScriptExecutor(),
                           "python": PythonScriptExecutor()},
         permission_policy=policy,
-        extra_tools=[TOOL_FACTORIES[n]() for n in sc.tools],
-        **sc.pool_kwargs,
+        extra_tools=[TOOL_FACTORIES[n]() for n in sc.tools] + setup.extra_tools,
+        **sc.pool_kwargs, **setup.pool_kwargs,
     )
     engine = await pool.get_or_create(session_id="s", entry_skill_id=sc.entry)
     # 三路采集：console（人读）+ JsonlSink（机读落盘）+ 内存计数
@@ -317,7 +381,7 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
 
         collector = asyncio.create_task(_collect_all())
         try:
-            await asyncio.wait_for(DRIVERS[sc.driver](engine, res), timeout=420.0)
+            await asyncio.wait_for(ALL_DRIVERS[sc.driver](engine, res), timeout=420.0)
             await asyncio.sleep(0.2)  # 事件总线 flush
             res.completed = res.kinds.get("turn_completed", 0) > 0
             res.failed = res.kinds.get("turn_failed", 0) > 0
