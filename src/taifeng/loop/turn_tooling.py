@@ -14,6 +14,12 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem, function_call_output
+from taifeng.conversation.origin import (
+    INPUT_TAINT_EXTRAS_KEY,
+    InputOrigin,
+    summarize_taint,
+    tag_origin,
+)
 from taifeng.llm.errors import (
     AttachmentTooLargeError,
     ImageCountExceededError,
@@ -178,6 +184,10 @@ class TurnTooling:
                 "script_executors": self.__tooling_owner.script_executors,
                 # === detached-spawn 四工具据此拿到 engine 的 spawn API ===
                 "spawn_coordinator": self.__tooling_owner.spawn_coordinator,
+                # === input-origin：当前上下文里不可信内容的汇总（ADR 0085）===
+                INPUT_TAINT_EXTRAS_KEY: summarize_taint(
+                    self.__tooling_owner.history_buffer
+                ).to_dict(),
             },
         )
 
@@ -269,10 +279,31 @@ class TurnTooling:
                 thread_id=self.__tooling_owner.thread_id,
                 is_error=True,
             )
-        return function_call_output(
-            call_id=call_id,
-            output=result.output,
-            thread_id=self.__tooling_owner.thread_id,
-            is_error=result.is_error,
-            attachments=attachments,
+        return tag_origin(
+            function_call_output(
+                call_id=call_id,
+                output=result.output,
+                thread_id=self.__tooling_owner.thread_id,
+                is_error=result.is_error,
+                attachments=attachments,
+            ),
+            self._output_origin(call_id),
         )
+
+    def _output_origin(self, call_id: str) -> InputOrigin | None:
+        """该调用结果的来源标记：工具声明了 ``output_trust`` 才有（input-origin）。"""
+        name = next(
+            (
+                item.payload.get("name")
+                for item in reversed(self.__tooling_owner.history_buffer)
+                if item.kind in ("function_call", "tool_intent")
+                and item.payload.get("call_id") == call_id
+            ),
+            None,
+        )
+        if not isinstance(name, str):
+            return None
+        spec = self.__tooling_owner.tool_runtime._registry.get(name)  # noqa: SLF001
+        if spec is None or spec.output_trust is None:
+            return None
+        return InputOrigin(kind="tool", trust=spec.output_trust, label=name[:128])

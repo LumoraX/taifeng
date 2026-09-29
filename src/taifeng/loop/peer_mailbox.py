@@ -21,6 +21,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem
+from taifeng.conversation.origin import tag_origin
 from taifeng.loop.event import (
     EventMsg,
     PeerAgentWoken,
@@ -33,6 +34,7 @@ from taifeng.loop.event import (
 from taifeng.loop.spawn_handle import SpawnDrivePlan
 
 if TYPE_CHECKING:
+    from taifeng.conversation.origin import InputOrigin
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.spawn_driver import SpawnDriver
     from taifeng.loop.spawn_handle import SpawnHandle
@@ -79,14 +81,16 @@ class PeerMailbox:
         raise ValueError(f"unknown_peer_target: {target}")
 
     def _peer_item(
-        self, target_tid: str, text: str, from_thread_id: str
+        self, target_tid: str, text: str, from_thread_id: str,
+        origin: InputOrigin | None = None,
     ) -> ResponseItem:
         """渲染 peer 消息为中性 ResponseItem（user_message 形态，不新增 kind）。
 
         payload 显式标注 ``source="peer"`` 与 ``from_thread``，prompt 渲染层 /
-        业务审计可区分 peer 消息与真实用户输入。
+        业务审计可区分 peer 消息与真实用户输入。``origin`` 非 None 时打来源标记
+        （input-origin，ADR 0085）。
         """
-        return ResponseItem(
+        return tag_origin(ResponseItem(
             kind="user_message",
             thread_id=target_tid,
             payload={
@@ -95,7 +99,7 @@ class PeerMailbox:
                 "source": "peer",
                 "from_thread": from_thread_id,
             },
-        )
+        ), origin)
 
     async def deliver_peer_message(
         self,
@@ -105,8 +109,12 @@ class PeerMailbox:
         mode: str = "queue_only",
         from_thread_id: str | None = None,
         submission_id: str | None = None,
+        origin: InputOrigin | None = None,
     ) -> dict[str, Any]:
         """谱系内点对点投递（``send_message`` 工具与 ``SendToPeer`` Op 的唯一路径）。
+
+        ``origin``：消息的来源标记。``SendToPeer`` 由业务声明；``send_message`` 工具传入
+        发送方上下文的派生标记——不可信内容不能经转发变干净（ADR 0085）。
 
         分支（spec「双模式投递」）：
           - 目标运行中（live runner 在册）→ 投其 ``pending_input``（B1 steering
@@ -133,7 +141,7 @@ class PeerMailbox:
             raise ValueError(
                 "trigger_turn_root_forbidden: root turn 由用户驱动，不可被 peer 唤醒"
             )
-        item = self._peer_item(target_tid, text, sender)
+        item = self._peer_item(target_tid, text, sender, origin)
 
         delivered_via = "history"
         mode_downgraded = False

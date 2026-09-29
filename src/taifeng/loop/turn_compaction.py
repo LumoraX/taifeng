@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from taifeng.context.budget import POST_COMPACTION_TOKENS_KEY, recompaction_blocked
 from taifeng.context.compressor import CompressionContext
 from taifeng.context.injection import InitialContextInjection
+from taifeng.conversation.origin import lost_taint, tag_origin
 from taifeng.loop.event import (
     CompactionCompleted,
     CompactionDeferred,
@@ -24,6 +25,7 @@ from taifeng.loop.event import (
 from taifeng.loop.turn_helpers import _history_orphan_call_ids
 
 if TYPE_CHECKING:
+    from taifeng.conversation.origin import InputOrigin
     from taifeng.loop.turn import TurnRunner
 
 
@@ -190,7 +192,9 @@ class TurnCompaction:
             # 持久化新的 compacted item，并在其上记下压缩刚结束时的估算（增量基线，
             # ADR 0083）。基线随条目落 transcript，冷加载后仍可读；是否设闸由预算决定
             if result.summary_item_id:
-                await self._persist_summary_with_baseline(result.summary_item_id)
+                await self._persist_summary_with_baseline(
+                    result.summary_item_id, lost_taint(ctx.history, new_history)
+                )
             # 如果压缩破坏了 cache，标记下一次 LLM 调用的 break 为预期内
             if result.cache_invalidated:
                 self.__compaction_owner._next_cache_break_expected = True
@@ -230,16 +234,25 @@ class TurnCompaction:
         )
         return result.success
 
-    async def _persist_summary_with_baseline(self, summary_item_id: str) -> None:
-        """给压缩条目记上基线并落 store；history 里的同一条目同步替换（身份不变）。"""
+    async def _persist_summary_with_baseline(
+        self, summary_item_id: str, inherited: InputOrigin | None,
+    ) -> None:
+        """给压缩条目记上基线与继承的来源标记并落 store；history 里的同一条目同步替换。
+
+        ``inherited``：被折叠的内容里有不可信条目时，摘要带派生标记——上下文不因压缩而
+        变干净（input-origin，ADR 0085）。
+        """
         owner = self.__compaction_owner
         baseline = owner._history_token_estimate()
         for index, item in enumerate(owner.history_buffer):
             if item.id != summary_item_id:
                 continue
-            stamped = item.model_copy(update={
-                "metadata": {**item.metadata, POST_COMPACTION_TOKENS_KEY: baseline},
-            })
+            stamped = tag_origin(
+                item.model_copy(update={
+                    "metadata": {**item.metadata, POST_COMPACTION_TOKENS_KEY: baseline},
+                }),
+                inherited,
+            )
             owner.history_buffer[index] = stamped
             await owner.store.append(stamped)
             return

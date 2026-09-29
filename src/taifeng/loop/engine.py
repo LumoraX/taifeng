@@ -19,6 +19,7 @@ from taifeng.conversation.models import (
     system_injection,
     user_message,
 )
+from taifeng.conversation.origin import InputOrigin, tag_origin
 from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.instructions.resolver import InstructionResolver
 from taifeng.instructions.types import (
@@ -1084,9 +1085,9 @@ class AgentEngine:
                         )
                     continue
                 if isinstance(sub.op, InjectSystemMessage):
-                    item = system_injection(
+                    item = tag_origin(system_injection(
                         sub.op.text, thread_id=self._thread_id, source=sub.op.source
-                    )
+                    ), sub.op.origin)
                     active = self._active_root_pending()
                     if active is not None:
                         # 在飞期间 root history 只有 runner 一个写者（ADR 0029）：
@@ -1105,7 +1106,7 @@ class AgentEngine:
                             target=sub.op.target_thread_id,
                             text=sub.op.text,
                             mode=sub.op.mode,
-                            from_thread_id=sub.op.from_thread_id,
+                            from_thread_id=sub.op.from_thread_id, origin=sub.op.origin,
                             submission_id=sub.id,
                         )
                     except ValueError as e:
@@ -1127,7 +1128,8 @@ class AgentEngine:
                     # B1 midturn-input-steering：投进活跃 turn 的 pending 队列（下一
                     # 迭代边界 drain 并入）；无活跃 turn → 落历史不起新 turn。
                     target = self._pending.get(sub.op.submission_id)
-                    item = user_message(sub.op.text, thread_id=self._thread_id)
+                    item = tag_origin(
+                        user_message(sub.op.text, thread_id=self._thread_id), sub.op.origin)
                     if target is not None:
                         # 活跃 turn：入共享队列，由 runner drain 时落 store + emit
                         target.pending_input.append(item)
@@ -1781,6 +1783,7 @@ class AgentEngine:
         mode: str = "queue_only",
         from_thread_id: str | None = None,
         submission_id: str | None = None,
+        origin: InputOrigin | None = None,
     ) -> dict[str, Any]:
         """转发到 SpawnDriver.deliver_peer_message —— peer-mailbox 唯一投递路径。
 
@@ -1788,7 +1791,7 @@ class AgentEngine:
         都收敛到此。详见 spawn_driver.py 同名方法。
         """
         return await self._spawn.deliver_peer_message(
-            target=target, text=text, mode=mode,
+            target=target, text=text, mode=mode, origin=origin,
             from_thread_id=from_thread_id, submission_id=submission_id)
 
     async def wait_spawn_terminal(

@@ -14,6 +14,7 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import user_message
+from taifeng.conversation.origin import tag_origin
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext, ResolvedInstruction
 from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
@@ -181,10 +182,12 @@ class EngineGate:
         turn_cancel: CancellationToken,
     ) -> None:
         """持有 root gate 后的根 turn 主体（挂起守卫 → 落 user → 指令 → hook → runner）。"""
+        origin = None
         if isinstance(sub, Submission):
             assert isinstance(sub.op, UserMessage)
             user_text = sub.op.text
             attachments = sub.op.attachments
+            origin = sub.op.origin
         else:
             user_text = sub.text
             attachments = None
@@ -211,10 +214,13 @@ class EngineGate:
 
         # 把 user 消息落 buffer + 持久化
         if attachments is not None:
-            item = user_message(
-                user_text,
-                thread_id=self._engine._thread_id,
-                attachments=attachments,
+            item = tag_origin(
+                user_message(
+                    user_text,
+                    thread_id=self._engine._thread_id,
+                    attachments=attachments,
+                ),
+                origin,
             )
             # resume/内部路径仍在 durable append 前执行 defense-in-depth 校验。
             from taifeng.llm.client import model_capabilities

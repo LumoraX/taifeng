@@ -357,6 +357,10 @@ def prepare_user_message(
     """在 Engine 第一个 await 前复制并 canonicalize legacy Submission。"""
     if not isinstance(submission.op, UserMessage):
         raise TypeError("audited UserMessage admission requires UserMessage")
+    if submission.op.origin is not None:
+        # strict Journal 的 submission_accepted 尚无来源标记字段：显式拒绝（durable
+        # submission_rejected），不把标记悄悄丢掉后照常接受（ADR 0085）
+        raise ValueError("strict audit journal does not accept input origin tags")
     attachments = _validated_attachments(submission.op, state)
     candidate = ResponseItem(
         kind="user_message",

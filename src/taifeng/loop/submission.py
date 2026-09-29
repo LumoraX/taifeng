@@ -10,6 +10,8 @@ from typing import Any, Literal, Union
 
 from pydantic import BaseModel, Field
 
+from taifeng.conversation.origin import InputOrigin  # noqa: TC001  # Pydantic 运行期需要
+
 
 def _gen_sub_id() -> str:
     return f"sub_{secrets.token_hex(6)}"
@@ -27,6 +29,9 @@ class UserMessage(BaseModel):
     到点以 ``CancelReason.DEADLINE_EXCEEDED`` 取消整棵 turn 树，终态
     ``turn_completed.end_reason="cancelled"`` 且 ``cancel_reason="deadline_exceeded"``
     （cancel-reason-deadline）。计时自 turn 开始排队起（含等待 root gate 的时间）。"""
+    # None 时不参与序列化：未声明来源的 UserMessage 外形与引入本字段前逐字一致
+    origin: InputOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    """这条输入的来源标记（input-origin，ADR 0085）；None = 未声明。"""
 
 
 class CancelTurn(BaseModel):
@@ -65,6 +70,8 @@ class InjectSystemMessage(BaseModel):
     kind: Literal["inject_system"] = "inject_system"
     text: str
     source: str = "business"
+    origin: InputOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    """这条注入的来源标记（input-origin，ADR 0085）；None = 未声明。"""
 
 
 class InjectUserInput(BaseModel):
@@ -79,6 +86,8 @@ class InjectUserInput(BaseModel):
     kind: Literal["inject_user_input"] = "inject_user_input"
     submission_id: str
     text: str
+    origin: InputOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    """这条输入的来源标记（input-origin，ADR 0085）；None = 未声明。"""
 
 
 class ThreadRollback(BaseModel):
@@ -204,6 +213,8 @@ class SendToPeer(BaseModel):
     text: str
     mode: Literal["queue_only", "trigger_turn"] = "queue_only"
     from_thread_id: str | None = None
+    origin: InputOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    """这条消息的来源标记（input-origin，ADR 0085）；None = 未声明。"""
 
 
 class Shutdown(BaseModel):

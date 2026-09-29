@@ -719,6 +719,8 @@ def test_legacy_tool_spec_shape_is_fully_restored() -> None:
         "can_suspend",
         # tool-crash-reconciliation：崩溃恢复回查函数（默认 None）
         "reconcile",
+        # input-origin：工具结果的可信度声明（默认 None = 不打来源标记）
+        "output_trust",
     }
     tool = _legacy_tool()
     assert tool.parallel_safe is False

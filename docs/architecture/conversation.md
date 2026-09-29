@@ -228,6 +228,15 @@ reasoning provider state、function call 和后续 `origin_llm_sample_id` 工具
 
 详见 ADR `docs/decisions/0008-store-protocol-decoupling.md`。
 
+## 输入来源标记（input-origin，ADR 0085）
+
+条目的 `metadata["origin"]` 记录这段内容是谁送进来的、声明的可信度：`{kind, trust, label?}`。由送入方声明
+（业务在 Op 上、工具在 `ToolSpec.output_trust` 上）；内核派生的内容（压缩摘要、`call_skill` 子 thread 的种子消息、
+`send_message` 发出的 peer 消息）继承其来源上下文的不可信标记。标记只在 metadata 里，不进 prompt。
+
+`summarize_taint(history)` 汇总上下文里的不可信内容，随每次工具派发经 `ToolContext.extras["input_taint"]` 与 hook
+上下文交给业务。内核不依据它做任何裁决。契约见 `capabilities/input-origin.md`。
+
 ## 红线影响
 
 - **R1 业务零侵入**：放宽允许 `import sqlite3`，限定唯一文件；继续禁第三方 DB 客户端

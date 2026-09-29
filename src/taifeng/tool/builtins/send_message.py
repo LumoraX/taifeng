@@ -11,9 +11,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
+from taifeng.conversation.origin import taint_from_extras
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+
+if TYPE_CHECKING:
+    from taifeng.conversation.origin import InputOrigin
 
 
 class PeerCoordinator(Protocol):
@@ -27,6 +31,7 @@ class PeerCoordinator(Protocol):
         mode: str = "queue_only",
         from_thread_id: str | None = None,
         submission_id: str | None = None,
+        origin: InputOrigin | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -54,11 +59,14 @@ def make_send_message_tool() -> ToolSpec:
         coordinator: PeerCoordinator | None = ctx.extras.get("spawn_coordinator")
         if coordinator is None:
             return ToolResult.error("peer_unavailable", reason="config_error")
-        # 发送者 = 当前 turn 的 thread(child 内调用即 child_thread_id)
+        # 发送者 = 当前 turn 的 thread(child 内调用即 child_thread_id)。
+        # 消息由模型在发送方的上下文里写成:上下文里有不可信内容时,消息带派生标记,
+        # 不可信内容不能经转发变干净(input-origin,ADR 0085)
         try:
             out = await coordinator.deliver_peer_message(
                 target=target, text=text, mode=mode,
-                from_thread_id=ctx.thread_id)
+                from_thread_id=ctx.thread_id,
+                origin=taint_from_extras(ctx.extras).derived_origin())
         except ValueError as e:
             # 未知目标 / TriggerTurn 打 root:显式 error 结果,turn 继续
             return ToolResult.error(str(e), reason="peer_delivery_rejected")

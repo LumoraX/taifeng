@@ -142,6 +142,11 @@ class ToolSpec:
     can_suspend: bool = False
     """该工具是否可能抛 SuspendSignal（HITL/长挂起）。strict audit 只接受 False。"""
 
+    output_trust: Literal["trusted", "untrusted"] | None = None
+    """该工具结果的可信度声明（input-origin，ADR 0085）。None = 未声明，结果不打来源标记；
+    声明后每条结果的 metadata 记 ``origin = {kind: "tool", trust, label: <工具名>}``。
+    从外部取回内容的工具（网页、邮件、第三方接口）应声明 ``untrusted``。"""
+
     reconcile: ReconcileFunc | None = None
     """崩溃恢复回查函数（tool-crash-reconciliation）。None = 不支持回查。
 

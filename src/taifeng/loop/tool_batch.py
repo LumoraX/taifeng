@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from taifeng.context.truncate import truncate_middle
+from taifeng.conversation.origin import INPUT_TAINT_EXTRAS_KEY
 from taifeng.loop.event import ToolCallCompleted
 from taifeng.loop.tool_output import apply_post_tool_hooks, cap_tool_result
 from taifeng.suspend.signal import SuspendSignal  # 运行时 except 捕获,不可放 TYPE_CHECKING
@@ -277,6 +278,10 @@ async def _dispatch_one_inner(
 
     hook_ctx = HookContext(
         thread_id=thread_id, submission_id=submission_id, entry_skill_id=entry_skill_id,
+        # input-origin：hook 据上下文是否被不可信内容污染决定放行 / 拒绝（ADR 0085）
+        extras={
+            INPUT_TAINT_EXTRAS_KEY: ctx.extras[INPUT_TAINT_EXTRAS_KEY]
+        } if INPUT_TAINT_EXTRAS_KEY in ctx.extras else {},
     )
     effective_args = req.arguments
     denied = None  # HookDecision | None

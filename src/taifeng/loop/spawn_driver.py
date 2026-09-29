@@ -51,6 +51,7 @@ from taifeng.loop.spawn_rewind import SpawnRewindChain
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
+    from taifeng.conversation.origin import InputOrigin
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
     from taifeng.loop.submission import Submission
@@ -787,10 +788,11 @@ class SpawnDriver:
         mode: str = "queue_only",
         from_thread_id: str | None = None,
         submission_id: str | None = None,
+        origin: InputOrigin | None = None,
     ) -> dict[str, Any]:
-        """转发到 ``PeerMailbox.deliver_peer_message``（公共入口签名不变）。"""
+        """转发到 ``PeerMailbox.deliver_peer_message``。"""
         return await self._peers.deliver_peer_message(
-            target=target, text=text, mode=mode,
+            target=target, text=text, mode=mode, origin=origin,
             from_thread_id=from_thread_id, submission_id=submission_id)
 
     async def wait_spawn_terminal(

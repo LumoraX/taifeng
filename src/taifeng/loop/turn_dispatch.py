@@ -96,9 +96,15 @@ class TurnDispatch:
                 },
             )
             from taifeng.conversation.models import user_message
-            seed = user_message(
-                json.dumps(arguments, ensure_ascii=False),
-                thread_id=sub_thread_id,
+            from taifeng.conversation.origin import summarize_taint, tag_origin
+            # 种子由模型在父上下文里写成：父上下文有不可信内容时种子带派生标记，
+            # 不可信内容不能经子 skill 变干净（input-origin，ADR 0085）
+            seed = tag_origin(
+                user_message(
+                    json.dumps(arguments, ensure_ascii=False),
+                    thread_id=sub_thread_id,
+                ),
+                summarize_taint(self.__dispatch_owner.history_buffer).derived_origin(),
             )
             await self.__dispatch_owner.store.append(seed)
 

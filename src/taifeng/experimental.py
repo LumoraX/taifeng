@@ -15,6 +15,13 @@ from __future__ import annotations
 
 from taifeng.context.strategies import MultimodalEvictionStrategy
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
+from taifeng.conversation.origin import (
+    InputOrigin,
+    InputTaint,
+    origin_of,
+    summarize_taint,
+    taint_from_extras,
+)
 from taifeng.llm.file_input import FileAttachmentV1, FileInputPolicy
 from taifeng.llm.providers.replay import (
     JournalReplayClient,
@@ -96,6 +103,12 @@ __all__ = [
     "WorkingSetPlan",
     "WorkingSetPolicy",
     "plan_working_set",
+    # 输入来源标记（input-origin，🧪）
+    "InputOrigin",
+    "InputTaint",
+    "origin_of",
+    "summarize_taint",
+    "taint_from_extras",
     # 可声明的失败恢复配方（failure-recovery-recipes，🧪）
     "RecipeDeclaringPolicy",
     "RecoveryRecipeBook",
