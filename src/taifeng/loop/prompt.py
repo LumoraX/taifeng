@@ -592,16 +592,7 @@ def build_api_request(
             model_capabilities=resolved_capabilities,
         )
 
-    # cache anchor 坐标换算(cache-anchor 契约):anchor 是 history 下标,含语义——
-    # [0, anchor] 为已缓存前缀,-1 为无缓存;CacheBreakpoint.index 是 messages 下标
-    # (anthropic 据此打 cache_control)。打点位置 = 前缀产出的最后一条消息(来源
-    # history 下标 <= anchor);前缀无产出消息(全是记账 item)则不打点。
-    breakpoints: list[CacheBreakpoint] = []
-    if cache_anchor_index >= 0:
-        for i in range(len(source_indexes) - 1, -1, -1):
-            if source_indexes[i] <= cache_anchor_index:
-                breakpoints.append(CacheBreakpoint(index=i))
-                break
+    breakpoints = _anchor_breakpoints(source_indexes, cache_anchor_index)
 
     # K3 prefetch（page-in）：把取回的长期记忆作为**尾部** system 消息注入，
     # 不动 system_prompt 头部（R2 cache-aware：变动的 prefetch 不破坏 cached 前缀）。
@@ -616,6 +607,24 @@ def build_api_request(
         entry=entry, model=model, system_prompt=system_prompt, tools=tools,
         breakpoints=breakpoints, messages=messages, input_items=input_items,
     )
+
+
+def _anchor_breakpoints(
+    source_indexes: list[int], cache_anchor_index: int
+) -> list[CacheBreakpoint]:
+    """cache anchor 坐标换算(cache-anchor 契约):history 下标 → messages 下标的断点。
+
+    anchor 是 history 下标,含语义——[0, anchor] 为已缓存前缀,-1 为无缓存;
+    CacheBreakpoint.index 是 messages 下标(anthropic 据此打 cache_control)。打点位置 =
+    前缀产出的最后一条消息(来源 history 下标 <= anchor);前缀无产出消息(全是记账 item)
+    则不打点。
+    """
+    if cache_anchor_index < 0:
+        return []
+    for i in range(len(source_indexes) - 1, -1, -1):
+        if source_indexes[i] <= cache_anchor_index:
+            return [CacheBreakpoint(index=i)]
+    return []
 
 
 def _with_modality_tags(
