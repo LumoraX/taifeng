@@ -134,6 +134,7 @@ Later ADRs:
 93. [ADR 0093: ContextEngine 可插拔槽位——history 不动，只改发出去的视图](decisions/0093-context-engine-slot.md): 发给模型的内容恒等于 history，非破坏性的上下文管理没有入口。决策：槽位只管视图装配与轮后通知，不接管压缩；视图可含 history 外的条目；内核只做结构校验，不合法即失败不退回；预算与压缩触发按视图估算；同一 history 版本只装配一次；缓存影响由引擎声明；引擎挂在压缩协调器上。
 94. [ADR 0094: 审计模式放开折叠式上下文压缩与预算提示](decisions/0094-audit-mode-compaction.md): 审计模式拒绝任何压缩，长会话只能跑到溢出；预算提示绕过 Journal 直写投影。决策：只放开折叠式策略并由策略声明；`context_compacted` 与摘要条目同批；摘要的 LLM 调用经内核提供的会话落账，失败也落；先落账后改 hot history；只在采样之间压缩；回写时排除被折叠的条目；预算提示一并落账。
 95. [ADR 0095: 审计模式接受文件附件与工具结果里的图片](decisions/0095-audit-mode-attachments.md): 带文件的用户消息在审计模式被拒，工具返回图片会冻结 Session。决策：文件附件另立 DTO（不改图片附件的字节形状），按 `kind` 区分；准入与非审计路径同一口径外加 Session 字节上限；工具图片随结果对话项落账、outcome 只记摘要；不合格时结果变成错误而不冻结。
+96. [ADR 0096: 审计模式放开 hook 与不挂起的权限裁决](decisions/0096-audit-mode-hooks-and-permission.md): 审计模式拒绝任何 hook 与权限策略，而需要审计的部署最需要它们。决策：业务的 handler 与策略原样运行，内核按 turn 绑定一层，裁决先落账再生效；每个 handler 每次裁决一条 `hook_evaluated`，改写内容落账、其余 metadata 只记键名；`permission_decided` 记请求与裁决；上下文无法落账的请求被拒；挂起式审批另行立项。
 
 ### Fourth Pass: Gap Tracking
 

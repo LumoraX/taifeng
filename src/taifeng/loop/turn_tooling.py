@@ -27,6 +27,7 @@ from taifeng.llm.errors import (
     UnsupportedModalityError,
 )
 from taifeng.llm.image_input import admit_tool_attachments
+from taifeng.loop.audit_gates import bind_audit_gates
 from taifeng.loop.event import DenialCircuitOpen, DoomLoopCircuitOpen, DoomLoopWarned
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
 from taifeng.loop.tool_output import tool_result_cap
@@ -49,6 +50,8 @@ class TurnTooling:
             owner: 宿主 TurnRunner —— 提供 turn 运行态与共享依赖。
         """
         self.__tooling_owner = owner
+        # 审计模式：hook 与权限策略绑定到本 turn，裁决先落账再生效（ADR 0096）
+        bind_audit_gates(owner)
         # Resume 批准后须在 turn 内重跑的调用，随下一次 seed 补跑一并执行后清空
         self.extra_seed_call_ids: tuple[str, ...] = ()
 

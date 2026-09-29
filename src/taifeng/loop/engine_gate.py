@@ -17,6 +17,7 @@ from taifeng.conversation.models import user_message
 from taifeng.conversation.origin import tag_origin
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext, ResolvedInstruction
+from taifeng.loop.audit_gates import engine_turn_hooks
 from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
 from taifeng.loop.engine_prewarm import yield_to_turn
 from taifeng.loop.engine_types import _PendingTurn
@@ -285,7 +286,9 @@ class EngineGate:
         #   3) 此处 hook deny → 不创建 TurnRunner、emit turn_failed
         if self._engine._hooks is not None:
             from taifeng.hooks.types import HookContext, PreTurnHook
-            pre_decision = await self._engine._hooks.run(
+            pre_decision = await engine_turn_hooks(
+                self._engine, sub.id, audited_turn_index(sub),
+            ).run(
                 "pre_turn",
                 PreTurnHook(
                     user_text=user_text,

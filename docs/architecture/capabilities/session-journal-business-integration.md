@@ -16,8 +16,8 @@ UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
 SessionJournal 是执行事实和对话项的唯一可靠事实源。hot history、MessageStore 和 EventMsg 都是
 Journal durable ack 之后的内存态或可重建投影，不得领先 Journal，也不得被声明为第二事实源。
 
-未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。本阶段不支持 HITL/审批、suspend、
-手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
+未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。hook 与不挂起的权限裁决见 §16。
+本阶段不支持以挂起方式进行的 HITL/审批、suspend、手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
 detached spawn、barrier、peer、
 LLM attempt / submission 未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
 加密、WORM 或外置 blob。LLM request intent
@@ -34,6 +34,8 @@ tool_outcome_committed + conversation_item(function_call_output)
 skill_dispatch_finished + thread_terminal + conversation_item(skill_outcome)
 context_compacted + conversation_item(compacted)
 budget_hint_injected + conversation_item(system_injection)
+hook_evaluated          （单条；先于它所约束的动作）
+permission_decided      （单条；先于它所约束的动作）
 ```
 
 只有覆盖这些 record id 的 `JournalAck` 返回后，调用方才能：
@@ -63,6 +65,8 @@ V2。现有 Phase 1 初始化三记录是 V0 canonical vectors，保持原 bytes
 | Tool call | `{turn_id}:tool:{call_id}` |
 | 上下文压缩 | `{turn_id}:compaction:{ordinal}` |
 | 预算提示 | `{turn_id}:budget_hint:{ordinal}` |
+| hook 裁决 | `{turn_id}:hook:{ordinal}` |
+| 权限裁决 | `{turn_id}:permission:{ordinal}` |
 | Skill dispatch | `{tool_operation_id}:skill:{target_skill_id}` |
 
 除初始化 V0 外，record id 固定为：
@@ -287,8 +291,8 @@ observer/ack 不确定使 attempt 为 UNKNOWN、冻结 Session、禁止 retry。
 
 ## 9. Tool 终态收敛
 
-audit ToolSpec 必须声明 `effect_kind`、`reconciliation`、`can_suspend=False`。hooks、permission、HITL 和
-可 suspend Tool 在 effect 前拒绝。
+audit ToolSpec 必须声明 `effect_kind`、`reconciliation`、`can_suspend=False`。以挂起方式进行的审批、HITL 和
+可 suspend Tool 在 effect 前拒绝；hook 与不挂起的权限裁决先落账再生效（§16）。
 
 一批 call 先按 call index 原子提交所有 executable/rejected intents，再 dispatch。每个 committed intent
 必须得到一个 terminal outcome：`success | error | rejected | cancelled | unknown`。
@@ -344,7 +348,7 @@ LLM request 落账时图片与文件的正文都按 §8 脱敏（`image_base64` 
 | Op | UserMessage、CancelTurn、Shutdown | 其他 Op |
 | Session | 新建；resume（Journal 接管，§13；root 工具调用的 UNKNOWN 按 §13.1 收敛） | 已终结 Session、存在无法收敛的未结算 effect、writer 仍存活 |
 | Store | 默认 JSONL 可重建投影 | custom store/directory、IndexHook |
-| Hook/approval | 无 | hooks、permission、HITL |
+| Hook/approval | 内核的 `HookRunner`；内核的 `PermissionPolicy`（规则、可复用授权、当场作答的 prompter）（§16） | 其他类型的 hook 运行器 / 权限策略对象、`SuspendingPrompter`、HITL |
 | Context | 无压缩策略，或全部策略声明 `audit_support` 为 `fold` / `fold_model`（§15） | 未声明或原地改写条目的压缩策略、ContextEngine、rewind、memory、instruction |
 | Skill | atomic/composite、同步 call_skill | orchestration、suspension |
 | Spawn/peer | 无 | detached spawn、barrier、peer |
@@ -549,3 +553,69 @@ Journal 重放三者一致；strict verify 通过；resume 后 history 与崩溃
 不同 turn 的压缩各有独立 identity；摘要调用的 request / checkpoint / response 齐全且先于压缩结论；
 摘要失败时调用照样落账而 history 不变；预算提示与它的 record 同批；记录与对话项的形状校验；
 被折叠的条目不并回、期间应用的输入保留、冲突仍被检出。
+
+## 16. hook 与权限裁决（ADR 0096）
+
+### 16.1 允许的配置
+
+| 参数 | 允许 | 拒绝 |
+| --- | --- | --- |
+| `hooks` | `HookRunner`（含子类） | 其他对象：`audit_hooks_unsupported` |
+| `permission_policy` | `PermissionPolicy`，且 `prompter` 不是 `SuspendingPrompter` | 其他对象、以挂起方式审批：`audit_permission_unsupported` |
+
+业务注入的 handler 与策略原样运行；内核在 runner 构造时按 turn 绑定一层，裁决返回给调用方之前先落账。
+子 skill 的 runner 重新绑定到自己的 thread；子 turn 的权限策略照常按 `subagent_approval_mode` 包装。
+
+### 16.2 记录
+
+`HookEvaluatedV1`（record type `hook_evaluated`）——每个 handler 的每次裁决一条：
+
+| 字段 | 含义 |
+| --- | --- |
+| `hook_kind` | hook 类型 |
+| `handler_index` | 该类型下第几个 handler（注册顺序，从 0 起） |
+| `allow` / `reason` | 是否放行、拒绝理由 |
+| `subject` | 裁决针对的对象：hook 输入里的 `call_id` / `tool_name` / `target_skill_id` / `caller_skill_id` / `script_name` / `phase` / `iteration` / `end_reason` / `depth` 中存在的那些 |
+| `overrides` | handler 要求的改写：`args_override` / `output_override` / `text_override`。值无法规范化时记 `{"not_canonical": true}` |
+| `metadata_keys` | handler 给出的其余 metadata 的键名（只记键名） |
+| `error_class` | handler 抛出异常时的异常类名；此时 `allow=false`、`reason="hook_error"`，异常原文不落账 |
+
+`PermissionDecidedV1`（record type `permission_decided`）——每次 `check` 一条：
+
+| 字段 | 含义 |
+| --- | --- |
+| `scope` / `target` | 权限范围与对象 |
+| `request_reason` | 请求方（模型）自陈的理由 |
+| `call_id` / `call_chain` | 所属工具调用、skill 调用栈 |
+| `request_metadata` | 请求携带的上下文（工具参数、业务透传内容） |
+| `granted` / `mode` / `decision_reason` | 裁决、裁决方式、依据（命中的规则、授权 id、审批人的说明） |
+| `remember_until` | 审批人声明的记忆范围 |
+| `minted_grant` | 随裁决签发的可复用授权的匹配条件；没有签发为空 |
+
+### 16.3 顺序与编号
+
+- 裁决记录 ack 之后调用方才拿到裁决：`pre_tool_use` 的记录先于工具执行，`post_tool_use` 的记录先于
+  `tool_outcome_committed`，权限裁决先于被批准的动作。
+- 同一 turn 内 hook 记录连续编号，engine 层的 `pre_turn` / `post_turn` 与 runner 层的 hook 共用一个计数；
+  权限裁决另起一个计数。编号按 thread 分别计，子 skill 的裁决记在子 thread 名下。
+- 串行运行的 handler 里，拒绝之后的 handler 不运行，也就没有记录。
+- 请求携带的上下文无法规范化时，这次请求被拒绝（`decision_reason =
+  audit_permission_request_not_canonical`），业务的策略不被调用，记录里 `request_metadata` 为空。
+- 裁决记录不是 effect：恢复时不参与未结算判定。
+- 任一裁决记录写入不确定按 §4 冻结 Session；冻结不会被当成 handler 自己的错误吞掉。
+
+### 16.4 边界
+
+- `post_turn` 在 `turn_completed` 事件之后触发；Session 紧接着被关闭时，它可能来不及运行或落账
+  （与非审计模式下该 hook 的时序相同）。
+- handler 给出的自由 metadata 只记键名；需要留存其值的业务自行记录。
+- 以挂起方式进行的审批与 HITL 需要挂起与恢复本身进 Journal，不在本节范围。
+
+### 16.5 验收
+
+静态门放行内核的 hook 运行器与不挂起的权限策略、拒绝其他对象与挂起式审批；参数改写先于工具执行落账；
+拒绝落账且工具不执行；多个 handler 逐个落账、拒绝之后的不运行；输出改写落账且到达模型；
+handler 出错落账且不含原文；`pre_turn` 拒绝落账且不发起 LLM 调用；turn 内各层 hook 连续编号、
+下一 turn 重新编号；子 skill 的裁决记在子 thread；strict verify 通过且恢复不受裁决记录影响；
+规则裁决、人工审批与签发的授权、命中已签发的授权、skill 派发审批、子 skill 按 subagent 模式裁决、
+无法规范化的请求被拒、策略的其余入口仍可用。

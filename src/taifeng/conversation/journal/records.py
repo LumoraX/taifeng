@@ -598,8 +598,9 @@ class _SkillOutcomeItemPayload(JournalModel):
     ts_unix: NonNegativeInt | None = None
 
 
-# turn 内的上下文维护 operation（ADR 0094）：``{turn_id}:<kind>:<ordinal>``
-_CONTEXT_OPERATIONS = frozenset({"compaction", "budget_hint"})
+# turn 内按序号编号的 operation：``{turn_id}:<kind>:<ordinal>``
+# 上下文维护（ADR 0094）、hook 与权限裁决（ADR 0096）
+_CONTEXT_OPERATIONS = frozenset({"compaction", "budget_hint", "hook", "permission"})
 
 
 def _is_canonical_uint(value: str) -> bool:

@@ -311,7 +311,8 @@ class TurnDispatch:
                 status=_status,
                 end_reason=outcome.end_reason,
                 final_text=outcome.final_text,
-                outcome_payload=_record.as_payload(),
+                # 战绩条目进 Journal：自由文本的错误详情不落账（稳定错误已在 finished 记录里）
+                outcome_payload={**_record.as_payload(), "error_detail": None},
                 error=_child_error,
             )
         else:

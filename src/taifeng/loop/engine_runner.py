@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from taifeng.loop.audit_gates import engine_turn_hooks
 from taifeng.loop.audit_history import (
     AuditedHistoryConflictError,
     audited_history_conflict_failure,
@@ -179,7 +180,7 @@ class EngineRunner:
         if not handlers:
             return
         from taifeng.hooks.types import HookContext, PostTurnHook
-        await self._engine._hooks.run_audit_only(
+        await engine_turn_hooks(self._engine, submission_id, iteration).run_audit_only(
             "post_turn",
             PostTurnHook(
                 end_reason=outcome.end_reason,

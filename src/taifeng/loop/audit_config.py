@@ -13,7 +13,7 @@ from taifeng.llm.audit import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from taifeng.conversation.journal.models import (
         JournalAck,
@@ -241,7 +241,8 @@ def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
         value = getattr(inputs, field_name)
         if value is None:
             continue
-        if field_name == "compressor" and _compressor_is_auditable(value):
+        admit = _ADMISSION_CHECKS.get(field_name)
+        if admit is not None and admit(value):
             continue
         raise AuditCapabilityError(code)
     for field_name, code in _COLLECTION_CAPABILITY_RULES:
@@ -275,6 +276,34 @@ def _compressor_is_auditable(compressor: object) -> bool:
         inspect.getattr_static(type(strategy), "audit_support", None) in _AUDITABLE_COMPRESSION
         for strategy in strategies
     )
+
+
+def _hooks_are_auditable(hooks: object) -> bool:
+    """hook 运行器是内核的 ``HookRunner``：裁决可以按 turn 绑定落账（ADR 0096）。"""
+    from taifeng.hooks.types import HookRunner
+
+    return isinstance(hooks, HookRunner)
+
+
+def _permission_is_auditable(policy: object) -> bool:
+    """权限策略是内核的 ``PermissionPolicy``，且不以挂起的方式征求审批（ADR 0096）。
+
+    以挂起方式审批需要挂起与恢复本身进 Journal，不在这里放行。
+    """
+    from taifeng.permission.policy import PermissionPolicy
+    from taifeng.permission.prompter import SuspendingPrompter
+
+    return isinstance(policy, PermissionPolicy) and not isinstance(
+        policy.prompter, SuspendingPrompter
+    )
+
+
+# 字段 → 「这个具体的值可以在审计模式下使用」的判定；没有列出的字段一律拒绝
+_ADMISSION_CHECKS: dict[str, Callable[[object], bool]] = {
+    "compressor": _compressor_is_auditable,
+    "hooks": _hooks_are_auditable,
+    "permission_policy": _permission_is_auditable,
+}
 
 
 def _validate_model_capability(inputs: AuditStaticInputs) -> None:
