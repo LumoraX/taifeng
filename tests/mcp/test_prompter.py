@@ -12,6 +12,7 @@ import pytest
 
 from taifeng.mcp.prompter import McpPrompter
 from taifeng.mcp.server import McpServerInitiatedRequestError
+from taifeng.mcp.server_capabilities import McpClientCapabilityError
 from taifeng.permission.types import PermissionRequest
 
 # --------------------------------------------------------------------
@@ -150,6 +151,18 @@ async def test_server_error_returns_deny() -> None:
     assert decision.granted is False
     assert "-32601" in decision.reason
     assert decision.reason.startswith("elicitation_error")
+
+
+@pytest.mark.asyncio
+async def test_client_without_elicitation_capability_returns_deny() -> None:
+    """server 因客户端未声明 elicitation 而没发请求 → deny，reason 写明不支持（fail-closed）。"""
+    stub = _StubServer(raise_exc=McpClientCapabilityError(
+        method="elicitation/create", capability="elicitation", initialized=True))
+    decision = await McpPrompter(stub).prompt(_make_request())
+    assert decision.granted is False
+    assert decision.reason == (
+        "elicitation_unsupported: client did not declare the 'elicitation' capability "
+        "required by elicitation/create")
 
 
 @pytest.mark.asyncio
