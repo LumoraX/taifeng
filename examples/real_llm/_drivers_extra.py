@@ -16,25 +16,25 @@ from typing import TYPE_CHECKING, Any
 
 from _drivers import _root_completions, _wait_for
 from _setups import (
+    COMPACT_CODE,
     COMPACT_CONSTRAINT,
-    COMPACT_TOKEN,
     GUARD_CAP_BYTES,
-    GUARD_HEAD_TOKEN,
-    GUARD_INJECT_TOKEN,
+    GUARD_HEAD_CODE,
+    GUARD_INJECT_CODE,
     GUARD_INJECTION,
-    GUARD_MID_TOKEN,
+    GUARD_MID_CODE,
     GUARD_SANITIZED,
-    GUARD_TAIL_TOKEN,
+    GUARD_TAIL_CODE,
     GUARD_TOOL,
     INFERENCE_CHILD_MARK,
     INFERENCE_ENTRY_MARK,
-    PINNED_FIRST_TOKEN,
-    PINNED_HOST_TOKEN,
+    PINNED_FIRST_CODE,
+    PINNED_HOST_CODE,
+    READ_PATH_CODE,
     READ_PATH_FILE,
     READ_PATH_SKILL,
-    READ_PATH_TOKEN,
+    SEARCH_CODE,
     SEARCH_TARGET,
-    SEARCH_TOKEN,
 )
 
 import taifeng
@@ -133,7 +133,8 @@ async def drive_skill_inference(engine: Any, res: Any) -> None:
         seen = {(r.get("reasoning_effort"), r.get("max_output_tokens")) for r in reqs}
         assert seen == {decl}, f"{label} 请求的推理参数 {seen} ≠ 声明 {decl}"
     print(f"  [inference] entry×{len(entry_reqs)}={entry_decl} "
-          f"child×{len(child_reqs)}={child_decl}（codex wire：reasoning.effort / max_output_tokens）")
+          f"child×{len(child_reqs)}={child_decl}"
+          "（codex wire：reasoning.effort / max_output_tokens）")
 
 
 # ── tool_output_guard（ADR 0061）───────────────────────────────────────────
@@ -156,16 +157,17 @@ async def drive_tool_output_guard(engine: Any, res: Any) -> None:
     assert capped.get("original_bytes", 0) > GUARD_CAP_BYTES, f"原始字节数未超上限: {capped}"
 
     # 工具之后的请求 = 含头部 token 的请求（用户消息里没有 token 值，只能来自工具输出）
-    after_tool = [b for b in map(_blob, _requests(res)) if GUARD_HEAD_TOKEN in b]
+    after_tool = [b for b in map(_blob, _requests(res)) if GUARD_HEAD_CODE in b]
     assert after_tool, "没有捕获到携带工具输出的后续请求"
     for blob in after_tool:
-        assert GUARD_INJECTION not in blob and GUARD_INJECT_TOKEN not in blob, "注入文本进入了请求"
+        assert GUARD_INJECTION not in blob and GUARD_INJECT_CODE not in blob, "注入文本进入了请求"
         assert GUARD_SANITIZED in blob, "请求里没有清洗占位（改写未进入模型视图）"
         assert f"exceeded the {GUARD_CAP_BYTES}-byte limit" in blob, "请求里没有截断标记"
-        assert GUARD_MID_TOKEN not in blob, "正中内容未被截掉（上限未生效）"
-    assert GUARD_HEAD_TOKEN in answer and GUARD_TAIL_TOKEN in answer, f"未复述头尾 token: {answer!r}"
-    assert GUARD_INJECT_TOKEN not in answer, "模型回答里出现了注入 token"
-    print(f"  [guard] rewritten=True capped={capped} 后续请求×{len(after_tool)} 均无注入、含截断标记")
+        assert GUARD_MID_CODE not in blob, "正中内容未被截掉（上限未生效）"
+    assert GUARD_HEAD_CODE in answer and GUARD_TAIL_CODE in answer, f"未复述头尾 token: {answer!r}"
+    assert GUARD_INJECT_CODE not in answer, "模型回答里出现了注入 token"
+    print(f"  [guard] rewritten=True capped={capped} "
+          f"后续请求×{len(after_tool)} 均无注入、含截断标记")
 
 
 # ── pinned_periodic（ADR 0065）─────────────────────────────────────────────
@@ -192,14 +194,14 @@ async def drive_pinned_periodic(engine: Any, res: Any) -> None:
     store = res.state["todo_store"]
     counts: list[int] = []
     await _run_turn(engine, res, "请用 todo_write 建立办公室搬迁准备清单，三项都为 pending："
-                    f"① 盘点机柜设备（资产编号 {PINNED_FIRST_TOKEN}）② 预约搬运车辆 "
+                    f"① 盘点机柜设备（资产编号 {PINNED_FIRST_CODE}）② 预约搬运车辆 "
                     "③ 通知各部门搬迁时间。建好后只回复「已建立」。", 1)
     counts.append(_periodic_count(res))
     assert _tool_pairs(res, "todo_write"), "第 1 轮模型未调用 todo_write，清单为空无法验证重注"
     await _run_turn(engine, res, "车辆的事我来跟进。你先简单说一句：搬迁前一天最该确认什么？", 2)
     counts.append(_periodic_count(res))
     # 宿主侧追加一项（模拟其他参与方更新清单）：模型此后只能经周期重注得知
-    store.replace([*store.items, {"content": f"领取门禁临时卡（凭证号 {PINNED_HOST_TOKEN}）",
+    store.replace([*store.items, {"content": f"领取门禁临时卡（凭证号 {PINNED_HOST_CODE}）",
                                   "status": "pending"}])
     await _run_turn(engine, res, "搬迁当天大概需要几个人手？一句话回答。", 3)
     counts.append(_periodic_count(res))
@@ -210,13 +212,13 @@ async def drive_pinned_periodic(engine: Any, res: Any) -> None:
     injected = [it.payload.get("text", "") for it in engine.history_snapshot()
                 if it.kind == "system_injection"
                 and it.payload.get("source") == pinned_injection_source("todo")]
-    assert injected and PINNED_HOST_TOKEN in injected[-1], "最近一次重注内容不含宿主追加的条目"
+    assert injected and PINNED_HOST_CODE in injected[-1], "最近一次重注内容不含宿主追加的条目"
     last_req = _requests(res)[-1]
     tail = (last_req.get("input_items") or last_req.get("messages") or [{}])[-1]
-    assert tail.get("role") == "system" and PINNED_HOST_TOKEN in str(tail.get("content")), (
-        f"第 4 轮请求的最后一项不是含 {PINNED_HOST_TOKEN} 的重注: {tail}")
-    assert PINNED_HOST_TOKEN in answer, f"第 4 轮未复述经重注送达的条目: {answer!r}"
-    print(f"  [pinned] periodic 累计 {counts}；第 4 轮复述 {PINNED_HOST_TOKEN}")
+    assert tail.get("role") == "system" and PINNED_HOST_CODE in str(tail.get("content")), (
+        f"第 4 轮请求的最后一项不是含 {PINNED_HOST_CODE} 的重注: {tail}")
+    assert PINNED_HOST_CODE in answer, f"第 4 轮未复述经重注送达的条目: {answer!r}"
+    print(f"  [pinned] periodic 累计 {counts}；第 4 轮复述 {PINNED_HOST_CODE}")
 
 
 # ── file_search（ADR 0064）─────────────────────────────────────────────────
@@ -228,12 +230,12 @@ async def drive_file_search(engine: Any, res: Any) -> None:
     区分点：7 个文件里只有嵌套目录下的一个含 token，文件名不可猜；未注册 file_read，
     grep 是唯一能看到文件内容的途径。要求 grep 被调用、其输出命中目标文件、回答给出该路径。
     """
-    answer = await _run_turn(engine, res, f"工作目录里有一批分仓备忘。请找出哪个文件记录了调拨批次号 "
-                             f"{SEARCH_TOKEN}，回答该文件相对工作目录的路径。", 1)
+    answer = await _run_turn(engine, res, "工作目录里有一批分仓备忘。请找出哪个文件记录了"
+                             f"调拨批次号 {SEARCH_CODE}，回答该文件相对工作目录的路径。", 1)
     greps = _tool_pairs(res, "grep")
     assert greps, "模型未调用 grep"
-    hit = [done for _, done in greps
-           if done is not None and not done.data["is_error"] and SEARCH_TARGET in done.data["output"]]
+    hit = [done for _, done in greps if done is not None
+           and not done.data["is_error"] and SEARCH_TARGET in done.data["output"]]
     assert hit, f"grep 输出未命中目标文件: {[d.data['output'] for _, d in greps if d]}"
     assert SEARCH_TARGET in answer, f"回答未给出正确文件 {SEARCH_TARGET}: {answer!r}"
     print(f"  [search] grep×{len(greps)} 命中 {SEARCH_TARGET}")
@@ -260,10 +262,10 @@ async def drive_read_skill_path(engine: Any, res: Any) -> None:
     aux = [(s, d) for s, d in _tool_pairs(res, "read_skill") if _is_aux_read(s)]
     assert aux, f"模型未调用 read_skill(skill_id={READ_PATH_SKILL}, path={READ_PATH_FILE})"
     ok = [d for _, d in aux if d is not None and not d.data["is_error"]
-          and READ_PATH_TOKEN in d.data["output"]]
+          and READ_PATH_CODE in d.data["output"]]
     assert ok, f"附属文件读取失败或内容不含 token: {[d.data for _, d in aux if d]}"
-    assert READ_PATH_TOKEN in answer, f"回答未复述附属文件里的 token: {answer!r}"
-    print(f"  [read_skill] path 读取×{len(aux)}，回答含 {READ_PATH_TOKEN}")
+    assert READ_PATH_CODE in answer, f"回答未复述附属文件里的 token: {answer!r}"
+    print(f"  [read_skill] path 读取×{len(aux)}，回答含 {READ_PATH_CODE}")
 
 
 # ── compaction_continuity（ADR 0059）───────────────────────────────────────
@@ -292,15 +294,15 @@ async def drive_compaction_continuity(engine: Any, res: Any) -> None:
     history = engine.history_snapshot()
     compacted = [it for it in history if it.kind == "compacted"]
     assert compacted, "压缩后历史里没有 compacted 条目"
-    assert not any(it.kind == "user_message" and COMPACT_TOKEN in str(it.payload.get("text", ""))
+    assert not any(it.kind == "user_message" and COMPACT_CODE in str(it.payload.get("text", ""))
                    for it in history), "约束原话仍以 user_message 留在历史里（未被压缩掉）"
     block = _recent_user_block(str(compacted[-1].payload.get("summary", "")))
     assert COMPACT_CONSTRAINT in block, "压缩条目的 <recent_user_messages> 未逐字保留约束原话"
 
     answer = await _run_turn(engine, res, "最后用一句话总结：个人电脑里的照片该怎么备份？", 4)
-    assert COMPACT_TOKEN in answer, f"压缩后的回答未遵守约束（缺签名 {COMPACT_TOKEN}）: {answer!r}"
+    assert COMPACT_CODE in answer, f"压缩后的回答未遵守约束（缺签名 {COMPACT_CODE}）: {answer!r}"
     print(f"  [compaction] 压缩移除 {done.data.get('removed_count')} 条；原话逐字保留；"
-          f"压缩后回答含 {COMPACT_TOKEN}")
+          f"压缩后回答含 {COMPACT_CODE}")
 
 
 DRIVERS_EXTRA: dict[str, Any] = {

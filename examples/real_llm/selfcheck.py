@@ -31,24 +31,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _setups import (  # noqa: E402
+    COMPACT_CODE,
     COMPACT_MARK,
-    COMPACT_TOKEN,
-    GUARD_HEAD_TOKEN,
+    GUARD_HEAD_CODE,
     GUARD_MARK,
-    GUARD_TAIL_TOKEN,
+    GUARD_TAIL_CODE,
     GUARD_TOOL,
     INFERENCE_CHILD_MARK,
     INFERENCE_ENTRY_MARK,
-    PINNED_FIRST_TOKEN,
-    PINNED_HOST_TOKEN,
+    PINNED_FIRST_CODE,
+    PINNED_HOST_CODE,
     PINNED_MARK,
+    READ_PATH_CODE,
     READ_PATH_FILE,
     READ_PATH_MARK,
     READ_PATH_SKILL,
-    READ_PATH_TOKEN,
+    SEARCH_CODE,
     SEARCH_MARK,
     SEARCH_TARGET,
-    SEARCH_TOKEN,
 )
 from capability_matrix import SCENARIOS, _verdict, run_scenario  # noqa: E402
 from test_codex_image_matrix import preflight_codex_image_matrix  # noqa: E402
@@ -66,7 +66,7 @@ def _call(call_id: str, name: str, **arguments: object) -> dict[str, str]:
 # ADR 0056–0065 新场景的静态剧本。路由按插入序取首个命中标记：子 skill / 压缩摘要的
 # 标记排在 entry 之前（它们的请求里可能夹带 entry 侧文本，反之不会）。
 _TODO_ITEMS = [
-    {"content": f"盘点机柜设备（资产编号 {PINNED_FIRST_TOKEN}）", "status": "pending"},
+    {"content": f"盘点机柜设备（资产编号 {PINNED_FIRST_CODE}）", "status": "pending"},
     {"content": "预约搬运车辆", "status": "pending"},
     {"content": "通知各部门搬迁时间", "status": "pending"},
 ]
@@ -85,7 +85,7 @@ EXTRA_SIM_ROUTES = {
     "tool_output_guard": {
         GUARD_MARK: [
             SimTurn(text="先取日志。", tool_calls=[_call("g1", GUARD_TOOL)]),
-            SimTurn(text=f"HEAD-TOKEN 是 {GUARD_HEAD_TOKEN}，TAIL-TOKEN 是 {GUARD_TAIL_TOKEN}。"),
+            SimTurn(text=f"HEAD-TOKEN 是 {GUARD_HEAD_CODE}，TAIL-TOKEN 是 {GUARD_TAIL_CODE}。"),
         ],
     },
     "pinned_periodic": {
@@ -94,12 +94,12 @@ EXTRA_SIM_ROUTES = {
             SimTurn(text="已建立"),
             SimTurn(text="确认新址的网络与门禁已开通。"),
             SimTurn(text="大约需要六个人。"),
-            SimTurn(text=f"[ ] 领取门禁临时卡（凭证号 {PINNED_HOST_TOKEN}）"),
+            SimTurn(text=f"[ ] 领取门禁临时卡（凭证号 {PINNED_HOST_CODE}）"),
         ],
     },
     "file_search": {
         SEARCH_MARK: [
-            SimTurn(text="按内容搜索。", tool_calls=[_call("s1", "grep", pattern=SEARCH_TOKEN)]),
+            SimTurn(text="按内容搜索。", tool_calls=[_call("s1", "grep", pattern=SEARCH_CODE)]),
             SimTurn(text=f"记录在 {SEARCH_TARGET}。"),
         ],
     },
@@ -110,17 +110,17 @@ EXTRA_SIM_ROUTES = {
             SimTurn(text="再读细则。", tool_calls=[_call("r2", "read_skill",
                                                         skill_id=READ_PATH_SKILL,
                                                         path=READ_PATH_FILE)]),
-            SimTurn(text=f"复核口令是 {READ_PATH_TOKEN}。"),
+            SimTurn(text=f"复核口令是 {READ_PATH_CODE}。"),
         ],
     },
     "compaction_continuity": {
         # handoff 摘要请求的 system prompt 标记（HANDOFF_SYSTEM_PROMPT_ZH）
         "接力提示词": [SimTurn(text="## 进度\n已介绍 3-2-1 原则与增量 / 全量备份的区别。")],
         COMPACT_MARK: [
-            SimTurn(text=f"明白。\n签名：{COMPACT_TOKEN}"),
-            SimTurn(text=f"3 份副本、2 种介质、1 份异地。\n签名：{COMPACT_TOKEN}"),
-            SimTurn(text=f"增量只备变化部分，全量每次全备。\n签名：{COMPACT_TOKEN}"),
-            SimTurn(text=f"照片按 3-2-1 原则多地多介质保存。\n签名：{COMPACT_TOKEN}"),
+            SimTurn(text=f"明白。\n签名：{COMPACT_CODE}"),
+            SimTurn(text=f"3 份副本、2 种介质、1 份异地。\n签名：{COMPACT_CODE}"),
+            SimTurn(text=f"增量只备变化部分，全量每次全备。\n签名：{COMPACT_CODE}"),
+            SimTurn(text=f"照片按 3-2-1 原则多地多介质保存。\n签名：{COMPACT_CODE}"),
         ],
     },
 }
