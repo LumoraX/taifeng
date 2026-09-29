@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from taifeng.mcp.bridge import McpToolError
+from taifeng.mcp.pagination import DEFAULT_MAX_LIST_PAGES, list_all_tools, validate_max_pages
 from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
 from taifeng.mcp.server_messages import ServerMessageRouter
 
@@ -83,6 +84,7 @@ class McpHttpClient:
         request_timeout_seconds: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
         elicitation_handler: ElicitationHandler | None = None,
+        max_list_pages: int = DEFAULT_MAX_LIST_PAGES,
     ) -> None:
         """
         Args:
@@ -93,7 +95,10 @@ class McpHttpClient:
             transport: 自定义 httpx transport（测试注入 MockTransport）。
             elicitation_handler: 可选；注入则声明 ``elicitation`` 能力并处理 server 的
                 ``elicitation/create``；不注入则不声明，server 仍发时回 ``-32601``。
+            max_list_pages: ``tools/list`` 跟 ``nextCursor`` 翻页的页数上限；超限抛
+                ``McpPaginationError``（防恶意 server 无限翻页，不静默截断）。
         """
+        self._max_list_pages = validate_max_pages(max_list_pages)
         self._url = url
         self._timeout = request_timeout_seconds
         self._http = httpx.AsyncClient(
@@ -122,15 +127,19 @@ class McpHttpClient:
         listen_notifications: bool = True,
         transport: httpx.AsyncBaseTransport | None = None,
         elicitation_handler: ElicitationHandler | None = None,
+        max_list_pages: int = DEFAULT_MAX_LIST_PAGES,
     ) -> McpHttpClient:
         """建连：initialize 握手 + （可选）打开服务端推送流。
+
+        参数语义见 ``__init__``；``listen_notifications=False`` 不开 GET 推送流。
 
         Raises:
             McpToolError: 握手失败（HTTP 错误 / JSON-RPC 错误 / 超时）。
             McpProtocolVersionError: server 回的协议版本不受支持（会话已结束）。
         """
         client = cls(url, headers=headers, request_timeout_seconds=request_timeout_seconds,
-                     transport=transport, elicitation_handler=elicitation_handler)
+                     transport=transport, elicitation_handler=elicitation_handler,
+                     max_list_pages=max_list_pages)
         try:
             await client._initialize()
         except BaseException:
@@ -276,10 +285,17 @@ class McpHttpClient:
                          expect_id=None)
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        """``tools/list``。"""
-        result = await self._request("tools/list")
-        tools = result.get("tools", []) if isinstance(result, dict) else []
-        return tools if isinstance(tools, list) else []
+        """``tools/list``：跟完 ``nextCursor`` 分页，返回全部工具元数据。
+
+        Raises:
+            McpPaginationError: 翻页超过 ``max_list_pages`` / 游标重复 / 游标非字符串。
+            McpToolError: 某页形状非法、HTTP / JSON-RPC 错误或超时。
+        """
+        return await list_all_tools(self._list_tools_page, max_pages=self._max_list_pages)
+
+    async def _list_tools_page(self, cursor: str | None) -> Any:
+        """取一页 ``tools/list``；首页不带 ``params``（兼容不认 cursor 字段的旧 server）。"""
+        return await self._request("tools/list", {"cursor": cursor} if cursor is not None else None)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """``tools/call``。"""

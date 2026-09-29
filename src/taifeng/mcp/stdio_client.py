@@ -36,6 +36,7 @@ from taifeng.mcp.bridge import (
     register_mcp_tools,
     register_mcp_tools_async,
 )
+from taifeng.mcp.pagination import DEFAULT_MAX_LIST_PAGES, list_all_tools, validate_max_pages
 from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
 from taifeng.mcp.server_messages import ServerMessageRouter
 
@@ -59,6 +60,7 @@ class McpStdioClient:
         *,
         request_timeout_seconds: float | None = 60.0,
         elicitation_handler: ElicitationHandler | None = None,
+        max_list_pages: int = DEFAULT_MAX_LIST_PAGES,
     ) -> None:
         """
         Args:
@@ -72,8 +74,11 @@ class McpStdioClient:
             elicitation_handler: 可选；注入则 initialize 声明 ``elicitation`` 能力，
                 server 的 ``elicitation/create`` 交它处理；不注入则不声明，server 仍发
                 时回 ``-32601``。
+            max_list_pages: ``tools/list`` 跟 ``nextCursor`` 翻页的页数上限；超限抛
+                ``McpPaginationError``（防恶意 server 无限翻页，不静默截断）。
         """
         self._proc = proc
+        self._max_list_pages = validate_max_pages(max_list_pages)
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._reader_task: asyncio.Task[None] | None = None
@@ -101,6 +106,7 @@ class McpStdioClient:
         cwd: str | None = None,
         request_timeout_seconds: float | None = 60.0,
         elicitation_handler: ElicitationHandler | None = None,
+        max_list_pages: int = DEFAULT_MAX_LIST_PAGES,
     ) -> McpStdioClient:
         """fork 一个 MCP server 子进程并完成 JSON-RPC handshake。
 
@@ -108,12 +114,15 @@ class McpStdioClient:
             request_timeout_seconds: 透传到 ``McpStdioClient.__init__``；
                 ``None`` 表示无 client 层 timeout
             elicitation_handler: 透传到 ``McpStdioClient.__init__``。
+            max_list_pages: 透传到 ``McpStdioClient.__init__``。
 
         Raises:
             McpProtocolVersionError: server 回的协议版本不受支持（子进程已关闭）。
         """
         if not command:
             raise ValueError("empty command")
+        # 坏配置在拉起子进程之前拒绝（构造期再抛会留下孤儿进程）
+        validate_max_pages(max_list_pages)
         proc = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
@@ -123,7 +132,7 @@ class McpStdioClient:
             cwd=cwd,
         )
         client = cls(proc, request_timeout_seconds=request_timeout_seconds,
-                     elicitation_handler=elicitation_handler)
+                     elicitation_handler=elicitation_handler, max_list_pages=max_list_pages)
         client._reader_task = asyncio.create_task(client._reader_loop())
         try:
             await client._initialize()
@@ -264,12 +273,18 @@ class McpStdioClient:
         )
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        """tools/list 返回 tool 元数据列表。"""
-        result = await self._send_request("tools/list")
-        if not isinstance(result, dict):
-            return []
-        tools = result.get("tools", [])
-        return tools if isinstance(tools, list) else []
+        """``tools/list``：跟完 ``nextCursor`` 分页，返回全部工具元数据。
+
+        Raises:
+            McpPaginationError: 翻页超过 ``max_list_pages`` / 游标重复 / 游标非字符串。
+            McpToolError: 某页形状非法、JSON-RPC 错误或超时。
+        """
+        return await list_all_tools(self._list_tools_page, max_pages=self._max_list_pages)
+
+    async def _list_tools_page(self, cursor: str | None) -> Any:
+        """取一页 ``tools/list``；首页不带 ``params``（兼容不认 cursor 字段的旧 server）。"""
+        return await self._send_request(
+            "tools/list", {"cursor": cursor} if cursor is not None else None)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """tools/call 执行远端 tool。"""

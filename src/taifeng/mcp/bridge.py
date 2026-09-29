@@ -43,7 +43,7 @@ class McpClient(Protocol):
     """桥所需的最小 MCP 客户端能力（stdio / HTTP 两种传输都实现）。"""
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        """``tools/list``：返回工具元数据列表。"""
+        """``tools/list``：返回**跟完 nextCursor 分页后**的完整工具元数据列表。"""
         ...
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:

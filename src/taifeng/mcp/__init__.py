@@ -9,7 +9,8 @@
     - stdio transport（子进程 + JSON-RPC 2.0）/ streamable HTTP transport
     - 协议版本：声明 2025-06-18，接受 ``SUPPORTED_PROTOCOL_VERSIONS`` 内的协商结果，
       其余断开（``McpProtocolVersionError``）
-    - initialize / tools/list / tools/call / notifications/tools/list_changed
+    - initialize / tools/list（跟完 ``nextCursor`` 分页，页数上限防失控）/ tools/call /
+      notifications/tools/list_changed
     - 把 MCP tool 注册为 Taifeng ToolSpec，通过统一 ToolRegistry 派发；
       ``bind_mcp_tools`` 随 list_changed 自动增删 / 替换（dynamic-tool-set）
     - tools/call 结果无损投影：图片进 ``ToolResult.attachments``、structuredContent 进
@@ -34,6 +35,7 @@ from taifeng.mcp.bridge import McpClient, McpToolBinding, bind_mcp_tools
 from taifeng.mcp.content import McpContentError
 from taifeng.mcp.elicitation import ElicitationHandler, ElicitationRequest, ElicitationResult
 from taifeng.mcp.http_client import McpHttpClient
+from taifeng.mcp.pagination import McpPaginationError
 from taifeng.mcp.prompter import McpPrompter
 from taifeng.mcp.protocol import (
     LATEST_PROTOCOL_VERSION,
@@ -57,6 +59,7 @@ __all__ = [
     "McpClient",
     "McpContentError",
     "McpHttpClient",
+    "McpPaginationError",
     "McpPrompter",
     "McpProtocolVersionError",
     "McpToolBinding",
