@@ -10,12 +10,12 @@ HITL 权限门：`PermissionRequest` / `PermissionRule` / `PermissionPolicy` / `
 | scope | 谁发 | target 形状 |
 | --- | --- | --- |
 | `shell_exec` | `shell_exec` / `run_in_background` | 完整命令串 |
-| `file_read` / `file_write` | `file_read` / `file_write` | 解析后的**绝对路径**（沙箱 root 拼接 + resolve） |
+| `file_read` / `file_write` | `file_read` / `file_write`；`apply_patch`（每个被改动的路径一条 `file_write`，含删除） | 解析后的**绝对路径**（沙箱 root 拼接 + resolve） |
 | `network` | `http_request`（含每一跳 redirect） | `"<METHOD> <URL>"` |
 | `script_exec` | `run_script` | `"<skill_id>/<script_name>"` |
 | `skill_dispatch` | `call_skill` / `spawn_skill` | 目标 skill id |
 | `compaction` | 压缩触发 | 策略名 |
-| `tool_use` | **兜底**：无更细效果的工具（业务 `for_tool_call`、过渡期的 `apply_patch`） | 工具名；`metadata["args"]` 为原始参数 |
+| `tool_use` | **兜底**：无更细效果的工具（业务 `for_tool_call`） | 工具名；`metadata["args"]` 为原始参数 |
 
 内置效果类工具 MUST NOT 以 `tool_use` 形状发请求；`tool_use` + `metadata["args"]` + `PermissionRule.args_match` 是给业务自注册工具（Style B 规则）用的机制。
 
@@ -252,7 +252,7 @@ pattern 三态语义：
 | `Network(p)` | `network` | p 匹配 `"<METHOD> <URL>"`；p 不以 `re:` 开头且首 token 不是 HTTP method 时前缀 `"* "` 后归一（任意 method 命中） |
 | `Skill(p)` | `skill_dispatch` | p（匹配 skill id） |
 | `Script(p)` | `script_exec` | p（匹配 `"<skill_id>/<script_name>"`） |
-| `ApplyPatch(p)` | `tool_use` | p —— 过渡形态，`apply_patch` 尚未按路径发 `file_write`（backlog） |
+| `ApplyPatch(p)` | `file_write` | p（匹配绝对路径）—— `FileWrite` 的同义别名，`apply_patch` 按路径发 `file_write` |
 
 未识别别名 → 抛 `ValueError("unknown_permission_syntax: ...")`。
 

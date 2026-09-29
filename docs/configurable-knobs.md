@@ -853,7 +853,7 @@ from taifeng import make_apply_patch_tool
 
 tool = make_apply_patch_tool(
     root_dir="./workspace",          # 沙盒根
-    policy=my_permission_policy,     # 可选；整组 patch 一次审批
+    policy=my_permission_policy,     # 可选；每个被改动的路径一条 file_write 审批
     max_bytes=1024 * 1024,           # 单 patch new_text 上限
 )
 ```
@@ -871,6 +871,8 @@ tool = make_apply_patch_tool(
 ```
 
 **两阶段原子语义**：所有 patch 先 dry-run 全量校验（路径在沙盒 / `old_text` 唯一 / `create` 时 path 不存在 / `delete` 时 path 存在），任一失败 → 0 文件被改；全过才执行。
+
+**权限**：每个被改动的路径（含删除）各发一条 `scope="file_write"`、`target=<绝对路径>` 的审批，同一路径只问一次；任一被拒则整组不执行。按路径写的 `FileWrite(...)` / `ApplyPatch(...)` 规则对它生效（ADR 0073）。
 
 与 unified diff 的对比：结构化输入避开 diff parser 复杂度与 LLM 格式错误（缩进 / 行号偏移）；想用 unified diff 业务侧自己包装一层。
 

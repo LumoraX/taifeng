@@ -119,7 +119,7 @@ PermissionPolicy.from_dict({
 }, prompter=my_prompter)
 ```
 
-支持的 alias：`Bash` / `ShellExec` / `Skill` / `Script` / `FileRead` / `FileWrite` / `ApplyPatch`。pattern 三态：字面 / `re:` 正则 / `glob:` 通配（payload 含 `*`/`?` 时自动加 `glob:` 前缀）。
+支持的 alias：`Bash` / `ShellExec` / `Skill` / `Script` / `FileRead` / `FileWrite` / `ApplyPatch`（`FileWrite` 的同义别名）。pattern 三态：字面 / `re:` 正则 / `glob:` 通配（payload 含 `*`/`?` 时自动加 `glob:` 前缀）。
 
 ## 运行
 

@@ -1503,7 +1503,7 @@ function exitResume() {
 /* m.policy_preview = {default_mode, deny[], allow[], ask[]} （Style A 配置）
    每条规则形如 "Bash(re:^rm\\s+-rf\\b)" / "Skill(read_*)"。
 
-   徽章设计：按 scope 分组（Bash / Skill / File / Script / ApplyPatch）每组一个 chip，
+   徽章设计：按 scope 分组（Bash / Skill / File / Script）每组一个 chip，
    颜色取该 scope 内最严重的 mode（deny > ask > allow）；文字写"通/问/拒×N"组合，
    一眼看懂"哪类动作通过、哪类被拦"。再附 [默认 X] 大徽章 + [HITL] 状态。
 */
@@ -1514,7 +1514,7 @@ const POLICY_ALIAS_GROUP = {
   Skill: "Skill",
   FileRead: "File", FileWrite: "File",
   Script: "Script",
-  ApplyPatch: "ApplyPatch",
+  ApplyPatch: "File",
 };
 
 function parseRuleAlias(ruleStr) {
@@ -1576,7 +1576,7 @@ function renderPolicy(m) {
   // chip 2..N：按 scope 分组
   const groups = groupRulesByAlias(deny, allow, ask);
   // 固定顺序展示，避免每次切 demo 抖动
-  for (const name of ["Bash", "Skill", "File", "Script", "ApplyPatch", "Other"]) {
+  for (const name of ["Bash", "Skill", "File", "Script", "Other"]) {
     if (!groups[name]) continue;
     chips.push({ cls: groupChipClass(groups[name]), text: groupChipText(name, groups[name]) });
   }
