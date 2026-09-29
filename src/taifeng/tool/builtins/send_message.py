@@ -2,7 +2,8 @@
 
 与 spawn 四工具同范式:handler 经 ``ctx.extras['spawn_coordinator']`` 取协调器
 (= AgentEngine),转发到 ``deliver_peer_message``(``SendToPeer`` Op 共用同一
-路径)。寻址 = thread_id / handle_id / "parent";双模式 queue_only / trigger_turn
+路径)。寻址 = thread_id / handle_id / "parent" / 拓扑地址(``sibling:<skill_id>`` /
+``child:<skill_id>``,ADR 0091);双模式 queue_only / trigger_turn
 (语义详见 docs/architecture/capabilities/peer-mailbox-messaging.md)。
 
 寻址失败 / TriggerTurn 打 root → 返回 error 结果(turn 不失败,不静默丢弃)。
@@ -77,7 +78,10 @@ def make_send_message_tool() -> ToolSpec:
         description=(
             "向同一谱系内的另一个活体 agent(兄弟专家 / 协调者)点对点发消息。\n\n"
             "target 寻址:对方的 child_thread_id、spawn 句柄 handle_id,或特殊值 "
-            "\"parent\"(上行给协调者)。\n"
+            "\"parent\"(上行给协调者)。也可以按对方跑的 skill 指代它:"
+            "\"sibling:<skill_id>\"(你是被分离派发的专家时,指另一个专家)、"
+            "\"child:<skill_id>\"(你是协调者时,指你派发的专家);同一 skill 有多个实例时"
+            "加 \"#<n>\" 指第 n 个。\n"
             "mode:queue_only=入队/落史(对方下次采样可见,不打扰);"
             "trigger_turn=对方空闲时立即唤醒其新 turn 处理消息"
             "(对方正在跑则自动降级为 queue_only,mode_downgraded=true;"
@@ -90,7 +94,8 @@ def make_send_message_tool() -> ToolSpec:
                 "target": {
                     "type": "string",
                     "description": (
-                        "目标寻址:child_thread_id / handle_id / \"parent\""
+                        "目标寻址:child_thread_id / handle_id / \"parent\" / "
+                        "\"sibling:<skill_id>[#n]\" / \"child:<skill_id>[#n]\""
                     ),
                 },
                 "text": {

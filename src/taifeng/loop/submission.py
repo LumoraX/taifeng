@@ -202,7 +202,8 @@ class SendToPeer(BaseModel):
 
     参数：
         - ``target_thread_id``: 目标寻址 —— child_thread_id / handle_id / "parent"
-          （"parent" 解析为发送者谱系的 root thread）。
+          （"parent" 解析为发送者谱系的 root thread）/ 拓扑地址
+          ``sibling:<skill_id>[#n]``、``child:<skill_id>[#n]``（ADR 0091）。
         - ``text``: 消息正文（落 ResponseItem，事件只带长度与截断预览）。
         - ``mode``: queue_only（入队/落史）或 trigger_turn（空闲 spawn child 唤醒）。
         - ``from_thread_id``: 发送者 thread（None = root thread 自身）。

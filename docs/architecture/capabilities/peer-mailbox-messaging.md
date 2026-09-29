@@ -8,14 +8,26 @@
 
 ## 数据契约
 
-### 寻址(D2:谱系内 thread_id,拓扑路径 deferred)
+### 寻址(D2:谱系内 thread_id + 拓扑路径,ADR 0091)
 
 | target 取值 | 解析 |
 | --- | --- |
 | child_thread_id | 直接命中已登记 spawn child |
 | handle_id | 经句柄表解析到 child_thread_id |
-| `"parent"` | 本谱系 root thread(嵌套 spawn 的 parent 亦收敛到 root) |
+| `"parent"` / `"root"` | 本谱系 root thread(嵌套 spawn 的 parent 亦收敛到 root) |
+| `"sibling:<skill_id>"` | 另一个 spawn child,跑的是该 skill;发送方须是 spawn child |
+| `"child:<skill_id>"` | spawn child,跑的是该 skill;发送方须是 root |
+| 以上两种加 `#<n>` | 同一 skill 有多个实例时的第 n 个(按派发先后,从 1 起) |
 | 其他 | `ValueError: unknown_peer_target`(显式失败;跨 engine 天然失败于此) |
+
+拓扑寻址(`loop/peer_address.py`,纯函数)的规则:
+
+- 候选 = 句柄表里 `skill_id` 相符、状态为 `running` / `suspended` / `done`、且不是发送方自己的 child;`cancelled` / `error` 的实例不参与(仍可按句柄 id 直接寻址)。
+- 没有候选 → `unknown_peer_target`;候选多于一个且未写 `#<n>` → `ambiguous_peer_target`(列出各候选的句柄 id);`#<n>` 越界 → `unknown_peer_target`。
+- 关系与发送方不符(root 用 `sibling:`、child 用 `child:`)→ `peer_address_not_applicable`,并提示应改用哪种写法。
+- 写法不合法(skill id 为空、含空白、序号不是正整数)→ `invalid_peer_address`。
+- 解析只读句柄表当时的状态,不订阅后续变化:地址解析到哪个 thread,消息就投给哪个 thread。
+- 经拓扑地址投递时,`deliver_peer_message` 的返回值与 `peer_message_sent` 事件多一个 `address`(发送方写的原始地址);直接寻址与 `parent` / `root` 不带这个键。
 
 ### peer 消息形态(D3:不新增 ResponseItem kind)
 
@@ -108,4 +120,6 @@
 
 `tests/loop/test_peer_messaging.py`(17):事件/Op 形态、QueueOnly 空闲落史 R5 + 事件契约、handle_id/"parent" 寻址、未知目标显式 error、TriggerTurn root 拒绝、空闲唤醒(句柄重回 done + 新 result)、运行中降级(gate 工具钉住运行态 → pending_input → drain 并入)、suspended 不唤醒、wait_peer 终态/超时/取消级联、SendToPeer Op 同路径、旗舰 e2e(LLM spawn → send_message trigger_turn 唤醒 → 专家产出补充结论);wait_any 四例(任一终态即唤醒 + 事件形态 / 同批多终态一次收全 + 已终态立即返回 / 全 pending 超时 + 空集与未知句柄显式抛 / 取消级联)。
 
-> demo:`examples/peer_messaging/demo.py`(mock 可跑)。拓扑路径寻址(`sibling:<skill_id>`)与跨 engine 通信 deferred(见 ADR/design D1-D2)。
+`tests/loop/test_peer_topology_address.py`:地址解析与非法写法、兄弟 / 子寻址、发送方不算自己的兄弟、关系与发送方不符、多实例须写序号、失败实例不参与、root 按 skill 投递及事件留痕、直接寻址不带 `address`、兄弟间按 skill 唤醒、工具回报寻址错误、`SendToPeer` 接受拓扑地址。
+
+> demo:`examples/peer_messaging/demo.py`(mock 可跑)。跨 engine 通信、一次投给多个目标(广播)不在本能力内。

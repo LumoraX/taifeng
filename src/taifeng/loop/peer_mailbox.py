@@ -31,6 +31,11 @@ from taifeng.loop.event import (
     PeerWaitResolved,
     PeerWaitStarted,
 )
+from taifeng.loop.peer_address import (
+    ROOT_ALIASES,
+    is_topology_address,
+    resolve_topology_address,
+)
 from taifeng.loop.spawn_handle import SpawnDrivePlan
 
 if TYPE_CHECKING:
@@ -58,18 +63,27 @@ class PeerMailbox:
         self._driver = driver
 
     def _resolve_peer_target(self, target: str, from_thread_id: str) -> str:
-        """寻址解析：thread_id / handle_id / "parent" → 目标 thread_id。
+        """寻址解析：thread_id / handle_id / "parent" / 拓扑地址 → 目标 thread_id。
 
-        - ``parent``：解析为本谱系 root thread（spawn_skill 固定把
+        - ``parent`` / ``root``：解析为本谱系 root thread（spawn_skill 固定把
           ``parent_thread_id`` 记为 engine root，嵌套 spawn 同样收敛到 root）。
+        - ``sibling:<skill_id>[#n]`` / ``child:<skill_id>[#n]``：按 skill 指代对方
+          （拓扑路径寻址，见 ``peer_address``）。
         - handle_id：经句柄表解析到 child_thread_id。
         - thread_id：root 或任一已登记 spawn child。
         未知目标显式 ``ValueError``（不静默丢弃）；跨 engine 寻址天然失败于此。
         """
         drv = self._driver
         eng = drv._engine  # noqa: SLF001
-        if target == "parent":
+        if target in ROOT_ALIASES:
             return str(eng._thread_id)  # noqa: SLF001
+        if is_topology_address(target):
+            return resolve_topology_address(
+                target,
+                sender_thread_id=from_thread_id,
+                root_thread_id=str(eng._thread_id),  # noqa: SLF001
+                handles=drv._spawn_handles.handles.values(),  # noqa: SLF001
+            )
         if target == eng._thread_id:  # noqa: SLF001
             return target
         h = drv._spawn_handles.get(target)  # noqa: SLF001
@@ -180,24 +194,29 @@ class PeerMailbox:
                         # 空闲（终态）spawn child → 续跑范式唤醒；suspended 只落史。
                         woken = await self._wake_peer_turn(handle, submission_id)
 
-        await eng._emit(EventMsg(  # noqa: SLF001
-            submission_id=submission_id or sender,
-            msg=PeerMessageSent(data={
-                "from": sender,
-                "to": target_tid,
-                "mode": mode,
-                "delivered_via": delivered_via,
-                "mode_downgraded": mode_downgraded,
-                "text_len": len(text),
-                "text_preview": text[:80],
-            }),
-        ))
-        return {
+        sent: dict[str, Any] = {
+            "from": sender,
+            "to": target_tid,
+            "mode": mode,
+            "delivered_via": delivered_via,
+            "mode_downgraded": mode_downgraded,
+            "text_len": len(text),
+            "text_preview": text[:80],
+        }
+        outcome: dict[str, Any] = {
             "target_thread_id": target_tid,
             "delivered_via": delivered_via,
             "mode_downgraded": mode_downgraded,
             "woken": woken,
         }
+        if is_topology_address(target):
+            # 拓扑寻址：把发送方写的地址一并留痕，审计时能看出它是怎么找到对方的
+            sent["address"] = target
+            outcome["address"] = target
+        await eng._emit(EventMsg(  # noqa: SLF001
+            submission_id=submission_id or sender, msg=PeerMessageSent(data=sent),
+        ))
+        return outcome
 
     async def _wake_peer_turn(
         self, handle: SpawnHandle, submission_id: str | None
