@@ -115,7 +115,7 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 `Rewind.thread_id` 指向某 spawn 句柄的 `child_thread_id` 时，engine SHALL 路由到 `SpawnDriver.rewind_spawn`（`loop/spawn_rewind.py`，与 `Resume` 的 thread 寻址分流同形）：
 
 1. **节点表**：`engine.rewind_nodes_for(thread_id)` 只读暴露；子 thread 节点 SHALL 从 `_load_thread_items`（非根 thread 逻辑 history 的单一入口，已 `reconstruct_logical_history`）经 `derive_rewind_log` 派生（**禁止对 raw 直接 derive**——坐标会错位）。
-2. **活性守卫（禁状态白名单）**：拒绝按**活性**判定而非句柄状态——冷重建状态推断不产出 `error`（失败子 thread 冷启后呈现 done / running），按状态拦会挡死冷重试。放行集合 = error / done / cancelled 终态 + 中断遗留 running（不在 live 运行表）。
+2. **活性守卫（禁状态白名单）**：拒绝按**活性**判定而非句柄状态——冷重建状态推断不产出 `error`（失败子 thread 冷启后呈现 done / running），按状态拦会挡死冷重试。放行集合 = error / done / cancelled 终态 + 挂起态（见「挂起态下的 rewind」）+ 中断遗留 running（不在 live 运行表）。
 3. **截断**：守卫全部通过后（拒绝不排在并发闸后面），经 `SpawnDriver._drive` 统一驱动入口重推（ADR 0035）：占 K1 并发 slot（满额排队）→ 线程锁内落 `[rewind]` marker（`cut_index`，append 到**子 thread** store，append-only，R5）+ emit `turn_rewound` + 以逻辑 history 截断 buffer → 重建 detached 子 runner（`_build_child_runner`）；`retry_tool` + `new_args` 只改内存 buffer、store 原样。二次驱动（再次 resume / peer 唤醒）读到的逻辑 history 不含被截断的旧圈与 marker。
 4. **收敛**：重推完成经 `_finalize_spawn` 单点收敛（回写句柄 + 子 thread `spawn_settled` 锚 + emit 终态 + barrier 幂等重查——已 fired 的 barrier 不二次触发）；重推 token 在守卫通过的同步步自根取消派生并登记 spawn 取消表（重推起跑前的 kill 也能命中，R4）。
 5. **事件**：成功 emit `turn_rewound`，data **含 `thread_id`**（与根路径区分）。
@@ -126,6 +126,40 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 - **WHEN** spawn 句柄 status=="error"，对其子 thread 的 dispatch 节点提交 `Rewind(thread_id=child_tid, mode=re_reason)`
 - **THEN** 截断到该节点采样前并重推；成功后句柄落 done + `SpawnCompleted`；再失败落 error 可再次 rewind
 
+### Requirement: 挂起态下的 rewind——挂起随截断一并作废（ADR 0080）
+
+turn 处于挂起态（存在活跃挂起 record）时，`Rewind` 的语义是「不回答，回到之前重来」。根路径与 spawn 子 thread 路径同形，
+规划共用 `engine_ops.plan_rewind`，守卫为纯函数 `rewind.suspended_rewind_rejection`：
+
+- 截断把挂起 record 连同它等待的调用一起带出逻辑 history；此后 `_find_active_suspension` 返回 None，对旧请求的
+  `Resume` 得 `suspension_resolve_rejected`。不另写 resolved-marker——rewind marker 的截断已使该 record 不在逻辑
+  history 中，冷重建结果相同。
+- `turn_rewound.data.discarded_suspension` = 被作废的挂起 record id；turn 未挂起为 null。
+- `re_reason`：截到采样前，不留任何调用，同批有几个调用在等人都可以。
+- `retry_tool`：只允许对**正在等人的那个调用**做（换参后重跑，通常会重新挂起并产生新的 record）。截断后若还留着
+  其他没有结果的调用 → `rewind_rejected(sibling_calls_pending)`，不改动 history，挂起保持活跃、仍可 `Resume`。
+- 被拒的 rewind（任何原因）SHALL NOT 作废挂起。
+- spawn 子 thread：句柄 `suspended` → 重推 `running` → 终态；沿用统一驱动入口（K1 排队、取消 token、单点收敛）。
+- 嵌套挂起（根 pending 为 `CHILD_SKILL`）：根 rewind 后子 thread 上的挂起 record 物理留存但不再可达——子 thread 的
+  `Resume` 经根的活跃挂起寻址，根已无活跃挂起即被拒。
+
+#### Scenario: 不回答，回到采样前重来
+- **GIVEN** turn 因工具审批挂起
+- **WHEN** 对 `t1:it1` 提交 `Rewind(mode=re_reason)`
+- **THEN** `turn_rewound.discarded_suspension` 为该挂起的 record id，turn 重采样并走到终态
+- **AND** history 中不再有 suspension 条目与未配对的调用；被挂起的工具从未执行
+- **AND** 用旧 request id 提交 `Resume` 得 `suspension_resolve_rejected`
+
+#### Scenario: 对挂起的调用换参重跑
+- **WHEN** 对挂起调用的 dispatch 节点提交 `Rewind(mode=retry_tool, new_args=...)`
+- **THEN** 旧挂起作废；工具以新参数重新进入审批并再次挂起，产生新的 record
+- **AND** `Resume` 新 record 后工具以新参数执行一次，turn 完成
+
+#### Scenario: 同批还有调用在等人
+- **GIVEN** 一次采样发出 `p1`（已有结果）与 `d1`（等人审批）
+- **WHEN** 对 `p1` 提交 `Rewind(mode=retry_tool)`
+- **THEN** `rewind_rejected(sibling_calls_pending)`；history 不变，`p1` 未被重跑，挂起仍可 `Resume`
+
 ### Requirement: 校验失败显式拒绝（禁 silent fallback）
 
 下列情形 SHALL emit `rewind_rejected` 并**不改 history**，绝不静默 no-op：
@@ -134,7 +168,8 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 | --- | --- |
 | `unknown_node` | `node_id` 不在节点表（含被折叠 turn 的节点、冷加载未传 `initial_history` 时的空表） |
 | `mode_kind_mismatch` | 对非 dispatch 节点用 `retry_tool` |
-| `turn_suspended` | 存在活跃挂起（HITL）record —— 挂起态 rewind v1 不支持（根 / 子 thread 同形，挂起走 Resume） |
+| `turn_suspended` | 挂起态下截断后挂起 record 仍在保留范围内（节点在挂起之后，正常不出现） |
+| `sibling_calls_pending` | 挂起态下截断后仍留着没有结果的调用，且不是本次 `retry_tool` 要重跑的那一个 |
 | `unknown_thread` | `thread_id` 不属于任何 spawn 句柄的 `child_thread_id`（仅 thread 寻址路径） |
 | `thread_running` | 子 thread 热跑中（live 运行表命中）或已有 rewind 在飞（仅 thread 寻址路径） |
 
@@ -150,7 +185,7 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 
 - **R1**：`RewindCheckpoint` / `Rewind` / `reconstruct_logical_history` / `derive_rewind_log` 全通用，无业务概念；业务经 Op + `rewind_nodes()` 使用。
 - **R2**：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`reason="rewind"`），不计入 `unexpected_cache_breaks`。冷加载跨进程 cache 不可信，engine `__init__` 置 `_cache_anchor_index = -1`，derive 的 checkpoint `cache_anchor` 填 -1（纯保险，实际切点以 `self._cache_anchor_index` 为准）。
-- **R3**：`rewind_checkpoint_recorded` / `turn_rewound` / `rewind_rejected` 三事件；新增 `RewindTableRebuilt{thread_id, turn_count, node_count}`（冷重建后 emit）。
+- **R3**：`rewind_checkpoint_recorded` / `turn_rewound`（含 `drop_index` / `discarded_suspension`）/ `rewind_rejected` 三事件；新增 `RewindTableRebuilt{thread_id, turn_count, node_count}`（冷重建后 emit）。
 - **R4**：重推全程透传根 `CancellationToken`，子 skill 走 `cancel.child()`；`reconstruct` / `derive` 均为同步纯 CPU，无长操作，不需要 cancel。
 - **R5**：截断**仅内存**，store JSONL append-only（旧 items 不物理删），rewind / rollback marker 持久化 `cut_index`（additive payload 字段）；`reconstruct_logical_history` 只读 history，不写 store。冷重建依赖 `MessageStore.load_thread` 的「保序 + 完整」语义（协议红线，见「冷场景重建」Requirement）。
 
@@ -163,8 +198,7 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 - **call_skill 阻塞子链**的中间层 thread 不可寻址（生命周期附属父 turn、无独立句柄；thread 寻址只认 spawn 句柄的 `child_thread_id`）。
 - rewind 已 done 且 barrier 已 fired 的 spawn：重推得新结果但**不自动重聚合**（fired 守卫幂等）；业务要重聚合需自行再 `set_join_barrier`。
 - 多实例部署下"中断遗留 running"的活性不可见（live 运行表是单 engine 实例内闭合）；多实例互斥是业务侧部署约束。
-- 挂起态 turn 内 rewind：拒绝（`turn_suspended`）。
-- 批次内**其他调用本身没有结果**（如同批挂起）时的 `retry_tool`：受挂起态守卫约束，见上条。
+- 挂起态下对同批**已有结果**的调用做 `retry_tool`：拒绝（`sibling_calls_pending`）；需要时先 `Resume` 或改用 `re_reason`。
 - replay 模式（录后确定性重放整条 call 图）、压缩等内核动作作为节点：留待后续（见设计 §8）。
 - **冷 rewind 不还原历史 entry-skill 指令层**：若 thread 历史跨多个不同 entry skill 的 turn，冷 rewind 到旧 turn 时使用当前构造时传入的 entry skill 指令层，不还原"该旧 turn 当时"的指令——v1 范围约束，与「只 root turn 入表」同级。
 - **自定义 CompressionStrategy 孤儿 salvage note 边界**：若自定义策略 `success=True` 却 `summary_item_id=None` 并触发了 salvage note，会写出孤儿 note；`reconstruct_logical_history` 在此情形下显式校验（而非静默误配），作为系统边界记录。内置 `sliding` / `handoff` 不触发此边界。

@@ -250,6 +250,10 @@ Resume(thread_id, resolutions)
 
 挂起期间收到 `CancelTurn`（目标为挂起 turn 的 submission），`_cancel_active_suspension` SHALL 追加一条 resolved-marker 丢弃该挂起（与 resume 同机制），使其不再被 `_find_active_suspension` 返回；后续 Resume 命中 `no_active_suspension` 被拒。无匹配挂起则 no-op（保持 CancelTurn 宽容语义）。协程已退栈，不阻塞主 actor。
 
+挂起期间收到 `Rewind`：挂起随截断一并作废（不写 resolved-marker，rewind marker 的截断已使该 record 不在逻辑 history 中），
+`turn_rewound.discarded_suspension` 给出被作废的 record id；被拒的 `Rewind` 不作废挂起。见
+[turn-rewind § 挂起态下的 rewind](turn-rewind.md)。
+
 #### Scenario: 挂起中 CancelTurn → 丢弃
 - **WHEN** turn 已 end_reason=suspended，对其 submission 发 `CancelTurn`
 - **THEN** 落 resolved-marker（emit EngineLog）；之后 `Resume` 被拒为 `no_active_suspension`

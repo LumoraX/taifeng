@@ -6,8 +6,8 @@
 覆盖面:
 - Rewind.thread_id 字段(缺省 None 向后兼容)
 - rewind_nodes_for 只读入口(根 tid 等价内存表;子 tid raw → reconstruct → derive)
-- 活性守卫(unknown_thread / thread_running / turn_suspended / unknown_node;
-  禁状态白名单 —— error 终态与 stale running 均放行)
+- 活性守卫(unknown_thread / thread_running / unknown_node;
+  禁状态白名单 —— error 终态、挂起态与 stale running 均放行)
 - 截断重推(error → re_reason 重推落 done / retry_tool 换参 / 再失败可再 rewind /
   冷恢复坐标自洽 / kill_spawn 可取消重推)
 """
@@ -176,7 +176,7 @@ async def test_rewind_nodes_for_root_equals_property(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# T2 活性守卫:unknown_thread / thread_running / turn_suspended / unknown_node
+# T2 活性守卫:unknown_thread / thread_running / unknown_node
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -218,8 +218,10 @@ async def test_rewind_running_spawn_rejected(rw_skills, threads_dir) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rewind_suspended_spawn_rejected(rw_skills, threads_dir) -> None:
-    """子 thread 活跃挂起 → rewind_rejected(turn_suspended),挂起走 Resume。"""
+async def test_rewind_suspended_spawn_unknown_node_keeps_suspension(
+    rw_skills, threads_dir
+) -> None:
+    """子 thread 挂起态不再拦 rewind（ADR 0080）；但被拒的 rewind 不得作废挂起。"""
     from taifeng import SuspendByDefaultPolicy
 
     pool, _ = await _make_pool(rw_skills, threads_dir, routes={
@@ -232,9 +234,10 @@ async def test_rewind_suspended_spawn_rejected(rw_skills, threads_dir) -> None:
     assert await _wait(
         lambda: engine.spawn_status([hid])[hid]["status"] == "suspended"
     ), "SuspendByDefaultPolicy 下触顶应挂起"
-    sub_id = await engine.submit(Rewind(node_id="t1:it1", thread_id=ctid))
+    sub_id = await engine.submit(Rewind(node_id="t9:it9", thread_id=ctid))
     data = await asyncio.wait_for(_collect_rejected(engine, sub_id), timeout=GUARD_TIMEOUT_SECONDS)
-    assert data["reason"] == "turn_suspended"
+    assert data["reason"] == "unknown_node"
+    assert engine.spawn_status([hid])[hid]["status"] == "suspended"
     await pool.close()
 
 

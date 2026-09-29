@@ -1,9 +1,10 @@
 """SpawnRewindChain —— detached spawn 子 thread 的 rewind 截断重推链。
 
 职责(thread-addressable-rewind 契约实现体):
-  - 活性守卫:unknown_thread / thread_running / turn_suspended /
-    unknown_node / mode_kind_mismatch(禁状态白名单 —— error 终态与
-    中断遗留 running 均放行,见 design D4)
+  - 活性守卫:unknown_thread / thread_running / unknown_node /
+    mode_kind_mismatch(禁状态白名单 —— error 终态、中断遗留 running 与
+    挂起态均放行,见 design D4 / ADR 0080);挂起态另过
+    ``suspended_rewind_rejection``(turn_suspended / sibling_calls_pending)
   - 截断:``[rewind]`` marker(cut_index)append 到子 thread store
     (append-only 不删,R5;冷恢复经 reconstruct 重放幂等)
   - 重推:reconstruct 后的逻辑 history 截断 → ``_build_child_runner``
@@ -23,9 +24,9 @@ import logging
 from typing import TYPE_CHECKING
 
 from taifeng.conversation.models import system_injection
-from taifeng.loop.engine_ops import rewrite_call_args
+from taifeng.loop.engine_ops import plan_rewind, rewrite_call_args
 from taifeng.loop.event import EventMsg, RewindRejected, TurnRewound
-from taifeng.loop.rewind import RetryCut, derive_rewind_log, plan_retry_cut
+from taifeng.loop.rewind import derive_rewind_log
 from taifeng.loop.spawn_handle import SpawnDrivePlan
 from taifeng.loop.submission import Rewind, Submission
 
@@ -57,11 +58,12 @@ class SpawnRewindChain:
         守卫按活性判定(design D4,禁状态白名单):
           1. thread_id 不属于任何 spawn 句柄 → ``unknown_thread``;
           2. 子 runner 热跑中 / 已有 rewind 在飞 → ``thread_running``;
-          3. 子 thread 逻辑 history 有活跃挂起 → ``turn_suspended``(走 Resume);
-          4. node_id 不在节点表 → ``unknown_node``;mode/kind 不相容 →
-             ``mode_kind_mismatch``(与根路径同形)。
+          3. node_id 不在节点表 → ``unknown_node``;mode/kind 不相容 →
+             ``mode_kind_mismatch``(与根路径同形);
+          4. 子 thread 处于挂起态:挂起随截断一并作废;截断后仍留着等人的调用 →
+             ``sibling_calls_pending``(与根路径同一守卫,ADR 0080)。
 
-        放行集合:error / done / cancelled 终态、中断遗留 running(不在
+        放行集合:error / done / cancelled 终态、挂起态、中断遗留 running(不在
         _live_runners)——全部是「无并发写者」的安全态。重推失败由宽 except
         兜底落 ``_settle_failed``(不静默、不卡死)。
 
@@ -116,10 +118,8 @@ class SpawnRewindChain:
 
         # 3. 逻辑 history(_load_thread_items 已 reconstruct;禁直接 derive raw,design D3)
         logical = await eng._load_thread_items(child_tid)  # noqa: SLF001
-        # 活跃挂起守卫:挂起态 rewind 与 Resume 职责重叠,显式拒绝(对称根路径)
-        if eng._find_active_suspension_in(logical) is not None:  # noqa: SLF001
-            await self._reject(sub.id, op.node_id, "turn_suspended")
-            return
+        suspended = eng._find_active_suspension_in(logical)  # noqa: SLF001
+        discarded = suspended.record_id if suspended is not None else None
         # 4. 节点定位 + mode/kind 相容(与根路径 _handle_rewind 同形)。守卫全部
         #    在 K1 等待之前完成——拒绝必须及时,不能排在并发闸后面。
         nodes = derive_rewind_log(logical)
@@ -132,16 +132,13 @@ class SpawnRewindChain:
         ):
             await self._reject(sub.id, op.node_id, "mode_kind_mismatch")
             return
-        # retry_tool 按批次规划(保同批其他调用与结果,与根路径同一函数);其余截到采样前
-        try:
-            plan = (
-                plan_retry_cut(logical, cp)
-                if op.mode == "retry_tool"
-                else RetryCut(cut_index=cp.history_len)
-            )
-        except ValueError:
-            await self._reject(sub.id, op.node_id, "unknown_node")
+        # 规划与根路径同一函数:retry_tool 按批次(保同批其他调用与结果),其余截到采样前;
+        # 挂起态另过挂起态守卫
+        planned = plan_rewind(logical, cp, op.mode, discarded)
+        if isinstance(planned, str):
+            await self._reject(sub.id, op.node_id, planned)
             return
+        plan, kept = planned
         cut = plan.cut_index
         # 取消 token 在守卫通过的同一同步步派生并登记(先于任何 await):中断遗留
         # running 句柄在重推起跑前被 kill 也能命中(R4),不再取消到旧 token。
@@ -164,10 +161,11 @@ class SpawnRewindChain:
                 "thread_id": child_tid, "node_id": op.node_id,
                 "node_kind": cp.kind, "mode": op.mode, "cut_index": cut,
                 "drop_index": plan.drop_index,
+                "discarded_suspension": discarded,
             })))
             # 7. 截断内存 buffer;retry_tool + new_args → 改写悬空 fc(只改内存,
             #    store 原样保留 append-only;改写经 marker 留痕,与根路径同语义)
-            buffer = plan.apply(logical)
+            buffer = list(kept)
             if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
                 rewrite_call_args(buffer, cp.call_id, op.new_args)
             return SpawnDrivePlan(
@@ -184,7 +182,7 @@ class SpawnRewindChain:
         #    放行状态 = 活性守卫已放行的全部形态(终态三值 + 中断遗留 running)。
         await drv._drive(  # noqa: SLF001
             handle.handle_id, label="spawn_rewind", prepare=_prepare,
-            expect_status=("running", "done", "error", "cancelled"),
+            expect_status=("running", "done", "error", "cancelled", "suspended"),
             cancel=cancel,
         )
 

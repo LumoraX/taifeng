@@ -852,7 +852,11 @@ class TurnRewound(_Msg):
     """一次 Rewind Op 成功回退到某节点并重推时发出。
 
     data = {"node_id": str, "node_kind": str, "mode": str,
-            "cut_index": int, "cache_anchor": int}
+            "cut_index": int, "drop_index": int | None, "cache_anchor": int,
+            "discarded_suspension": str | None, "thread_id"?: str}
+    - drop_index: 并行批次 retry_tool 去掉的旧结果下标；无则 None
+    - discarded_suspension: 随截断一并作废的挂起 record id；turn 未挂起为 None
+    - cache_anchor: 仅根路径；thread_id: 仅 spawn 子 thread 路径
     """
 
     kind: Literal["turn_rewound"] = "turn_rewound"
@@ -862,7 +866,8 @@ class RewindRejected(_Msg):
     """一次 Rewind Op 校验失败被拒时发出（禁 silent fallback）。
 
     data = {"node_id": str, "reason": str}
-    reason ∈ {unknown_node, no_rewindable_turn, mode_kind_mismatch, turn_suspended}
+    reason ∈ {unknown_node, no_rewindable_turn, mode_kind_mismatch, turn_suspended,
+              sibling_calls_pending, unknown_thread, thread_running}
     """
 
     kind: Literal["rewind_rejected"] = "rewind_rejected"

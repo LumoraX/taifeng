@@ -244,6 +244,38 @@ def plan_retry_cut(history: list[ResponseItem], cp: RewindCheckpoint) -> RetryCu
     return RetryCut(cut_index=end, drop_index=output_index)
 
 
+def suspended_rewind_rejection(
+    kept: list[ResponseItem],
+    *,
+    suspension_record_id: str,
+    retried_call_id: str | None,
+) -> str | None:
+    """挂起态下的 rewind 能否进行(纯函数);可以返回 None,否则返回拒绝原因。
+
+    挂起态 rewind 的语义是「不回答、回到之前重来」:截断必须把挂起 record 连同它等待的
+    调用一起带走。两种情形不成立:
+
+    - ``turn_suspended``:截断后挂起 record 仍在保留范围内(节点在挂起之后,不应出现);
+    - ``sibling_calls_pending``:截断后还留着没有结果的调用,且不是本次要重跑的那一个。
+      典型是对同批里已有结果的调用做 retry_tool——同批等人的调用会随挂起作废而永远
+      悬空。回到采样前重来(re_reason)不留任何调用,不受此限。
+
+    Args:
+        kept: 按规划截断后的 history。
+        suspension_record_id: 当前活跃挂起的 record id。
+        retried_call_id: retry_tool 要重跑的调用;re_reason 为 None。
+    """
+    for item in kept:
+        if item.kind == "suspension" and item.payload.get("record_id") == suspension_record_id:
+            return "turn_suspended"
+    calls = {i.payload.get("call_id") for i in kept if i.kind == "function_call"}
+    outputs = {i.payload.get("call_id") for i in kept if i.kind == "function_call_output"}
+    dangling = {call_id for call_id in calls - outputs if call_id is not None}
+    if dangling - {retried_call_id}:
+        return "sibling_calls_pending"
+    return None
+
+
 def derive_rewind_log(history: list[ResponseItem]) -> list[RewindCheckpoint]:
     """从逻辑 history(reconstruct 后)推导全 turn 可寻址节点表。
 

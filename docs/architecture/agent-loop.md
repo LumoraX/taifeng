@@ -528,7 +528,7 @@ node_id 为 turn 限定格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（di
 
 ### 重推（`engine._handle_rewind`）
 
-actor 模型下提交 `Rewind` 时上一 turn 已结束（engine 空闲），故「重推」= 截断 engine history（仅内存）+ 回退 `cache_anchor` + 落 rewind marker（store，payload 含 `cut_index`；并行批次 retry_tool 另含 `drop_index`）+ emit `turn_rewound` + 建新 root TurnRunner 重跑：
+actor 模型下提交 `Rewind` 时上一 turn 已结束或已挂起（engine 空闲；挂起态下挂起随截断一并作废，ADR 0080），故「重推」= 截断 engine history（仅内存）+ 回退 `cache_anchor` + 落 rewind marker（store，payload 含 `cut_index`；并行批次 retry_tool 另含 `drop_index`）+ emit `turn_rewound` + 建新 root TurnRunner 重跑：
 
 ```
 Rewind(node_id, mode, new_args?)
