@@ -76,13 +76,20 @@ from taifeng.skill.selection import (
     TrialVerdict,
     VerifierTrialJudge,
 )
+from taifeng.skill.trust import SkillTrustPolicy, SourceTrustPolicy
 from taifeng.skill.working_set import (
     FitnessScorer,
     SkillFitnessScore,
+    TierRule,
     WilsonFitnessScorer,
     WorkingSetPlan,
     WorkingSetPolicy,
     plan_working_set,
+)
+from taifeng.skill.working_set_runtime import (
+    SkillWorkingSet,
+    WorkingSetChange,
+    WorkingSetView,
 )
 from taifeng.tool.spec import ReconcileVerdict
 
@@ -138,6 +145,13 @@ __all__ = [
     "TrialJudge",
     "TrialVerdict",
     "VerifierTrialJudge",
+    # 工作集生效与来源信任分层（skill-working-set，🧪）
+    "SkillTrustPolicy",
+    "SkillWorkingSet",
+    "SourceTrustPolicy",
+    "TierRule",
+    "WorkingSetChange",
+    "WorkingSetView",
     # 输入来源标记（input-origin，🧪）
     "InputOrigin",
     "InputTaint",

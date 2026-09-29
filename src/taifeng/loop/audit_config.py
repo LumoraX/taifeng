@@ -134,6 +134,7 @@ class AuditStaticInputs:
     failure_suspend_on_expire: Literal["abort", "retry"] = "abort"
     skill_suspension_enabled: bool = True
     skill_authorization: object | None = None
+    skill_working_set: object | None = None
 
 
 class AuditCapabilityError(ValueError):
@@ -192,6 +193,7 @@ _OBJECT_CAPABILITY_RULES = (
     ("memory_query_builder", "audit_memory_query_builder_unsupported"),
     ("failure_policy", "audit_failure_policy_unsupported"),
     ("skill_authorization", "audit_skill_authorization_unsupported"),
+    ("skill_working_set", "audit_skill_working_set_unsupported"),
 )
 
 _COLLECTION_CAPABILITY_RULES = (

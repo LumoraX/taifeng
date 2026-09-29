@@ -18,13 +18,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from taifeng.skill.fitness import SkillFitness
+    from taifeng.skill.trust import TrustTier
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,33 @@ def _wilson_lower_bound(rate: float, samples: int, z: float) -> float:
 
 
 @dataclass(frozen=True)
+class TierRule:
+    """某个来源信任层级上对通用策略的调整（ADR 0090）。
+
+    Attributes:
+        promotable: 该层级的 skill 能否被提拔进工作集。
+        promote_min_samples: 该层级提拔所需的最少成败样本数；None = 沿用通用值。
+        quarantine_min_samples: 该层级判隔离所需的最少成败样本数；None = 沿用通用值。
+        quarantine_exempt: 该层级的 skill 不被隔离（战绩再差也只是不提拔）。
+    """
+
+    promotable: bool = True
+    promote_min_samples: int | None = None
+    quarantine_min_samples: int | None = None
+    quarantine_exempt: bool = False
+
+    def __post_init__(self) -> None:
+        """构造期校验。"""
+        for name in ("promote_min_samples", "quarantine_min_samples"):
+            value = getattr(self, name)
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be at least 1, got {value!r}")
+
+
+_NEUTRAL_RULE = TierRule()
+
+
+@dataclass(frozen=True)
 class WorkingSetPolicy:
     """工作集规划的策略参数（全部由业务注入，内核不含默认业务取值以外的假设）。
 
@@ -130,6 +158,7 @@ class WorkingSetPolicy:
         promote_min_samples: 提拔所需的最少成败样本数。
         quarantine_min_samples: 判隔离所需的最少成败样本数（样本太少不下结论）。
         quarantine_max_success_rate: 成功率不高于该值、且样本数达标时隔离。
+        tier_rules: 按来源信任层级的调整；没有列出的层级、以及层级未知的 skill 用通用值。
     """
 
     budget: int
@@ -137,6 +166,13 @@ class WorkingSetPolicy:
     promote_min_samples: int = 5
     quarantine_min_samples: int = 5
     quarantine_max_success_rate: float = 0.2
+    tier_rules: Mapping[TrustTier, TierRule] = field(default_factory=dict)
+
+    def rule_for(self, tier: TrustTier | None) -> TierRule:
+        """该层级适用的调整；层级未知或未配置时为不作调整。"""
+        if tier is None:
+            return _NEUTRAL_RULE
+        return self.tier_rules.get(tier, _NEUTRAL_RULE)
 
     def __post_init__(self) -> None:
         """构造期校验（非法值显式报错）。"""
@@ -178,20 +214,25 @@ class WorkingSetPlan:
         return bool(self.promote or self.evict or self.quarantine or self.release)
 
 
-def _should_quarantine(score: SkillFitnessScore, policy: WorkingSetPolicy) -> bool:
-    """高选中、低成功：样本数达标且成功率不高于阈值。"""
+def _should_quarantine(
+    score: SkillFitnessScore, policy: WorkingSetPolicy, rule: TierRule,
+) -> bool:
+    """高选中、低成功：样本数达标且成功率不高于阈值；豁免层级不隔离。"""
+    if rule.quarantine_exempt:
+        return False
+    min_samples = rule.quarantine_min_samples or policy.quarantine_min_samples
     return (
-        score.decided_samples >= policy.quarantine_min_samples
+        score.decided_samples >= min_samples
         and score.success_rate <= policy.quarantine_max_success_rate
     )
 
 
-def _promotable(score: SkillFitnessScore, policy: WorkingSetPolicy) -> bool:
-    """样本数与战绩分都达到提拔线。"""
-    return (
-        score.decided_samples >= policy.promote_min_samples
-        and score.score >= policy.promote_min_score
-    )
+def _promotable(score: SkillFitnessScore, policy: WorkingSetPolicy, rule: TierRule) -> bool:
+    """样本数与战绩分都达到提拔线，且所在层级允许提拔。"""
+    if not rule.promotable:
+        return False
+    min_samples = rule.promote_min_samples or policy.promote_min_samples
+    return score.decided_samples >= min_samples and score.score >= policy.promote_min_score
 
 
 def plan_working_set(
@@ -200,6 +241,7 @@ def plan_working_set(
     promoted: frozenset[str],
     policy: WorkingSetPolicy,
     quarantined: frozenset[str] = frozenset(),
+    tiers: Mapping[str, TrustTier] | None = None,
 ) -> WorkingSetPlan:
     """由全部 skill 的战绩分规划工作集与隔离集。
 
@@ -212,17 +254,26 @@ def plan_working_set(
 
     同分按成败样本数多者优先，再按 skill_id 升序。
 
+    ``tiers``（skill id → 来源信任层级）给出时，每个 skill 按所在层级的 ``TierRule`` 调整
+    提拔与隔离的门槛；没有列出的 skill 层级未知，用通用值。层级只调门槛，不改战绩分。
+
     Raises:
         ValueError: ``scores`` 里同一 skill 出现多次。
     """
     ids = [score.skill_id for score in scores]
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate skill id in scores")
-    isolated = {score.skill_id for score in scores if _should_quarantine(score, policy)}
+    known = tiers or {}
+    rules = {score.skill_id: policy.rule_for(known.get(score.skill_id)) for score in scores}
+    isolated = {
+        score.skill_id for score in scores
+        if _should_quarantine(score, policy, rules[score.skill_id])
+    }
     candidates = sorted(
         (
             score for score in scores
-            if score.skill_id not in isolated and _promotable(score, policy)
+            if score.skill_id not in isolated
+            and _promotable(score, policy, rules[score.skill_id])
         ),
         key=lambda score: (-score.score, -score.decided_samples, score.skill_id),
     )
@@ -240,6 +291,7 @@ def plan_working_set(
 __all__ = [
     "FitnessScorer",
     "SkillFitnessScore",
+    "TierRule",
     "WilsonFitnessScorer",
     "WorkingSetPlan",
     "WorkingSetPolicy",

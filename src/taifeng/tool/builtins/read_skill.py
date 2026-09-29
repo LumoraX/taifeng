@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from taifeng.skill.authorization import is_discoverable_outside
+from taifeng.skill.working_set_runtime import view_from_extras
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -81,6 +82,7 @@ def _discoverable_outside(skill_id: str, snapshot: SkillSnapshot, ctx: ToolConte
     return is_discoverable_outside(
         caller, skill_id, snapshot, authorization, ctx.extras.get("capabilities"),
         on_stack=stack.path() if stack is not None else (),
+        hidden=view_from_extras(ctx.extras).hidden,
     )
 
 

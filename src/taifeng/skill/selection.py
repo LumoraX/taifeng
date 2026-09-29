@@ -38,16 +38,20 @@ SelectionRoute = Literal["proceed", "trial", "escalate"]
 ROUTE_FIELD = "route"
 """``search_skills`` 结果里每个候选承载分流结论的键。"""
 
+TRUST_TIER_FIELD = "trust_tier"
+"""``search_skills`` 结果里每个候选承载来源信任层级的键（配置了信任策略时才有）。"""
+
 SEARCH_TOOL_NAME = "search_skills"
 READ_TOOL_NAME = "read_skill"
 
 
 @dataclass(frozen=True)
 class SelectionCandidate:
-    """参与分流的一个候选：只有 id 与置信度。"""
+    """参与分流的一个候选：id、置信度，以及来源信任层级（未知为 None）。"""
 
     skill_id: str
     confidence: float
+    trust_tier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +82,7 @@ class ThresholdSelectionPolicy:
         tau_low: 置信 < 此值一律升级。
         ambiguity_margin: 置信最高的候选与另一个候选的差 < 此值时两者难分，都须先试用；
             0 = 不做并列判定。
+        trial_tiers: 这些来源信任层级的候选置信再高也须先试用（ADR 0090）；缺省为空。
 
     Raises:
         ValueError: 阈值不在 [0, 1] 内、``tau_low > tau_high``、或间距为负。
@@ -86,6 +91,7 @@ class ThresholdSelectionPolicy:
     tau_high: float = 0.75
     tau_low: float = 0.4
     ambiguity_margin: float = 0.05
+    trial_tiers: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         """构造期校验。"""
@@ -130,6 +136,9 @@ class ThresholdSelectionPolicy:
         elif candidate.skill_id in contested:
             route = "trial"
             reason = "too close to another candidate to tell apart"
+        elif candidate.trust_tier in self.trial_tiers:
+            route = "trial"
+            reason = f"source trust tier is {candidate.trust_tier}"
         else:
             route = "proceed"
             reason = f"confidence {confidence:.2f} is at least {self.tau_high:.2f}"

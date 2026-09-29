@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     )
     from taifeng.skill.authorization import SkillAuthorizationPolicy
     from taifeng.skill.definition import SkillDefinition
+    from taifeng.skill.trust import SkillTrustPolicy
+    from taifeng.skill.working_set_runtime import SkillWorkingSet
 
 
 SubagentApprovalMode = Literal["inherit", "auto_deny", "auto_allow"]
@@ -144,6 +146,16 @@ class DispatchPolicy:
 
     None（默认）= 白名单是硬边界。注入后，调用方可经 ``search_skills`` 发现白名单外的
     skill，每次派发由该策略裁决；``check`` 本身仍只做结构性判定。
+    """
+
+    trust: SkillTrustPolicy | None = None
+    """skill 来源信任分层（ADR 0090）。None（默认）= 层级未知，战绩记录的 ``trust_tier`` 为空。"""
+
+    working_set: SkillWorkingSet | None = None
+    """按战绩规划的工作集（相位 5 生效，ADR 0090）。
+
+    None（默认）= 不生效。注入后，内核把每条战绩交给它，并按它的结论提拔（召回模式下直接
+    列出）、隐藏或拒绝派发被隔离的 skill。
     """
 
     def __post_init__(self) -> None:

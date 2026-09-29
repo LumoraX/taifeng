@@ -88,7 +88,7 @@ class SkillExecutionRecord:
     parent_call_id:         str | None        # 父调用的 call_id（根层为 None）
     depth:                  int               # 调用深度（根层=0，每层 call_skill +1）
     source:                 SkillSource       # "atomic" | "composite" | "orchestration"
-    trust_tier:             str | None        # 信任层级（v1 恒 None；预留给发现相位）
+    trust_tier:             str | None        # 来源信任层级；未配置 DispatchPolicy.trust 时为 None（见 skill-working-set）
     selection_origin:       SelectionOrigin   # "whitelist"（v1 恒）| "discovered"（发现相位填）
     selection_confidence:   float | None      # 长相分（v1 恒 None；发现 / 评估相位填；禁止喂提拔）
     outcome:                OutcomeStatus     # "success" | "failure" | "abandoned"

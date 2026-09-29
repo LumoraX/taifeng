@@ -128,6 +128,7 @@ Later ADRs:
 87. [ADR 0087: 后台延迟压缩——先在后台算摘要，下一轮开始时应用](decisions/0087-background-deferred-compaction.md): 摘要类压缩发生在用户提交消息之后、模型回答之前，长会话里首字延迟多出十几秒。决策：包装策略在 history 快照上后台计算，下一次 pre_turn 核对前缀后应用；逼近硬阈值或后台失败过则同步；只在 pre_turn 起后台与应用；须为唯一策略；pool 关闭时收尾。
 88. [ADR 0088: 按选择置信度分流——低置信候选不可直接派发](decisions/0088-skill-selection-confidence-gate.md): 相位 2 只把置信度交给模型自行掂量，低置信误派发要到子 skill 跑完才暴露。决策：`proceed` / `trial` / `escalate` 三档；`search_skills` 标注 `route`，`call_skill` / `spawn_skill` 在派发处强制；`trial` 须先 `read_skill` 或试用门放行，`escalate` 本轮不可派发；判定由 history 推导；只约束本轮经召回看到的 skill；默认不启用。
 89. [ADR 0089: 白名单外 skill 的派发授权](decisions/0089-skill-authorization-outside-whitelist.md): 白名单同时是工作集和授权边界，调用方够不到作者没列出的 skill。决策：`DispatchPolicy.authorization` 注入 `SkillAuthorizationPolicy`（`discoverable` / `authorize`）；召回池并入白名单外可发现的 skill；授权只豁免白名单一层；参考实现复用权限门（范围 `skill_authorization`）；`call_skill` 获批后在续跑的 turn 内重跑（修复此前恢复时 `call_skill misconfigured`）。
+90. [ADR 0090: 按战绩规划的工作集生效，并引入 skill 来源信任分层](decisions/0090-working-set-enforcement-and-trust-tiers.md): ADR 0077 的结论只记录不生效，`trust_tier` 自 v1 起恒为空。决策：`DispatchPolicy.working_set` 注入 `SkillWorkingSet`，战绩落定后直接重算；结论在 turn 开始时取快照；召回模式下直接列出工作集里的 child；隔离作用范围 `flag` / `hide` / `block`；来源信任三层由加载目录决定，只调门槛不进战绩分，同时供分流门与授权使用。
 
 ### Fourth Pass: Gap Tracking
 

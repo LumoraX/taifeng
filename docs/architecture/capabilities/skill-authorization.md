@@ -38,6 +38,7 @@
 | --- | --- |
 | `caller_skill_id` / `target_skill_id` | 发起方与目标 |
 | `target_description` / `target_source` | 目标的描述与来源（`SkillDefinition.source`） |
+| `target_trust_tier` | 目标的来源信任层级；未配置 `DispatchPolicy.trust` 时为 `None` |
 | `origin` | 派发入口；当前只有 `"call_skill"` |
 | `reason` | 模型自陈的派发理由 |
 | `call_chain` | 调用栈，最深的在最后 |
@@ -60,8 +61,8 @@
 两者的 `discoverable` 缺省为「注册表里的 skill 都可被发现」。
 
 `PermissionSkillAuthorization` 发出的权限请求：`scope="skill_authorization"`、`target=<目标 skill id>`、
-`reason=<模型自陈理由>`，`metadata` 在业务透传内容之上含 `caller_skill_id` / `target_source` / `origin` /
-`call_id`。规则别名 `SkillAuthorization(<pattern>)`。`skill_dispatch` 的规则不作用于它。
+`reason=<模型自陈理由>`，`metadata` 在业务透传内容之上含 `caller_skill_id` / `target_source` /
+`target_trust_tier` / `origin` / `call_id`。规则别名 `SkillAuthorization(<pattern>)`。`skill_dispatch` 的规则不作用于它。
 
 ### 可发现范围
 
@@ -73,6 +74,7 @@
 | 调用栈上的 skill | 派发必然成环 |
 | entry skill | `call_skill` 不能把入口作为子调用 |
 | `exposure.model_invocable == False`、`requires` 不满足 | 与白名单内同一套可见性过滤 |
+| 按战绩被隔离且对模型隐藏（`hidden`，见 [skill-working-set](skill-working-set.md)） | 同上 |
 | `policy.discoverable` 返回 `False` | 业务收窄 |
 
 ## 行为契约

@@ -19,6 +19,8 @@ from taifeng.loop.event import (
     SkillSpawnRejected,
     SubagentPolicyOverridden,
 )
+from taifeng.loop.working_set_events import emit_working_set_changes
+from taifeng.skill.trust import tier_of
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -265,7 +267,8 @@ class TurnDispatch:
             parent_call_id=_self_frame.parent_call_id if _self_frame else None,
             depth=parent_stack.depth,
             source=target.source,
-            trust_tier=None,  # v1 留空；来源信任分层在后续相位填
+            # 来源信任层级（ADR 0090）；未配置信任策略时为 None
+            trust_tier=tier_of(self.__dispatch_owner.dispatch_policy.trust, target),
             # 经 search_skills 召回派发 → discovered + confidence；否则 v1 的 whitelist/None
             selection_origin=_selection_origin,
             selection_confidence=_selection_confidence,
@@ -316,6 +319,12 @@ class TurnDispatch:
                 skill_outcome_item(_record.as_payload(), thread_id=sub_thread_id)
             )
         await self.__dispatch_owner._emit(SkillOutcomeRecorded(data=_record.as_payload()))
+        # 相位 5 生效（ADR 0090）：战绩落定后交给工作集重算，变更逐条打事件
+        _working_set = self.__dispatch_owner.dispatch_policy.working_set
+        if _working_set is not None:
+            await emit_working_set_changes(
+                self.__dispatch_owner._emit, await _working_set.observe(_record)
+            )
 
         if outcome.success:
             return ToolResult.ok(outcome.final_text, sub_thread_id=sub_thread_id)

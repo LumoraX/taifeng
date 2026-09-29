@@ -16,6 +16,8 @@ from taifeng.skill.authorization import (
     SkillAuthorizationRequest,
     is_discoverable_outside,
 )
+from taifeng.skill.trust import tier_of
+from taifeng.skill.working_set_runtime import view_from_extras
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
@@ -71,7 +73,7 @@ async def authorize_outside_whitelist(
     """
     if not is_discoverable_outside(
         caller, target.id, snapshot, authorization, ctx.extras.get("capabilities"),
-        on_stack=stack.path(),
+        on_stack=stack.path(), hidden=view_from_extras(ctx.extras).hidden,
     ):
         return _not_in_whitelist(caller, target)
     call_chain = tuple(stack.path())
@@ -90,6 +92,9 @@ async def authorize_outside_whitelist(
         turn_index=int(ctx.extras.get("turn_index") or 0),
         metadata=dict(ctx.extras.get("request_metadata") or {}),
         permission_policy=ctx.extras.get("permission_policy"),
+        target_trust_tier=tier_of(
+            getattr(ctx.extras.get("dispatch_policy"), "trust", None), target
+        ),
     )
     decision = await authorization.authorize(request, cancel=ctx.cancel)
     await _emit(ctx, decision.granted, {

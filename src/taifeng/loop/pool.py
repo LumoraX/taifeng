@@ -510,6 +510,7 @@ class EnginePool:
             failure_suspend_max_auto_retries=self._failure_suspend_max_auto_retries,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
             skill_authorization=self._dispatch_policy.authorization,
+            skill_working_set=self._dispatch_policy.working_set,
         )
 
         self._engines: dict[str, AgentEngine] = {}

@@ -37,22 +37,25 @@
 
 | 类型 | 字段 |
 | --- | --- |
-| `SelectionCandidate` | `skill_id`、`confidence` |
+| `SelectionCandidate` | `skill_id`、`confidence`、`trust_tier`（来源信任层级，未知为 `None`） |
 | `RoutedCandidate` | `skill_id`、`confidence`、`route`、`reason`（给模型看的英文短句） |
 
 ### `SelectionConfidencePolicy`（Protocol）与 `ThresholdSelectionPolicy`
 
 `route(candidates) -> Sequence[RoutedCandidate]`；实现 SHALL 对每个候选返回一条结论、顺序不变。
 
-默认实现 `ThresholdSelectionPolicy(tau_high=0.75, tau_low=0.4, ambiguity_margin=0.05)`：
+默认实现 `ThresholdSelectionPolicy(tau_high=0.75, tau_low=0.4, ambiguity_margin=0.05, trial_tiers=frozenset())`：
 
 | 条件 | 分流 |
 | --- | --- |
 | `confidence < tau_low` | `escalate` |
 | `tau_low <= confidence < tau_high` | `trial` |
 | `confidence >= tau_high`，且与置信最高者之差 `< ambiguity_margin` 的候选不止一个 | 这些候选都为 `trial` |
+| `confidence >= tau_high`，且 `trust_tier` 在 `trial_tiers` 里 | `trial` |
 | 其余 `confidence >= tau_high` | `proceed` |
 
+- `trial_tiers` 缺省为空；候选的 `trust_tier` 取自 `DispatchPolicy.trust`（见 [skill-working-set](skill-working-set.md)），
+  未配置信任策略时为 `None`，不受 `trial_tiers` 影响。
 - 并列判定只在置信 `>= tau_high` 的候选之间进行；`ambiguity_margin=0` 关闭并列判定。
 - 阈值不在 `[0, 1]`、`tau_low > tau_high`、间距为负：构造期 `ValueError`。
 

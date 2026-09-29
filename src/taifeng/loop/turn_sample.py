@@ -151,6 +151,7 @@ class TurnSample:
         # 但只在 deferred 模式下对本 entry 暴露——inline entry（小白名单 / 显式
         # inline）不暴露搜索工具（向后兼容：原本就没有 search_skills）。判定走
         # effective_child_recall（与 system prompt 文本同一真相，保证一致）。
+        working_set = await self.__sample_owner._guards.capture_working_set()  # noqa: SLF001
         outside_discovery = self.__sample_owner._guards.outside_discovery_active()  # noqa: SLF001
         if self.__sample_owner._deferred_exposure_active() or outside_discovery:
             search_spec = self.__sample_owner.tool_runtime._registry.get(  # noqa: SLF001
@@ -194,7 +195,7 @@ class TurnSample:
             recall_threshold=self.__sample_owner.recall_threshold,
             # 是否有召回后端：无后端恒 inline（与工具裁剪同口径）
             has_recall_backend=self.__sample_owner.has_recall_backend,
-            outside_discovery=outside_discovery,
+            outside_discovery=outside_discovery, working_set=working_set,
             image_input_policy=self.__sample_owner.image_input_policy,
             model_input_capabilities=input_capabilities,
             file_input_policy=self.__sample_owner.file_input_policy,

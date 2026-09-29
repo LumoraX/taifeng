@@ -31,6 +31,7 @@ from taifeng.loop.event import DenialCircuitOpen, DoomLoopCircuitOpen, DoomLoopW
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
 from taifeng.loop.tool_output import tool_result_cap
 from taifeng.loop.turn_helpers import _latest_user_text
+from taifeng.skill.working_set_runtime import WORKING_SET_VIEW_EXTRAS_KEY
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -186,6 +187,8 @@ class TurnTooling:
                 "script_executors": self.__tooling_owner.script_executors,
                 # === detached-spawn 四工具据此拿到 engine 的 spawn API ===
                 "spawn_coordinator": self.__tooling_owner.spawn_coordinator,
+                # === 本 turn 的工作集快照：召回池 / 可发现范围与 prompt 同一份（ADR 0090）===
+                WORKING_SET_VIEW_EXTRAS_KEY: self.__tooling_owner._guards.working_set_view,  # noqa: SLF001
                 # === input-origin：当前上下文里不可信内容的汇总（ADR 0085）===
                 INPUT_TAINT_EXTRAS_KEY: summarize_taint(
                     self.__tooling_owner.history_buffer

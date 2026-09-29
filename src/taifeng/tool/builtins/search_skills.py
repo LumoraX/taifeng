@@ -29,8 +29,9 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.skill.authorization import REQUIRES_AUTHORIZATION_FIELD, discoverable_outside
 from taifeng.skill.recall import RecallEntry
-from taifeng.skill.selection import ROUTE_FIELD, SelectionCandidate
+from taifeng.skill.selection import ROUTE_FIELD, TRUST_TIER_FIELD, SelectionCandidate
 from taifeng.skill.visibility import visible_child_skills
+from taifeng.skill.working_set_runtime import view_from_extras
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -134,15 +135,29 @@ def _outside_pool(
         for item in discoverable_outside(
             caller, snapshot, authorization, capabilities,
             on_stack=stack.path() if stack is not None else (),
+            hidden=view_from_extras(ctx.extras).hidden,
         )
     ]
 
 
-def _mark_outside(payload: list[dict[str, Any]], outside_ids: frozenset[str]) -> None:
-    """给白名单外的候选标上「派发须经授权」。"""
+def _annotate(
+    ctx: ToolContext,
+    payload: list[dict[str, Any]],
+    outside_ids: frozenset[str],
+    snapshot: SkillSnapshot,
+) -> None:
+    """给候选补上内核掌握的事实：是否须经授权、来源信任层级。
+
+    两者都只在对应能力启用时出现，未启用时候选的键与此前一致。
+    """
+    trust = getattr(ctx.extras.get("dispatch_policy"), "trust", None)
     for entry in payload:
-        if entry["skill_id"] in outside_ids:
+        skill_id = entry["skill_id"]
+        if skill_id in outside_ids:
             entry[REQUIRES_AUTHORIZATION_FIELD] = True
+        definition = snapshot.get(skill_id)
+        if trust is not None and definition is not None:
+            entry[TRUST_TIER_FIELD] = trust.tier(definition)
 
 
 async def _routed_result(
@@ -160,7 +175,10 @@ async def _routed_result(
             json.dumps(payload, ensure_ascii=False), candidate_count=len(payload)
         )
     routed = policy.route([
-        SelectionCandidate(str(entry["skill_id"]), float(entry["confidence"]))
+        SelectionCandidate(
+            str(entry["skill_id"]), float(entry["confidence"]),
+            trust_tier=entry.get(TRUST_TIER_FIELD),
+        )
         for entry in payload
     ])
     routes = {item.skill_id: item for item in routed}
@@ -236,7 +254,8 @@ def _make_search_skills_handler(
         # ---- 构召回池：caller.child_skills + G4 过滤（与 inline 列表同源同过滤）----
         # 召回池**仅含 caller 的 child_skills**（更窄），不是 reachable 全集——
         # 召回是「为 LLM 选下一个 call_skill 目标」服务，目标必须在白名单内。
-        visible = visible_child_skills(caller, snapshot, capabilities)
+        hidden = view_from_extras(ctx.extras).hidden
+        visible = visible_child_skills(caller, snapshot, capabilities, hidden=hidden)
         pool = [
             RecallEntry(skill_id=v.skill_id, description=v.description)
             for v in visible
@@ -275,7 +294,7 @@ def _make_search_skills_handler(
                 }
                 for c in candidates
             ]
-            _mark_outside(payload, outside_ids)
+            _annotate(ctx, payload, outside_ids, snapshot)
             return await _routed_result(ctx, payload, selection_policy)
 
         # ---- 启用验证：召回与 verify 之间再 check 取消（R4：长链路尽早中断）----
@@ -336,7 +355,7 @@ def _make_search_skills_handler(
             }
             for v in verified
         ]
-        _mark_outside(payload, outside_ids)
+        _annotate(ctx, payload, outside_ids, snapshot)
         return await _routed_result(ctx, payload, selection_policy)
 
     return _handler

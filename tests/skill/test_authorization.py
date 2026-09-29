@@ -261,7 +261,7 @@ async def test_permission_authorization_uses_its_own_scope() -> None:
     assert (request.entry_skill_id, request.turn_index) == ("caller", 2)
     assert request.metadata == {
         "x_corr": "v-1", "caller_skill_id": "caller", "target_source": "user",
-        "origin": "call_skill", "call_id": "c1",
+        "target_trust_tier": None, "origin": "call_skill", "call_id": "c1",
     }
 
 

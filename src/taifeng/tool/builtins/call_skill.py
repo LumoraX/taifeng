@@ -190,6 +190,13 @@ async def _call_skill_handler(
             path=list(verdict.path),
         )
     assert target is not None
+    if policy.working_set is not None and policy.working_set.blocks(target.id):
+        # 按战绩被隔离且配置为拒绝派发（相位 5 生效，ADR 0090）
+        return ToolResult.error(
+            f"dispatch_rejected: skill_quarantined (path: {caller.id} → {target.id})",
+            reason="skill_quarantined",
+            path=[caller.id, target.id],
+        )
 
     # 阶段 1b：选择置信度分流门（相位 3，ADR 0088）——经发现选中的低置信 / 难分候选
     # 须先试用或升级，不得直接派发

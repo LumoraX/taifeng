@@ -458,7 +458,7 @@ class CallSkillTool:
 
 完整数据契约与场景见 `capabilities/skill-recall.md`；为何这么定见 ADR 0023（召回）+ ADR 0024（opt-in 总闸 + 验证门）。
 
-## 按战绩算分与影子评估（skill-working-set）
+## 按战绩算分、影子评估与生效（skill-working-set）
 
 每次 `call_skill` 子 skill 到达终态都会产生一条战绩（`skill_outcome_recorded`）。`SkillFitnessStore` 把它们聚合成
 每个 skill 的成败计数与成本累计；`working_set` 模块在聚合之上算分并规划工作集：
@@ -474,10 +474,24 @@ skill_outcome_recorded ──► SkillFitnessShadow（TelemetrySink，attach 到
 - **长相与战绩分离**：算分只读成败计数与成本，不读 `selection_confidence`。
 - **放弃不算失败**；没有成败样本的 skill 得 0 分；样本越少分数被压得越低。
 - **超预算逐出最低分者**，不是最早进入者；**高选中、低成功**的 skill 被隔离且不得提拔。
-- **当前只有影子模式**：`SkillFitnessShadow` 经事件流旁路挂接，prompt 组装、召回、派发路径都不持有它的引用，
+- **影子模式**：`SkillFitnessShadow` 经事件流旁路挂接，prompt 组装、召回、派发路径都不持有它的引用，
   skill 的可见性与排序不受影响。
+- **生效模式**：`DispatchPolicy(working_set=SkillWorkingSet(...), trust=...)`。子 skill 到达终态后战绩交给
+  `observe`，变更打成 `skill_promoted` / `skill_evicted` / `skill_quarantined` / `skill_released`；
+  每个 turn 首次采样前取一份结论快照，整 turn 使用：
 
-数据契约见 `capabilities/skill-working-set.md`；为何这么定见 ADR 0077。
+  ```
+  快照.promoted ──► deferred 模式的 system prompt 直接列出这些 child（免搜索）
+  快照.hidden   ──► child 列表、召回池、白名单外可发现范围都不含这些 skill
+  blocks(id)    ──► call_skill 拒绝派发（仅 quarantine_effect="block"）
+  ```
+
+- **来源信任分层**：`SkillTrustPolicy` 给出 `trusted` / `standard` / `untrusted`，默认实现
+  `SourceTrustPolicy` 按加载来源分层（`FilesystemSkillRegistry(..., sources={目录: 来源})`）。层级写进战绩记录的
+  `trust_tier`、召回候选与白名单外授权请求；`WorkingSetPolicy.tier_rules` 按层级调整提拔与隔离的门槛；
+  `ThresholdSelectionPolicy(trial_tiers=...)` 让指定层级的候选置信再高也须先试用。层级不改战绩分。
+
+数据契约见 `capabilities/skill-working-set.md`；为何这么定见 ADR 0077（算分与影子）、0090（生效与信任分层）。
 
 ## scripts 与执行器（scripts-runtime）
 

@@ -57,6 +57,10 @@ MsgKind = Literal[
     "skill_selection_gated",
     "skill_authorization_granted",
     "skill_authorization_denied",
+    "skill_promoted",
+    "skill_evicted",
+    "skill_quarantined",
+    "skill_released",
     "thread_resumed",
     "subagent_policy_overridden",
     "turn_completed",
@@ -275,6 +279,41 @@ class SkillAuthorizationDenied(_Msg):
     """相位 4 准入：一次白名单外派发被授权策略拒绝。data 同 ``SkillAuthorizationGranted``。"""
 
     kind: Literal["skill_authorization_denied"] = "skill_authorization_denied"
+
+
+class SkillPromoted(_Msg):
+    """相位 5 沉淀：skill 按战绩被提拔进工作集（skill-working-set，ADR 0090）。
+
+    data = {"skill_id": str, "score": float | None, "success_rate": float | None,
+            "decided_samples": int | None, "trust_tier": str | None,
+            "trigger_call_id": str | None}
+    - score / success_rate / decided_samples: 变更时的战绩；已无战绩记录时为 None
+    - trigger_call_id: 触发这次重算的执行；启动时重算产生的变更为 None
+    本事件不进 LLM 视图，仅供 TelemetrySink / 审计消费。
+    """
+
+    kind: Literal["skill_promoted"] = "skill_promoted"
+
+
+class SkillEvicted(_Msg):
+    """相位 5 沉淀：skill 被逐出工作集（超预算被挤掉、掉线或被隔离）。data 同 ``SkillPromoted``。"""
+
+    kind: Literal["skill_evicted"] = "skill_evicted"
+
+
+class SkillQuarantined(_Msg):
+    """相位 5 沉淀：skill 被隔离——选中得多、成功得少，描述多半过度承诺。
+
+    data 同 ``SkillPromoted``。运维据此去修或删该 skill；战绩重置或好转后自动解除。
+    """
+
+    kind: Literal["skill_quarantined"] = "skill_quarantined"
+
+
+class SkillReleased(_Msg):
+    """相位 5 沉淀：skill 解除隔离。data 同 ``SkillPromoted``。"""
+
+    kind: Literal["skill_released"] = "skill_released"
 
 
 class SkillSpawnRejected(_Msg):
@@ -1068,6 +1107,10 @@ Msg = Union[
     SkillSelectionGated,
     SkillAuthorizationGranted,
     SkillAuthorizationDenied,
+    SkillPromoted,
+    SkillEvicted,
+    SkillQuarantined,
+    SkillReleased,
     TurnSuspended,
     SuspensionResolved,
     SuspensionPartiallyResolved,

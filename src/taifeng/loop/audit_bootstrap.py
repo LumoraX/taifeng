@@ -136,6 +136,7 @@ def validate_pool_audit(
     failure_suspend_max_auto_retries: int | None,
     failure_suspend_on_expire: str,
     skill_authorization: object | None = None,
+    skill_working_set: object | None = None,
 ) -> None:
     """用 EnginePool 已解析的真实依赖构造 static gate 输入。"""
     if config is None:
@@ -163,6 +164,7 @@ def validate_pool_audit(
             failure_suspend_on_expire=failure_suspend_on_expire,  # type: ignore[arg-type]
             skill_suspension_enabled=False,
             skill_authorization=skill_authorization,
+            skill_working_set=skill_working_set,
         ),
     )
 
