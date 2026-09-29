@@ -663,7 +663,7 @@ async def test_join_barrier_concurrent_check_fires_once(skills_dir, threads_dir)
 
 @pytest.mark.asyncio
 async def test_join_barrier_fired_precedes_then_thread_output(tmp_path, threads_dir):
-    """join_barrier_fired 必须先于会诊 turn 文本，便于订阅方先建轨。"""
+    """join_barrier_fired 必须先于聚合 turn 文本，便于订阅方先建轨。"""
     skills = tmp_path / "skills"
     for sid, body in {
         "order-root": """---
@@ -672,7 +672,7 @@ description: 顺序测试根
 version: 1.0.0
 type: composite
 entry: true
-child_skills: [order-a, order-b, order-consult]
+child_skills: [order-a, order-b, order-review]
 tool_names: [spawn_skill]
 ---
 ORDER_ROOT_MARK
@@ -693,13 +693,13 @@ type: atomic
 ---
 ORDER_B_MARK
 """,
-        "order-consult": """---
-name: order-consult
-description: 顺序测试会诊
+        "order-review": """---
+name: order-review
+description: 顺序测试聚合
 version: 1.0.0
 type: atomic
 ---
-ORDER_CONSULT_MARK
+ORDER_REVIEW_MARK
 """,
     }.items():
         d = skills / sid
@@ -709,7 +709,7 @@ ORDER_CONSULT_MARK
     client = RoutingSimClient(routes={
         "ORDER_A_MARK": [SimTurn(text="结论A")],
         "ORDER_B_MARK": [SimTurn(text="结论B")],
-        "ORDER_CONSULT_MARK": [SimTurn(text="汇总:综合A+B")],
+        "ORDER_REVIEW_MARK": [SimTurn(text="汇总:综合A+B")],
     })
     pool = await taifeng.EnginePool.create(
         skills_dir=skills, threads_dir=threads_dir, model_client=client, compressors=[])
@@ -729,7 +729,7 @@ ORDER_CONSULT_MARK
     task = asyncio.create_task(watch())
     a = (await engine.spawn_skill(skill_id="order-a", args={}, reason="x"))["handle_id"]
     b = (await engine.spawn_skill(skill_id="order-b", args={}, reason="x"))["handle_id"]
-    await engine.set_join_barrier([a, b], then_skill_id="order-consult")
+    await engine.set_join_barrier([a, b], then_skill_id="order-review")
     assert await _wait(lambda: len(observed) >= 2)
 
     assert observed[0][0] == "join_barrier_fired"

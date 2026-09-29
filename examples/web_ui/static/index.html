@@ -329,7 +329,7 @@
   .ec-result { margin-top:6px; white-space:pre-wrap; }
   .ec-form .fld { margin:6px 0; }
   .ec-form textarea { width:100%; }
-  .consult-report { margin-top:8px; border-top:1px dashed var(--border); padding-top:8px; }
+  .review-report { margin-top:8px; border-top:1px dashed var(--border); padding-top:8px; }
   .cr-title { font-weight:600; }
   .cr-body { white-space:pre-wrap; }
   /* rewind 节点表（turn_rewind demo）—— 只在 wants_rewind demo 渲染 */
@@ -489,9 +489,9 @@
 <div id="expert-panel" class="expert-panel" style="display:none">
   <div class="ep-title">专家面板</div>
   <div id="expert-cards"></div>
-  <div id="consult-report" class="consult-report" style="display:none">
-    <div class="cr-title">联合会诊报告</div>
-    <div id="consult-report-body" class="cr-body"></div>
+  <div id="review-report" class="review-report" style="display:none">
+    <div class="cr-title">联合评审报告</div>
+    <div id="review-report-body" class="cr-body"></div>
   </div>
 </div>
 
@@ -547,7 +547,7 @@ let demos = {};  // demo_id → meta
 let llmInfo = { provider: null, model: null, context_window: null };
 // 专家卡注册表：handle_id → {el, skillId, formAnchor}。detached-spawn demo 用。
 let expertCards = {};
-let consultThreadId = null;
+let reviewThreadId = null;
 
 // LLM loop 状态机：从 turn_started 累计到 turn_completed/failed
 const loop = {
@@ -930,9 +930,9 @@ function routeToChat(kind, data, payload) {
 
   // ── chat 面板渲染 ──────────────────────────────────────────
   if (kind === "assistant_text" && data.delta) {
-    // 联合会诊报告 thread 的文本输出到报告区，不进主聊天气泡
-    if (consultThreadId && data.thread_id === consultThreadId) {
-      $("consult-report-body").textContent += data.delta;
+    // 联合评审报告 thread 的文本输出到报告区，不进主聊天气泡
+    if (reviewThreadId && data.thread_id === reviewThreadId) {
+      $("review-report-body").textContent += data.delta;
       return;
     }
     if (!currentAssistantBubble) {
@@ -1006,8 +1006,8 @@ function routeToChat(kind, data, payload) {
     if (c) setCardStatus(c, "error", kind === "spawn_failed" ? "失败" : "已取消");
   }
   if (kind === "join_barrier_fired") {
-    $("consult-report").style.display = "block";
-    consultThreadId = data.then_thread_id;
+    $("review-report").style.display = "block";
+    reviewThreadId = data.then_thread_id;
   }
 }
 
@@ -1143,10 +1143,10 @@ async function doRewind(nodeId, mode) {
 
 // 切 demo / 新会话时：重置专家卡与报告区
 function resetExpertPanel() {
-  expertCards = {}; consultThreadId = null;
+  expertCards = {}; reviewThreadId = null;
   $("expert-cards").innerHTML = "";
-  $("consult-report").style.display = "none";
-  $("consult-report-body").textContent = "";
+  $("review-report").style.display = "none";
+  $("review-report-body").textContent = "";
   $("expert-panel").style.display = "none";
   // rewind 节点表一并隐藏（切 demo / 新会话时清场）
   $("rewind-panel").style.display = "none";

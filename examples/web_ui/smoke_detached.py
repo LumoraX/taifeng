@@ -36,10 +36,10 @@ def _rewind_mock() -> SimClient:
         SimTurn(text="派发分析…", tool_calls=[
             {"id": "a0", "name": "call_skill", "arguments": CALL_ANALYZER}]),
         SimTurn(text="【分析】风险偏高(初版)"),
-        SimTurn(text="【综合】建议:加强监测(初版)"),
+        SimTurn(text="【综合】建议:加强监控(初版)"),
         # retry_tool 重跑 analyzer 用的后续 turns：
         SimTurn(text="【分析】风险中等(修订)"),
-        SimTurn(text="【综合】建议:常规随访(修订)"),
+        SimTurn(text="【综合】建议:按常规排期处理(修订)"),
     ])
 
 
@@ -89,23 +89,23 @@ async def smoke_multi_expert() -> None:
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
         r = await client.post("/api/chat", json={
-            "message": "我血压偏高、体重也涨了，帮我看看。",
+            "message": "我们准备上线新的订单接口，帮我从安全和性能两方面评审一下。",
             "demo_id": demo_id, "session_id": session_id})
         _check(r.status_code == 200, f"/api/chat 200（实际 {r.status_code}）")
 
         spawned = await _wait_count(sink, "spawn_started", 2)
         _check(len(spawned) >= 2, f"2× spawn_started（实际 {len(spawned)}）")
         handles = {e["data"]["skill_id"]: e["data"]["handle_id"] for e in spawned}
-        cardio_h = handles["cardio-expert"]
-        metab_h = handles["metabolic-expert"]
+        security_h = handles["security-expert"]
+        perf_h = handles["perf-expert"]
 
         # 经 engine API 登记 barrier（真 LLM 走 await_skills 工具；mock 不能回放
         # 运行时 handle_id，故此处直登记，等价于 LLM 自登记的效果）
         pool = server._pools[demo_id]
         engine = await pool.get_or_create(
             session_id=f"{demo_id}:{session_id}", entry_skill_id="orchestrator")
-        await engine.set_join_barrier([cardio_h, metab_h],
-                                      then_skill_id="joint-consult")
+        await engine.set_join_barrier([security_h, perf_h],
+                                      then_skill_id="joint-review")
 
         async def resume_expert(handle_id: str, name: str) -> None:
             susp = None
@@ -122,12 +122,12 @@ async def smoke_multi_expert() -> None:
             rr = await client.post("/api/resume", json={
                 "demo_id": demo_id, "session_id": session_id,
                 "thread_id": tid, "request_id": rid,
-                "payload": {"answer": "知道了"}})
+                "payload": {"answer": "已补充"}})
             _check(rr.status_code == 200, f"{name} /api/resume 200（{rr.status_code}）")
 
-        # 错峰：先 cardio 跑到完成，再 metabolic
-        await resume_expert(cardio_h, "cardio")
-        await resume_expert(metab_h, "metabolic")
+        # 错峰：先 security 跑到完成，再 perf
+        await resume_expert(security_h, "security")
+        await resume_expert(perf_h, "perf")
 
         done = await _wait_count(sink, "spawn_completed", 2)
         _check(len(done) >= 2, f"2× spawn_completed（实际 {len(done)}）")
@@ -146,7 +146,7 @@ async def smoke_turn_rewind() -> None:
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
         r = await client.post("/api/chat", json={
-            "message": "评估健康风险", "demo_id": demo_id, "session_id": session_id})
+            "message": "分析工单风险", "demo_id": demo_id, "session_id": session_id})
         _check(r.status_code == 200, f"turn_rewind /api/chat 200（{r.status_code}）")
 
         # 等根 turn 完成

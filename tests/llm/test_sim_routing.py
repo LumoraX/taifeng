@@ -44,7 +44,7 @@ async def test_marker_in_system_prompt_matches():
     """skill body 在 system_prompt 内 —— 标记须能命中两处。"""
     client = RoutingSimClient(routes={"EXPERT_MARKER": [SimTurn(text="hit")]})
     assert await _drain_text(
-        client, _req("普通输入", system=["专科 skill 正文 EXPERT_MARKER"])
+        client, _req("普通输入", system=["专项 skill 正文 EXPERT_MARKER"])
     ) == "hit"
 
 

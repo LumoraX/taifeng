@@ -121,9 +121,9 @@ async def test_openai_compat_uses_tool_call_id_when_index_missing() -> None:
     """Gemini 流式 tool_call 可缺 index，此时必须按 id 分组避免把多 call 拼坏。"""
 
     sse = (
-        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"ckd\\",\\"reason\\":\\"r1\\"}"}}]}}]}\n\n'
-        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_2","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"metabolic\\",\\"reason\\":\\"r2\\"}"}}]}}]}\n\n'
-        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_3","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"lung-nodule\\",\\"reason\\":\\"r3\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"security-expert\\",\\"reason\\":\\"r1\\"}"}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_2","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"perf-expert\\",\\"reason\\":\\"r2\\"}"}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_3","type":"function","function":{"name":"spawn_skill","arguments":"{\\"skill_id\\":\\"report-writer\\",\\"reason\\":\\"r3\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
         b'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}\n\n'
         b"data: [DONE]\n\n"
     )
@@ -164,9 +164,9 @@ async def test_openai_compat_uses_tool_call_id_when_index_missing() -> None:
         "call_3",
     ]
     assert [event.data["arguments"] for event in done_events] == [
-        '{"skill_id":"ckd","reason":"r1"}',
-        '{"skill_id":"metabolic","reason":"r2"}',
-        '{"skill_id":"lung-nodule","reason":"r3"}',
+        '{"skill_id":"security-expert","reason":"r1"}',
+        '{"skill_id":"perf-expert","reason":"r2"}',
+        '{"skill_id":"report-writer","reason":"r3"}',
     ]
 
 

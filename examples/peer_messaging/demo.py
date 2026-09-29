@@ -1,6 +1,6 @@
 """peer-mailbox demo —— 活体专家间点对点消息(mock,无需 key)。
 
-MDT 场景缩影:协调者 spawn 专家 → 专家完成首轮 → 协调者把新发现
+多专家评审场景缩影:协调者 spawn 专家 → 专家完成首轮 → 协调者把新发现
 ``send_message(mode=trigger_turn)`` 推给专家并唤醒其新 turn → 专家结合新信息
 产出补充结论 → 协调者 ``wait_peer`` 等到终态取结果。演示:
 
@@ -30,7 +30,7 @@ from taifeng.tool.builtins.wait_peer import make_wait_peer_tool
 
 _COORD = """---
 name: coordinator
-description: 会诊协调者
+description: 评审协调者
 version: 1.0.0
 type: composite
 entry: true
@@ -38,18 +38,18 @@ child_skills: [expert]
 tool_names: [spawn_skill, send_message, wait_peer]
 max_call_depth: 3
 ---
-# COORD_MARK 会诊协调者
+# COORD_MARK 评审协调者
 """
 
 _EXPERT = """---
 name: expert
-description: 代谢专科专家
+description: 性能评审专家
 version: 1.0.0
 type: composite
 tool_names: [send_message]
 max_call_depth: 2
 ---
-# EXPERT_MARK 代谢专科专家
+# EXPERT_MARK 性能评审专家
 """
 
 
@@ -72,14 +72,14 @@ async def main() -> None:
 
         client = RoutingSimClient(routes={
             "COORD_MARK": [
-                SimTurn(text="派出代谢专家", tool_calls=[
+                SimTurn(text="派出性能评审专家", tool_calls=[
                     {"id": "s1", "name": "spawn_skill", "arguments":
-                     '{"skill_id":"expert","reason":"会诊","args":{}}'}]),
+                     '{"skill_id":"expert","reason":"评审","args":{}}'}]),
                 SimTurn(text="专家已派出"),
             ],
             "EXPERT_MARK": [
-                SimTurn(text="初步结论:糖耐量异常,建议复查 OGTT"),
-                SimTurn(text="结合家族史修正:升级为糖尿病前期高危,建议立即干预"),
+                SimTurn(text="初步结论:接口延迟偏高,建议补一轮压测"),
+                SimTurn(text="结合压测发现修正:连接池耗尽升级为上线阻塞项,建议扩容后再发布"),
             ],
         })
         pool = await taifeng.EnginePool.create(
@@ -100,7 +100,7 @@ async def main() -> None:
         await asyncio.sleep(0)
 
         # 1. 协调者 turn:LLM 经 spawn_skill 派出专家
-        sub_id = await engine.submit(taifeng.UserMessage(text="开始会诊"))
+        sub_id = await engine.submit(taifeng.UserMessage(text="开始评审"))
         async for ev in engine.subscribe(sub_id):
             if ev.msg.kind in ("turn_completed", "turn_failed"):
                 break
@@ -114,7 +114,7 @@ async def main() -> None:
         # 2. 业务侧 SendToPeer Op:把新发现推给空闲专家并唤醒(trigger_turn)
         await engine.submit(SendToPeer(
             target_thread_id=child_tid,
-            text="补充病史:患者父母均有 2 型糖尿病",
+            text="补充发现:压测峰值下数据库连接池耗尽",
             mode="trigger_turn"))
         assert await _wait(lambda: any(
             m.kind == "peer_agent_woken" for m in events))

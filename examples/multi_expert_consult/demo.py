@@ -1,16 +1,16 @@
-"""multi_expert_consult 体验 demo —— 并发多专家 + 错峰 HITL + 联合会诊聚合（纯 SimClient）。
+"""multi_expert_consult 体验 demo —— 并发多专家 + 错峰 HITL + 联合评审聚合（纯 SimClient）。
 
-演示内核 **detached-spawn** 能力的完整闭环：
+演示内核 **detached-spawn** 能力的完整闭环（场景：多专家并行评审一份上线方案）：
 
-    用户说身体情况
+    用户提交评审请求（新订单接口上线）
       → orchestrator 一个 turn 内：
-           ├─ spawn_skill(cardio-expert)     ┐ 两个专家分离发起、各自后台 child thread
-           ├─ spawn_skill(metabolic-expert)  ┘ 立即返回句柄、不阻塞编排 turn
-           └─ await_skills([两个句柄], then=joint-consult)  登记 join-barrier
+           ├─ spawn_skill(security-expert)   ┐ 两个专家分离发起、各自后台 child thread
+           ├─ spawn_skill(perf-expert)       ┘ 立即返回句柄、不阻塞编排 turn
+           └─ await_skills([两个句柄], then=joint-review)  登记 join-barrier
       → 两个专家各自走 **错峰 HITL**：
-           cardio 先挂起 → Resume(cardio 的 child thread) → cardio 完成；
-           过一会 metabolic 才挂起 → Resume(metabolic 的 child thread) → metabolic 完成。
-      → 两个句柄全终态 → join-barrier 自动触发 → joint-consult 起聚合 turn → 最终会诊报告。
+           security 先挂起 → Resume(security 的 child thread) → security 完成；
+           过一会 perf 才挂起 → Resume(perf 的 child thread) → perf 完成。
+      → 两个句柄全终态 → join-barrier 自动触发 → joint-review 起聚合 turn → 最终联合评审报告。
 
 错峰（staggered）与 concurrent_fanout 的「同步收齐」对照：
     - concurrent_fanout：一条消息里 N 个 call_skill 同批派发、**同步阻塞**等全部回流，
@@ -51,43 +51,43 @@ SKILLS_DIR = Path(__file__).parent / "skills"
 def _routing_client() -> RoutingSimClient:
     """按各 skill body 唯一标记路由的 SimClient。
 
-    - orchestrator（ORCH_CONSULT_MARK）：一个 turn 内连发两个 spawn_skill +
-      一个 await_skills（登记 join-barrier → joint-consult），再吐收尾文本。
-    - cardio-expert（CARDIO_MARK）：turn1 调 request_user_input（挂起），
+    - orchestrator（ORCH_REVIEW_MARK）：一个 turn 内连发两个 spawn_skill +
+      一个 await_skills（登记 join-barrier → joint-review），再吐收尾文本。
+    - security-expert（SECURITY_MARK）：turn1 调 request_user_input（挂起），
       Resume 后 turn2 出结论。
-    - metabolic-expert（METABOLIC_MARK）：同上，独立节奏。
-    - joint-consult（JOINT_CONSULT_MARK）：barrier 触发后自动起，吐最终会诊报告。
+    - perf-expert（PERF_MARK）：同上，独立节奏。
+    - joint-review（JOINT_REVIEW_MARK）：barrier 触发后自动起，吐最终联合评审报告。
     """
     return RoutingSimClient(routes={
-        "ORCH_CONSULT_MARK": [
-            SimTurn(text="主诉涉及多系统，并发分离发起两个专科专家，收齐后联合会诊。",
+        "ORCH_REVIEW_MARK": [
+            SimTurn(text="评审请求涉及安全与性能两个专项，并发分离发起两个专家，收齐后联合评审。",
                      tool_calls=[
-                         {"id": "sp_cardio", "name": "spawn_skill",
-                          "arguments": '{"skill_id":"cardio-expert",'
-                                       '"reason":"评估心血管风险","args":{}}'},
-                         {"id": "sp_metab", "name": "spawn_skill",
-                          "arguments": '{"skill_id":"metabolic-expert",'
-                                       '"reason":"评估代谢风险","args":{}}'},
+                         {"id": "sp_security", "name": "spawn_skill",
+                          "arguments": '{"skill_id":"security-expert",'
+                                       '"reason":"评估安全风险","args":{}}'},
+                         {"id": "sp_perf", "name": "spawn_skill",
+                          "arguments": '{"skill_id":"perf-expert",'
+                                       '"reason":"评估性能风险","args":{}}'},
                      ]),
-            SimTurn(text="编排完成，专家在后台错峰推进，收齐自动联合会诊。"),
+            SimTurn(text="编排完成，专家在后台错峰推进，收齐自动联合评审。"),
         ],
-        "CARDIO_MARK": [
-            SimTurn(text="心血管专家向用户补问。", tool_calls=[
-                {"id": "cardio_ask", "name": "request_user_input",
-                 "arguments": '{"prompt": "近期是否有胸闷 / 血压波动？"}'},
+        "SECURITY_MARK": [
+            SimTurn(text="安全评审专家向用户补问。", tool_calls=[
+                {"id": "security_ask", "name": "request_user_input",
+                 "arguments": '{"prompt": "接口是否对外网开放、鉴权方式？"}'},
             ]),
-            SimTurn(text="心血管结论：血压偏高但无急性风险，建议低盐 + 监测。"),
+            SimTurn(text="安全结论：对外开放需补签名校验与限流，其余无高危项。"),
         ],
-        "METABOLIC_MARK": [
-            SimTurn(text="代谢专家向用户补问。", tool_calls=[
-                {"id": "metab_ask", "name": "request_user_input",
-                 "arguments": '{"prompt": "近期体重 / 血糖 / 饮食有何变化？"}'},
+        "PERF_MARK": [
+            SimTurn(text="性能评审专家向用户补问。", tool_calls=[
+                {"id": "perf_ask", "name": "request_user_input",
+                 "arguments": '{"prompt": "预估峰值 QPS 与数据量？"}'},
             ]),
-            SimTurn(text="代谢结论：空腹血糖临界，建议控糖 + 复查糖化。"),
+            SimTurn(text="性能结论：峰值下连接池余量偏紧，建议扩容 + 压测复核。"),
         ],
-        "JOINT_CONSULT_MARK": [
-            SimTurn(text="【联合会诊报告】心血管与代谢双高危：优先控糖控压，"
-                          "4 周后心内 + 内分泌联合复诊。"),
+        "JOINT_REVIEW_MARK": [
+            SimTurn(text="【联合评审报告】安全与性能各有一项待办：先补签名校验与限流，"
+                          "再扩容连接池并压测复核，通过后灰度上线。"),
         ],
     })
 
@@ -105,7 +105,7 @@ async def _drive_orchestrator(engine: taifeng.AgentEngine) -> dict[str, str]:
     """
     handles: dict[str, str] = {}
     sub_id = await engine.submit(taifeng.UserMessage(
-        text="我最近血压偏高、体重也涨了，帮我看看身体情况。"))
+        text="我们准备上线新的订单接口，帮我从安全和性能两方面评审一下。"))
     async for ev in engine.subscribe_all():
         if ev.msg.kind == "spawn_started":
             handles[ev.msg.data["skill_id"]] = ev.msg.data["handle_id"]
@@ -148,7 +148,7 @@ async def _resume_expert(
            f"（待答 request_id={req_id}）")
     # Resume 该专家的 child thread，回填问询答案
     await engine.submit(Resume(
-        thread_id=child_tid, resolutions={req_id: {"answer": "知道了，已告知"}}))
+        thread_id=child_tid, resolutions={req_id: {"answer": "已补充，见评审材料"}}))
     done = await _wait_event(events, "spawn_completed", handle_id)
     if done is None:
         raise RuntimeError(f"{name} 未在预期内完成")
@@ -156,7 +156,7 @@ async def _resume_expert(
 
 
 async def main() -> None:
-    """端到端跑一次多专家会诊：并发 spawn → 错峰 HITL → join-barrier 聚合。"""
+    """端到端跑一次多专家评审：并发 spawn → 错峰 HITL → join-barrier 聚合。"""
     with tempfile.TemporaryDirectory() as td:
         threads = Path(td) / "threads"
         client = _routing_client()
@@ -174,7 +174,7 @@ async def main() -> None:
             ],
         )
         engine = await pool.get_or_create(
-            session_id="multi-expert-consult", entry_skill_id="orchestrator")
+            session_id="multi-expert-review", entry_skill_id="orchestrator")
 
         # 全局事件时间线：单独 task 持续订阅 subscribe_all，收集关键事件
         events: list = []
@@ -194,37 +194,37 @@ async def main() -> None:
 
         print("\n=== ① 编排入口 turn：并发分离发起两个专家 ===")
         handles = await _drive_orchestrator(engine)
-        cardio_hid = handles["cardio-expert"]
-        metab_hid = handles["metabolic-expert"]
-        _print(f"[编排] spawn_started ×2 —— cardio={cardio_hid} "
-               f"metabolic={metab_hid}")
+        security_hid = handles["security-expert"]
+        perf_hid = handles["perf-expert"]
+        _print(f"[编排] spawn_started ×2 —— security={security_hid} "
+               f"perf={perf_hid}")
 
-        # 两个专家已在后台分离发起；现在登记 join-barrier（收齐 → joint-consult）。
+        # 两个专家已在后台分离发起；现在登记 join-barrier（收齐 → joint-review）。
         # （demo 直接调 engine API 登记，等价于 LLM 调 await_skills；用真实句柄。）
-        print("\n=== ② 登记 join-barrier：两专家全跑完 → 自动起联合会诊 ===")
+        print("\n=== ② 登记 join-barrier：两专家全跑完 → 自动起联合评审 ===")
         await engine.set_join_barrier(
-            [cardio_hid, metab_hid], then_skill_id="joint-consult")
+            [security_hid, perf_hid], then_skill_id="joint-review")
 
-        print("\n=== ③ 错峰 HITL：cardio 先挂起→恢复→完成；之后 metabolic 才恢复→完成 ===")
-        # 错峰：先把 cardio 推到完成，metabolic 此刻仍挂在自己的 HITL 上
-        await _resume_expert(engine, events, "cardio-expert", cardio_hid)
-        _print("…cardio 已完成；metabolic 仍在自己的 child thread 上等待问诊答复（错峰）")
-        await _resume_expert(engine, events, "metabolic-expert", metab_hid)
+        print("\n=== ③ 错峰 HITL：security 先挂起→恢复→完成；之后 perf 才恢复→完成 ===")
+        # 错峰：先把 security 推到完成，perf 此刻仍挂在自己的 HITL 上
+        await _resume_expert(engine, events, "security-expert", security_hid)
+        _print("…security 已完成；perf 仍在自己的 child thread 上等待补问答复（错峰）")
+        await _resume_expert(engine, events, "perf-expert", perf_hid)
 
-        print("\n=== ④ 两专家全终态 → join-barrier 自动触发联合会诊聚合 ===")
+        print("\n=== ④ 两专家全终态 → join-barrier 自动触发联合评审聚合 ===")
         fired = await _wait_barrier_fired(events)
         then_tid = fired.msg.data["then_thread_id"]
-        _print(f"[barrier] join_barrier_fired —— 自动起 joint-consult "
+        _print(f"[barrier] join_barrier_fired —— 自动起 joint-review "
                f"于 thread {then_tid[:8]}…")
-        report = await _read_consult_report(pool, then_tid)
-        print("\n=== ⑤ 最终联合会诊报告 ===")
+        report = await _read_review_report(pool, then_tid)
+        print("\n=== ⑤ 最终联合评审报告 ===")
         _print(report)
 
         # SimClient 瞬时完成，给后台聚合 turn 落盘时间后收尾
         await asyncio.sleep(0.3)
         await pool.close()
         watch_task.cancel()
-        print("\n🎉 multi_expert_consult：并发多专家 + 错峰 HITL + 联合会诊聚合 演示完毕")
+        print("\n🎉 multi_expert_consult：并发多专家 + 错峰 HITL + 联合评审聚合 演示完毕")
 
 
 async def _wait_barrier_fired(events: list, tries: int = 300):
@@ -237,10 +237,10 @@ async def _wait_barrier_fired(events: list, tries: int = 300):
     raise RuntimeError("join-barrier 未在预期内触发")
 
 
-async def _read_consult_report(
+async def _read_review_report(
     pool: taifeng.EnginePool, then_tid: str, tries: int = 300,
 ) -> str:
-    """从聚合 child thread 读回 joint-consult 产出的最终 assistant 文本。"""
+    """从聚合 child thread 读回 joint-review 产出的最终 assistant 文本。"""
     for _ in range(tries):
         items = [it async for it in await pool.store.load_thread(then_tid)]
         texts = [

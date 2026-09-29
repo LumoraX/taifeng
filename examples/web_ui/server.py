@@ -240,7 +240,7 @@ DEMOS: dict[str, DemoMeta] = {
         ),
         skills_dir=EXAMPLES_DIR / "form_hitl" / "skills",
         entry_skill_id="intake-coordinator",
-        sample_prompt="我来做个首诊，请帮我登记基础信息。",
+        sample_prompt="我是新入职的同事，请帮我登记基础信息。",
         # 聚焦表单 HITL，关掉 call_skill 派发的权限审批弹窗（否则噪音）
         hitl_on_skill_dispatch=False,
         # opt-in 注入 request_user_input 采集工具
@@ -459,15 +459,15 @@ DEMOS: dict[str, DemoMeta] = {
     ),
     "multi_expert_consult": DemoMeta(
         demo_id="multi_expert_consult",
-        title="🩺 多专家会诊 (并发 spawn + 错峰 HITL + 联合会诊)",
+        title="🔍 多专家评审 (并发 spawn + 错峰 HITL + 联合评审)",
         description=(
-            "orchestrator 一个 turn 内对多个专科 spawn_skill（各自 detached child "
+            "orchestrator 一个 turn 内对多个评审专家 spawn_skill（各自 detached child "
             "thread），await_skills 登记 join-barrier；各专家错峰 HITL，全终态 → "
-            "barrier 自动起 joint-consult 聚合。演示 detached-spawn 完整闭环。"
+            "barrier 自动起 joint-review 聚合。演示 detached-spawn 完整闭环。"
         ),
         skills_dir=EXAMPLES_DIR / "multi_expert_consult" / "skills",
         entry_skill_id="orchestrator",
-        sample_prompt="我最近血压偏高、体重也涨了，帮我看看身体情况。",
+        sample_prompt="我们准备上线新的订单接口，帮我从安全和性能两方面评审一下。",
         hitl_on_skill_dispatch=False,
         streams_detached=True,
         wants_spawn_tools=True,
@@ -483,7 +483,7 @@ DEMOS: dict[str, DemoMeta] = {
         ),
         skills_dir=EXAMPLES_DIR / "turn_rewind" / "skills",
         entry_skill_id="orchestrator",
-        sample_prompt="帮我评估这位患者的健康风险并给建议。",
+        sample_prompt="帮我分析这张工单的风险并给建议。",
         hitl_on_skill_dispatch=False,
         streams_detached=True,
         wants_rewind=True,
@@ -1084,7 +1084,7 @@ async def _bridge_events(
     =barrier_id / resume 事件=resume sub.id 都要转发）。退出谓词纯事件驱动：
     根 turn 终态 ∧ ``engine.has_live_spawns()`` 为假 ∧ 无未触发 barrier ∧
     无在跑 then_thread —— 保证 spawn 后台活动（含挂起待 HITL 的专家）与 join-barrier
-    触发的 joint-consult 输出都不会被提前截断。
+    触发的 joint-review 输出都不会被提前截断。
     """
     sub_key = f"{demo_id}:{session_id}"
     # detached 退出谓词的 bookkeeping

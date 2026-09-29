@@ -176,7 +176,7 @@ async def test_spawn_nested_child_skill_hitl_resume(nested_skills, threads_dir):
     # 4. Resume(spawn 子 thread, leaf 的 request_id) —— 业务侧据 SpawnSuspended.thread_id
     #    路由 + leaf turn_suspended 的 request_id 回填。命中挂起 spawn 句柄 → 嵌套续跑链。
     await engine.submit(Resume(
-        thread_id=child_tid, resolutions={req_id: {"answer": "已补充：血糖 6.3"}}))
+        thread_id=child_tid, resolutions={req_id: {"answer": "已补充：峰值 3000 QPS"}}))
 
     # 5. 续跑链应让专家跑到终态完成（子 skill 续跑 → 专家 top 续跑 → spawn_completed）
     assert await _wait(
@@ -189,7 +189,7 @@ async def test_spawn_nested_child_skill_hitl_resume(nested_skills, threads_dir):
 
 
 # 多轮嵌套错峰：composite 专家编排 2 个子 skill，**两个子 skill 各自挂起一次**（镜像真实
-# 医学专家多步流水线里多步先后 request_user_input）—— 验证嵌套续跑链支持多轮、且每轮都能
+# 评审专家多步流水线里多步先后 request_user_input）—— 验证嵌套续跑链支持多轮、且每轮都能
 # 重新挂起 / 重新 resume，专家最终跑完所有步骤。
 _EXPERT2 = """---
 name: expert2
