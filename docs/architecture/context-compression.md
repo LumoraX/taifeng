@@ -259,7 +259,29 @@ class OffloadStrategy:
 
 契约：[capabilities/compaction-offload-strategy.md](capabilities/compaction-offload-strategy.md)。
 
-> `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim / Offload 四档谱系**。
+### 5. MultimodalEvictionStrategy（多模态重载荷驱逐，A4）
+
+把**旧条目**上的图片 / 文件附件换成一行描述，文本原样保留。参照 openclaw context-pruning（旧 image part 换占位文本）
+与 codex（超限时从历史剥离图片）。
+
+```python
+class MultimodalEvictionStrategy:
+    """旧条目上的附件换成描述；文本与最近的附件不动。"""
+
+    name = "multimodal_evict"
+    priority = 25                      # surgical_trim(20) 与 offload(30) 之间
+```
+
+- **只看附件、不动文本**：`user_message` 与 `function_call_output` 都处理；条目不增不减、身份与配对不变。
+- **描述保留指称能力**：类型、大小、文件名、sha256 前 8 位——模型仍能指称「那张图 / 那份文档」，业务可据摘要取回原件。
+- **「最近」按带附件的条目计数**（`keep_recent`），一次截图带两张图是一个整体；尾部保护范围内的附件不动也不占名额。
+- **选择性触发**：有上下文压力且确有可驱逐的附件才触发，否则让位给后面的档。
+- **窗口（R2）**：常规只动 anchor 之后；`allow_head_evict=True` 且 pre_turn 时可越 anchor，如实标 `cache_invalidated`。
+- **明细透出（R3）**：`detail = {"evicted_items", "evicted_attachments", "evicted_bytes"}`。
+
+契约：[capabilities/compaction-multimodal-eviction.md](capabilities/compaction-multimodal-eviction.md)。实验层导出。
+
+> `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim / Offload / MultimodalEviction 五档谱系**。
 > 占位符前缀（`[duplicate` / `[pruned:` / `[offloaded:`）统一在 `context/placeholders.py`，被 SurgicalTrim 与 Offload 共用为幂等守卫。
 
 ### 工具图片附件的处置

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from taifeng.context.strategies import MultimodalEvictionStrategy
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.llm.file_input import FileAttachmentV1, FileInputPolicy
 from taifeng.llm.providers.replay import (
@@ -90,6 +91,8 @@ __all__ = [
     "WorkingSetPlan",
     "WorkingSetPolicy",
     "plan_working_set",
+    # 多模态重载荷驱逐（compaction-multimodal-eviction，🧪）
+    "MultimodalEvictionStrategy",
     # 用户文件（PDF）输入（llm-file-input，🧪）
     "FileAttachmentV1",
     "FileInputPolicy",

@@ -16,6 +16,9 @@ DEDUP_PREFIX = "[duplicate"
 PRUNED_PREFIX = "[pruned:"
 # offload 产物:超大结果落盘后的 stub 指针占位
 OFFLOAD_PREFIX = "[offloaded:"
+# multimodal_evict 产物:被驱逐附件的描述。它**追加在原文本之后**而非替换整段文本,
+# 故不进 is_placeholder 的识别集(带着它的文本仍是可被剪枝的正常输出)
+EVICTED_PREFIX = "[evicted:"
 
 # 所有压缩占位符前缀 —— is_placeholder 的识别集
 _ALL_PREFIXES: tuple[str, ...] = (DEDUP_PREFIX, PRUNED_PREFIX, OFFLOAD_PREFIX)

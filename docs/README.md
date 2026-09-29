@@ -120,6 +120,7 @@ Later ADRs:
 79. [ADR 0079: 并行批次里的 retry_tool 按批次截断，只重跑目标调用](decisions/0079-retry-tool-in-parallel-batch.md) (Amends #0014, #0016): 一次采样发出多个调用时 retry_tool 会截掉同批其他调用的结果（或整个调用）。决策：`plan_retry_cut` 按批次规划，保留到批次末尾、只去掉目标调用的旧结果；marker 记 `drop_index` 供冷重建重放；单调用批次行为逐位不变。
 80. [ADR 0080: 挂起态下允许 rewind，挂起随截断一并作废](decisions/0080-rewind-while-suspended.md) (Amends #0014, #0018): 挂起时 rewind 一律被拒，人想改主意只能取消整个 turn。决策：截断把挂起 record 连同等待的调用一起带出逻辑 history；守卫判定截断后是否自洽——同批还有调用等人时对已结算调用的 `retry_tool` 被拒（`sibling_calls_pending`）；被拒的 rewind 不改动状态。
 81. [ADR 0081: 压缩作为回访节点——可回到某次压缩之前](decisions/0081-compaction-as-rewind-node.md) (Amends #0014, #0016): 压缩是对 history 影响最大的内核动作却不可寻址，摘要有损时无法回头。决策：每个仍在的 `compacted` 条目是 `compaction` 节点；rewind 它 = 从 transcript 重放还原到压缩之前（去掉压缩写下的旁路项）；新增 `restore` 模式只还原不重推，`re_reason` 仅在轮到模型说话时可用；仅 root thread。
+82. [ADR 0082: 多模态重载荷驱逐——旧附件换成描述](decisions/0082-multimodal-payload-eviction.md): 用户消息上的附件没有任何压缩策略处理，带图会话在文本远未触顶时就被迫整体摘要。决策：独立策略 `MultimodalEvictionStrategy`，只看附件不动文本，用含类型 / 大小 / 文件名 / sha256 前缀的描述替换；「最近」按带附件的条目计数；无候选不触发；实验层。
 
 ### Fourth Pass: Gap Tracking
 
