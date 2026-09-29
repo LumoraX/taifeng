@@ -456,6 +456,27 @@ class CallSkillTool:
 
 完整数据契约与场景见 `capabilities/skill-recall.md`；为何这么定见 ADR 0023（召回）+ ADR 0024（opt-in 总闸 + 验证门）。
 
+## 按战绩算分与影子评估（skill-working-set）
+
+每次 `call_skill` 子 skill 到达终态都会产生一条战绩（`skill_outcome_recorded`）。`SkillFitnessStore` 把它们聚合成
+每个 skill 的成败计数与成本累计；`working_set` 模块在聚合之上算分并规划工作集：
+
+```
+skill_outcome_recorded ──► SkillFitnessShadow（TelemetrySink，attach 到 engine）
+                              ├─ store.record                      聚合（按 call_id 幂等）
+                              ├─ FitnessScorer.score × 全部 skill  Wilson 置信下界，可选成本折减
+                              ├─ plan_working_set                  提拔 / 逐出 / 隔离 / 解除（无状态重算）
+                              └─ ShadowObserver.on_evaluation      只记录「如果生效会发生什么」
+```
+
+- **长相与战绩分离**：算分只读成败计数与成本，不读 `selection_confidence`。
+- **放弃不算失败**；没有成败样本的 skill 得 0 分；样本越少分数被压得越低。
+- **超预算逐出最低分者**，不是最早进入者；**高选中、低成功**的 skill 被隔离且不得提拔。
+- **当前只有影子模式**：`SkillFitnessShadow` 经事件流旁路挂接，prompt 组装、召回、派发路径都不持有它的引用，
+  skill 的可见性与排序不受影响。
+
+数据契约见 `capabilities/skill-working-set.md`；为何这么定见 ADR 0077。
+
 ## scripts 与执行器（scripts-runtime）
 
 SKILL.md 中 `scripts:` 字段声明的脚本不是装饰品 —— 由 `run_script` 内置工具暴露给 LLM 执行（`scripts:` 非空即自动进可见集，见 `capabilities/tool-whitelist.md`）。详见 ADR 0009 / `capabilities/script-execution.md`。

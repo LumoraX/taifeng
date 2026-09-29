@@ -9,11 +9,14 @@ v1（skill-outcome-record）已在每次 ``call_skill`` 子 skill 终态时落�
   （DB / KV / 指标系统）由业务实现（ADR 0017 规则③：内核只定协议）。
 - ``SkillFitnessRecorder``：实现 ``TelemetrySink``，把 ``skill_outcome_recorded`` 事件
   还原为 ``SkillExecutionRecord`` 交给 store；像 ``JsonlSink`` 一样 ``attach(engine)``。
-- ``InMemorySkillFitnessStore``：进程内参考实现（测试 / 单进程试用）。
+- ``SkillFitnessCatalog``（Protocol）：``all_fitness`` 列出全部聚合，供按战绩算分的上层
+  （``working_set`` / ``fitness_shadow``，ADR 0077）遍历。与 ``SkillFitnessStore`` 分开定义：
+  只做写入与单点查询的存储不必实现它。
+- ``InMemorySkillFitnessStore``：进程内参考实现（测试 / 单进程试用），两个协议都实现。
 
-**只沉淀、不决策**：内核任何路径都不读 fitness，不据此改变 skill 的可见性、排序或派发
-（召回 / 提拔 / 逐出属于后续相位，另行立项）。长相与战绩分离不变量不变——
-``selection_confidence`` 不参与聚合。
+**只沉淀、不决策**：本模块不改变 skill 的可见性、排序或派发。长相与战绩分离不变量不变——
+``selection_confidence`` 不参与聚合；``discovered_selections`` 只数「经发现被选中的次数」，
+不含置信度。
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from taifeng.skill.outcome import SkillExecutionRecord
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from taifeng.loop.engine import AgentEngine
     from taifeng.loop.event import EventMsg
 
@@ -37,11 +42,21 @@ class SkillFitness:
     failures: int = 0
     abandoned: int = 0
     last_ts_unix: int = 0
+    cost_tokens_total: int = 0
+    cost_duration_ms_total: int = 0
+    cost_iterations_total: int = 0
+    discovered_selections: int = 0
+    """经发现（``selection_origin == "discovered"``）被选中的次数；只计数，不含置信度。"""
 
     @property
     def total(self) -> int:
         """已记录的终态执行次数。"""
         return self.successes + self.failures + self.abandoned
+
+    @property
+    def decided(self) -> int:
+        """分出成败的执行次数（不含放弃）。"""
+        return self.successes + self.failures
 
 
 @runtime_checkable
@@ -55,6 +70,20 @@ class SkillFitnessStore(Protocol):
     async def fitness(self, skill_id: str) -> SkillFitness | None:
         """读某 skill 的聚合；从未记录过返回 None。"""
         ...
+
+
+@runtime_checkable
+class SkillFitnessCatalog(Protocol):
+    """可遍历的战绩聚合（按战绩算分的上层需要看到全部 skill）。"""
+
+    async def all_fitness(self) -> Sequence[SkillFitness]:
+        """返回全部已记录 skill 的聚合；顺序不作约定。"""
+        ...
+
+
+@runtime_checkable
+class SkillFitnessLedger(SkillFitnessStore, SkillFitnessCatalog, Protocol):
+    """写入 + 单点查询 + 遍历：按战绩算分的上层所需的完整存储能力。"""
 
 
 @dataclass
@@ -76,11 +105,21 @@ class InMemorySkillFitnessStore:
             failures=current.failures + (record.outcome == "failure"),
             abandoned=current.abandoned + (record.outcome == "abandoned"),
             last_ts_unix=max(current.last_ts_unix, record.ts_unix),
+            cost_tokens_total=current.cost_tokens_total + record.cost_tokens,
+            cost_duration_ms_total=current.cost_duration_ms_total + record.cost_duration_ms,
+            cost_iterations_total=current.cost_iterations_total + record.cost_iterations,
+            discovered_selections=(
+                current.discovered_selections + (record.selection_origin == "discovered")
+            ),
         )
 
     async def fitness(self, skill_id: str) -> SkillFitness | None:
         """读聚合；未记录过返回 None。"""
         return self._fitness.get(skill_id)
+
+    async def all_fitness(self) -> tuple[SkillFitness, ...]:
+        """全部聚合，按 skill_id 排序。"""
+        return tuple(self._fitness[skill_id] for skill_id in sorted(self._fitness))
 
 
 class SkillFitnessRecorder:
@@ -112,6 +151,8 @@ class SkillFitnessRecorder:
 __all__ = [
     "InMemorySkillFitnessStore",
     "SkillFitness",
+    "SkillFitnessCatalog",
+    "SkillFitnessLedger",
     "SkillFitnessRecorder",
     "SkillFitnessStore",
 ]

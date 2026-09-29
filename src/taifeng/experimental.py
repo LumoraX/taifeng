@@ -33,8 +33,23 @@ from taifeng.mcp.http_client import McpHttpClient
 from taifeng.skill.fitness import (
     InMemorySkillFitnessStore,
     SkillFitness,
+    SkillFitnessCatalog,
+    SkillFitnessLedger,
     SkillFitnessRecorder,
     SkillFitnessStore,
+)
+from taifeng.skill.fitness_shadow import (
+    ShadowEvaluation,
+    ShadowObserver,
+    SkillFitnessShadow,
+)
+from taifeng.skill.working_set import (
+    FitnessScorer,
+    SkillFitnessScore,
+    WilsonFitnessScorer,
+    WorkingSetPlan,
+    WorkingSetPolicy,
+    plan_working_set,
 )
 from taifeng.tool.spec import ReconcileVerdict
 
@@ -61,8 +76,20 @@ __all__ = [
     # skill 战绩聚合（skill-fitness，🧪：只沉淀不决策）
     "InMemorySkillFitnessStore",
     "SkillFitness",
+    "SkillFitnessCatalog",
+    "SkillFitnessLedger",
     "SkillFitnessRecorder",
     "SkillFitnessStore",
+    # 按战绩算分与工作集规划 + 影子模式（skill-working-set，🧪：只算分不生效）
+    "FitnessScorer",
+    "ShadowEvaluation",
+    "ShadowObserver",
+    "SkillFitnessScore",
+    "SkillFitnessShadow",
+    "WilsonFitnessScorer",
+    "WorkingSetPlan",
+    "WorkingSetPolicy",
+    "plan_working_set",
     # 用户文件（PDF）输入（llm-file-input，🧪）
     "FileAttachmentV1",
     "FileInputPolicy",

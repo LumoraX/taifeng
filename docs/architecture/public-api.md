@@ -15,8 +15,10 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`、
 审计 resume 人裁决 `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`）、
 Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
-（`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitness`、`SkillFitnessRecorder`、
-`InMemorySkillFitnessStore`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
+（`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitnessCatalog`、`SkillFitnessLedger`、`SkillFitness`、
+`SkillFitnessRecorder`、`InMemorySkillFitnessStore`）、按战绩算分与影子评估（`FitnessScorer`、`WilsonFitnessScorer`、
+`SkillFitnessScore`、`WorkingSetPolicy`、`WorkingSetPlan`、`plan_working_set`、`SkillFitnessShadow`、
+`ShadowEvaluation`、`ShadowObserver`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
 
 ## 类型标记
 
