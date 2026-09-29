@@ -40,6 +40,11 @@ from taifeng.mcp.protocol import (
     jsonrpc_error,
     select_server_protocol_version,
 )
+from taifeng.mcp.server_capabilities import (
+    McpClientCapabilityError,
+    missing_client_capability,
+    parse_client_capabilities,
+)
 
 if TYPE_CHECKING:
     from taifeng.loop.pool import EnginePool
@@ -131,6 +136,14 @@ class McpStdioServer:
         # tools/call 以 owned task 派发（读循环不被 turn 阻塞，turn 内的
         # elicitation 才能读到 client 应答）；run() 退出时统一收敛
         self._owned_tasks: set[asyncio.Task[None]] = set()
+
+        self._client_capabilities: dict[str, Any] | None = None
+        """initialize 时客户端声明的能力；None = 尚未 initialize。server → client 请求据此门控。"""
+
+    @property
+    def client_capabilities(self) -> dict[str, Any] | None:
+        """客户端在 initialize 声明的能力（副本）；尚未 initialize 为 None。"""
+        return None if self._client_capabilities is None else dict(self._client_capabilities)
 
     # ------------------------------------------------------------------
     # Public: run loop
@@ -314,6 +327,8 @@ class McpStdioServer:
         Raises:
             TimeoutError: 等待超时
             McpServerInitiatedRequestError: client 回了 JSON-RPC error
+            McpClientCapabilityError: 该方法所需的客户端能力未在 initialize 声明——请求**未发出**
+                （规范：只能使用协商成功的能力），并已 emit ``elicitation_unsupported``
             RuntimeError: server 尚未启动（_stdout 未 bind）
             asyncio.CancelledError: cancel token 触发
         """
@@ -321,6 +336,7 @@ class McpStdioServer:
             raise RuntimeError(
                 "server_initiated_request called before run() started"
             )
+        await self._require_client_capability(method)
         self._outgoing_id_counter += 1
         req_id = f"srv_{self._outgoing_id_counter}"
 
@@ -389,6 +405,21 @@ class McpStdioServer:
                 "outcome": outcome,
             })
 
+    async def _require_client_capability(self, method: str) -> None:
+        """客户端未声明 ``method`` 所需能力 → 不发请求：emit ``elicitation_unsupported`` 后抛错。
+
+        Raises:
+            McpClientCapabilityError: 所需能力未声明（含尚未 initialize）。
+        """
+        capability = missing_client_capability(method, self._client_capabilities)
+        if capability is None:
+            return
+        initialized = self._client_capabilities is not None
+        await self._emit_event("elicitation_unsupported", {
+            "method": method, "capability": capability, "initialized": initialized})
+        raise McpClientCapabilityError(
+            method=method, capability=capability, initialized=initialized)
+
     async def _emit_event(self, kind: str, data: dict[str, Any]) -> None:
         """转发到业务侧 emit_cb；为 None 时走 logger.info。"""
         if self._emit_cb is None:
@@ -437,8 +468,10 @@ class McpStdioServer:
         """initialize handshake —— 协议版本协商 + server info 公告。
 
         版本协商按规范 lifecycle：客户端请求的版本在支持清单内则原样回，否则回最新版
-        （由客户端决定是否断开）；不以 JSON-RPC 错误拒绝版本。
+        （由客户端决定是否断开）；不以 JSON-RPC 错误拒绝版本。同时记下客户端声明的能力，
+        之后的 server → client 请求（如 ``elicitation/create``）据此门控。
         """
+        self._client_capabilities = parse_client_capabilities(params)
         return {
             "protocolVersion": select_server_protocol_version(params.get("protocolVersion")),
             "capabilities": {"tools": {}, "resources": {}},

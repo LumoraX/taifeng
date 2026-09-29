@@ -681,12 +681,18 @@ LiteLLMClient(
 | `cwd` | `None` | 子进程工作目录 |
 | **`request_timeout_seconds`** | `60.0` | 单条 JSON-RPC 请求超时；`None` = 关闭 client 层超时，完全由调用方控制。`tools/call` 途中 server 发起的 elicitation 等用户的时间也计入 |
 | **`elicitation_handler`** | `None` | 可选 `ElicitationHandler`；注入则 initialize 声明 `elicitation` 能力并处理 server 的 `elicitation/create`；`None` 不声明，server 仍发时回 `-32601`（见 §4.2） |
+| **`max_list_pages`** | `100` | `tools/list` 跟 `nextCursor` 翻页的页数上限；超限 / 游标重复 / 游标非字符串抛 `McpPaginationError`（不静默截断）；< 1 在拉起子进程前 `ValueError` |
 
 协议版本不是旋钮：客户端恒声明 `2025-06-18`，接受 `SUPPORTED_PROTOCOL_VERSIONS`（`2025-06-18` / `2025-03-26` /
 `2024-11-05`）内的协商结果，其余断开并抛 `McpProtocolVersionError`；协商结果读 `client.protocol_version`
 （[mcp-client](architecture/capabilities/mcp-client.md)）。
 
-**双层 timeout 协同**：`register_mcp_tools_async(..., timeout_seconds=N)` 在 tool 调用外层包了一层 `wait_for(..., timeout=N)`。修复前内层硬编码 60s，外层调大会被静默截断；现在 `McpStdioClient(request_timeout_seconds=N)` 与外层匹配，**或** 显式设 `None` 把唯一 timeout 责任交给外层。
+**双层 timeout 协同**：`register_mcp_tools_async(..., timeout_seconds=N)` / `bind_mcp_tools(..., timeout_seconds=N)` 在 tool 调用外层再限时 N 秒（并接 `ToolContext.cancel`）。修复前内层硬编码 60s，外层调大会被静默截断；现在 `McpStdioClient(request_timeout_seconds=N)` 与外层匹配，**或** 显式设 `None` 把唯一 timeout 责任交给外层。
+
+**放弃即通知**（不是旋钮，ADR 0069）：任一层超时、turn 取消或宿主 `task.cancel()` 放弃一个已发出的请求时，客户端向
+server 发 `notifications/cancelled{requestId, reason}`（reason 如 `client timeout after 120s` /
+`client cancelled the request (requested)`；宿主 `task.cancel("…")` 的消息即 reason），此后迟到的响应被忽略。
+`initialize` 不发；stdio 尚未写出的请求不发。
 
 ```python
 # 推荐：内外层 timeout 一致
@@ -725,7 +731,19 @@ server 打开。`register_mcp_tools_async` 同名参数语义相同。
 走工具图片附件的落盘前 admission；只开 `True` 不开策略，带图的调用以 `tool_attachment_rejected` 判错。`structuredContent` 不需要旋钮：恒进
 `ToolResult.data["structured_content"]`，文本侧缺等价 JSON 时自动补上。`register_mcp_tools_async` 同名参数语义相同。
 
-`McpHttpClient.connect` 同样接受 `elicitation_handler`（语义同 §4 表）。
+`McpHttpClient.connect` 同样接受 `elicitation_handler` / `max_list_pages`（语义同 §4 表），另有两个 HTTP 专属旋钮：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| **`max_stream_resumptions`** | `3` | POST 的 SSE 流在响应前断开时，按 `Last-Event-ID` 续传的次数上限；GET 推送流连续无事件重连的上限。`0` = 不续传 / 不重连；< 0 构造期 `ValueError` |
+| **`stream_resume_delay_seconds`** | `1.0` | 续传 / 重连的基础间隔，按次数翻倍、单次 ≤30s；server 以 SSE `retry:` 给出的间隔优先；< 0 构造期 `ValueError` |
+
+续传只在 server 给 SSE 事件带过 id 时发生；server 从未给 id、续传 GET 回 405 / 错误 / 非 SSE、次数用尽 → 该请求以
+`McpToolError` 显式失败（全部续传计入 `request_timeout_seconds`）。
+
+**outputSchema**（不是旋钮）：工具在 `tools/list` 声明了 `outputSchema` 时，桥按它校验非 `isError` 结果的
+`structuredContent`；缺失或违例 → 该次调用判错（`reason="mcp_output_schema_violation"`，`data["violations"]`），
+server 原文不交给模型；outputSchema 形状非法的工具不注册（告警）。
 
 ### 4.2 elicitation 注入口（taifeng 作为 MCP 客户端，ADR 0063）
 
@@ -805,6 +823,12 @@ async def main():
 ```
 
 **重要约束**：CLI / server 的 **stdout 是 JSON-RPC 协议流**；任何 print / log 必须走 stderr。
+
+**HITL 能力门控**（`--enable-hitl` / `McpPrompter`，不是旋钮，ADR 0069）：server 只向在 initialize 声明了
+`capabilities.elicitation` 的客户端发 `elicitation/create`。未声明（或尚未 initialize）→ 请求不发出，审批立即
+fail-closed 判 deny（`reason="elicitation_unsupported: …"`），并经 `McpStdioServer(emit=)` 发 `elicitation_unsupported`
+（`{"method", "capability", "initialized"}`；未注入 emit 时记 info 日志）。要用 MCP 审批，客户端必须声明该能力；
+`McpStdioServer.client_capabilities` 可读到客户端的声明。
 
 ### 错误码
 

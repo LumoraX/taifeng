@@ -20,7 +20,13 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from taifeng.mcp.cancellation import await_or_abandon
 from taifeng.mcp.content import McpContentError, convert_tool_result
+from taifeng.mcp.output_schema import (
+    McpOutputSchemaError,
+    parse_output_schema,
+    structured_output_violations,
+)
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -43,7 +49,7 @@ class McpClient(Protocol):
     """桥所需的最小 MCP 客户端能力（stdio / HTTP 两种传输都实现）。"""
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        """``tools/list``：返回工具元数据列表。"""
+        """``tools/list``：返回**跟完 nextCursor 分页后**的完整工具元数据列表。"""
         ...
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -75,18 +81,28 @@ def extract_text_content(result: dict[str, Any]) -> tuple[str, bool]:
     return output.text, output.is_error
 
 
-def _make_handler(client: McpClient, mcp_name: str, config: _BridgeConfig) -> Any:
-    """构造调用远端工具的 handler（闭包绑定远端工具名）。
+def _make_handler(
+    client: McpClient, mcp_name: str, config: _BridgeConfig,
+    output_schema: dict[str, Any] | None,
+) -> Any:
+    """构造调用远端工具的 handler（闭包绑定远端工具名与其 outputSchema）。
 
+    超时（``config.timeout_seconds``）→ ``mcp_timeout``；``ctx.cancel`` 取消 → 打断在飞调用后
+    抛 ``CancelledError``（运行时收敛为 cancelled）。两者都会让客户端发 ``notifications/cancelled``。
     结果投影见 ``convert_tool_result``：图片按 ``config.attach_images`` 进附件或占位；
     ``structuredContent`` 原对象进 ``data["structured_content"]``（保留 ``mcp_tool`` 键）。
-    结果形状不合法 → 该次调用判错（``reason="mcp_invalid_content"``），不静默丢内容。
+    结果形状不合法 → 该次调用判错（``reason="mcp_invalid_content"``）；工具声明了
+    outputSchema 而结构化结果不合规 → 判错（``reason="mcp_output_schema_violation"``，
+    违例清单进 ``data["violations"]``），未通过校验的内容不交给模型。
     """
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:
-            result = await asyncio.wait_for(
-                client.call_tool(mcp_name, args), timeout=config.timeout_seconds)
+            # 超时或 turn 取消（ctx.cancel）时打断在飞调用，客户端据此向 server 发
+            # notifications/cancelled；token 取消以 CancelledError 交运行时收敛为 cancelled 结果
+            result = await await_or_abandon(
+                client.call_tool(mcp_name, args),
+                timeout_seconds=config.timeout_seconds, cancel=ctx.cancel)
         except McpToolError as e:
             return ToolResult.error(f"mcp_error: {e}", reason="mcp_error", code=e.code)
         except TimeoutError:
@@ -96,6 +112,14 @@ def _make_handler(client: McpClient, mcp_name: str, config: _BridgeConfig) -> An
         except McpContentError as e:
             return ToolResult.error(
                 f"mcp_invalid_content: {e}", reason="mcp_invalid_content", mcp_tool=mcp_name)
+        if output_schema is not None:
+            violations = structured_output_violations(
+                output_schema, output.structured_content, is_error=output.is_error)
+            if violations:
+                return ToolResult.error(
+                    "mcp_output_schema_violation: " + "; ".join(violations),
+                    reason="mcp_output_schema_violation", mcp_tool=mcp_name,
+                    violations=violations)
         data: dict[str, Any] = {"mcp_tool": mcp_name}
         if output.structured_content is not None:
             data["structured_content"] = output.structured_content
@@ -149,30 +173,48 @@ def _classify_effect(meta: dict[str, Any], config: _BridgeConfig) -> tuple[str, 
     return (*_UNTRUSTED_EFFECT, config.parallel_safe)
 
 
-def _specs_from_listing(
+@dataclass(frozen=True)
+class _BoundTool:
+    """一个远端工具在本地的投影：注册用的 ToolSpec + 其声明的 outputSchema（未声明为 None）。"""
+
+    spec: ToolSpec
+    output_schema: dict[str, Any] | None
+
+
+def _tools_from_listing(
     client: McpClient, listing: list[dict[str, Any]], config: _BridgeConfig,
-) -> dict[str, ToolSpec]:
-    """把 tools/list 结果转成 {本地名: ToolSpec}；形状不对的条目跳过。"""
-    specs: dict[str, ToolSpec] = {}
+) -> dict[str, _BoundTool]:
+    """把 tools/list 结果转成 {本地名: _BoundTool}；形状不对的条目跳过。
+
+    ``outputSchema`` 形状非法的工具跳过并告警：注册它就只能二选一——不校验（静默放行
+    server 违约的结果）或每次调用必败——都不如不暴露给模型。
+    """
+    tools: dict[str, _BoundTool] = {}
     for meta in listing:
         if not isinstance(meta, dict):
             continue
         name = meta.get("name")
         if not name or not isinstance(name, str):
             continue
+        try:
+            output_schema = parse_output_schema(meta)
+        except McpOutputSchemaError as e:
+            logger.warning("mcp tool %s skipped: %s", name, e)
+            continue
         local_name = f"{config.tool_prefix}{name}"
         effect_kind, reconciliation, parallel_safe = _classify_effect(meta, config)
-        specs[local_name] = ToolSpec(
+        spec = ToolSpec(
             name=local_name,
             description=f"[MCP] {meta.get('description', '')}",
             input_schema=meta.get("inputSchema") or {"type": "object"},
-            handler=_make_handler(client, name, config),
+            handler=_make_handler(client, name, config, output_schema),
             parallel_safe=parallel_safe,
             effect_kind=effect_kind,
             reconciliation=reconciliation,
             timeout_seconds=config.timeout_seconds + 5.0,
         )
-    return specs
+        tools[local_name] = _BoundTool(spec=spec, output_schema=output_schema)
+    return tools
 
 
 @dataclass
@@ -181,53 +223,80 @@ class McpToolBinding:
 
     Attributes:
         owned: 本绑定当前在注册表里拥有的本地工具名（只增删自己的，不碰别人的工具）。
+        output_schemas: 已注册工具中声明了 outputSchema 的 {本地名: schema}（handler 按它
+            校验结构化结果；同步时 schema 变化同样触发替换）。
     """
 
     client: McpClient
     registry: ToolRegistry
     config: _BridgeConfig
     owned: set[str] = field(default_factory=set)
+    output_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
     _sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def sync(self) -> tuple[list[str], list[str], list[str]]:
-        """重新拉取工具列表并按差异更新注册表。
+        """重新拉取工具列表（跟完分页）并按差异更新注册表。
 
         Returns:
             (新增, 移除, 替换) 的本地工具名。
 
-        同名工具只在描述或 schema 变化时替换；与非本绑定的已注册工具重名时跳过并告警
-        （不抢占别人的工具）。串行化：并发的 list_changed 通知排队执行。
+        同名工具只在描述 / 入参 schema / 副作用分类 / outputSchema 变化时替换；与非本绑定的
+        已注册工具重名时跳过并告警（不抢占别人的工具）。串行化：并发的 list_changed 通知排队执行。
         """
         async with self._sync_lock:
-            desired = _specs_from_listing(
+            desired = _tools_from_listing(
                 self.client, await self.client.list_tools(), self.config)
+            removed = self._remove_absent(desired)
             added: list[str] = []
-            removed: list[str] = []
             replaced: list[str] = []
-            for name in sorted(self.owned - desired.keys()):
-                self.registry.unregister(name)
-                self.owned.discard(name)
-                removed.append(name)
-            for name, spec in desired.items():
+            for name, tool in desired.items():
                 if name in self.owned:
-                    current = self.registry.get(name)
-                    # annotations 变化（如 readOnly → 可写）同样要替换：分类决定恢复与并发语义
-                    if current is not None and (
-                        current.description != spec.description
-                        or current.input_schema != spec.input_schema
-                        or current.effect_kind != spec.effect_kind
-                        or current.parallel_safe != spec.parallel_safe
-                    ):
-                        self.registry.replace(spec)
+                    if self._differs(name, tool):
+                        self.registry.replace(tool.spec)
+                        self._remember(name, tool)
                         replaced.append(name)
                     continue
                 if name in self.registry:
                     logger.warning("mcp tool %s collides with an existing tool; skipped", name)
                     continue
-                self.registry.register(spec)
+                self.registry.register(tool.spec)
                 self.owned.add(name)
+                self._remember(name, tool)
                 added.append(name)
             return added, removed, replaced
+
+    def _remove_absent(self, desired: dict[str, _BoundTool]) -> list[str]:
+        """注销本绑定拥有、但新列表里已没有的工具；返回被移除的本地名（有序）。"""
+        removed: list[str] = []
+        for name in sorted(self.owned - desired.keys()):
+            self.registry.unregister(name)
+            self.owned.discard(name)
+            self.output_schemas.pop(name, None)
+            removed.append(name)
+        return removed
+
+    def _differs(self, name: str, tool: _BoundTool) -> bool:
+        """已注册的同名工具与新声明是否不同（任一变化都需替换 handler / spec）。"""
+        current = self.registry.get(name)
+        if current is None:
+            return False
+        spec = tool.spec
+        # annotations 变化（如 readOnly → 可写）同样要替换：分类决定恢复与并发语义；
+        # outputSchema 变化要替换：handler 闭包里的校验依据随之更新
+        return (
+            current.description != spec.description
+            or current.input_schema != spec.input_schema
+            or current.effect_kind != spec.effect_kind
+            or current.parallel_safe != spec.parallel_safe
+            or self.output_schemas.get(name) != tool.output_schema
+        )
+
+    def _remember(self, name: str, tool: _BoundTool) -> None:
+        """记下已注册工具的 outputSchema（未声明则清掉旧记录）。"""
+        if tool.output_schema is None:
+            self.output_schemas.pop(name, None)
+        else:
+            self.output_schemas[name] = tool.output_schema
 
     async def _on_list_changed(self) -> None:
         """list_changed 回调：同步失败只记日志（server 抖动不应打断宿主）。"""
@@ -243,6 +312,7 @@ class McpToolBinding:
         for name in sorted(self.owned):
             self.registry.unregister(name)
         self.owned.clear()
+        self.output_schemas.clear()
 
 
 async def bind_mcp_tools(

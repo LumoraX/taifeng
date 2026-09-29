@@ -7,6 +7,7 @@
     - 每条消息以单行 JSON 表示，stdin/stdout 行分隔
     - 双向：server 也会发带 id 的请求（``elicitation/create`` / ``ping``）与通知，
       交 ``ServerMessageRouter`` 处理，应答写回 server 的 stdin
+    - 本端请求超时 / 被取消而放弃时发 ``notifications/cancelled``（``CancelNotifier``）
 
 启动外部 server (示例)::
 
@@ -36,6 +37,8 @@ from taifeng.mcp.bridge import (
     register_mcp_tools,
     register_mcp_tools_async,
 )
+from taifeng.mcp.cancellation import CancelNotifier, cancel_reason
+from taifeng.mcp.pagination import DEFAULT_MAX_LIST_PAGES, list_all_tools, validate_max_pages
 from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
 from taifeng.mcp.server_messages import ServerMessageRouter
 
@@ -59,6 +62,7 @@ class McpStdioClient:
         *,
         request_timeout_seconds: float | None = 60.0,
         elicitation_handler: ElicitationHandler | None = None,
+        max_list_pages: int = DEFAULT_MAX_LIST_PAGES,
     ) -> None:
         """
         Args:
@@ -72,8 +76,11 @@ class McpStdioClient:
             elicitation_handler: 可选；注入则 initialize 声明 ``elicitation`` 能力，
                 server 的 ``elicitation/create`` 交它处理；不注入则不声明，server 仍发
                 时回 ``-32601``。
+            max_list_pages: ``tools/list`` 跟 ``nextCursor`` 翻页的页数上限；超限抛
+                ``McpPaginationError``（防恶意 server 无限翻页，不静默截断）。
         """
         self._proc = proc
+        self._max_list_pages = validate_max_pages(max_list_pages)
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._reader_task: asyncio.Task[None] | None = None
@@ -91,6 +98,8 @@ class McpStdioClient:
             server_info=lambda: dict(self._server_info),
             elicitation_handler=elicitation_handler,
         )
+        # 放弃本端请求时的 notifications/cancelled 后台发送器（close 时收敛）
+        self._cancels = CancelNotifier(self._write_message)
 
     @classmethod
     async def spawn(
@@ -101,6 +110,7 @@ class McpStdioClient:
         cwd: str | None = None,
         request_timeout_seconds: float | None = 60.0,
         elicitation_handler: ElicitationHandler | None = None,
+        max_list_pages: int = DEFAULT_MAX_LIST_PAGES,
     ) -> McpStdioClient:
         """fork 一个 MCP server 子进程并完成 JSON-RPC handshake。
 
@@ -108,12 +118,15 @@ class McpStdioClient:
             request_timeout_seconds: 透传到 ``McpStdioClient.__init__``；
                 ``None`` 表示无 client 层 timeout
             elicitation_handler: 透传到 ``McpStdioClient.__init__``。
+            max_list_pages: 透传到 ``McpStdioClient.__init__``。
 
         Raises:
             McpProtocolVersionError: server 回的协议版本不受支持（子进程已关闭）。
         """
         if not command:
             raise ValueError("empty command")
+        # 坏配置在拉起子进程之前拒绝（构造期再抛会留下孤儿进程）
+        validate_max_pages(max_list_pages)
         proc = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
@@ -123,7 +136,7 @@ class McpStdioClient:
             cwd=cwd,
         )
         client = cls(proc, request_timeout_seconds=request_timeout_seconds,
-                     elicitation_handler=elicitation_handler)
+                     elicitation_handler=elicitation_handler, max_list_pages=max_list_pages)
         client._reader_task = asyncio.create_task(client._reader_loop())
         try:
             await client._initialize()
@@ -153,9 +166,13 @@ class McpStdioClient:
     async def _send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """发一条带 id 的请求并等待其响应。
 
+        请求写出后因超时或被取消而放弃时，向 server 发 ``notifications/cancelled``（原因：
+        超时秒数 / 取消消息）；尚未写出就被取消的请求 server 不知其存在，不发。
+
         Raises:
             RuntimeError: 客户端已关闭 / 连接断开。
             McpToolError: JSON-RPC error 或超时（-32000）。
+            asyncio.CancelledError: 调用方取消（已登记取消通知）。
         """
         if self._closed:
             raise RuntimeError("client closed")
@@ -166,15 +183,23 @@ class McpStdioClient:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id, "method": method}
         if params is not None:
             payload["params"] = params
+        written = False
         try:
             await self._write_message(payload)
+            written = True
             if self._request_timeout is None:
                 # 无 client 层 timeout：由调用方（如 register_mcp_tools_async 的
                 # 外层 wait_for）控制；这里直接等
                 return await future
             return await asyncio.wait_for(future, timeout=self._request_timeout)
         except TimeoutError as e:
+            self._cancels.notify(
+                req_id, method, f"client timeout after {self._request_timeout:g}s")
             raise McpToolError(-32000, f"request timeout: {method}") from e
+        except asyncio.CancelledError as e:
+            if written:
+                self._cancels.notify(req_id, method, cancel_reason(e))
+            raise
         finally:
             # 超时 / 外层取消后迟到的响应按孤儿处理，不再落到已放弃的 future 上
             self._pending.pop(req_id, None)
@@ -264,12 +289,18 @@ class McpStdioClient:
         )
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        """tools/list 返回 tool 元数据列表。"""
-        result = await self._send_request("tools/list")
-        if not isinstance(result, dict):
-            return []
-        tools = result.get("tools", [])
-        return tools if isinstance(tools, list) else []
+        """``tools/list``：跟完 ``nextCursor`` 分页，返回全部工具元数据。
+
+        Raises:
+            McpPaginationError: 翻页超过 ``max_list_pages`` / 游标重复 / 游标非字符串。
+            McpToolError: 某页形状非法、JSON-RPC 错误或超时。
+        """
+        return await list_all_tools(self._list_tools_page, max_pages=self._max_list_pages)
+
+    async def _list_tools_page(self, cursor: str | None) -> Any:
+        """取一页 ``tools/list``；首页不带 ``params``（兼容不认 cursor 字段的旧 server）。"""
+        return await self._send_request(
+            "tools/list", {"cursor": cursor} if cursor is not None else None)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """tools/call 执行远端 tool。"""
@@ -296,7 +327,7 @@ class McpStdioClient:
     # ------------------------------------------------------------------
 
     async def close(self) -> None:
-        """关闭连接：先收敛 server 请求的应答任务与监听任务，再关 stdin、等子进程退出。
+        """关闭连接：先收敛 server 请求的应答 / 监听任务与未发出的取消通知，再关 stdin、等子进程退出。
 
         在等用户的 elicitation handler 在这里被取消（不再写任何响应——连接即将断开）。
         """
@@ -304,6 +335,7 @@ class McpStdioClient:
             return
         self._closed = True
         await self._router.aclose()
+        await self._cancels.aclose()
         if self._proc.stdin is not None and not self._proc.stdin.is_closing():
             try:
                 self._proc.stdin.close()

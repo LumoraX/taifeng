@@ -160,8 +160,10 @@ McpPrompter(
    - `action="reject"`（定稿前草案的动作名，兼容早期客户端）→ `PermissionDecision.deny(reason="user_rejected")`
    - `action="cancel"` → `PermissionDecision.deny(reason="user_cancelled")`
    - 其他 `action` → `PermissionDecision.deny(reason=f"elicitation_unknown_action:{action}")`
-4. `TimeoutError` 捕获 → `PermissionDecision.deny(reason="elicitation_timeout")`
-5. 任何其他异常 → `PermissionDecision.deny(reason=f"elicitation_error:{type(e).__name__}")`，并 log exception
+4. `McpClientCapabilityError`（客户端未在 initialize 声明 `elicitation` 能力，server 按规范**没有发出**请求，见
+   [mcp-server](mcp-server.md)）→ 立即 `PermissionDecision.deny(reason=f"elicitation_unsupported: {e}")`，不等超时
+5. `TimeoutError` 捕获 → `PermissionDecision.deny(reason="elicitation_timeout")`
+6. 任何其他异常 → `PermissionDecision.deny(reason=f"elicitation_error:{type(e).__name__}")`，并 log exception
 
 #### Scenario: 用户批准
 - **WHEN** McpPrompter.prompt(req) 被调用
@@ -183,6 +185,10 @@ McpPrompter(
 #### Scenario: 超时
 - **WHEN** McpPrompter 配 timeout_seconds=0.1 + mock server 不回包
 - **THEN** SHALL 返回 deny with reason `"elicitation_timeout"`
+
+#### Scenario: 客户端不支持 elicitation
+- **WHEN** MCP 客户端 initialize 时未声明 `capabilities.elicitation`
+- **THEN** SHALL 立即返回 deny，reason 以 `"elicitation_unsupported:"` 开头（写明客户端未声明该能力），且没有 `elicitation/create` 发出
 
 #### Scenario: elicitation request params 包含 message + schema
 - **WHEN** McpPrompter.prompt(req) 被调用，req=PermissionRequest(scope="shell_exec", target="ls /etc", call_chain=("A","B"))

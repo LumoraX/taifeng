@@ -28,6 +28,7 @@ from taifeng.mcp.prompter import McpPrompter
 from taifeng.mcp.server import McpStdioServer
 from taifeng.permission.types import PermissionPolicy, PermissionRequest
 from tests.conftest import GUARD_TIMEOUT_SECONDS, guard_ticks, wait_for_condition
+from tests.mcp.server_handshake import ELICITATION, negotiate
 
 
 def _make_pipe() -> tuple[asyncio.StreamReader, asyncio.StreamWriter, list[bytes]]:
@@ -67,6 +68,8 @@ async def _start_server() -> tuple[
         lambda: server._stdout is not None,
         message="server.run 未在守卫期限内 bind _stdout",
     )
+    # host 在 initialize 声明 elicitation 能力，server 才会向它发审批请求
+    await negotiate(reader, written, ELICITATION)
     return server, reader, written, task
 
 
@@ -303,6 +306,7 @@ async def test_tools_call_path_hitl_gets_client_answer_before_timeout() -> None:
         lambda: server._stdout is not None,
         message="server.run 未在守卫期限内 bind _stdout",
     )
+    await negotiate(reader, written, ELICITATION)
     try:
         call = json.dumps({
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",

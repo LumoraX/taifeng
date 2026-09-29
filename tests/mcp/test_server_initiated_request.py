@@ -21,6 +21,7 @@ from taifeng.mcp.server import (
     McpStdioServer,
 )
 from tests.conftest import GUARD_TIMEOUT_SECONDS, guard_ticks, wait_for_condition
+from tests.mcp.server_handshake import ELICITATION, negotiate
 
 # --------------------------------------------------------------------
 # Fixtures: fake bidirectional pipe（in-memory stdin / stdout）
@@ -78,6 +79,8 @@ async def _start_server() -> tuple[
         lambda: server._stdout is not None,
         message="server.run 未在守卫期限内 bind _stdout",
     )
+    # 用例以 elicitation/create 作 server 请求：客户端须先声明该能力（server 按规范门控）
+    await negotiate(reader, written, ELICITATION)
     return server, reader, written, task
 
 
