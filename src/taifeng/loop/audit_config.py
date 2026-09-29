@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         SessionOpenResult,
     )
     from taifeng.llm.client import ModelClient
-    from taifeng.loop.audit_resume_tools import AuditToolOutcomeResolver
+    from taifeng.loop.audit_resume_resolution import AuditToolOutcomeResolver
     from taifeng.skill.registry import SkillSnapshot
 
 

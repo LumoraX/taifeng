@@ -20,7 +20,8 @@ claw-code recovery recipe。决策：ADR 0045（非审计路径）、ADR 0070（
 分流原语 `RETRY_SAFE_EFFECTS` / `run_reconcile` / 回填文案 / `stable_recovery_id`）、
 `loop/pool_session.py`（resume 接线）、`tool/spec.py`（`reconcile` / `ReconcileVerdict`）、
 `suspend/reason.py` + `suspend/resolver.py`（`TOOL_OUTCOME_UNKNOWN`）；strict audit 路径见文末
-`loop/audit_resume_tools.py` + `conversation/journal/recovery_records.py`。
+`loop/audit_resume_tools.py`（识别 + 分流 + 落账记录）、`loop/audit_resume_resolution.py`（人裁决 DTO /
+resolver 类型）、`conversation/journal/recovery_records.py`（`ToolRecoveryCommittedV1`）。
 
 ## 数据契约
 

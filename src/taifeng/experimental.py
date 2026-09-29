@@ -22,7 +22,7 @@ from taifeng.llm.providers.replay import (
     recorded_calls,
 )
 from taifeng.loop.audit_config import AuditCapabilityError, AuditConfig
-from taifeng.loop.audit_resume_tools import (
+from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeRequest,
     AuditToolOutcomeResolution,
 )

@@ -38,6 +38,7 @@ from taifeng.conversation.journal.projector import (
 )
 from taifeng.loop.audit import SessionAuditCoordinator
 from taifeng.loop.audit_bootstrap import AuditedSessionState, _emergency_close
+from taifeng.loop.audit_resume_resolution import AuditToolResolutionError
 from taifeng.loop.audit_resume_scan import (
     ResumedHistory,
     find_unsettled_effects,
@@ -45,7 +46,6 @@ from taifeng.loop.audit_resume_scan import (
     root_thread_id,
 )
 from taifeng.loop.audit_resume_tools import (
-    AuditToolResolutionError,
     UnresolvedToolCall,
     needs_operator_without_lock,
     plan_audited_tool_recovery,

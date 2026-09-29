@@ -22,7 +22,7 @@ from taifeng.llm.providers.sim import SimClient, SimTurn
 from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
 from taifeng.loop.audit_config import AuditConfig
 from taifeng.loop.audit_resume import AuditResumeError
-from taifeng.loop.audit_resume_tools import (
+from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeRequest,
     AuditToolOutcomeResolution,
 )
@@ -476,26 +476,6 @@ async def test_resume_provide_for_recorded_outcome_is_invalid(tmp_path: Path) ->
     assert caught.value.code == "audit_resume_resolution_invalid"
     assert _recovery(await _load(tmp_path)) == []
     await resumed.close()
-
-
-def test_resolution_rejects_retry_and_anonymous_operator() -> None:
-    """裁决构造期校验：不支持 retry（恢复不执行工具），operator_id 必填。"""
-    with pytest.raises(ValueError, match="retry is unsupported"):
-        AuditToolOutcomeResolution(action="retry", operator_id="op")  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="operator_id"):
-        AuditToolOutcomeResolution(action="abort", operator_id="")
-
-
-def test_audit_config_rejects_non_callable_resolver(tmp_path: Path) -> None:
-    """resolver 必须可调用（构造期显式报错）。"""
-    with pytest.raises(ValueError, match="audit_tool_outcome_resolver_invalid"):
-        AuditConfig(
-            journal_core=JsonlSessionJournalCore(tmp_path / "journal"),
-            writer_id="w",
-            max_attachment_bytes=1,
-            max_total_attachment_bytes=1,
-            tool_outcome_resolver="not-callable",  # type: ignore[arg-type]
-        )
 
 
 @pytest.mark.asyncio
