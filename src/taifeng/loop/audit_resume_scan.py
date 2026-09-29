@@ -31,6 +31,7 @@ from taifeng.conversation.journal.recovery_records import (
     ToolCallUndispatchedV1,
     ToolRecoveryCommittedV1,
 )
+from taifeng.conversation.reconstruct import reconstruct_logical_history
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -203,7 +204,11 @@ def rebuild_root_history(
     envelopes: Sequence[JournalEnvelope],
     thread_id: str,
 ) -> ResumedHistory:
-    """按 Journal seq 重建 root thread 的已提交对话项与下一 turn index。"""
+    """按 Journal seq 重建 root thread 的逻辑 history 与下一 turn index。
+
+    对话项按落账顺序重放：``compacted`` 条目折叠它替代的区间（ADR 0094），得到的与崩溃前的
+    hot history 一致。
+    """
     items: list[ResponseItem] = []
     seqs: list[int] = []
     next_turn_index = 0
@@ -220,7 +225,7 @@ def rebuild_root_history(
                 # 新 Engine 的 turn index 接续已 durable 的最大值，保持单调
                 next_turn_index = max(next_turn_index, accepted.turn_index + 1)
     return ResumedHistory(
-        items=tuple(items),
+        items=tuple(reconstruct_logical_history(items)),
         first_seq=seqs[0] if seqs else None,
         last_seq=seqs[-1] if seqs else 0,
         next_turn_index=next_turn_index,

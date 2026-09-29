@@ -557,6 +557,18 @@ _sample_once 采样 → provider 抛 ContextOverflowError
 - 契约见 [`capabilities/reactive-compaction-recovery.md`](capabilities/reactive-compaction-recovery.md)。
 ```
 
+## 审计模式下的压缩（ADR 0094）
+
+审计模式只接受**折叠式**策略（类属性 `audit_support` 为 `fold` 或 `fold_model`），且只在采样之间压缩：
+
+```
+策略经 CompressionContext.model_session 调用模型 ──► 每次调用按 LLM effect 落账
+压缩成功 ──► context_compacted + conversation_item(compacted) 同批落账 ──► ack 后才改 hot history
+```
+
+原地改写条目的策略、手动压缩、溢出自愈在审计模式下不可用。预算提示同样经 Journal 落账。
+记录形状、顺序与恢复见 `capabilities/session-journal-business-integration.md` §15。
+
 ## 上下文视图（ContextEngine，ADR 0093）
 
 压缩改写 history；ContextEngine 不改 history，只决定每次采样发出去的**视图**：

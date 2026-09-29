@@ -606,16 +606,17 @@ def test_reserved_responses_metadata_is_strictly_typed(key: str, value: object) 
 
 def test_unknown_response_item_is_rejected_before_serialization() -> None:
     """契约外 kind 必须在构造 wire payload/record 前失败。"""
+    # tool_intent 是 legacy 路径的记账条目；审计模式下意图是独立的 record，不是对话项
     unknown = ResponseItem.model_construct(
-        kind="compacted",
+        kind="tool_intent",
         id="item_x",
         thread_id="thread_1",
-        payload={"summary": "x"},
+        payload={"call_id": "c1", "name": "t", "arguments": "{}"},
         created_at=datetime(2026, 7, 22, tzinfo=UTC),
         metadata={},
     )
 
-    with pytest.raises(UnsupportedConversationItemError, match="compacted"):
+    with pytest.raises(UnsupportedConversationItemError, match="tool_intent"):
         serialize_response_item(unknown, source_record_id="source_1")
 
 

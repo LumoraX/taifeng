@@ -10,13 +10,15 @@
 
 ```text
 UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
+采样之间：折叠式上下文压缩 / 预算提示（§15）
 ```
 
 SessionJournal 是执行事实和对话项的唯一可靠事实源。hot history、MessageStore 和 EventMsg 都是
 Journal durable ack 之后的内存态或可重建投影，不得领先 Journal，也不得被声明为第二事实源。
 
 未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。本阶段不支持 HITL/审批、suspend、
-compaction/rewind、memory、instruction 更新、hooks、orchestration、detached spawn、barrier、peer、
+手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
+detached spawn、barrier、peer、
 LLM attempt / submission 未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
 加密、WORM 或外置 blob。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
@@ -30,6 +32,8 @@ submission_accepted + conversation_item(user_message) + submission_applied
 llm_response_committed + conversation_item(reasoning/assistant/function_call...)
 tool_outcome_committed + conversation_item(function_call_output)
 skill_dispatch_finished + thread_terminal + conversation_item(skill_outcome)
+context_compacted + conversation_item(compacted)
+budget_hint_injected + conversation_item(system_injection)
 ```
 
 只有覆盖这些 record id 的 `JournalAck` 返回后，调用方才能：
@@ -57,6 +61,8 @@ V2。现有 Phase 1 初始化三记录是 V0 canonical vectors，保持原 bytes
 | LLM logical call | `{turn_id}:llm:{iteration}` |
 | LLM attempt | `{llm_operation_id}:attempt:{retry_ordinal}` |
 | Tool call | `{turn_id}:tool:{call_id}` |
+| 上下文压缩 | `{turn_id}:compaction:{ordinal}` |
+| 预算提示 | `{turn_id}:budget_hint:{ordinal}` |
 | Skill dispatch | `{tool_operation_id}:skill:{target_skill_id}` |
 
 除初始化 V0 外，record id 固定为：
@@ -321,7 +327,7 @@ child turn identity 包含 child thread id 和 parent submission id。unexpected
 | Session | 新建；resume（Journal 接管，§13；root 工具调用的 UNKNOWN 按 §13.1 收敛） | 已终结 Session、存在无法收敛的未结算 effect、writer 仍存活 |
 | Store | 默认 JSONL 可重建投影 | custom store/directory、IndexHook |
 | Hook/approval | 无 | hooks、permission、HITL |
-| Context | 无 compressor/memory/instruction update | compaction、rewind、memory、instruction |
+| Context | 无压缩策略，或全部策略声明 `audit_support` 为 `fold` / `fold_model`（§15） | 未声明或原地改写条目的压缩策略、ContextEngine、rewind、memory、instruction |
 | Skill | atomic/composite、同步 call_skill | orchestration、suspension |
 | Spawn/peer | 无 | detached spawn、barrier、peer |
 | LLM | attempt-observable | opaque attempt/retry |
@@ -447,3 +453,80 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
 - 获得明确外部 provider 授权后运行真实 LLM capability matrix，并在最终代码 head 刷新两份 ledger。
 
 最后一项未完成时，不得标 OpenSpec 完成、archive 或 merge。
+
+## 15. 上下文压缩与预算提示（ADR 0094）
+
+### 15.1 允许的压缩
+
+压缩策略以类属性 `audit_support` 声明对审计模式的支持；协调器里任一策略没有声明或声明了别的值，
+构造期以 `audit_compressor_unsupported` 拒绝。
+
+| `audit_support` | 含义 | 内置策略 |
+| --- | --- | --- |
+| `fold` | 折叠式、不调用模型：一段 history 被一条 `compacted` 条目替代 | `SlidingWindowStrategy` |
+| `fold_model` | 折叠式、调用模型，且只经 `CompressionContext.model_session` 调用 | `HandoffCompactionStrategy` |
+| （无） | 原地改写条目、落盘、后台执行 | `SurgicalTrimStrategy`、`MultimodalEvictionStrategy`、`OffloadStrategy`、`BackgroundCompactionStrategy` |
+
+原地改写的策略被拒的原因：改写后的条目不进 Journal，hot history 会与 Journal 不一致。
+
+压缩只在采样之间发生（`pre_turn` / `mid_turn`）。手动压缩（`CompactNow`）不在允许的 Op 之列；
+溢出自愈不启用——它要对同一次 LLM 调用重采样，而审计下每个 LLM operation 只发生一次，
+上下文溢出仍使 turn 失败。
+
+### 15.2 记录
+
+`ContextCompactedV1`（record type `context_compacted`）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `phase` | `pre_turn` / `mid_turn` |
+| `strategy` | 执行压缩的策略名 |
+| `ordinal` | 本 turn 内第几次压缩（从 0 起） |
+| `tokens_before` / `tokens_after` | 压缩前后的上下文占用估算 |
+| `replaced_range` | 被折叠的区间 `[start, end)`，坐标系是压缩前的逻辑 history |
+| `removed_item_count` | 被折叠的条目数，等于区间长度 |
+| `summary_item_id` | 同批提交的 `compacted` 对话项的 id |
+| `cache_invalidated` / `anchor_preserved_until` | 对缓存前缀的影响（R2） |
+| `quality_warnings` / `detail` | 摘要质量警告、策略自报的计数 |
+| `llm_request_record_ids` | 为这次压缩发起的 LLM 调用的 request record id，按发起顺序 |
+
+`BudgetHintInjectedV1`（record type `budget_hint_injected`）：`used_tokens`、`context_window`、`soft_limit`、
+`hard_limit`、`item_id`。
+
+对话项新增两种 kind：`compacted`（`summary`、`replaced_range`、`cache_invalidated`）与
+`system_injection`（`text`、`source`，`source` 只允许 `budget_hint`——截断类 marker 会改写 history，不落账）。
+摘要条目的 metadata 带压缩后的占用估算（压缩增量基线）与继承的来源标记。
+
+### 15.3 顺序
+
+```text
+压缩策略经 model_session 发起的每次调用：
+    llm_request_committed → dispatch → llm_response_checkpoint
+策略返回后：
+    每次已收敛的调用各补一条 llm_response_committed（无对话项；调用失败也补）
+压缩成功：
+    context_compacted + conversation_item(compacted)   一个 batch
+    ack → 投影 → 改 hot history、缓存锚点、校准锚点
+```
+
+- 压缩发起的 LLM 调用各是独立的 logical LLM operation，`iteration` 从 1 000 000 起编号。
+- 压缩未成功（策略返回失败、摘要质量不过、产物引入悬空调用）时不写 `context_compacted`，history 不变；
+  已发起的 LLM 调用照样落账。
+- 策略声明了折叠式却没有给出 `compacted` 摘要条目：不应用，`compaction_completed.reason` 为
+  `audit_requires_summary_item`。
+- 任一 Journal 写入不确定按 §4 冻结 Session。
+
+### 15.4 hot history 与恢复
+
+- runner 记下本轮被折叠的条目 id；turn 结束回写 engine history 时这些条目不并回，
+  其余条目仍按完整身份核对，不一致以 `audit_history_item_conflict` 冻结。
+- 投影按 Journal seq 追加对话项，`compacted` 条目排在它替代的条目之后；读取方按标记重放得到逻辑 history。
+- resume 重建 root history 时同样按标记重放，得到的与崩溃前的 hot history 一致。
+
+### 15.5 验收
+
+折叠式策略放行、改写式与未声明的策略拒绝；压缩结论与摘要条目同批且相邻；hot history、投影、
+Journal 重放三者一致；strict verify 通过；resume 后 history 与崩溃前一致且续跑看到折叠后的上下文；
+不同 turn 的压缩各有独立 identity；摘要调用的 request / checkpoint / response 齐全且先于压缩结论；
+摘要失败时调用照样落账而 history 不变；预算提示与它的 record 同批；记录与对话项的形状校验；
+被折叠的条目不并回、期间应用的输入保留、冲突仍被检出。

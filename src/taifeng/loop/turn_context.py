@@ -18,6 +18,8 @@ from taifeng.context.budget import (
 )
 from taifeng.context.budget_hint import evaluate_budget_hint, render_budget_hint
 from taifeng.context.pinned_state import pinned_injection_source, turns_since_injection
+from taifeng.conversation.journal.context_records import BudgetHintInjectedV1
+from taifeng.loop.audit_compaction import commit_audited_budget_hint
 from taifeng.loop.event import BudgetHintInjected, EngineLog, PinnedStateReinjected
 from taifeng.loop.turn_helpers import _latest_user_text
 from taifeng.loop.turn_view import TurnContextView
@@ -41,6 +43,8 @@ class TurnContextLoad:
         self.__ctxload_owner = owner
         # 上下文视图（ADR 0093）：未注入 ContextEngine 时不起作用
         self.view = TurnContextView(owner)
+        # 审计模式下本 turn 已落账的预算提示数（ADR 0094）
+        self._audit_budget_hints = 0
 
     async def prefetch_memory(self) -> None:
         """K3 page-in：按最近用户消息 prefetch 长期记忆 → ``_prefetched_memory``。
@@ -205,6 +209,30 @@ class TurnContextLoad:
             "phase": phase,
         }))
 
+    async def _persist_budget_hint(self, note: ResponseItem, tokens: int) -> None:
+        """落预算提示：审计模式经 Journal 与它的 record 同批提交，否则直写 store。"""
+        owner = self.__ctxload_owner
+        if owner.audit_state is None:
+            await owner.store.append(note)
+            return
+        budget = owner.effective_budget
+        await commit_audited_budget_hint(
+            state=owner.audit_state,
+            submission_id=owner.submission_id,
+            turn_index=owner.turn_index,
+            ordinal=self._audit_budget_hints,
+            payload=BudgetHintInjectedV1(
+                used_tokens=tokens,
+                context_window=budget.context_window,
+                soft_limit=budget.soft_limit,
+                hard_limit=budget.hard_limit,
+                item_id=note.id,
+            ),
+            note=note,
+            cancel=owner.cancel,
+        )
+        self._audit_budget_hints += 1
+
     def estimate_items(self, items: list[ResponseItem]) -> int:
         """本地粗估一段 items 的 token（按本 turn 的图片 / 文件策略与业务估算器）。"""
         return estimate_history_tokens(
@@ -273,8 +301,8 @@ class TurnContextLoad:
         note = system_injection(
             render_budget_hint(tokens, budget),
             thread_id=self.__ctxload_owner.thread_id, source="budget_hint")
+        await self._persist_budget_hint(note, tokens)
         self.__ctxload_owner.history_buffer.append(note)
-        await self.__ctxload_owner.store.append(note)
         window = budget.context_window
         await self.__ctxload_owner._emit(BudgetHintInjected(data={
             "used": tokens,

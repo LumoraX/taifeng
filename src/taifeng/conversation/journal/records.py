@@ -18,6 +18,10 @@ from taifeng.conversation.journal.canonical import (
     model_canonical_data,
     validate_json_value,
 )
+from taifeng.conversation.journal.context_items import (
+    CompactedItemPayload,
+    SystemInjectionItemPayload,
+)
 from taifeng.conversation.journal.models import (
     ActorRef,
     HashHex,
@@ -41,7 +45,7 @@ from taifeng.llm.errors import (
 )
 from taifeng.tool.spec import ToolResult
 
-type SupportedItemKind = Literal["user_message", "assistant_message", "function_call", "function_call_output", "reasoning", "skill_outcome"]  # noqa: E501
+type SupportedItemKind = Literal["user_message", "assistant_message", "function_call", "function_call_output", "reasoning", "skill_outcome", "compacted", "system_injection"]  # noqa: E501
 
 _SUPPORTED_ITEM_KINDS = frozenset(get_args(SupportedItemKind.__value__))
 
@@ -572,13 +576,17 @@ class _SkillOutcomeItemPayload(JournalModel):
     ts_unix: NonNegativeInt | None = None
 
 
+# turn 内的上下文维护 operation（ADR 0094）：``{turn_id}:<kind>:<ordinal>``
+_CONTEXT_OPERATIONS = frozenset({"compaction", "budget_hint"})
+
+
 def _is_canonical_uint(value: str) -> bool:
     """只接受无前导零的 ASCII 非负整数。"""
     return value.isascii() and value.isdigit() and (value == "0" or value[0] != "0")
 
 
 def _operation_kind(value: str) -> str | None:
-    """按唯一 grammar 识别 simple/turn/llm/tool/skill operation。"""
+    """按唯一 grammar 识别 simple/turn/llm/tool/skill/context operation。"""
     parts = value.split(":")
     if len(parts) == 1:
         return "simple" if parts[0] else None
@@ -592,6 +600,8 @@ def _operation_kind(value: str) -> str | None:
         return "turn"
     if len(parts) == 6 and parts[4] == "llm" and _is_canonical_uint(parts[5]):
         return "llm"
+    if len(parts) == 6 and parts[4] in _CONTEXT_OPERATIONS and _is_canonical_uint(parts[5]):
+        return parts[4]
     if len(parts) == 6 and parts[4] == "tool" and parts[5]:
         return "tool"
     if len(parts) == 8 and parts[4] == "tool" and parts[5] and parts[6] == "skill" and parts[7]:
@@ -644,6 +654,16 @@ class JournalIdentities:
         if retry_ordinal < 0:
             raise ValueError("retry ordinal must be non-negative")
         return f"{llm_operation_id}:attempt:{retry_ordinal}"
+
+    def context(self, turn_id: str, kind: str, ordinal: int) -> str:
+        """构造 turn 内上下文维护 operation 的 identity（压缩 / 预算提示）。"""
+        if not self._owns(turn_id, "turn"):
+            raise ValueError("context operation parent must be this identity's canonical turn")
+        if kind not in _CONTEXT_OPERATIONS:
+            raise ValueError(f"unknown context operation kind: {kind}")
+        if ordinal < 0:
+            raise ValueError("context operation ordinal must be non-negative")
+        return f"{turn_id}:{kind}:{ordinal}"
 
     def tool(self, turn_id: str, call_id: str) -> str:
         """构造 Tool call identity。"""
@@ -765,6 +785,10 @@ def _validated_item_payload(
         model = _FunctionCallOutputItemPayload.model_validate(payload)
     elif kind == "reasoning":
         model = _ReasoningItemPayload.model_validate(payload)
+    elif kind == "compacted":
+        model = CompactedItemPayload.model_validate(payload)
+    elif kind == "system_injection":
+        model = SystemInjectionItemPayload.model_validate(payload)
     else:
         model = _SkillOutcomeItemPayload.model_validate(payload)
     return _canonical_mapping(model.model_dump(mode="python", exclude_unset=True))

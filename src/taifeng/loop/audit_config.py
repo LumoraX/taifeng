@@ -238,8 +238,12 @@ def validate_audit_config(
 def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
     """按稳定优先级拒绝未接入的 store/context/suspension 能力。"""
     for field_name, code in _OBJECT_CAPABILITY_RULES:
-        if getattr(inputs, field_name) is not None:
-            raise AuditCapabilityError(code)
+        value = getattr(inputs, field_name)
+        if value is None:
+            continue
+        if field_name == "compressor" and _compressor_is_auditable(value):
+            continue
+        raise AuditCapabilityError(code)
     for field_name, code in _COLLECTION_CAPABILITY_RULES:
         if getattr(inputs, field_name):
             raise AuditCapabilityError(code)
@@ -252,6 +256,25 @@ def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
         or inputs.failure_suspend_on_expire != "abort"
     ):
         raise AuditCapabilityError("audit_failure_suspension_unsupported")
+
+
+_AUDITABLE_COMPRESSION = frozenset({"fold", "fold_model"})
+
+
+def _compressor_is_auditable(compressor: object) -> bool:
+    """压缩协调器里的每个策略都声明了折叠式的审计支持（ADR 0094）。
+
+    声明读类属性 ``audit_support``，不执行任何 descriptor；没有策略的协调器无事可审。
+    """
+    strategies = _static_tool_attribute(compressor, "strategies")
+    if strategies is _MISSING:
+        strategies = getattr(compressor, "strategies", _MISSING)
+    if not isinstance(strategies, tuple):
+        return False
+    return all(
+        inspect.getattr_static(type(strategy), "audit_support", None) in _AUDITABLE_COMPRESSION
+        for strategy in strategies
+    )
 
 
 def _validate_model_capability(inputs: AuditStaticInputs) -> None:

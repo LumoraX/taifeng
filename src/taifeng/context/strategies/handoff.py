@@ -39,6 +39,7 @@ from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
 
 if TYPE_CHECKING:
+    from taifeng.context.compressor import ModelSessionFactory
     from taifeng.llm.client import ModelClient
 
 logger = logging.getLogger(__name__)
@@ -219,6 +220,7 @@ class HandoffCompactionStrategy:
 
     name = "handoff"
     priority = 100
+    audit_support = "fold_model"
 
     def __init__(
         self,
@@ -304,10 +306,12 @@ class HandoffCompactionStrategy:
         end: int,
         *,
         feedback: str = "",
+        model_session: ModelSessionFactory | None = None,
     ) -> tuple[str, str | None]:
         """调一次 LLM 生成摘要，返回 (summary_text, error_reason)。
 
-        error_reason 非 None 表示生成失败（LLM error / 异常）。
+        error_reason 非 None 表示生成失败（LLM error / 异常）。``model_session`` 非 None 时
+        会话由它提供（审计模式下的受审计会话），否则用策略自己持有的客户端。
         """
         formatted = _format_messages_for_summary(to_compress)
         content = (
@@ -329,8 +333,12 @@ class HandoffCompactionStrategy:
             parallel_tool_calls=False,
         )
         summary_text = ""
+        session = (
+            self._client.session(cancel=cancel, model=self._model)
+            if model_session is None else model_session(self._model)
+        )
         try:
-            async with self._client.session(cancel=cancel, model=self._model) as s:
+            async with session as s:
                 async for ev in s.stream(request):
                     if ev.kind == "text_delta":
                         summary_text += ev.data.get("text", "")
@@ -403,7 +411,8 @@ class HandoffCompactionStrategy:
         for attempt in range(self._quality_max_attempts):
             feedback = _regeneration_feedback(audit) if audit and attempt > 0 else ""
             summary_text, err = await self._generate_summary(
-                to_compress, start, end, feedback=feedback
+                to_compress, start, end, feedback=feedback,
+                model_session=ctx.model_session,
             )
             if err is not None:
                 return self._fail(ctx, err)

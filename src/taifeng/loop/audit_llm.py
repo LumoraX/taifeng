@@ -142,8 +142,9 @@ class JournalModelAttemptObserver:
         # 重试」签发互不冲突的 attempt/record id。当前 strict audit 能力面内它恒为
         # 0，因为每个 operation 只发生一次：① inner 是官方 one-network-attempt
         # client（adapter 拒绝任何自带 retry 的 wrapper，见 audit.py
-        # _reviewed_one_attempt_client_types）→ provider 不内部重试；② audit 静态
-        # 拒 compressor → 无 overflow reactive 重采样；③ audit 静态拒 failure_policy
+        # _reviewed_one_attempt_client_types）→ provider 不内部重试；② audit 下
+        # 溢出自愈不启用（只在采样之间压缩，ADR 0094）→ 无 overflow reactive 重采样；压缩为
+        # 摘要发起的调用各用独立的 iteration，不与采样共用 operation；③ audit 静态拒 failure_policy
         # / failure_suspension → 可恢复错误走 TERMINAL 而非 SYSTEM_RETRY 重采样；
         # ④ audit resume（ADR 0053）遇未结算 LLM attempt 一律 fail closed，不会在
         # 新 Engine 里重放同一 operation；续跑的新 turn 使用新 submission id，

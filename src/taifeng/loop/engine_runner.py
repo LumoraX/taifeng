@@ -28,6 +28,12 @@ if TYPE_CHECKING:
     from taifeng.loop.turn import TurnOutcome, TurnRunner
 
 
+def _superseded_ids(runner: TurnRunner) -> frozenset[str]:
+    """runner 在本轮压缩里折叠掉的条目 id；没有压缩协作器（测试替身）时为空。"""
+    compaction = getattr(runner, "_compaction", None)
+    return frozenset(getattr(compaction, "superseded_ids", ()))
+
+
 class EngineRunner:
     """engine turn runner协作器（持 engine 引用，自身无状态）。"""
 
@@ -82,6 +88,7 @@ class EngineRunner:
                     merged_history = merge_audited_history(
                         self._engine._history,
                         runner_history,
+                        superseded=_superseded_ids(runner),
                     )
                 except AuditedHistoryConflictError:
                     raise self._engine._audit_state.coordinator.freeze(
