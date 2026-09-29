@@ -195,6 +195,7 @@ class TurnSample:
             has_recall_backend=self.__sample_owner.has_recall_backend,
             image_input_policy=self.__sample_owner.image_input_policy,
             model_input_capabilities=input_capabilities,
+            file_input_policy=self.__sample_owner.file_input_policy,
         )
 
         max_bytes = self.__sample_owner.budget.max_request_bytes

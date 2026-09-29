@@ -26,11 +26,8 @@ from taifeng.conversation.store import (
 from taifeng.conversation.transcript import JsonlMessageStore
 from taifeng.llm.client import model_capabilities
 from taifeng.llm.errors import UnsupportedPersistenceCapabilityError
-from taifeng.llm.image_input import (
-    DISABLED_IMAGE_POLICY,
-    ImageInputPolicy,
-    InputCostEstimator,
-)
+from taifeng.llm.file_input import DISABLED_FILE_POLICY, FileInputPolicy
+from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, ImageInputPolicy, InputCostEstimator
 from taifeng.llm.retrying import with_default_retry
 from taifeng.loop.audit_bootstrap import (
     AuditStoreBinding,
@@ -348,6 +345,7 @@ class EnginePool:
         audit: AuditConfig | None = None,
         image_input_policy: ImageInputPolicy | None = None,
         input_cost_estimator: InputCostEstimator | None = None,
+        file_input_policy: FileInputPolicy | None = None,
     ) -> None:
         self._registry = skill_registry
         # ADR 0041：池级默认套有界重试，recall / verifier / 引擎共用同一包装（幂等）
@@ -357,6 +355,7 @@ class EnginePool:
         self._auto_retry = auto_retry
         self._retry_config = retry_config
         self._image_input_policy = image_input_policy or DISABLED_IMAGE_POLICY
+        self._file_input_policy = file_input_policy or DISABLED_FILE_POLICY
         self._input_cost_estimator = input_cost_estimator
         self._store = store
         self._tool_registry = tool_registry
@@ -591,6 +590,7 @@ class EnginePool:
         audit: AuditConfig | None = None,
         image_input_policy: ImageInputPolicy | None = None,
         input_cost_estimator: InputCostEstimator | None = None,
+        file_input_policy: FileInputPolicy | None = None,
     ) -> EnginePool:
         """便捷构造。
 
@@ -711,7 +711,7 @@ class EnginePool:
                 enable_auto_discovery=enable_auto_discovery,
                 skill_verifier=resolved_verifier,
                 audit=audit,
-                image_input_policy=image_input_policy,
+                image_input_policy=image_input_policy, file_input_policy=file_input_policy,
                 input_cost_estimator=input_cost_estimator,
             )
             pool._owned_directory = owned_directory

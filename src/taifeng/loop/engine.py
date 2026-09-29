@@ -29,6 +29,7 @@ from taifeng.instructions.types import (
 from taifeng.llm.errors import LLMError
 from taifeng.llm.retrying import with_default_retry
 from taifeng.loop import engine_ops
+from taifeng.loop.attachment_parts import admit_user_attachments
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
@@ -193,6 +194,7 @@ class AgentEngine:
         has_recall_backend: bool = False,
         image_input_policy: Any = None,
         input_cost_estimator: Any = None,
+        file_input_policy: Any = None,
     ) -> None:
         """
         Args:
@@ -213,9 +215,11 @@ class AgentEngine:
         self._model_client = with_default_retry(
             model_client, config=retry_config, enabled=auto_retry,
         )
+        from taifeng.llm.file_input import DISABLED_FILE_POLICY
         from taifeng.llm.image_input import DISABLED_IMAGE_POLICY
 
         self._image_input_policy = image_input_policy or DISABLED_IMAGE_POLICY
+        self._file_input_policy = file_input_policy or DISABLED_FILE_POLICY
         self._input_cost_estimator = input_cost_estimator
         self._store = store
         self._thread_id = thread_id
@@ -568,6 +572,7 @@ class AgentEngine:
             estimate=partial(
                 estimate_history_tokens,
                 image_input_policy=self._image_input_policy,
+                file_input_policy=self._file_input_policy,
                 input_cost_estimator=self._input_cost_estimator,
                 model=self._entry_skill.model or "",
             ),
@@ -661,19 +666,12 @@ class AgentEngine:
                 await reject_unsupported_audited_op(self._audit_state, sub)
             raise UnsupportedAuditedOperationError(sub.id, str(sub.op.kind))
         if isinstance(sub.op, UserMessage):
-            # legacy path 在 enqueue 与 durable append 前完成图片准入。
-            from taifeng.llm.client import model_capabilities
-            from taifeng.loop.prompt import history_to_api_messages
-
-            candidate = user_message(
-                sub.op.text,
-                thread_id=self._thread_id,
-                attachments=sub.op.attachments,
-            )
-            history_to_api_messages(
-                [candidate],
+            # legacy path 在 enqueue 与 durable append 前完成图片 / 文件准入。
+            admit_user_attachments(
+                sub.op.attachments,
                 image_input_policy=self._image_input_policy,
-                model_capabilities=model_capabilities(self._model_client),
+                file_input_policy=self._file_input_policy,
+                model_client=self._model_client,
             )
         await self._submissions.put(sub)
         return sub.id
@@ -1551,6 +1549,7 @@ class AgentEngine:
             cancel=turn_cancel,
             image_input_policy=self._image_input_policy,
             input_cost_estimator=self._input_cost_estimator,
+            file_input_policy=self._file_input_policy,
             audit_state=self._audit_state,
             hooks=self._hooks,
             script_executors=self._script_executors,
@@ -1717,6 +1716,7 @@ class AgentEngine:
             cancel=cancel,
             image_input_policy=self._image_input_policy,
             input_cost_estimator=self._input_cost_estimator,
+            file_input_policy=self._file_input_policy,
             hooks=self._hooks,
             permission_policy=self._permission_policy,
             request_metadata=self._request_metadata,

@@ -6,6 +6,7 @@
     1. 本地粗估（无实测时的地板）：
        - 文本：len(text) / 3.5（中英混合的经验比例）
        - 图像：~1500 token（256×256 base）或业务估算器
+       - 文件（PDF）：页数 × 每页上界；页数未知 / 策略未启用时取策略的固定上界
     2. 实测校准（token-accounting-calibration，参照 codex
        ``context_manager/history.rs`` 的「上次真实 usage + 之后新增条目估算」）：
        每次采样成功后用 provider 回报的完整 prompt token 数建一个 ``TokenCalibration``
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from taifeng.conversation.models import ResponseItem
+    from taifeng.llm.file_input import FileInputPolicy
     from taifeng.llm.image_input import ImageInputPolicy, InputCostEstimator
 
 
@@ -70,21 +72,55 @@ def _estimate_image_tokens(
     )
 
 
+def _estimate_file_tokens(item: ResponseItem, file_input_policy: FileInputPolicy | None) -> int:
+    """估算 user item 内文件 token：非零保守上界（provider 按页计费）。
+
+    策略启用时复用完整 admission（同时拿到 PDF 页数）按页估算；未启用（冷恢复读到
+    历史文件等）时不解码正文，每个文件直接取策略的固定上界——绝不按零计。
+    """
+    from taifeng.llm.file_input import (
+        DISABLED_FILE_POLICY,
+        FileAttachmentV1,
+        admit_file_attachments,
+        estimate_file_tokens,
+    )
+
+    raw = item.payload.get("attachments", [])
+    if not isinstance(raw, list):
+        return 0
+    files = [value for value in raw if isinstance(value, dict) and value.get("kind") == "file"]
+    if not files:
+        return 0
+    policy = file_input_policy or DISABLED_FILE_POLICY
+    if not policy.enabled:
+        return policy.unknown_file_token_ceiling * len(files)
+    attachments = [FileAttachmentV1.model_validate(value) for value in files]
+    return sum(
+        estimate_file_tokens(file, policy)
+        for file in admit_file_attachments(attachments, policy)
+    )
+
+
 def estimate_item_tokens(
     item: ResponseItem,
     *,
     image_input_policy: ImageInputPolicy | None = None,
     input_cost_estimator: InputCostEstimator | None = None,
     model: str = "",
+    file_input_policy: FileInputPolicy | None = None,
 ) -> int:
-    """估算单条 ResponseItem 的 token 占用，图片走可注入保守估算器。"""
+    """估算单条 ResponseItem 的 token 占用，图片走可注入估算器、文件按页保守上界。"""
     payload = item.payload
     if item.kind in ("user_message", "assistant_message", "system_injection"):
-        return estimate_text_tokens(str(payload.get("text", ""))) + _estimate_image_tokens(
-            item,
-            image_input_policy=image_input_policy,
-            input_cost_estimator=input_cost_estimator,
-            model=model,
+        return (
+            estimate_text_tokens(str(payload.get("text", "")))
+            + _estimate_image_tokens(
+                item,
+                image_input_policy=image_input_policy,
+                input_cost_estimator=input_cost_estimator,
+                model=model,
+            )
+            + _estimate_file_tokens(item, file_input_policy)
         )
     if item.kind == "function_call":
         return estimate_text_tokens(
@@ -117,14 +153,16 @@ def estimate_history_tokens(
     image_input_policy: ImageInputPolicy | None = None,
     input_cost_estimator: InputCostEstimator | None = None,
     model: str = "",
+    file_input_policy: FileInputPolicy | None = None,
 ) -> int:
-    """估算完整历史 token，并把统一图片策略传给每条 user item。"""
+    """估算完整历史 token，并把统一图片 / 文件策略传给每条 user item。"""
     return sum(
         estimate_item_tokens(
             item,
             image_input_policy=image_input_policy,
             input_cost_estimator=input_cost_estimator,
             model=model,
+            file_input_policy=file_input_policy,
         )
         for item in items
     )

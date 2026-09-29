@@ -202,10 +202,11 @@ class TurnContextLoad:
         }))
 
     def estimate_items(self, items: list[ResponseItem]) -> int:
-        """本地粗估一段 items 的 token（按本 turn 的图片策略与业务估算器）。"""
+        """本地粗估一段 items 的 token（按本 turn 的图片 / 文件策略与业务估算器）。"""
         return estimate_history_tokens(
             items,
             image_input_policy=self.__ctxload_owner.image_input_policy,
+            file_input_policy=self.__ctxload_owner.file_input_policy,
             input_cost_estimator=self.__ctxload_owner.input_cost_estimator,
             model=self.__ctxload_owner.entry_skill.model or "",
         )

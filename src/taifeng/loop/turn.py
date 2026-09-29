@@ -17,6 +17,7 @@ from taifeng.llm.errors import (
     LLMError,
     classify_failure,
 )
+from taifeng.llm.file_input import DISABLED_FILE_POLICY, FileInputPolicy
 from taifeng.llm.image_input import (
     DISABLED_IMAGE_POLICY,
     ImageInputPolicy,
@@ -139,6 +140,7 @@ class TurnRunner:
     cancel: CancellationToken
     image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY
     input_cost_estimator: InputCostEstimator | None = None
+    file_input_policy: FileInputPolicy = DISABLED_FILE_POLICY  # user 文件输入策略（llm-file-input）
     audit_state: AuditedSessionState | None = None
     """strict audit state；None 时保持 legacy ModelClient session 路径。"""
     hooks: Any = None  # HookRunner | None —— 可选钩子
