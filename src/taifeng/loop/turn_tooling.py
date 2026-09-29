@@ -229,6 +229,12 @@ class TurnTooling:
 
             raise _turn_mod._BatchSuspend((outcome.suspend,))
         fco = self.__tooling_owner._settle_tool_output(call_id, outcome.result)
+        # Responses 路径:结果须带上它所属采样的 id,否则与调用对不上(主派发同此处理)
+        sample_id = fc.metadata.get("llm_sample_id")
+        if isinstance(sample_id, str) and sample_id:
+            fco = fco.model_copy(update={
+                "metadata": {**fco.metadata, "origin_llm_sample_id": sample_id},
+            })
         self.__tooling_owner.history_buffer.append(fco)
         await self.__tooling_owner.store.append(fco)
 

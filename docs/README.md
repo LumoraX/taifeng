@@ -117,6 +117,7 @@ Later ADRs:
 76. [ADR 0076: 审计 resume 沿 skill 派发树自底向上收敛子 thread 的工具调用](decisions/0076-audit-resume-dispatch-tree-recovery.md) (Amends #0070): 崩溃发生在同步 `call_skill` 的子 skill 执行途中时 Session 只能废弃。决策：把派发层的未结算拆解到其内部的工具调用，子调用 → 派发终态 → 父调用同批自底向上收敛；悬空 `call_skill` 意图按派发谱系结算；被中断的执行不记战绩、不续跑。
 77. [ADR 0077: 按战绩算分与工作集规划先以影子模式上线](decisions/0077-skill-fitness-shadow-mode.md): 相位 5 连影子模式都未开始，无从积累可核对的数据。决策：Wilson 置信下界算分（放弃不进分母、可选成本折减、不读选择置信度）；工作集与隔离集无状态重算；影子评估做成 TelemetrySink，内核不持有其引用，「不生效」由结构保证。
 78. [ADR 0078: spawn 拒绝带稳定分类，对模型与事件流可见](decisions/0078-spawn-reject-classification.md): detached spawn 的准入拒绝以普通异常冒出，经工具时被当作工具故障（`reason="exception"` + traceback），事件流无拒绝事件。决策：`SpawnRejectReason` 稳定分类；`SpawnRejectedError(ValueError)` 与 `SpawnLimitError.reject_reason`；`spawn_skill` 把准入拒绝当作结果返回并 emit 统一形状的 `skill_spawn_rejected`。
+79. [ADR 0079: 并行批次里的 retry_tool 按批次截断，只重跑目标调用](decisions/0079-retry-tool-in-parallel-batch.md) (Amends #0014, #0016): 一次采样发出多个调用时 retry_tool 会截掉同批其他调用的结果（或整个调用）。决策：`plan_retry_cut` 按批次规划，保留到批次末尾、只去掉目标调用的旧结果；marker 记 `drop_index` 供冷重建重放；单调用批次行为逐位不变。
 
 ### Fourth Pass: Gap Tracking
 

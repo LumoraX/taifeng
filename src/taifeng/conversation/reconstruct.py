@@ -2,10 +2,12 @@
 
 append-only 主存(R5)在两种情况下与热内存 history 结构性发散:
 1. 压缩:被替换的中间 item 不删,placeholder append 到末尾(replaced_range 记区间)。
-2. 历史 rewind/rollback:被截断的 item 仍物理留存,marker 记 cut_index。
+2. 历史 rewind/rollback:被截断的 item 仍物理留存,marker 记 cut_index;并行批次里的
+   retry_tool 另记 drop_index(保留范围内被去掉的那条旧结果,ADR 0079)。
 
 本函数顺序重放 transcript,复现热内存 history:折叠压缩区间、挪 salvage note、
-按 cut_index 截断。对未压缩/未 rewind 的干净 thread 是恒等映射。纯 CPU、无 IO。
+按 cut_index 截断、按 drop_index 去掉旧结果。对未压缩/未 rewind 的干净 thread 是恒等
+映射。纯 CPU、无 IO。
 
 设计:ADR 0016(冷场景重建,决策一)
 """
@@ -27,7 +29,8 @@ def reconstruct_logical_history(raw: list[ResponseItem]) -> list[ResponseItem]:
     """顺序重放 transcript → 与热内存等价的逻辑 history。
 
     参数 raw:`MessageStore.load_thread` 按写入序返回的全部 item(保序 + 完整)。
-    抛 ValueError:rewind/rollback marker 缺 cut_index(不静默猜下标)。
+    抛 ValueError:rewind/rollback marker 缺 cut_index,或 drop_index 越界 / 指向的不是
+    function_call_output(不静默猜下标)。
     """
     logical: list[ResponseItem] = []
     for item in raw:
@@ -52,10 +55,25 @@ def reconstruct_logical_history(raw: list[ResponseItem]) -> list[ResponseItem]:
                     f"rewind/rollback marker 缺 cut_index,无法重建逻辑 history:{item.id}"
                 )
             logical = logical[:cut]
+            _drop_replaced_output(logical, item)
             # marker 本身不进 logical(热路径只落 store、不进 _history)
         else:
             logical.append(item)
     return logical
+
+
+def _drop_replaced_output(logical: list[ResponseItem], marker: ResponseItem) -> None:
+    """并行批次 retry_tool:去掉保留范围内被重跑调用的旧结果(marker 无 drop_index 则不动)。"""
+    drop = marker.payload.get("drop_index")
+    if drop is None:
+        return
+    if type(drop) is not int or not 0 <= drop < len(logical):
+        raise ValueError(f"rewind marker drop_index 越界,无法重建逻辑 history:{marker.id}")
+    if logical[drop].kind != "function_call_output":
+        raise ValueError(
+            f"rewind marker drop_index 指向的不是 function_call_output:{marker.id}"
+        )
+    del logical[drop]
 
 
 def _is_salvage(item: ResponseItem) -> bool:

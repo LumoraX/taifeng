@@ -8,7 +8,11 @@
 - ``dispatch``：每次工具 / call_skill 派发。两个切点——``history_len`` = 所属
   iteration 采样前(re_reason,与该圈 iteration 节点同值,因 assistant 消息原子、
   不可切在并行 tool_call 中间);``inner_history_len`` = function_call 之后 /
-  function_call_output 之前(retry_tool 切点,只重跑该工具)。
+  function_call_output 之前(单调用批次的 retry_tool 切点)。
+
+retry_tool 的实际截断由 ``plan_retry_cut`` 按**批次**规划(ADR 0079):一次采样发出多个
+调用时,只去掉目标调用的旧结果,同批其他调用的调用记录与结果原样保留,批次之后的内容
+丢弃。单调用批次下规划结果与 ``inner_history_len`` 相同。
 
 设计:ADR 0014(turn-rewind)+ ADR 0016(冷场景重建);契约 docs/architecture/capabilities/turn-rewind.md
 约束:checkpoint 只记 history **下标**,不物理删 store —— append-only 不破(R5)。
@@ -144,6 +148,100 @@ class RewindLog:
         return next(
             (c for c in self.checkpoints if c.node_id == node_id), None
         )
+
+
+# 属于「一次采样的工具批次」的条目类型:意图(Chat 路径写前日志)/ 调用 / 结果
+_BATCH_KINDS = frozenset({"tool_intent", "function_call", "function_call_output"})
+
+
+@dataclass(frozen=True)
+class RetryCut:
+    """retry_tool 的截断规划:保留 ``history[:cut_index]``,再去掉 ``drop_index`` 那一条。
+
+    Attributes:
+        cut_index: 截断点;其后的条目全部丢弃。
+        drop_index: 保留范围内需去掉的旧结果下标;None = 无需另删(旧结果本就在截断点
+            之后,或目标调用本就没有结果)。
+    """
+
+    cut_index: int
+    drop_index: int | None = None
+
+    @property
+    def first_changed_index(self) -> int:
+        """history 中第一个发生变化的下标(cache anchor 回退到它之前)。"""
+        return self.cut_index if self.drop_index is None else self.drop_index
+
+    def apply(self, history: list[ResponseItem]) -> list[ResponseItem]:
+        """按规划产出新的 history 列表(不修改入参)。"""
+        kept = list(history[: self.cut_index])
+        if self.drop_index is not None:
+            del kept[self.drop_index]
+        return kept
+
+    def marker_extra(self) -> dict[str, int]:
+        """落进 rewind marker 的坐标(冷重建按它重放);无需另删时不带 ``drop_index``。"""
+        extra = {"cut_index": self.cut_index}
+        if self.drop_index is not None:
+            extra["drop_index"] = self.drop_index
+        return extra
+
+
+def _sample_id(item: ResponseItem) -> str | None:
+    """调用 / 结果所属的采样 id(Responses 路径才有);没有返回 None。"""
+    key = "llm_sample_id" if item.kind == "function_call" else "origin_llm_sample_id"
+    value = item.metadata.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _target_call_index(history: list[ResponseItem], cp: RewindCheckpoint) -> int:
+    """节点对应的那一次 function_call 的下标(call id 被复用时取节点所在位置的那次)。
+
+    Raises:
+        ValueError: history 在节点位置之前找不到该调用(节点表与 history 不一致)。
+    """
+    assert cp.inner_history_len is not None
+    upper = min(cp.inner_history_len, len(history))
+    for index in range(upper - 1, -1, -1):
+        item = history[index]
+        if item.kind == "function_call" and item.payload.get("call_id") == cp.call_id:
+            return index
+    raise ValueError(f"function_call for node {cp.node_id} not found in history")
+
+
+def plan_retry_cut(history: list[ResponseItem], cp: RewindCheckpoint) -> RetryCut:
+    """规划对 dispatch 节点做 retry_tool 时的截断(纯函数)。
+
+    批次 = 目标调用所在的、由意图 / 调用 / 结果组成的连续段;遇到其他类型的条目,或属于
+    另一次采样的调用 / 结果(Responses 路径下一圈可能没有文本项,靠采样 id 划界)即止。
+    两种落史布局都适用:Chat 路径逐对交错(调用, 结果),Responses 路径调用成组在前、
+    结果成组在后。
+
+    Raises:
+        ValueError: 节点不是 dispatch 节点,或与 history 不一致。
+    """
+    if cp.kind != "dispatch" or cp.call_id is None or cp.inner_history_len is None:
+        raise ValueError(f"retry_tool requires a dispatch node, got {cp.kind}: {cp.node_id}")
+    call_index = _target_call_index(history, cp)
+    sample = _sample_id(history[call_index])
+    end = call_index + 1
+    output_index: int | None = None
+    while end < len(history):
+        item = history[end]
+        if item.kind not in _BATCH_KINDS:
+            break
+        if item.kind != "tool_intent" and _sample_id(item) != sample:
+            break
+        is_output = item.kind == "function_call_output"
+        if is_output and output_index is None and item.payload.get("call_id") == cp.call_id:
+            output_index = end
+        end += 1
+    if output_index is None:
+        return RetryCut(cut_index=end)
+    if output_index == end - 1:
+        # 旧结果是批次最后一条:截到它之前即可(单调用批次即此形态)
+        return RetryCut(cut_index=output_index)
+    return RetryCut(cut_index=end, drop_index=output_index)
 
 
 def derive_rewind_log(history: list[ResponseItem]) -> list[RewindCheckpoint]:

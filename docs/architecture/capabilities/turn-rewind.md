@@ -22,7 +22,7 @@ ADR：[0014](../../../docs/decisions/0014-turn-rewind.md)（热场景）、[0016
 | `cache_anchor` | 回退时还原的 `cache_anchor_index` |
 | `iteration_index` | 所属采样圈 |
 | `call_id` / `target_id` | 仅 dispatch：被派发的 call_id / 工具名 |
-| `inner_history_len` | 仅 dispatch：retry_tool 切点（`function_call` 后 / `function_call_output` 前） |
+| `inner_history_len` | 仅 dispatch：`function_call` 后 / `function_call_output` 前；单调用批次的 retry_tool 切点（多调用批次的实际截断见 `plan_retry_cut`） |
 | `args_digest` | 仅 dispatch：原始 args 摘要（供 UI / 审计） |
 
 ### `Rewind` Op（`loop/submission.py`）
@@ -78,12 +78,37 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 
 ### Requirement: Rewind retry_tool 保留派发决定、只重跑该工具
 
-`mode=retry_tool`（仅 dispatch 节点）时，系统 SHALL 截到 `cp.inner_history_len`（**保留** assistant 的 `function_call`、丢弃旧 `function_call_output` 及其后），用 `new_args`（或原 args）**补跑该工具 / 子 skill**、追加新 output，再续推。补跑复用 `dispatch_batch` + `_build_tool_context`（含 `dispatcher`），故 `call_skill` 子 skill 也能正确重跑。
+`mode=retry_tool`（仅 dispatch 节点）时，系统 SHALL 按 `plan_retry_cut(history, cp)` 的规划截断，用 `new_args`（或原 args）**补跑该工具 / 子 skill**、追加新 output，再续推。补跑复用 `dispatch_batch` + `_build_tool_context`（含 `dispatcher`），故 `call_skill` 子 skill 也能正确重跑。
+
+截断按**批次**规划（`loop/rewind.py::plan_retry_cut`，纯函数，根路径与 spawn 子 thread 路径共用）：
+
+- **批次** = 目标调用所在的、由 `tool_intent` / `function_call` / `function_call_output` 组成的连续段；遇到其他类型的条目，
+  或属于另一次采样的调用 / 结果（按 `llm_sample_id` / `origin_llm_sample_id` 划界）即止。两种落史布局都适用：Chat 路径
+  逐对交错，Responses 路径调用成组在前、结果成组在后。
+- 规划结果 `RetryCut{cut_index, drop_index?}`：保留 `history[:cut_index]`，再去掉 `drop_index` 那一条旧结果。
+  - 目标调用的旧结果是批次最后一条（**单调用批次即此形态**）：`cut_index` = 旧结果下标 = `cp.inner_history_len`，无 `drop_index`；
+  - 旧结果在批次中间：`cut_index` = 批次末尾，`drop_index` = 旧结果下标；
+  - 目标调用本就没有结果：`cut_index` = 批次末尾，无 `drop_index`。
+- 同批其他调用的 `function_call` 与 `function_call_output` SHALL 原样保留（条目 id 不变）、SHALL NOT 被重跑；批次之后的全部条目丢弃。
+- call id 在同一 turn 内被复用时，取节点所在位置的那一次调用。
+- `cache_anchor` 回退到第一个发生变化的下标之前。
+- `new_args` 只改目标调用的 `arguments`；条目 id、附加内容与采样归属保留。
+- 补跑出的结果在 Responses 路径下带 `origin_llm_sample_id`（取自目标调用的 `llm_sample_id`）。
+- rewind marker 的 payload 为 `RetryCut.marker_extra()`：`{cut_index}` 或 `{cut_index, drop_index}`；`turn_rewound.data` 带
+  `cut_index` 与 `drop_index`（无则为 null）。
+- 节点与 history 对不上（该调用已不在 history 中）→ `rewind_rejected(unknown_node)`，不猜截点。
 
 #### Scenario: retry_tool 重跑一次 call_skill
 - **WHEN** 对某 dispatch 节点（如 `t1:disp1`）提交 `Rewind(mode=retry_tool)`
 - **THEN** assistant 的 `function_call` 被保留；该工具被重跑、output 被替换；LLM 从新 output 续推
-- **AND** `turn_rewound.data.cut_index == cp.inner_history_len`
+- **AND** 单调用批次下 `turn_rewound.data.cut_index == cp.inner_history_len`、`drop_index` 为 null
+
+#### Scenario: 并行批次里只重跑其中一个调用
+- **GIVEN** 一次采样发出 `a`、`b`、`c` 三个调用且都已有结果，之后还有一圈收尾
+- **WHEN** 对 `b` 的 dispatch 节点提交 `Rewind(mode=retry_tool)`
+- **THEN** 只有 `b` 被重新执行；`a`、`c` 的调用与结果原样保留；收尾那一圈被丢弃
+- **AND** 续推的请求里三个调用都有结果，history 无未配对的调用
+- **AND** 另起进程冷加载该 thread，逻辑 history 与热内存逐项相同
 
 ### Requirement: thread 寻址——rewind detached spawn 子 thread
 
@@ -139,7 +164,7 @@ node_id 格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（dispatch），其
 - rewind 已 done 且 barrier 已 fired 的 spawn：重推得新结果但**不自动重聚合**（fired 守卫幂等）；业务要重聚合需自行再 `set_join_barrier`。
 - 多实例部署下"中断遗留 running"的活性不可见（live 运行表是单 engine 实例内闭合）；多实例互斥是业务侧部署约束。
 - 挂起态 turn 内 rewind：拒绝（`turn_suspended`）。
-- `retry_tool` 假定**串行派发**（`max_parallel_tool_calls=1`，默认）：并行批次内部分重试会留下「已声明未补全」的 tool_call，v1 不支持。
+- 批次内**其他调用本身没有结果**（如同批挂起）时的 `retry_tool`：受挂起态守卫约束，见上条。
 - replay 模式（录后确定性重放整条 call 图）、压缩等内核动作作为节点：留待后续（见设计 §8）。
 - **冷 rewind 不还原历史 entry-skill 指令层**：若 thread 历史跨多个不同 entry skill 的 turn，冷 rewind 到旧 turn 时使用当前构造时传入的 entry skill 指令层，不还原"该旧 turn 当时"的指令——v1 范围约束，与「只 root turn 入表」同级。
 - **自定义 CompressionStrategy 孤儿 salvage note 边界**：若自定义策略 `success=True` 却 `summary_item_id=None` 并触发了 salvage note，会写出孤儿 note；`reconstruct_logical_history` 在此情形下显式校验（而非静默误配），作为系统边界记录。内置 `sliding` / `handoff` 不触发此边界。

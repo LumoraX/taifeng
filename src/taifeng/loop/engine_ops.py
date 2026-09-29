@@ -12,7 +12,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from taifeng.conversation.models import function_call, system_injection
+from taifeng.conversation.models import system_injection
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext
 from taifeng.loop.engine_types import _PendingTurn
@@ -25,10 +25,11 @@ from taifeng.loop.event import (
     RewindTableRebuilt,
     TurnRewound,
 )
-from taifeng.loop.rewind import count_turns
+from taifeng.loop.rewind import RetryCut, count_turns, plan_retry_cut
 from taifeng.loop.submission import Rewind, Submission, UpdateBudget, UpdateInstructions
 
 if TYPE_CHECKING:
+    from taifeng.conversation.models import ResponseItem
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
 
@@ -67,13 +68,23 @@ def rewrite_seed_args(engine: AgentEngine, call_id: str, new_args: dict[str, Any
     只改内存(自洽 + 供重跑读新参);store 保持 append-only,arg 覆盖经 rewind
     marker 留痕。调用方已持锁。
     """
-    for i, item in enumerate(engine._history):
+    rewrite_call_args(engine._history, call_id, new_args)
+
+
+def rewrite_call_args(
+    history: list[ResponseItem], call_id: str, new_args: dict[str, Any],
+) -> None:
+    """把 history 里**最后一次**该 call id 的 function_call 换成新参数(原地改)。
+
+    只换 ``arguments``:条目 id、附加内容与采样归属(metadata)原样保留,否则 Responses
+    路径下补跑出的结果就对不上它所属的采样。
+    """
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
         if item.kind == "function_call" and item.payload.get("call_id") == call_id:
-            engine._history[i] = function_call(
-                call_id=call_id, name=item.payload["name"],
-                arguments=json.dumps(new_args, ensure_ascii=False),
-                thread_id=engine._thread_id,
-            )
+            payload = {**item.payload, "arguments": json.dumps(new_args, ensure_ascii=False)}
+            history[index] = item.model_copy(update={"payload": payload})
+            return
 
 async def handle_rewind(
     engine: AgentEngine, sub: Submission, root_cancel: CancellationToken
@@ -116,35 +127,44 @@ async def handle_rewind(
         await emit_rewind_rejected(engine, sub.id, op.node_id, "turn_suspended")
         return
 
-    # 4. 选截点:retry_tool 用 inner(保 fc);其余用 history_len(re_reason)
-    cut = (
-        cp.inner_history_len
-        if op.mode == "retry_tool" and cp.inner_history_len is not None
-        else cp.history_len
-    )
-
-    # 5. 截断 history + 回退 cache_anchor(锁内;append-only:store 不删,仅内存截)
+    # 4. 选截点:retry_tool 按批次规划(保同批其他调用与结果);其余用 history_len(re_reason)
     async with engine._lock:
-        engine._history = engine._history[:cut]
-        if engine._cache_anchor_index >= cut:
-            engine._cache_anchor_index = cut - 1
-        # 5b. retry_tool + new_args:改写悬空 fc 的 arguments(自洽 + 重跑用新参)
-        if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
-            rewrite_seed_args(engine, cp.call_id, op.new_args)
+        try:
+            plan = (
+                plan_retry_cut(engine._history, cp)
+                if op.mode == "retry_tool"
+                else RetryCut(cut_index=cp.history_len)
+            )
+        except ValueError:
+            plan = None
+        if plan is not None:
+            # 5. 截断 history + 回退 cache_anchor(锁内;append-only:store 不删,仅内存截)
+            engine._history = plan.apply(engine._history)
+            if engine._cache_anchor_index >= plan.first_changed_index:
+                engine._cache_anchor_index = plan.first_changed_index - 1
+            # 5b. retry_tool + new_args:改写悬空 fc 的 arguments(自洽 + 重跑用新参)
+            if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
+                rewrite_seed_args(engine, cp.call_id, op.new_args)
+    if plan is None:
+        # 节点表与 history 对不上(该调用已不在 history 里):不猜截点,显式拒绝
+        await emit_rewind_rejected(engine, sub.id, op.node_id, "unknown_node")
+        return
+    cut = plan.cut_index
 
     # 6. marker(审计;同 rollback 范式,落 store、不进 history)
-    # cut_index 持久化：供 reconstruct_logical_history 冷恢复时按截断点重建逻辑 history
+    # 坐标持久化：供 reconstruct_logical_history 冷恢复时按同一规划重建逻辑 history
     marker = system_injection(
         f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
         thread_id=engine._thread_id, source="rewind",
-        extra={"cut_index": cut},
+        extra=plan.marker_extra(),
     )
     await engine._store.append(marker)
 
     # 7. emit turn_rewound(R3)
     await engine._emit(EventMsg(submission_id=sub.id, msg=TurnRewound(data={
         "node_id": op.node_id, "node_kind": cp.kind, "mode": op.mode,
-        "cut_index": cut, "cache_anchor": engine._cache_anchor_index,
+        "cut_index": cut, "drop_index": plan.drop_index,
+        "cache_anchor": engine._cache_anchor_index,
     })))
 
     # 8a. 冷 engine 惰性 resolve 指令层（spec §7 lazy-on-rewind）：

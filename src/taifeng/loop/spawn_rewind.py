@@ -19,18 +19,17 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING
 
-from taifeng.conversation.models import function_call, system_injection
+from taifeng.conversation.models import system_injection
+from taifeng.loop.engine_ops import rewrite_call_args
 from taifeng.loop.event import EventMsg, RewindRejected, TurnRewound
-from taifeng.loop.rewind import derive_rewind_log
+from taifeng.loop.rewind import RetryCut, derive_rewind_log, plan_retry_cut
 from taifeng.loop.spawn_handle import SpawnDrivePlan
 from taifeng.loop.submission import Rewind, Submission
 
 if TYPE_CHECKING:
-    from taifeng.conversation.models import ResponseItem
     from taifeng.loop.spawn_driver import SpawnDriver
     from taifeng.loop.spawn_handle import SpawnHandle
 
@@ -133,11 +132,17 @@ class SpawnRewindChain:
         ):
             await self._reject(sub.id, op.node_id, "mode_kind_mismatch")
             return
-        cut = (
-            cp.inner_history_len
-            if op.mode == "retry_tool" and cp.inner_history_len is not None
-            else cp.history_len
-        )
+        # retry_tool 按批次规划(保同批其他调用与结果,与根路径同一函数);其余截到采样前
+        try:
+            plan = (
+                plan_retry_cut(logical, cp)
+                if op.mode == "retry_tool"
+                else RetryCut(cut_index=cp.history_len)
+            )
+        except ValueError:
+            await self._reject(sub.id, op.node_id, "unknown_node")
+            return
+        cut = plan.cut_index
         # 取消 token 在守卫通过的同一同步步派生并登记(先于任何 await):中断遗留
         # running 句柄在重推起跑前被 kill 也能命中(R4),不再取消到旧 token。
         assert eng._root_cancel is not None  # engine.run 已启动  # noqa: SLF001
@@ -147,23 +152,24 @@ class SpawnRewindChain:
 
         async def _prepare() -> SpawnDrivePlan:
             """线程锁内:落 marker → emit → 截断 buffer(peer 落史与之互斥)。"""
-            # 5. 落 marker(append-only;cut_index 供冷恢复 reconstruct 重放)
+            # 5. 落 marker(append-only;坐标供冷恢复 reconstruct 重放)
             marker = system_injection(
                 f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
                 thread_id=child_tid, source="rewind",
-                extra={"cut_index": cut},
+                extra=plan.marker_extra(),
             )
             await eng._store.append(marker)  # noqa: SLF001
             # 6. emit turn_rewound(R3;带 thread_id 与根路径区分)
             await eng._emit(EventMsg(submission_id=sub.id, msg=TurnRewound(data={  # noqa: SLF001
                 "thread_id": child_tid, "node_id": op.node_id,
                 "node_kind": cp.kind, "mode": op.mode, "cut_index": cut,
+                "drop_index": plan.drop_index,
             })))
             # 7. 截断内存 buffer;retry_tool + new_args → 改写悬空 fc(只改内存,
             #    store 原样保留 append-only;改写经 marker 留痕,与根路径同语义)
-            buffer = list(logical[:cut])
+            buffer = plan.apply(logical)
             if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
-                self._rewrite_buffer_args(buffer, cp.call_id, op.new_args, child_tid)
+                rewrite_call_args(buffer, cp.call_id, op.new_args)
             return SpawnDrivePlan(
                 history=buffer,
                 sample_scope_id=sub.id,
@@ -181,29 +187,6 @@ class SpawnRewindChain:
             expect_status=("running", "done", "error", "cancelled"),
             cancel=cancel,
         )
-
-    def _rewrite_buffer_args(
-        self,
-        buffer: list[ResponseItem],
-        call_id: str,
-        new_args: dict[str, object],
-        thread_id: str,
-    ) -> None:
-        """retry_tool new_args:把内存 buffer 中该 call_id 的 fc 换成新 args。
-
-        只改内存(自洽 + 供重跑读新参);store 保持 append-only(与根路径
-        ``_rewrite_seed_args`` 同语义,作用对象换成局部 buffer)。
-        """
-        for i, item in enumerate(buffer):
-            if (
-                item.kind == "function_call"
-                and item.payload.get("call_id") == call_id
-            ):
-                buffer[i] = function_call(
-                    call_id=call_id, name=item.payload["name"],
-                    arguments=json.dumps(new_args, ensure_ascii=False),
-                    thread_id=thread_id,
-                )
 
     async def _reject(self, submission_id: str, node_id: str, reason: str) -> None:
         """rewind 守卫失败统一出口(禁 silent fallback,显式发事件)。"""
