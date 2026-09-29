@@ -54,12 +54,12 @@ CI 每个 PR 都会跑上面第一条（`.github/workflows/ci.yml`）。它**按
 
 运行：`PYTHONPATH=src uv run python examples/turn_rewind/demo.py`
 
-### `multi_expert_consult/` —— 并发多专家 + 错峰 HITL + 联合会诊聚合（纯 SimClient 无需 API key）
+### `multi_expert_consult/` —— 并发多专家 + 错峰 HITL + 联合评审聚合（纯 SimClient 无需 API key）
 
 | 文件 | 演示内容 |
 | --- | --- |
-| [multi_expert_consult/demo.py](multi_expert_consult/demo.py) | detached-spawn 完整闭环：orchestrator 一个 turn 内 `spawn_skill` 并发发起多个专家 + `await_skills` 登记 join-barrier；各专家在独立 child thread 上**错峰 HITL**（cardio 先恢复完成、metabolic 过一会才恢复）；两句柄全终态 → join-barrier 自动起 `joint-consult` 聚合 → 最终会诊报告。打印完整事件时间线 |
-| [multi_expert_consult/nested_hitl_demo.py](multi_expert_consult/nested_hitl_demo.py) | **嵌套专科错峰 HITL**（真实 MDT 拓扑）：被 spawn 的专科是 composite 且 `call_skill` 编排**子 skill**，由子 skill `request_user_input` 挂起 → spawn 子 thread 以 `CHILD_SKILL` 嵌套挂起 → `Resume` 走 `resume_spawn_nested` 续跑链（下探 leaf 核销 + 逐层回填 + 重跑根）→ spawn_completed。区别于 `demo.py` 的 tool-only 专科（直接 DATA 挂起） |
+| [multi_expert_consult/demo.py](multi_expert_consult/demo.py) | detached-spawn 完整闭环：orchestrator 一个 turn 内 `spawn_skill` 并发发起多个专家 + `await_skills` 登记 join-barrier；各专家在独立 child thread 上**错峰 HITL**（security 先恢复完成、perf 过一会才恢复）；两句柄全终态 → join-barrier 自动起 `joint-review` 聚合 → 最终联合评审报告。打印完整事件时间线 |
+| [multi_expert_consult/nested_hitl_demo.py](multi_expert_consult/nested_hitl_demo.py) | **嵌套专家错峰 HITL**（真实多专家评审拓扑）：被 spawn 的专家是 composite 且 `call_skill` 编排**子 skill**，由子 skill `request_user_input` 挂起 → spawn 子 thread 以 `CHILD_SKILL` 嵌套挂起 → `Resume` 走 `resume_spawn_nested` 续跑链（下探 leaf 核销 + 逐层回填 + 重跑根）→ spawn_completed。区别于 `demo.py` 的 tool-only 专家（直接 DATA 挂起） |
 
 > 本 demo 专家 / 聚合器用 `entry: false`（一种设计选择）。注意 **spawn 目标可为 entry skill**（spawn 是独立根，与 call_skill 不同；详见契约 `allow_entry_target`），并非硬性要求非 entry。契约见 [docs/architecture/capabilities/detached-spawn.md](../docs/architecture/capabilities/detached-spawn.md)，决策见 [ADR 0015](../docs/decisions/0015-detached-skill-spawn.md)。与 [concurrent_fanout/](concurrent_fanout/)（批量同步收齐）、[step_pipeline/](step_pipeline/)（业务确定性编排）互为三种并发姿态。**已接入 web_ui**（demo_id `multi_expert_consult`，`streams_detached=True` + `wants_spawn_tools=True`）；浏览器交互版见 [web_ui/](web_ui/)。
 
@@ -74,7 +74,7 @@ CI 每个 PR 都会跑上面第一条（`.github/workflows/ci.yml`）。它**按
 | [real_llm/with_hooks.py](real_llm/with_hooks.py) | PreToolUse hook 真实拦截 + permission gate |
 | [real_llm/kernel_knobs.py](real_llm/kernel_knobs.py) | 内核旋钮 K1–K4 在真实 token 流下成立（K2 OOM 用真实 usage 触顶 + K3 memory 钩子真触发） |
 | [real_llm/capability_matrix.py](real_llm/capability_matrix.py) | **能力矩阵** —— 10 个能力场景逐个真实 LLM 跑测，输出成败矩阵 + R3 可观测完整性审计（所有事件 kind 是否都有专用渲染） |
-| [real_llm/nested_spawn_hitl.py](real_llm/nested_spawn_hitl.py) | **嵌套 spawn 错峰 HITL 续跑** 真实 LLM 验证：专科 call_skill 子 skill → 子 skill request_user_input 嵌套挂起（CHILD_SKILL）→ Resume → `resume_spawn_nested` 续跑链跑到终态（补 capability_matrix 不覆盖的 spawn+挂起+续跑盲区） |
+| [real_llm/nested_spawn_hitl.py](real_llm/nested_spawn_hitl.py) | **嵌套 spawn 错峰 HITL 续跑** 真实 LLM 验证：专家 call_skill 子 skill → 子 skill request_user_input 嵌套挂起（CHILD_SKILL）→ Resume → `resume_spawn_nested` 续跑链跑到终态（补 capability_matrix 不覆盖的 spawn+挂起+续跑盲区） |
 | [real_llm/p1_guards_verify.py](real_llm/p1_guards_verify.py) | **P1 双能力真实验证**：surgical-trim（剪过的占位/截断历史喂回真实 LLM 后续 turn 正常）+ denial 断路器（真 tool call → 真 deny → 断路恰好一次）+ refund（cap=2 真实跑过 3 轮 echo） |
 | [real_llm/p1_round2_verify.py](real_llm/p1_round2_verify.py) | **第二批 P1 真实验证**：pinned 保活（压缩后模型据 pinned 注记复述出只存在于注入中的标记词）+ peer 投递（真实 send_message → 真唤醒 → 专家引用 peer 内容）+ wait_peer 终态 |
 | [real_llm/grants_verify.py](real_llm/grants_verify.py) | **可复用审批 grant 真实验证**（ADR 0022）：真 LLM 发起 call_skill → 命中预签发 grant → 绕过 prompter（prompter 0 次调用）；对照 `revoke_grant` 后回落 prompter（deny） |
@@ -130,7 +130,7 @@ OpenAI 的 provider 与 protocol 是两级统一配置：`provider=openai` 选�
 | [mcp_basic/](mcp_basic/) | taifeng 作为 MCP **server**：spawn `taifeng mcp serve` 走 5 步 JSON-RPC，最后一步真跑一轮 turn | **是**（key 经环境变量传给 serve 子进程） |
 | [mcp_hitl/](mcp_hitl/) | MCP server 模式下工具调用走 permission gate（turn 挂起等审批） | **是**（同上，经 serve 子进程） |
 | [suspend_resume/](suspend_resume/) | 表单采集型 HITL 挂起 → 释放实例 → 跨实例重建 → Resume 续跑（R5 头条故事） | 否（Mock） |
-| [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）；**含两个 detached 交互 demo**：`multi_expert_consult`（并发多专家 + 错峰 HITL + 联合会诊）和 `turn_rewind`（节点回访 + re_reason / retry_tool 重跑）。无 key 自动化 smoke：`PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py` | **是** |
+| [web_ui/](web_ui/) | FastAPI + SSE 浏览器实时看 agent 数据流，多 demo 切换 + 权限策略可视化 + 会话级可观测指标聚合面板 + 历史会话续接（R5 resume）；**含两个 detached 交互 demo**：`multi_expert_consult`（并发多专家 + 错峰 HITL + 联合评审）和 `turn_rewind`（节点回访 + re_reason / retry_tool 重跑）。无 key 自动化 smoke：`PYTHONPATH=src uv run python examples/web_ui/smoke_detached.py` | **是** |
 
 ### 编排 / 并发范式 + 懒加载（skill-as-context）
 

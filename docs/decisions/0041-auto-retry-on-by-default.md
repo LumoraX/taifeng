@@ -8,13 +8,13 @@
 ## 背景
 
 ADR 0037 把 `retry_async` 真正接线成 `RetryingModelClient`，但**留给业务侧显式套**：理由是它与 strict audit
-的「一次 `stream` 恰一个 attempt」契约互斥。2026-09-13 处置链路审计实测的后果：接入方 qiuben api 的
-`build_model_client()` 返回裸 `OpenAICompatClient`（模块 docstring 还写着「taifeng 已处理 retry」），全 `api/`
-搜不到 `RetryingModelClient`，MDT 也不是 Celery task——**任何一层都没有重试**。中转一次瞬时抖动（同期实测
-~17% `server_is_overloaded` 窗口）直接把专科轨打成挂起、等医生点「重试」。用户裁决：**默认自动 retry 开启**。
+的「一次 `stream` 恰一个 attempt」契约互斥。2026-09-13 处置链路审计实测的后果：某接入方的
+`build_model_client()` 返回裸 `OpenAICompatClient`（模块 docstring 还写着「taifeng 已处理 retry」），整个接入侧
+搜不到 `RetryingModelClient`，其编排层也不在可重试的任务框架里——**任何一层都没有重试**。中转一次瞬时抖动（同期实测
+~17% `server_is_overloaded` 窗口）直接把子 skill 轨打成挂起、等人工点「重试」。用户裁决：**默认自动 retry 开启**。
 
 同批还有一处「两套真相」：`UnreliableFinishError.retryable=True`，但其 kind `unreliable_finish` 不在
-`RetryConfig.retryable_kinds` 默认集合，装饰器不会重试它——而这恰是 qiuben 最常见的抖动形态（网关把上游
+`RetryConfig.retryable_kinds` 默认集合，装饰器不会重试它——而这恰是该接入方最常见的抖动形态（网关把上游
 `MALFORMED_FUNCTION_CALL` 错标成 `content_filter`，「6 次 3 中、重跑即过」）。默认开启却不覆盖它，等于没开。
 
 ## 决策
@@ -56,7 +56,7 @@ ADR 0037 把 `retry_async` 真正接线成 `RetryingModelClient`，但**留给�
 
 ## 后果
 
-- 接入方零改动即得有界重试；qiuben 的 `build_model_client()` 不再需要自己套（钉到含本 ADR 的发版即可）。
+- 接入方零改动即得有界重试；接入方的 `build_model_client()` 不再需要自己套（钉到含本 ADR 的发版即可）。
 - examples 的 `_provider_bootstrap.build_model_client(retry=True)` 显式套保留（幂等，且供不经引擎的直连脚本）。
 - 与 strict audit 的互斥由 `with_default_retry` 自动处理：传入 audit 适配器即不套，无需接入方记住 `retry=False`。
 - 每次重试仍经 ADR 0039 的 `provider_retry` 可观测。

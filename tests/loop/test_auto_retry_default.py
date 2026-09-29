@@ -1,7 +1,7 @@
 """ADR 0041：内核默认套有界重试。
 
 改动前 ``RetryingModelClient`` 只在 examples 的 bootstrap 里手工套；业务侧漏套 = 生产零自动重试
-（实测 qiuben api 即如此：中转一次瞬时抖动直接把 turn 打成挂起等人）。本文件钉死：
+（实测某接入方即如此：中转一次瞬时抖动直接把 turn 打成挂起等人）。本文件钉死：
 ``AgentEngine`` / ``AgentEnginePool`` / ``EnginePool.create`` 默认包装；幂等（已套过不重复、透明
 包装可穿透）；strict audit 适配器原样；``auto_retry=False`` 可关；``retry_config`` 可注入。
 """

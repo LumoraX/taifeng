@@ -10,7 +10,7 @@
 
 认知回路设计把「万级 skill 的工具认知回路」拆成发现（⑥）→ 评估 → 派发 → 战绩沉淀（⑦）等相位。v1（战绩沉淀）已落地：每次 `call_skill` 终态记一条 `SkillExecutionRecord`，预留 `selection_origin` / `selection_confidence` 两字段（v1 恒 `whitelist` / `None`），等发现相位填。
 
-相位 2 要解决的真实缺口：caller composite skill 的 `child_skills` 一旦膨胀（几十上百个子专科 / 工具），全部内联进 system prompt 的 `<available_child_skills>` 会**撑爆 context 且稀释注意力**。需要一个「据当前子任务意图先召回 top-K 再决策」的发现机制。
+相位 2 要解决的真实缺口：caller composite skill 的 `child_skills` 一旦膨胀（几十上百个子 skill / 工具），全部内联进 system prompt 的 `<available_child_skills>` 会**撑爆 context 且稀释注意力**。需要一个「据当前子任务意图先召回 top-K 再决策」的发现机制。
 
 落地前要定四件事的边界，避免做成「带准入的检索引擎」越界：召回作用域多宽、confidence 怎么用、阈值怎么切、溯源怎么连回 v1。
 

@@ -66,7 +66,7 @@ async def test_script_exhausted_raises():
 
 async def test_tool_call_chunked_delta_then_done():
     """arguments > 16 字符 → ≥2 个 tool_call_delta（首片带 name）+ done 重组一致。"""
-    arguments = json.dumps({"skill_id": "metabolic-analysis", "depth": 3})
+    arguments = json.dumps({"skill_id": "log-analysis", "depth": 3})
     client = SimClient(turns=[SimTurn(tool_calls=[
         {"id": "c1", "name": "call_skill", "arguments": arguments},
     ])])

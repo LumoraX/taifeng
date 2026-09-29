@@ -8,7 +8,7 @@
 
 主 LLM 在一次 turn 内想并发起多个专家子 skill（可同 skill 多实例），每个专家：
 - 可能**各自独立 HITL**（错峰，不同时挂起 / 不同时 resume）
-- 各自独立完成后**汇聚**到一次联合会诊 skill
+- 各自独立完成后**汇聚**到一次联合评审 skill
 
 现有并发 `call_skill` 批次（`max_parallel_tool_calls>1`）支持「等待收齐 + 无 HITL」，但：
 - 批次挂起是**栅栏**（`asyncio.gather` → 同批全部挂起、必须同批 resume），无法错峰

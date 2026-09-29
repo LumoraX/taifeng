@@ -156,16 +156,16 @@ async def test_filter_entry_skill_and_tag_and_semantics(tmp_path: Path) -> None:
     writer = JsonlMessageWriter(tmp_path / "threads")
 
     # 4 个 thread，分别覆盖四种组合
-    tid_match = await writer.create_thread(entry_skill_id="metabolic")
-    tid_wrong_tag = await writer.create_thread(entry_skill_id="metabolic")
+    tid_match = await writer.create_thread(entry_skill_id="report-writer")
+    tid_wrong_tag = await writer.create_thread(entry_skill_id="report-writer")
     tid_wrong_skill = await writer.create_thread(entry_skill_id="general")
     tid_neither = await writer.create_thread(entry_skill_id="general")
-    await directory.upsert_metadata(_make_meta(tid_match, updated_at=2000.0, entry="metabolic", tags=("prod",)))
-    await directory.upsert_metadata(_make_meta(tid_wrong_tag, updated_at=2001.0, entry="metabolic", tags=("dev",)))
+    await directory.upsert_metadata(_make_meta(tid_match, updated_at=2000.0, entry="report-writer", tags=("prod",)))
+    await directory.upsert_metadata(_make_meta(tid_wrong_tag, updated_at=2001.0, entry="report-writer", tags=("dev",)))
     await directory.upsert_metadata(_make_meta(tid_wrong_skill, updated_at=2002.0, entry="general", tags=("prod",)))
     await directory.upsert_metadata(_make_meta(tid_neither, updated_at=2003.0, entry="general", tags=("dev",)))
 
-    page = await directory.list_threads(filter=ThreadFilter(entry_skill_id="metabolic", tag="prod"))
+    page = await directory.list_threads(filter=ThreadFilter(entry_skill_id="report-writer", tag="prod"))
     returned = {m.thread_id for m in page.items}
     assert returned == {tid_match}
     await directory.close()
