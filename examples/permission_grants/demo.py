@@ -50,16 +50,16 @@ child_skills: [specialist]
 max_call_depth: 3
 ---
 # grant demo 入口
-收到「会诊」请求时调用 `call_skill` 派发 specialist，再综合结论。
+收到「评审」请求时调用 `call_skill` 派发 specialist，再综合结论。
 """
 
 _SPECIALIST = """---
 name: specialist
-description: 专科
+description: 专项
 version: 1.0.0
 type: atomic
 ---
-# 专科
+# 专项
 给一句结论。
 """
 
@@ -79,14 +79,14 @@ def _client() -> SimClient:
     """脚本：parent 发起 call_skill → child 给结论 → parent 综合。"""
     return SimClient(turns=[
         SimTurn(
-            text="我来发起会诊。",
+            text="我来发起评审。",
             tool_calls=[{
                 "id": "c1", "name": "call_skill",
-                "arguments": '{"skill_id": "specialist", "args": {}, "reason": "需要专科给出结论"}',
+                "arguments": '{"skill_id": "specialist", "args": {}, "reason": "需要专项给出结论"}',
             }],
         ),
         SimTurn(text="结论：各项指标正常。"),   # child specialist
-        SimTurn(text="综合：会诊完成。"),       # parent 收尾
+        SimTurn(text="综合：评审完成。"),       # parent 收尾
     ])
 
 
@@ -97,7 +97,7 @@ def _write(skills: Path) -> None:
 
 
 async def _run(policy: PermissionPolicy, skills: Path, threads: Path) -> list:
-    """跑一轮「请发起会诊」，返回事件列表。"""
+    """跑一轮「请发起评审」，返回事件列表。"""
     pool = await taifeng.EnginePool.create(
         skills_dir=skills, threads_dir=threads, model_client=_client(),
         compressors=[], permission_policy=policy,
@@ -113,7 +113,7 @@ async def _run(policy: PermissionPolicy, skills: Path, threads: Path) -> list:
 
     task = asyncio.create_task(watch())
     await asyncio.sleep(0)
-    await engine.submit(taifeng.UserMessage(text="请发起会诊。"))
+    await engine.submit(taifeng.UserMessage(text="请发起评审。"))
     for _ in range(200):
         if any(m.kind in ("turn_completed", "turn_failed") for m in events):
             break

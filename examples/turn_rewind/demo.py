@@ -29,8 +29,8 @@ from taifeng.loop.submission import Rewind
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 CALL_ANALYZER = (
-    '{"skill_id":"analyzer","reason":"取专科分析结论",'
-    '"args":{"patient":"病例X"}}'
+    '{"skill_id":"analyzer","reason":"取专项分析结论",'
+    '"args":{"ticket":"工单X"}}'
 )
 
 
@@ -80,13 +80,13 @@ async def scenario_retry_tool() -> None:
         # skills 来自磁盘固定目录，临时目录仅用于 threads_dir（会话存储）
         client = SimClient(turns=[
             # 一键跑完:orchestrator → call_skill(analyzer) → 综合
-            SimTurn(text="先派发专科分析…", tool_calls=[
+            SimTurn(text="先派发专项分析…", tool_calls=[
                 {"id": "a0", "name": "call_skill", "arguments": CALL_ANALYZER}]),
             SimTurn(text="【分析】风险偏高(初版)"),
             SimTurn(text="【综合】建议:加强监测(基于初版)"),
             # —— retry_tool 后:analyzer 重跑 + orchestrator 续推 ——
             SimTurn(text="【分析】风险中等(修订版)"),
-            SimTurn(text="【综合】建议:常规随访(基于修订版)"),
+            SimTurn(text="【综合】建议:常规跟进(基于修订版)"),
         ])
         pool = await taifeng.EnginePool.create(
             skills_dir=SKILLS_DIR, threads_dir=root / "threads",
@@ -95,7 +95,7 @@ async def scenario_retry_tool() -> None:
         engine = await pool.get_or_create(
             session_id="rw-a", entry_skill_id="orchestrator")
 
-        sub = await engine.submit(taifeng.UserMessage(text="分析病例 X"))
+        sub = await engine.submit(taifeng.UserMessage(text="分析工单 X"))
         print("  [一键跑完] →", await _drive(engine, sub))
         await _settle_nodes(engine)
         _print_nodes(engine)
@@ -119,12 +119,12 @@ async def scenario_re_reason() -> None:
         root = Path(td)
         # skills 来自磁盘固定目录，临时目录仅用于 threads_dir（会话存储）
         client = SimClient(turns=[
-            SimTurn(text="先派发专科分析…", tool_calls=[
+            SimTurn(text="先派发专项分析…", tool_calls=[
                 {"id": "a0", "name": "call_skill", "arguments": CALL_ANALYZER}]),
             SimTurn(text="【分析】风险偏高"),
             SimTurn(text="【综合】建议:加强监测"),
             # —— re_reason 到 it1 后:LLM 重决,这次直接不派发、给保守结论 ——
-            SimTurn(text="【综合】重新判断:信息不足,先补检查再说"),
+            SimTurn(text="【综合】重新判断:信息不足,先补排查再说"),
         ])
         pool = await taifeng.EnginePool.create(
             skills_dir=SKILLS_DIR, threads_dir=root / "threads",
@@ -133,7 +133,7 @@ async def scenario_re_reason() -> None:
         engine = await pool.get_or_create(
             session_id="rw-b", entry_skill_id="orchestrator")
 
-        sub = await engine.submit(taifeng.UserMessage(text="分析病例 X"))
+        sub = await engine.submit(taifeng.UserMessage(text="分析工单 X"))
         print("  [一键跑完] →", await _drive(engine, sub))
         await _settle_nodes(engine)
         _print_nodes(engine)

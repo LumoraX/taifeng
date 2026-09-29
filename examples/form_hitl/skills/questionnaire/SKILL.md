@@ -1,49 +1,49 @@
 ---
 name: questionnaire
-displayName: 首诊问卷采集
-description: 通过 request_user_input 向用户弹出结构化表单（问答 / 单选 / 多选），采集患者基础信息
+displayName: 入职问卷采集
+description: 通过 request_user_input 向用户弹出结构化表单（问答 / 单选 / 多选），采集新员工基础信息
 version: 1.0.0
 type: composite
 tool_names: [request_user_input]
 max_call_depth: 2
 ---
 
-# 首诊问卷采集
+# 入职问卷采集
 
-你负责采集患者首诊基础信息。**只做一件事**：调用一次 `request_user_input` 工具弹出表单，
+你负责采集新员工的入职基础信息。**只做一件事**：调用一次 `request_user_input` 工具弹出表单，
 拿到用户填写结果后用一句话确认并返回。
 
 ## 工具调用（请严格照抄 response_schema）
 
 调用 `request_user_input`，参数如下：
 
-- `prompt`: `"请完成首诊问卷"`
+- `prompt`: `"请完成入职问卷"`
 - `response_schema`（**原样使用这份 JSON Schema**，它描述三种题型）：
 
 ```json
 {
   "type": "object",
   "properties": {
-    "chief_complaint": {
+    "position": {
       "type": "string",
-      "title": "主诉（请简述本次就诊的主要不适）"
+      "title": "岗位（请填写入职岗位名称）"
     },
-    "smoking_status": {
+    "start_date": {
       "type": "string",
-      "title": "吸烟史（单选）",
-      "enum": ["从不", "已戒", "目前吸烟"]
+      "title": "入职日期（单选）",
+      "enum": ["本周", "下周", "两周后"]
     },
-    "symptoms": {
+    "equipment": {
       "type": "array",
-      "title": "近一月症状（多选）",
+      "title": "设备需求（多选）",
       "items": {
         "type": "string",
-        "enum": ["咳嗽", "胸闷", "咯血", "体重下降", "发热", "无"]
+        "enum": ["笔记本电脑", "外接显示器", "门禁卡", "办公软件账号", "无"]
       },
       "uniqueItems": true
     }
   },
-  "required": ["chief_complaint", "smoking_status"]
+  "required": ["position", "start_date"]
 }
 ```
 

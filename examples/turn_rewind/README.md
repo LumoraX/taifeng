@@ -32,7 +32,7 @@ PYTHONPATH=src uv run python examples/turn_rewind/demo.py   # 无需 API key（S
 ```
 [一键跑完]    → call_skill(analyzer)=风险偏高(初版) → 综合:加强监测(基于初版)
 Rewind(disp0, retry_tool)
-[retry_tool] → analyzer 走新子 turn=风险中等(修订版) → 综合:常规随访(基于修订版)
+[retry_tool] → analyzer 走新子 turn=风险中等(修订版) → 综合:常规跟进(基于修订版)
 ```
 保留「LLM 决定调 analyzer」的动作,只把 analyzer 子 skill 重跑一遍、换掉它的输出,
 父 skill 基于新结论续推。子 skill 是 `entry: false`,照样被 `call_skill` 重跑。
@@ -42,7 +42,7 @@ Rewind(disp0, retry_tool)
 ```
 [一键跑完]   → call_skill(analyzer)=风险偏高 → 综合:加强监测
 Rewind(it1, re_reason)
-[re_reason]  → LLM 重判:信息不足,先补检查（这次没派发 analyzer，下游自适应）
+[re_reason]  → LLM 重判:信息不足,先补排查（这次没派发 analyzer，下游自适应）
 ```
 
 ## 与 step_pipeline 的区别

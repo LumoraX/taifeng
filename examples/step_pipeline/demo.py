@@ -27,10 +27,10 @@ SKILLS = Path(__file__).resolve().parent / "skills"
 _FORM = {
     "type": "object",
     "properties": {
-        "age": {"type": "string", "title": "年龄"},
-        "smoking": {"type": "string", "title": "吸烟史", "enum": ["从不", "已戒", "目前吸烟"]},
+        "years": {"type": "string", "title": "成立年限"},
+        "sourcing": {"type": "string", "title": "关键原材料来源", "enum": ["单一来源", "双来源", "多来源"]},
     },
-    "required": ["age"],
+    "required": ["years"],
 }
 
 # 按 entry skill id 路由的脚本（每 skill 一个游标）
@@ -40,16 +40,16 @@ ROUTES: dict[str, list[SimTurn]] = {
             "id": "rui_intake", "name": "request_user_input",
             "arguments": '{"prompt":"请补充基础信息","response_schema":'
                          + __import__("json").dumps(_FORM, ensure_ascii=False) + "}"}]),
-        SimTurn(text="### 采集结果 v1：55岁/目前吸烟/右肺结节8mm INTAKE_V1"),
-        SimTurn(text="### 采集结果 v2（重试）：55岁/已戒烟/右肺结节8mm INTAKE_V2"),
+        SimTurn(text="### 采集结果 v1：成立6年/单一来源/延期1次 INTAKE_V1"),
+        SimTurn(text="### 采集结果 v2（重试）：成立6年/已补充第二来源/延期1次 INTAKE_V2"),
     ],
     '<entry_skill id="risk"': [
         SimTurn(text="### 风险评估 v1：基于[采集v1] → 中风险 RISK_V1"),
         SimTurn(text="### 风险评估 v2：基于[采集v2] → 低风险 RISK_V2"),
     ],
     '<entry_skill id="plan"': [
-        SimTurn(text="### 干预计划 v1 PLAN_V1"),
-        SimTurn(text="### 干预计划 v2 PLAN_V2"),
+        SimTurn(text="### 准入方案 v1 PLAN_V1"),
+        SimTurn(text="### 准入方案 v2 PLAN_V2"),
     ],
 }
 
@@ -70,8 +70,8 @@ async def main() -> None:
             extra_tools=[make_request_user_input_tool()], max_iterations=20)
         pipe = Pipeline(
             pool,
-            steps=[("intake", "信息采集"), ("risk", "风险评估"), ("plan", "干预计划")],
-            seed="男 55 岁，体检发现右肺结节 8mm",
+            steps=[("intake", "信息采集"), ("risk", "风险评估"), ("plan", "准入方案")],
+            seed="零部件供应商，成立 6 年，关键原材料单一来源",
             base_session="demo")
 
         _bar("阶段 1/4：顺跑 —— intake 第 1 步弹表单 → 挂起")
@@ -85,7 +85,7 @@ async def main() -> None:
         print(f"  表单题型: {kinds}")
 
         _bar("阶段 2/4：用户填表 → resume → 自动顺跑 risk、plan")
-        await pipe.resume_step(0, s0.pending["request_id"], {"age": "55", "smoking": "目前吸烟"})
+        await pipe.resume_step(0, s0.pending["request_id"], {"years": "6", "sourcing": "单一来源"})
         for s in pipe.steps:
             print(f"step{s.index}[{s.title}] 状态={s.status}  输出={s.output_text[:40]!r}")
         assert all(s.status == "done" for s in pipe.steps), [s.status for s in pipe.steps]
