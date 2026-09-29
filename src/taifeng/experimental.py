@@ -23,11 +23,16 @@ from taifeng.llm.providers.replay import (
     ReplayUnsupportedError,
     recorded_calls,
 )
+from taifeng.llm.recovery import RecoveryRecipeBook
 from taifeng.llm.types import FilePart
 from taifeng.loop.audit_config import AuditCapabilityError, AuditConfig
 from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeRequest,
     AuditToolOutcomeResolution,
+)
+from taifeng.loop.failure_policy import (
+    RecipeDeclaringPolicy,
+    RecoveryRecipeProvider,
 )
 from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
 from taifeng.mcp.http_client import McpHttpClient
@@ -91,6 +96,10 @@ __all__ = [
     "WorkingSetPlan",
     "WorkingSetPolicy",
     "plan_working_set",
+    # 可声明的失败恢复配方（failure-recovery-recipes，🧪）
+    "RecipeDeclaringPolicy",
+    "RecoveryRecipeBook",
+    "RecoveryRecipeProvider",
     # 多模态重载荷驱逐（compaction-multimodal-eviction，🧪）
     "MultimodalEvictionStrategy",
     # 用户文件（PDF）输入（llm-file-input，🧪）

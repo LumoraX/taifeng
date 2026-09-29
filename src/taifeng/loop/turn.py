@@ -23,7 +23,6 @@ from taifeng.llm.image_input import (
     ImageInputPolicy,
     InputCostEstimator,
 )
-from taifeng.llm.recovery import recommend_recovery
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
@@ -35,6 +34,7 @@ from taifeng.loop.event import (
     TurnStarted,
     TurnSuspended,
 )
+from taifeng.loop.failure_policy import resolve_recovery
 from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.rewind import RewindLog
 from taifeng.loop.turn_compaction import TurnCompaction
@@ -580,7 +580,7 @@ class TurnRunner:
             # G3：归类到稳定 failure_class + 处置建议 + 结构化恢复配方，
             # 供 telemetry 聚合 / HITL 展示 / 业务编排层自动恢复决策。
             failure_class, suggested_action = classify_failure(e)
-            recovery = recommend_recovery(failure_class)
+            recovery = resolve_recovery(self.failure_policy, failure_class)
             # G3：优先用异常自带的 request_id（失败路径 provider 回填），
             # 否则回退到本 turn 最近一次成功调用的 request_id。
             request_id = getattr(e, "request_id", None) or self._last_request_id
@@ -591,7 +591,7 @@ class TurnRunner:
                         "kind": type(e).__name__,
                         "failure_class": failure_class,
                         "suggested_action": suggested_action,
-                        "recovery": recovery.to_dict(),
+                        "recovery": recovery,
                         "request_id": request_id,
                         "iterations": iterations,
                         # 失败前已成功采样的用量（resume/重提不会回补，此处不报即永久漏计）

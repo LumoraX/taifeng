@@ -122,6 +122,7 @@ Later ADRs:
 81. [ADR 0081: 压缩作为回访节点——可回到某次压缩之前](decisions/0081-compaction-as-rewind-node.md) (Amends #0014, #0016): 压缩是对 history 影响最大的内核动作却不可寻址，摘要有损时无法回头。决策：每个仍在的 `compacted` 条目是 `compaction` 节点；rewind 它 = 从 transcript 重放还原到压缩之前（去掉压缩写下的旁路项）；新增 `restore` 模式只还原不重推，`re_reason` 仅在轮到模型说话时可用；仅 root thread。
 82. [ADR 0082: 多模态重载荷驱逐——旧附件换成描述](decisions/0082-multimodal-payload-eviction.md): 用户消息上的附件没有任何压缩策略处理，带图会话在文本远未触顶时就被迫整体摘要。决策：独立策略 `MultimodalEvictionStrategy`，只看附件不动文本，用含类型 / 大小 / 文件名 / sha256 前缀的描述替换；「最近」按带附件的条目计数；无候选不触发；实验层。
 83. [ADR 0083: 压缩增量基线——上次压缩后没长多少就不再压](decisions/0083-compaction-growth-baseline.md): 压缩腾不出多少空间时估算停在软阈值之上，每次预算检查都再压一次，反复破坏缓存、对摘要再做摘要。决策：基线记在 `compacted` 条目的 metadata 并随条目落 transcript；`recompact_min_growth_ratio` 设闸，到硬阈值、手动与 overflow 压缩不设闸；默认关闭。
+84. [ADR 0084: 失败恢复配方可由业务声明](decisions/0084-declarable-recovery-recipes.md): 事件里的恢复配方来自内核写死的表，业务只能另查一张，两张表各说各话。决策：`RecoveryRecipeBook` 按失败分类覆盖并在构造期校验；经失败处置 policy 的可选能力注入；`custom_steps` 承载业务动作；声明的配方带 `source: "declared"`；内核仍只透出不执行。
 
 ### Fourth Pass: Gap Tracking
 

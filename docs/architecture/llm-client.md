@@ -292,6 +292,9 @@ client = CircuitBreakingModelClient(
 `provider_unreliable_finish` / `cancelled` / `request_size` / `runtime_io` / `unknown`），每类带
 `suggested_action`。`llm/recovery.py::recommend_recovery(failure_class)`
 产出机读 `RecoveryPlan{steps, auto_retry_once, escalate}`，随 `TurnFailed.data['recovery']` 透出——**内核只产出建议，业务侧编排执行**（R1）。
+业务可按失败分类**声明**自己的配方（`RecoveryRecipeBook.default().declare(...)`，构造期校验），经
+`RecipeDeclaringPolicy` 挂到失败处置 policy 上；声明的配方在事件里带 `source: "declared"`，业务特有的动作写进
+`custom_steps`（ADR 0084，契约见 `capabilities/failure-recovery-recipes.md`）。
 native 三家成功时还会 emit `rate_limits`（`RateLimitSnapshot`）+ 回填 `LLMError.request_id`（服务端 request-id）。
 
 ### 异常终止与空回复（finish_reason）

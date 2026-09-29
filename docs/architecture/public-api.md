@@ -18,7 +18,7 @@ Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回�
 （`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitnessCatalog`、`SkillFitnessLedger`、`SkillFitness`、
 `SkillFitnessRecorder`、`InMemorySkillFitnessStore`）、按战绩算分与影子评估（`FitnessScorer`、`WilsonFitnessScorer`、
 `SkillFitnessScore`、`WorkingSetPolicy`、`WorkingSetPlan`、`plan_working_set`、`SkillFitnessShadow`、
-`ShadowEvaluation`、`ShadowObserver`）、多模态重载荷驱逐（`MultimodalEvictionStrategy`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
+`ShadowEvaluation`、`ShadowObserver`）、可声明的失败恢复配方（`RecoveryRecipeBook`、`RecipeDeclaringPolicy`、`RecoveryRecipeProvider`）、多模态重载荷驱逐（`MultimodalEvictionStrategy`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
 
 ## 类型标记
 

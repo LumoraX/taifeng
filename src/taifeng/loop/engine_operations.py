@@ -14,8 +14,8 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.errors import classify_failure, suggested_action_for
-from taifeng.llm.recovery import recommend_recovery
 from taifeng.loop.event import EventMsg, TurnFailed
+from taifeng.loop.failure_policy import resolve_recovery
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -103,7 +103,9 @@ class EngineOperations:
                         "kind": error_kind,
                         "failure_class": failure_class,
                         "suggested_action": suggested_action,
-                        "recovery": recommend_recovery(failure_class).to_dict(),
+                        "recovery": resolve_recovery(
+                            self._engine._failure_policy, failure_class
+                        ),
                         "request_id": None,
                         "iterations": 0,
                         "is_root": True,
