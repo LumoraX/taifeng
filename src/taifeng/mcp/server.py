@@ -47,6 +47,7 @@ from taifeng.mcp.server_capabilities import (
 )
 
 if TYPE_CHECKING:
+    from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.pool import EnginePool
 
 logger = logging.getLogger(__name__)
@@ -311,7 +312,7 @@ class McpStdioServer:
         params: dict[str, Any],
         *,
         timeout: float = 60.0,
-        cancel: Any = None,
+        cancel: CancellationToken | None = None,
     ) -> dict[str, Any]:
         """从 server 主动发起一次 client-bound JSON-RPC 请求并等响应。
 
@@ -344,17 +345,14 @@ class McpStdioServer:
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending_outgoing[req_id] = future
 
-        # 注册 cancel token 回调（可选）
+        # 注册 cancel token 回调（可选；R4：取消即结束等待）。此前调用的是不存在的
+        # ``add_callback``，AttributeError 被吞掉，传入的 token 从未生效
         cancel_unsub = None
         if cancel is not None:
             def _on_cancel() -> None:
                 if not future.done():
                     future.cancel()
-            try:
-                cancel_unsub = cancel.add_callback(_on_cancel)
-            except AttributeError:
-                # 兼容简化 cancel 对象（无 add_callback）
-                cancel_unsub = None
+            cancel_unsub = cancel.on_cancel(_on_cancel)
 
         # Telemetry: started
         await self._emit_event("elicitation_started", {
@@ -393,10 +391,7 @@ class McpStdioServer:
             # 清理 pending future（防止迟到 response 触发崩溃）
             self._pending_outgoing.pop(req_id, None)
             if cancel_unsub is not None:
-                try:
-                    cancel_unsub()
-                except Exception:
-                    pass
+                cancel_unsub()
             duration_ms = int((time.monotonic() - t0) * 1000)
             await self._emit_event("elicitation_completed", {
                 "method": method,

@@ -216,3 +216,25 @@ async def test_tools_call_path_denies_without_elicitation_round_trip() -> None:
     assert decisions[0].granted is False
     assert decisions[0].reason.startswith("elicitation_unsupported:")
     assert "elicitation/create" not in _methods(running.written)
+
+
+async def test_server_initiated_request_honors_cancel_token() -> None:
+    """R4：传入的 CancellationToken 触发即结束等待（此前误调 add_callback，token 从未生效）。"""
+    from taifeng.loop.cancellation import CancellationToken
+
+    running = await _Running().started()
+    token = CancellationToken()
+    try:
+        await negotiate(running.reader, running.written, ELICITATION)
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, token.cancel)
+        started = loop.time()
+        with pytest.raises(asyncio.CancelledError):
+            await running.server.server_initiated_request(
+                "elicitation/create", {"message": "?"}, timeout=30, cancel=token)
+        assert loop.time() - started < 5
+    finally:
+        await running.stop()
+    assert running.server._pending_outgoing == {}  # noqa: SLF001 —— 取消后清理 pending
+    completed = [data for kind, data in running.events if kind == "elicitation_completed"]
+    assert completed and completed[-1]["outcome"] == "cancelled"
