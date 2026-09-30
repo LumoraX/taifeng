@@ -153,6 +153,8 @@ Later ADRs:
 112. [ADR 0112: MCP stdio server 经 `CommandExecutor` 启动；持续读走 stderr](decisions/0112-mcp-stdio-server-through-command-executor.md): 宿主代跑的 MCP server 不经执行器，进不了沙盒；且客户端从不读 server 的 stderr，日志写满管道后 server 卡死。决策：`CommandSpec.stdin` + `StreamingCommandProcess`；`McpStdioClient.spawn(executor=)`（默认最小环境）；本机命令的 stdin 接 `DEVNULL`；持续读走 stderr、留 16 KiB 尾部。Amends #0051。
 113. [ADR 0113: WorkspaceFS——文件类工具经协议读写工作区](decisions/0113-workspace-fs.md): 命令进了沙盒，文件类工具却还在读写宿主机目录。决策：`WorkspaceFS` 协议（7 个成员）+ `LocalWorkspaceFS`；五个文件类工具工厂接受 `workspace=`；搜索工具的遍历只写一份，非本机工作区的访问从工作线程桥回事件循环；`apply_patch` 删除目录改在校验阶段拒绝。
 114. [ADR 0114: SessionJournal 后端 seam 与一致性检查](decisions/0114-session-journal-backend-seam.md): 审计会话的事实源只能写本机文件，协议、类型与语义都没公开，外部包无从写共享后端。决策：公开两个注入层次（换存储：`SyncFileAdapter` + `WriterLockAdapter`；换 core：`SessionJournalCore` + 存储无关的构件）；一致性检查 `taifeng.testing` 是协议的一部分；`InMemorySessionJournalCore` 作参考实现；全部放实验层，随审计模式一并晋升。
+115. [ADR 0115: Gemini 的工具 schema 投影与 Google 错误体分类](decisions/0115-gemini-tool-schema-projection.md): 真实端点上任何带默认工具的会话都 400（内置工具的 schema 带 `additionalProperties`），且这个 400 被归成安全拦截（`fieldViolations` 命中 `violat`）。决策：送出前按白名单投影 schema，参数校验仍按原 schema；Google 错误体按 `status` + `message` 分类。
+116. [ADR 0116: 用户文件（PDF）输入晋升稳定层](decisions/0116-user-file-input-graduates.md): 图片附件在稳定层而同构的文件附件停在实验层，下游无法把 PDF 交给模型。决策：`FileAttachmentV1` / `FileInputPolicy` / `FilePart` 晋升，契约转 ✅；依据是 codex 与 Gemini 两家的真实验证；OpenAI 与 Anthropic 的文件 wire 仍只有单测，如实保留在契约里。Amends #0068。
 
 ### Fourth Pass: Gap Tracking
 

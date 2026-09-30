@@ -161,6 +161,8 @@ _PLATFORM_FACING = (
     "make_glob_tool", "make_grep_tool", "make_memory_tool", "make_request_user_input_tool",
     "make_spawn_skill_tool", "make_await_skills_tool", "make_join_skill_tool", "make_kill_skill_tool",
     "make_read_skill_tool", "make_call_skill_tool", "make_run_script_tool", "make_search_skills_tool",
+    # 用户文件输入
+    "FileAttachmentV1", "FileInputPolicy", "FilePart",
     # MCP
     "McpClient", "McpHttpClient", "McpToolBinding", "bind_mcp_tools", "register_mcp_tools_async",
     "ElicitationHandler", "ElicitationRequest", "ElicitationResult",
@@ -173,7 +175,10 @@ def test_platform_facing_symbols_are_in_the_stable_layer(name: str) -> None:
     assert getattr(taifeng, name) is not None
 
 
-@pytest.mark.parametrize("name", ["McpHttpClient", "McpToolBinding", "bind_mcp_tools"])
+@pytest.mark.parametrize("name", [
+    "McpHttpClient", "McpToolBinding", "bind_mcp_tools",
+    "FileAttachmentV1", "FileInputPolicy", "FilePart",
+])
 def test_promoted_names_stay_importable_from_experimental(name: str) -> None:
     """晋升后在实验层保留一个发布版本：照常可用，提示改从顶层导入。"""
     assert name not in taifeng.experimental.__all__

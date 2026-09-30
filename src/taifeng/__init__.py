@@ -104,6 +104,7 @@ from taifeng.llm import (
     TextPart,
     TokenUsage,
 )
+from taifeng.llm.file_input import FileAttachmentV1, FileInputPolicy
 from taifeng.llm.providers import (
     RoutingSimClient,
     SimClient,
@@ -113,6 +114,7 @@ from taifeng.llm.providers import (
     SimScriptExhausted,
     SimTurn,
 )
+from taifeng.llm.types import FilePart
 from taifeng.loop import (
     CancellationToken,
     CancelTurn,
@@ -484,6 +486,10 @@ __all__ = [
     "make_shell_exec_tool",
     "make_spawn_skill_tool",
     "register_mcp_tools_async",
+    # 用户文件（PDF）输入（ADR 0116）
+    "FileAttachmentV1",
+    "FileInputPolicy",
+    "FilePart",
     "__version__",
     "assistant_message",
     "function_call",

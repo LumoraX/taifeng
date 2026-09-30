@@ -41,6 +41,8 @@ Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools
 - **内置工具工厂**：`make_*_tool` 全部在稳定层，包括 `EnginePool.create` 默认注册的四个；
 - **模拟器**：`SimClient` / `SimTurn` / `RoutingSimClient` 及故障注入、断言类型，下游写测试不必自造模型客户端；
 - **遥测**：`TelemetrySink`、`ConsoleSink`、`JsonlSink`、`attach_console_sink` / `attach_jsonl_sink`、OTel sink；
+- **消息附件**：图片（`ImageAttachmentV1` / `ImageInputPolicy` / `ImagePart`）与文件（`FileAttachmentV1` /
+  `FileInputPolicy` / `FilePart`）；
 - **MCP**：stdio 与 streamable HTTP 客户端、`McpClient` 协议、`bind_mcp_tools` / `register_mcp_tools_async`、
   elicitation 类型与错误类型。
 
@@ -49,7 +51,7 @@ Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools
 
 **晋升**：实验层名字转稳定时从 `taifeng.experimental.__all__` 移除，该模块的 `__getattr__` 保留同名入口
 至少一个发布版本，访问时发 `DeprecationWarning` 提示改从顶层导入（当前：`McpHttpClient`、`McpToolBinding`、
-`bind_mcp_tools`）。
+`bind_mcp_tools`，以及 ADR 0116 晋升的 `FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
 
 ## 一致性检查（`taifeng.testing`）
 

@@ -107,7 +107,6 @@ from taifeng.conversation.origin import (
     summarize_taint,
     taint_from_extras,
 )
-from taifeng.llm.file_input import FileAttachmentV1, FileInputPolicy
 from taifeng.llm.prewarm import CachePrimingPrewarmer, ModelPrewarmer, PrewarmOutcome
 from taifeng.llm.providers.replay import (
     JournalReplayClient,
@@ -117,7 +116,6 @@ from taifeng.llm.providers.replay import (
     recorded_calls,
 )
 from taifeng.llm.recovery import RecoveryRecipeBook
-from taifeng.llm.types import FilePart
 from taifeng.loop.audit_config import AuditCapabilityError, AuditConfig
 from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeRequest,
@@ -348,10 +346,6 @@ __all__ = [
     "BackgroundCompactionStrategy",
     # 多模态重载荷驱逐（compaction-multimodal-eviction，🧪）
     "MultimodalEvictionStrategy",
-    # 用户文件（PDF）输入（llm-file-input，🧪）
-    "FileAttachmentV1",
-    "FileInputPolicy",
-    "FilePart",
 ]
 
 # 已晋升到稳定层的名字：在本模块保留至少一个发布版本（ADR 0066 决策 5），访问时提示新位置。
@@ -360,6 +354,10 @@ _PROMOTED: dict[str, str] = {
     "McpHttpClient": "taifeng.mcp.http_client",
     "McpToolBinding": "taifeng.mcp.bridge",
     "bind_mcp_tools": "taifeng.mcp.bridge",
+    # ADR 0116：用户文件（PDF）输入
+    "FileAttachmentV1": "taifeng.llm.file_input",
+    "FileInputPolicy": "taifeng.llm.file_input",
+    "FilePart": "taifeng.llm.types",
 }
 
 

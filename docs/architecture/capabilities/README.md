@@ -91,7 +91,7 @@ Aligned with [llm-client.md](../llm-client.md).
 | --- | --- |
 | [llm-provider-native](llm-provider-native.md) | Native provider contract, `ResponseEvent` stream shape, Anthropic / Gemini / DeepSeek field mapping, cache field priority, error classification, and `record_cache_read` |
 | [llm-codex-provider](llm-codex-provider.md) | 独立 `codex-responses-v1` provider：顶层 instructions、有序 typed input、done-item 终态、provider-state 隔离、恢复与脱敏边界 |
-| [llm-file-input](llm-file-input.md) | 🧪 用户消息文件（首批 PDF）输入：`FileAttachmentV1` / `FilePart` canonical 形态、`FileInputPolicy` admission 与按页成本估算、`"file"` 能力门控、OpenAI Chat / Responses / Codex / Anthropic / Gemini wire 映射、脱敏与压缩占位（ADR 0068） |
+| [llm-file-input](llm-file-input.md) | 用户消息文件（首批 PDF）输入（稳定层，ADR 0116）：`FileAttachmentV1` / `FilePart` canonical 形态、`FileInputPolicy` admission 与按页成本估算、`"file"` 能力门控、OpenAI Chat / Responses / Codex / Anthropic / Gemini wire 映射、脱敏与压缩占位（ADR 0068） |
 | [model-routing-composition](model-routing-composition.md) | 多模型路由 / 回退包装器的组合契约：叠加顺序（回退在断路器外）、零产出才回退、按 failure_class 决定、能力取交集、协议不混组、可观测与缓存影响；内核不实现路由（ADR 0067） |
 | [llm-image-input](llm-image-input.md) | 用户消息图片输入：`ImageAttachmentV1` / `ImagePart` canonical 形态、admission 与成本估算、OpenAI Chat/Responses 与 Codex 协议映射、持久化压缩与脱敏边界 |
 | [llm-provider-native § thinking-passback](llm-provider-native.md) | Anthropic thinking / redacted_thinking 块连同签名、Gemini thoughtSignature 的解析 → `reasoning_state` / `extra_content` 落史 → 续传原样回传；`thinking_budget_tokens` / `thinking_budget` / `include_thoughts` 配置与冲突校验（ADR 0046） |

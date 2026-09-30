@@ -40,6 +40,9 @@ EventMsg
 FailureContext
 FailureDisposition
 FailureDispositionPolicy
+FileAttachmentV1
+FileInputPolicy
+FilePart
 FilesystemSkillRegistry
 GrantStore
 HandoffCompactionStrategy
