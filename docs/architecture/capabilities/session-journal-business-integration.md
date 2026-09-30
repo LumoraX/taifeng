@@ -24,7 +24,7 @@ Journal durable ack 之后的内存态或可重建投影，不得领先 Journal�
 在工具调用处停下等人作答的挂起与恢复见 §17，分离式派发见 §18，join-barrier 见 §19，peer 消息见 §20。
 本阶段不支持其余原因的挂起（子 skill 挂起、失败处置、资源护栏、带到期时间的挂起）、手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
 后台 shell 任务、
-LLM attempt / submission 未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
+已冻结 Session 的 repair/unfreeze、Timeline/export 通用 redaction、
 加密、WORM 或外置 blob。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
 
@@ -395,7 +395,7 @@ LLM request 落账时图片与文件的正文都按 §8 脱敏（`image_base64` 
 3. `open_existing(journal_session_id, writer_id=AuditConfig.writer_id, operation_id="<session>:resume:<随机>")`
    以 epoch+1 接管（跨进程写者锁保证原 writer 仍存活时 Busy）；
 4. 持锁后权威重读：初始化 batch 的 root thread 必须等于 `resume_thread_id`；收集**未结算 effect**——
-   `llm_request_committed` 无对应 `llm_response_checkpoint`、`tool_intent_committed` 无对应
+   `llm_request_committed` 无对应 `llm_response_checkpoint` / `llm_request_abandoned`、`tool_intent_committed` 无对应
    `tool_outcome_committed` / `tool_recovery_committed`、`skill_selected` 无同 operation 的
    `skill_dispatch_finished`、`submission_accepted` 无对应 `submission_applied`，或任一终态已 durable 为
    `unknown` 且未被 `tool_recovery_committed` 改判（ADR 0025：未匹配 intent 一律 UNKNOWN）。root thread 的工具
@@ -479,7 +479,7 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
   时用已落账的终态结算父调用。
 - 全有或全无覆盖整棵树：任一层有调用仍需人裁决，整批不写。
 - 被中断的执行不写 `skill_outcome`；恢复不续跑子 skill。
-- 未结算的 LLM attempt（请求已落账、无 checkpoint）仍不在收敛范围，出现在任一 thread 上都 fail closed。
+- 可收敛 thread 上没有 checkpoint 的 LLM 请求按 §13.5 作废；不可收敛 thread 上的仍 fail closed。
 
 ### 13.4 已准入、尚未应用的用户消息（ADR 0101）
 
@@ -488,6 +488,15 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
 为本次恢复的 operation），按准入顺序。补上的对话项与运行时应用得到的逐字相同。
 
 其他 op 的准入记录没有 applied 时仍 fail closed。
+
+### 13.5 没有 checkpoint 的 LLM 请求（ADR 0103）
+
+进程死在 LLM 调用途中：`llm_request_committed` 已落账、没有任何 `llm_response_checkpoint`。LLM 调用对
+内核没有外部副作用，回复一个字也没进过对话。恢复为可收敛 thread（root、被中断派发的子 thread、
+被中断的分离式派发与聚合 turn 的 thread）上每条这样的请求落一条 `llm_request_abandoned`
+（`LlmRequestAbandonedV1`：`request_record_id`、`reason = process_recovery`、`recovery_operation_id`），
+operation 与 turn 取自请求记录；此后这次请求视为已结算。它所在的 turn 到此为止，不补跑；模型在下一个
+turn 继续。作废记录与该 thread 上工具调用的结论同批、先于派发 / 派发出去的 thread 的终态。
 
 ## 14. 验收门槛
 

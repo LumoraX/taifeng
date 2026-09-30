@@ -45,6 +45,7 @@ from taifeng.conversation.journal.records import (
     StableErrorV1,
     ThreadTerminalV1,
 )
+from taifeng.loop.audit_resume_llm import abandoned_request_record, unsettled_llm_requests
 from taifeng.loop.audit_resume_scan import find_undispatched_calls
 from taifeng.loop.audit_resume_spawn import (
     InterruptedSpawn,
@@ -134,6 +135,7 @@ class RecoveryScope:
         others: 其余未结算 record（仍一律 fail closed）。
         spawns: 没有终态的分离式派发（ADR 0098）。
         unapplied: 已准入、尚未应用的用户消息（ADR 0101）。
+        llm_requests: 可收敛 thread 上没有 checkpoint 的 LLM 请求（ADR 0103）。
     """
 
     root_thread_id: str
@@ -144,13 +146,14 @@ class RecoveryScope:
     others: tuple[str, ...]
     spawns: tuple[InterruptedSpawn, ...] = ()
     unapplied: tuple[JournalEnvelope, ...] = ()
+    llm_requests: tuple[JournalEnvelope, ...] = ()
 
     @property
     def empty(self) -> bool:
         """没有任何可收敛项。"""
         return not (
             self.tool_calls or self.dispatches or self.undispatched
-            or self.spawns or self.unapplied
+            or self.spawns or self.unapplied or self.llm_requests
         )
 
     @property
@@ -261,6 +264,8 @@ def build_recovery_scope(
     }
     unapplied = unapplied_user_messages(envelopes, frozenset(pending), root_thread_id)
     owned.update(envelope.record_id for envelope in unapplied)
+    llm_requests = unsettled_llm_requests(envelopes, frozenset(pending), threads)
+    owned.update(envelope.record_id for envelope in llm_requests)
     for call in calls:
         is_dispatch = (
             call.intent_payload.name == CALL_SKILL_TOOL_NAME
@@ -295,6 +300,7 @@ def build_recovery_scope(
         others=tuple(record_id for record_id in leftover if record_id not in owned),
         spawns=tuple(spawn for spawn in spawns if spawn.started.record_id in owned),
         unapplied=unapplied,
+        llm_requests=llm_requests,
     )
 
 
@@ -357,6 +363,15 @@ class _Planner:
                 await self._settle_dispatch(item, result)
             else:
                 await self._settle_tool_call(item, result)
+        # 没有 checkpoint 的 LLM 请求：作废（没有外部副作用，回复没进过对话）
+        result.records.extend(
+            abandoned_request_record(
+                request, session_id=self._session_id,
+                recovery_operation_id=self._recovery_operation_id,
+            )
+            for request in self._scope.llm_requests
+            if request.thread_id == thread_id
+        )
         undispatched = plan_undispatched_recovery(
             [
                 call for call in self._scope.undispatched

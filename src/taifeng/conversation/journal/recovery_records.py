@@ -124,7 +124,30 @@ class ToolCallUndispatchedV1(PayloadModel):
     recovery_operation_id: NonEmptyStr
 
 
+LLM_REQUEST_ABANDONED_RECORD_TYPE = "llm_request_abandoned"
+"""接管时作废一次没有 checkpoint 的 LLM 请求的 record type（ADR 0103）。"""
+
+
+class LlmRequestAbandonedV1(PayloadModel):
+    """进程死在 LLM 调用途中：请求已落账、没有任何 checkpoint，接管时作废。
+
+    LLM 调用对内核没有外部副作用；没有 checkpoint 就没有任何内容进过对话。作废之后这次请求
+    视为已结算，那个 turn 到此为止，模型在下一个 turn 继续。
+
+    Attributes:
+        request_record_id: 被作废的 ``llm_request_committed`` record。
+        reason: 作废原因，恒为 ``process_recovery``。
+        recovery_operation_id: 本次 resume 接管的 operation id（与 ``writer_takeover`` 同源）。
+    """
+
+    request_record_id: NonEmptyStr
+    reason: Literal["process_recovery"] = "process_recovery"
+    recovery_operation_id: NonEmptyStr
+
+
 __all__ = [
+    "LLM_REQUEST_ABANDONED_RECORD_TYPE",
+    "LlmRequestAbandonedV1",
     "TOOL_CALL_UNDISPATCHED_RECORD_TYPE",
     "TOOL_RECOVERY_RECORD_TYPE",
     "ReconcileStatus",

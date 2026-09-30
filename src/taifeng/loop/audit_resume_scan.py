@@ -26,8 +26,10 @@ from taifeng.conversation.journal.records import (
     deserialize_response_item,
 )
 from taifeng.conversation.journal.recovery_records import (
+    LLM_REQUEST_ABANDONED_RECORD_TYPE,
     TOOL_CALL_UNDISPATCHED_RECORD_TYPE,
     TOOL_RECOVERY_RECORD_TYPE,
+    LlmRequestAbandonedV1,
     ToolCallUndispatchedV1,
     ToolRecoveryCommittedV1,
 )
@@ -97,6 +99,10 @@ def _settled_references(envelopes: Sequence[JournalEnvelope]) -> _Settlement:
         kind = envelope.record_type
         if kind == "llm_response_checkpoint":
             settled.llm.add(_payload_ref(envelope, "request_record_id"))
+        elif kind == LLM_REQUEST_ABANDONED_RECORD_TYPE:
+            # 接管时作废的请求视为已结算（ADR 0103）
+            settled.llm.add(LlmRequestAbandonedV1.model_validate(envelope.payload).request_record_id)
+            continue
         elif kind == "tool_outcome_committed":
             settled.tool.add(_payload_ref(envelope, "intent_record_id"))
         elif kind == TOOL_RECOVERY_RECORD_TYPE:
@@ -130,7 +136,7 @@ def _settled_references(envelopes: Sequence[JournalEnvelope]) -> _Settlement:
 def find_unsettled_effects(envelopes: Sequence[JournalEnvelope]) -> tuple[str, ...]:
     """返回尚未结算、需要恢复处置的 record id（按 Journal seq 排序）。
 
-    - ``llm_request_committed`` 没有对应 ``llm_response_checkpoint``；
+    - ``llm_request_committed`` 没有对应 ``llm_response_checkpoint`` / ``llm_request_abandoned``；
     - ``tool_intent_committed`` 没有对应 ``tool_outcome_committed`` / ``tool_recovery_committed``；
     - ``skill_selected`` 没有同 operation 的 ``skill_dispatch_finished``；
     - ``spawn_started`` 没有对应 ``spawn_settled``（ADR 0098）；

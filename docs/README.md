@@ -141,6 +141,7 @@ Later ADRs:
 100. [ADR 0100: 审计模式放开 peer 消息](decisions/0100-audit-mode-peer-messages.md): 消息要进别人的 thread，而那个 thread 有自己的写者，且 Journal 顺序就是接管时的对话顺序。决策：发出与进入对话是两条记录、由两个写者各写一条；进入对话的时刻是目标 runner 的迭代边界；root 的收件队列跟着 Session 走；已经结束的子 thread 不接受消息、不被唤醒；接管时未进入对话的消息回到收件队列；`SendToPeer` Op 不放开。
 101. [ADR 0101: 审计模式下用户消息的对话项在应用时落账](decisions/0101-audit-mode-application-time-conversation-item.md): 对话项在准入时落账、在拿到 root gate 时才进入对话；消息排在运行中的 turn 后面时 Journal 顺序与对话顺序不一致——投影判序号回退后停止更新，接管重建出的 history 顺序错误。决策：准入只落 `submission_accepted`，对话项与 `submission_applied` 在应用时落账；应用的落账与取消无关；接管时应用已准入未应用的消息。修正 ADR 0025 的用户入口记录语义。
 102. [ADR 0102: 审计 Session 关闭时先协作取消在飞的 turn](decisions/0102-audit-mode-cooperative-shutdown.md): 释放时对 operation 直接 raw cancel，截断了意图落账与收敛之间的窗口，Journal 留下没有结果的意图而 Session 以 complete 终结。决策：先取消持有 root gate 的 turn 的 token、在 2 秒宽限期内等它自行退出，再根取消与 raw cancel；收敛期间 gate 不再放行新 turn，排队的消息在在飞 turn 收尾之后只应用不运行。
+103. [ADR 0103: 接管时作废没有 checkpoint 的 LLM 请求](decisions/0103-audit-resume-abandons-interrupted-llm-requests.md): 进程死在 LLM 调用途中是最常见的崩溃时刻，而这种 Session 恰恰无法接管。决策：可收敛 thread 上没有 checkpoint 的请求落 `llm_request_abandoned` 视为已结算——回复没进过对话，作废不重复任何事情；那个 turn 到此为止不补跑；有 checkpoint 的不作废。
 
 ### Fourth Pass: Gap Tracking
 
