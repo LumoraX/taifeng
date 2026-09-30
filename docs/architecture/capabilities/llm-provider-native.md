@@ -440,6 +440,14 @@ Anthropic `tool_use.input` 与 Gemini `functionCall.args` 要求 JSON 对象。�
 - **WHEN** 向 Anthropic / Gemini 组装下一次请求
 - **THEN** 送出的参数 SHALL 是对象，`__invalid_arguments__ == "not_an_object: got list"`
 
+**真实端点验证**（`examples/real_llm/tool_args_replay_verify.py`，需 `LLM_BOOTSTRAP_PROVIDER=gemini|anthropic`）：
+把「非法 JSON」与「非对象 JSON」两段历史发给真实端点，确认请求被接受且模型能继续。
+
+| provider | 模型 | 日期 | 结果 |
+| --- | --- | --- | --- |
+| Gemini | `gemini-3.1-pro-preview` | 2026-09-30 | ✅ 两例均被接受；模型准确说出了参数错在哪（缺闭合括号 / 传成了列表） |
+| Anthropic | — | — | 未验证（没有可用的 key） |
+
 ### Requirement: 无显式错误的空 completion 视为正常完成（loop 层不臆断）
 
 判据：**只有 LLM 显式报错才是错误；模型没产出内容本身不是错误。** turn loop 在某轮采样无 tool call 时，即按正常终止处理——即便该 turn 无任何文本产出。此时 turn SHALL `success=True`、`final_text=""`，`call_skill` SHALL 回 `ToolResult.ok("")`，父 turn 拿到空结果继续。

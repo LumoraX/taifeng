@@ -145,6 +145,7 @@ Later ADRs:
 104. [ADR 0104: Journal Phase 5——Timeline 投影、脱敏、旧 transcript 导入与投影重建](decisions/0104-journal-timeline-redaction-import-rebuild.md): ADR 0025 的第五阶段。决策：Timeline 直接映射领域记录、按 `after_seq` 接力；脱敏按字段名而不是按内容，三种视图，事实源不动；旧 transcript 导入成历史标 `legacy_unverified` 的新 Session，损坏的行让导入失败，不认识的条目记下来；投影重建只补不改，分叉的只报告。
 105. [ADR 0105: replay 模式——工具结果回放与整条 Session 重放](decisions/0105-replay-mode.md): ADR 0054 只回放了 LLM，工具仍要真的执行。决策：工具结果按（名字，有效参数）从 Journal 匹配、内核编排工具照常运行、派发句柄由（turn，调用 id）派生、按录制的提交序列驱动新 Engine 且分叉即停；重放不比较对话内容。
 106. [ADR 0106: 超长文件按「方法体外置、类里按原名赋值」拆分](decisions/0106-file-size-split.md): engine.py 2092 行，协作者手法已用尽而白盒寻址名不能变。决策：方法定义为模块级函数、类里按原名赋值（绑定与打桩语义不变）；事件类按主题分文件并原名再导出；Journal 记录按层分文件；零行为变更。
+107. [ADR 0107: 重放重现录制里的挂起与 writer 接管](decisions/0107-replay-reproduces-suspension-and-takeover.md): 真实 LLM 录制跨过「挂起 → 释放 → 接管 → Resume」时重放分叉。决策：等过人的调用结果带 `origin_llm_sample_id`；回放工具重现录制的待答请求而不是直接交回结果；`writer_takeover` 是录制序列的一步，`replay_session(reopen=)` 在此换新 Engine；不剔除缓存断点、不重现崩溃式接管。Amends #0105。
 
 ### Fourth Pass: Gap Tracking
 

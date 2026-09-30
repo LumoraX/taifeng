@@ -165,10 +165,125 @@ async def test_replay_reproduces_a_suspension_and_its_resolution(tmp_path: Path)
 
     report = await replay_session(engine, submissions)
 
-    # 被替换的 guarded 工具直接给出录制的结果，不再停下等人：答复用不上，对话照样走到同一处
+    # 录制里停下等人的调用在重放里也停下（重现同一个待答请求），录制的答复结清它
     assert not report.diverged, report
-    assert [s.outcome for s in report.steps] == ["turn_completed", "not_needed"]
+    assert [s.outcome for s in report.steps] == ["turn_suspended", "turn_completed"]
     assert ledger.remaining == 0
     texts = [i.payload.get("text") for i in engine.history_snapshot() if i.kind == "assistant_message"]
     assert "批准之后做完了" in texts
+    await pool.close()
+
+
+async def _record_across_a_takeover(tmp_path: Path) -> tuple[list[Any], _Run]:
+    """录制：停下等审批 → 释放 → 新 Engine 接管 → 答复 → 完成。"""
+    from taifeng.loop.submission import Resume
+    from tests.loop.test_audit_suspension import _drive
+
+    run = _Run(tmp_path)
+    await run.start(root=[SimTurn(tool_calls=[_call("guarded", "g1", key="k")])])
+    events = await _drive(run.engine, taifeng.UserMessage(text="需要审批的事"))
+    assert events[-1].msg.kind == "turn_suspended", events[-1].msg.data
+    thread_id = run.engine.thread_id
+    await run.pool.close()
+
+    resumed = _Run(tmp_path)
+    await resumed.start(root=[SimTurn(text="批准之后做完了")], resume_thread_id=thread_id)
+    record = resumed.engine._find_active_suspension()  # noqa: SLF001
+    assert record is not None
+    (pending,) = record.pending
+    done = await _drive(resumed.engine, Resume(
+        thread_id=thread_id, resolutions={pending.request_id: {"granted": True}},
+    ))
+    assert done[-1].msg.kind == "turn_completed", done[-1].msg.data
+    await resumed.pool.close()
+    records = [e async for e in JsonlSessionJournalCore(tmp_path / "journal").load(_SESSION)]
+    return records, resumed
+
+
+def _asking_policy(run: _Run) -> PermissionPolicy:
+    return PermissionPolicy(
+        rules=[PermissionRule(scope="skill_dispatch", target_pattern="glob:*", mode="allow")],
+        default_mode="ask", prompter=run.pool._permission_policy.prompter,  # noqa: SLF001
+    )
+
+
+async def test_replay_reproduces_a_recorded_takeover(tmp_path: Path) -> None:
+    records, run = await _record_across_a_takeover(tmp_path)
+    submissions = recorded_submissions(records)
+    assert [s.kind for s in submissions] == ["user_message", "takeover", "resume"]
+    tools, ledger = replay_tools(run._tools(), recorded_tool_calls(records))  # noqa: SLF001
+    client = JournalReplayClient.from_records(records)
+    live: dict[str, Any] = {}
+
+    async def open_pool(resume_thread_id: str | None = None) -> taifeng.AgentEngine:
+        # 回放客户端与工具台账跨 Engine 沿用：录制的消费进度不随重建而重置
+        live["pool"] = await taifeng.EnginePool.create(
+            skills_dir=_skills(tmp_path / "replay"), threads_dir=tmp_path / "replay" / "threads",
+            model_client=AttemptObservableClientAdapter(
+                client, provider="sim", default_model="sim-model",
+            ),
+            compressors=[], extra_tools=tools, permission_policy=_asking_policy(run),
+            audit=AuditConfig(
+                journal_core=JsonlSessionJournalCore(tmp_path / "replay" / "journal"),
+                writer_id="replayer", max_attachment_bytes=65536,
+                max_total_attachment_bytes=1048576,
+            ),
+        )
+        live["engine"] = await live["pool"].get_or_create(
+            session_id=_SESSION, entry_skill_id="entry", resume_thread_id=resume_thread_id,
+        )
+        return live["engine"]
+
+    async def reopen(current: taifeng.AgentEngine) -> taifeng.AgentEngine:
+        thread_id = current.thread_id
+        await live["pool"].close()
+        return await open_pool(thread_id)
+
+    report = await replay_session(await open_pool(), submissions, reopen=reopen)
+
+    assert not report.diverged, report
+    assert [s.outcome for s in report.steps] == ["turn_suspended", "reopened", "turn_completed"]
+    assert ledger.remaining == 0 and client.remaining == 0
+    await live["pool"].close()
+    replayed = [
+        e.record_type
+        async for e in JsonlSessionJournalCore(tmp_path / "replay" / "journal").load(_SESSION)
+    ]
+    # 重放的 Journal 里也有同样的释放与接管
+    assert "session_detached" in replayed and "writer_takeover" in replayed
+
+
+async def test_a_takeover_without_reopen_is_reported_as_skipped(tmp_path: Path) -> None:
+    records, run = await _record_across_a_takeover(tmp_path)
+    tools, _ = replay_tools(run._tools(), recorded_tool_calls(records))  # noqa: SLF001
+    pool, _ = await _replay_pool(tmp_path, records, tools, permission_policy=_asking_policy(run))
+    engine = await pool.get_or_create(session_id=_SESSION, entry_skill_id="entry")
+
+    report = await replay_session(engine, recorded_submissions(records))
+
+    assert [(s.kind, s.outcome) for s in report.steps[:2]] == [
+        ("user_message", "turn_suspended"), ("takeover", "takeover_skipped"),
+    ]
+    # 沿用原 Engine 时缓存断点还在，接管后的第一次请求与录制对不上
+    assert report.steps[2].outcome == "ReplayDivergenceError"
+    assert report.diverged_at == report.steps[2].recorded_submission_id
+    await pool.close()
+
+
+async def test_a_failed_reopen_stops_the_replay_at_the_takeover(tmp_path: Path) -> None:
+    records, run = await _record_across_a_takeover(tmp_path)
+    tools, _ = replay_tools(run._tools(), recorded_tool_calls(records))  # noqa: SLF001
+    pool, _ = await _replay_pool(tmp_path, records, tools, permission_policy=_asking_policy(run))
+    engine = await pool.get_or_create(session_id=_SESSION, entry_skill_id="entry")
+
+    async def reopen(current: taifeng.AgentEngine) -> taifeng.AgentEngine:
+        raise RuntimeError("cannot take over")
+
+    report = await replay_session(engine, recorded_submissions(records), reopen=reopen)
+
+    takeover = report.steps[-1]
+    assert (takeover.kind, takeover.outcome, takeover.error) == (
+        "takeover", "RuntimeError", "cannot take over",
+    )
+    assert report.diverged_at == takeover.recorded_submission_id
     await pool.close()

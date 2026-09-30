@@ -711,6 +711,8 @@ llm_request_committed …                             续跑照常采样
 ```
 
 - 等过人的调用的结果记在它原来的 operation 下，`intent_record_id` 指向挂起前落账的意图；不重写意图。
+  结果对话项带 `origin_llm_sample_id`（取自发出该调用的 `function_call` 项的 `llm_sample_id`），与
+  不经挂起、当场结算的结果形状一致（ADR 0107）。
 - 被拒的调用结果状态为 `rejected`，直接作答的调用状态为 `success`，答复的 JSON 即调用结果。
 - 续跑的 turn 使用新的 `turn_index` 与这次 `Resume` 的 submission id；它发出终态事件之后不再写任何记录。
 - 续跑里重跑的调用可以再次停下等人（下一道审批），此时落一条新的 `turn_suspended`。

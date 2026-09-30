@@ -324,8 +324,13 @@ def awaited_convergence(
     registry: object,
     cancel: CancellationToken,
     image_input_policy: Any = None,
+    history: list[ResponseItem] | None = None,
 ) -> AwaitedToolConvergence:
-    """为一批等过人的调用构造结算器：结果记在它们原来的调用名下。"""
+    """为一批等过人的调用构造结算器：结果记在它们原来的调用名下。
+
+    ``history`` 给出时，结果对话项带上发出该调用的那次采样的 id（``origin_llm_sample_id``）：
+    Responses 协议据此把结果与调用归到同一组，与不经挂起、当场结算的结果形状一致。
+    """
     first = intents[requests[0].call_id]
     operation = first.removesuffix(_INTENT_SUFFIX)
     parts = operation.split(":")
@@ -336,6 +341,15 @@ def awaited_convergence(
     kwargs: dict[str, Any] = {}
     if image_input_policy is not None:
         kwargs["image_input_policy"] = image_input_policy
+    if history is not None:
+        wanted = {request.call_id for request in requests}
+        kwargs["origin_sample_ids"] = {
+            str(item.payload["call_id"]): str(item.metadata["llm_sample_id"])
+            for item in history
+            if item.kind == "function_call"
+            and item.payload.get("call_id") in wanted
+            and item.metadata.get("llm_sample_id")
+        }
     return AwaitedToolConvergence(
         state=state, submission_id=parts[1], turn_index=int(parts[3]), iteration=0,
         requests=requests, registry=registry, cancel=cancel,
@@ -380,6 +394,7 @@ async def _settle_answered(
         convergence = awaited_convergence(
             state, intents, [request],
             registry=engine._tool_runtime._registry, cancel=cancel,  # noqa: SLF001
+            history=history,
         )
         if call_id in already:
             # 上一次处置已结算过这次调用（处置到一半中断）：结果不可重写，沿用已有的
@@ -569,7 +584,7 @@ async def rerun_awaited_calls(runner: Any, call_ids: list[str]) -> None:
     convergence = awaited_convergence(
         state, intents, requests,
         registry=runner.tool_runtime._registry, cancel=runner.cancel,  # noqa: SLF001
-        image_input_policy=runner.image_input_policy,
+        image_input_policy=runner.image_input_policy, history=history,
     )
     import asyncio
 

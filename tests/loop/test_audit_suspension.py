@@ -12,6 +12,7 @@ import pytest
 import taifeng
 from taifeng.conversation.journal import JournalHealth
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
+from taifeng.conversation.journal.records import ToolStatus
 from taifeng.conversation.journal.suspension_records import (
     ResumeAcceptedV1,
     ResumeAppliedV1,
@@ -33,7 +34,12 @@ from taifeng.loop.audit_resume_scan import (
     awaited_intent_ids,
     find_unsettled_effects,
 )
-from taifeng.loop.audit_suspension import AuditedResumeRejectedError
+from taifeng.loop.audit_suspension import (
+    AWAITED_INTENTS_KEY,
+    AuditedResumeRejectedError,
+    _request_for,
+    awaited_convergence,
+)
 from taifeng.loop.submission import CancelTurn, Resume
 from taifeng.loop.turn_helpers import _history_orphan_call_ids
 from taifeng.permission import (
@@ -382,6 +388,37 @@ async def test_approval_reruns_the_call_under_its_original_identity(tmp_path: Pa
     await run.pool.close()
     verification = await JsonlSessionJournalCore(tmp_path / "journal").verify(_SESSION)
     assert verification.health is JournalHealth.HEALTHY
+
+
+async def test_resumed_outputs_are_grouped_with_the_sampling_that_made_the_call(
+    tmp_path: Path,
+) -> None:
+    """Responses 协议：恢复后结算的结果带上发出该调用的采样 id，与当场结算的结果形状一致。"""
+    run = _Run(tmp_path)
+    await _suspend(run)
+    state = run.engine._audit_state  # noqa: SLF001
+    assert state is not None
+    history = [
+        item.model_copy(update={"metadata": {**item.metadata, "llm_sample_id": "sample-7"}})
+        if item.kind == "function_call" else item
+        for item in run.engine.history_snapshot()
+    ]
+    (suspension,) = [i for i in history if i.kind == "suspension"]
+    intents = dict(suspension.metadata[AWAITED_INTENTS_KEY])
+
+    convergence = awaited_convergence(
+        state, intents, [_request_for(history, "c1")],
+        registry=run.engine._tool_runtime._registry,  # noqa: SLF001
+        cancel=run.engine._root_cancel, history=history,  # noqa: SLF001
+    )
+    item, _ = await convergence.settle(
+        _request_for(history, "c1"), ToolResult.ok("written"), ToolStatus.SUCCESS,
+    )
+
+    assert item.metadata["origin_llm_sample_id"] == "sample-7"
+    await run.core.close()
+    with pytest.raises(AuditSessionReleaseError):
+        await run.pool.close()
 
 
 async def test_denial_settles_the_call_without_running_it(tmp_path: Path) -> None:
