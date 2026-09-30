@@ -543,3 +543,97 @@ def test_gemini_parts_rejects_image_even_when_called_directly() -> None:
 
     with pytest.raises(UnsupportedModalityError):
         _gemini_parts([TextPart(text="a"), _image_part()])
+
+
+# ============================================================
+# 工具 schema 投影与 Google 错误体分类（ADR 0115）
+# ============================================================
+
+
+def test_tool_schema_is_projected_to_what_gemini_accepts() -> None:
+    """Gemini 的函数声明只认 OpenAPI 子集：不认的关键字会让整次请求 400。"""
+    from taifeng.llm.providers.gemini_schema import to_gemini_schema
+
+    schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            # 属性名恰好是关键字：是名字，不是关键字，必须保留
+            "additionalProperties": {"type": "string", "description": "a property, not a keyword"},
+            "title": {"type": ["string", "null"], "minLength": 1},
+            "tags": {
+                "type": "array", "minItems": 1, "uniqueItems": True,
+                "items": {"type": "object", "additionalProperties": True,
+                          "properties": {"k": {"const": "x", "type": "string"}}},
+            },
+            "mode": {"anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "integer"}]},
+        },
+        "required": ["title"],
+    }
+    assert to_gemini_schema(schema) == {
+        "type": "object",
+        "properties": {
+            "additionalProperties": {"type": "string", "description": "a property, not a keyword"},
+            "title": {"type": "string", "nullable": True, "minLength": 1},
+            "tags": {
+                "type": "array", "minItems": 1,
+                "items": {"type": "object", "properties": {"k": {"type": "string"}}},
+            },
+            "mode": {"anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "integer"}]},
+        },
+        "required": ["title"],
+    }
+    # 输入不被改动（同一份 schema 还要给内核自己做参数校验）
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["tags"]["uniqueItems"] is True
+
+
+def test_builtin_tool_schemas_survive_the_projection() -> None:
+    """内置工具的 schema 都带 additionalProperties：投影后不得再有 Gemini 不认的关键字。"""
+    import json
+
+    from taifeng import make_call_skill_tool, make_read_skill_tool
+
+    req = ApiRequest(
+        model="gemini",
+        messages=[ApiMessage(role="user", content="hi")],
+        tools=[
+            ToolSpecRef(name=t.name, description=t.description, input_schema=t.input_schema)
+            for t in (make_read_skill_tool(), make_call_skill_tool())
+        ],
+    )
+    tools = _to_gemini_tools(req)
+    assert tools is not None
+    declarations = tools[0]["functionDeclarations"]
+    assert [d["name"] for d in declarations] == ["read_skill", "call_skill"]
+    assert "additionalProperties" not in json.dumps(declarations)
+    assert declarations[0]["parameters"]["required"] == ["skill_id"]
+
+
+def test_field_violations_are_not_mistaken_for_a_content_filter() -> None:
+    """Google 的 400 在 details 里带 ``fieldViolations``：它是参数错误，不是安全拦截。"""
+    import json
+
+    from taifeng.llm.errors import ContentFilterError, ContextOverflowError, InvalidRequestError
+    from taifeng.llm.providers.gemini_provider import classify_gemini_http_error
+
+    body = json.dumps({"error": {
+        "code": 400, "status": "INVALID_ARGUMENT",
+        "message": 'Invalid JSON payload received. Unknown name "additionalProperties"',
+        "details": [{"@type": "type.googleapis.com/google.rpc.BadRequest", "fieldViolations": [
+            {"field": "tools[0]", "description": "Cannot find field."}]}],
+    }})
+    classified = classify_gemini_http_error(400, body)
+    assert type(classified) is InvalidRequestError
+    assert "fieldViolations" in str(classified)  # 完整错误体保留，排查要看 details
+
+    # 真的安全拦截与上下文超长照旧归类
+    blocked = json.dumps({"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                    "message": "The prompt was blocked for safety reasons."}})
+    assert type(classify_gemini_http_error(400, blocked)) is ContentFilterError
+    overflow = json.dumps({"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                     "message": "The input token count exceeds the maximum."}})
+    assert type(classify_gemini_http_error(400, overflow)) is ContextOverflowError
+    # 不是 Google 错误体的形状：按通用规则
+    assert type(classify_gemini_http_error(400, "plain text violation")) is ContentFilterError

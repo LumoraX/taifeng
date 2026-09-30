@@ -95,7 +95,10 @@ SSE 事件 SHALL 按 Anthropic `event: <type>\ndata: {...}` 双行格式解析�
 - HTTP method `POST`，认证通过 query 参数 `?key={api_key}` 或 header `x-goog-api-key`
 - body 字段 `contents` / `systemInstruction` / `tools` / `generationConfig`
 - `contents` 中 role 映射：`user` → `user`，`assistant` → `model`，`tool` → `function`（**Gemini 用 function 而非 tool**）
-- `tools` 字段格式 `[{functionDeclarations: [{name, description, parameters}]}]`
+- `tools` 字段格式 `[{functionDeclarations: [{name, description, parameters}]}]`；`parameters` SHALL 是工具
+  `input_schema` 经 `to_gemini_schema` 投影后的结果（ADR 0115）：只保留 Gemini `Schema` 接受的关键字
+  （`additionalProperties`、`$schema`、`const`、`uniqueItems` 等去掉），`properties` 的键按属性名保留，
+  `type: [T, "null"]` 改写为 `type: T` + `nullable: true`；原 schema 不被改动，参数校验仍由内核按原 schema 进行
 - `system_prompt: list[str]` 合并为 `systemInstruction: {parts: [{text: "<合并文本>"}]}`
 
 SSE 事件 SHALL 按 Gemini `data: {...}\n\n` 单行格式解析：
@@ -107,6 +110,15 @@ SSE 事件 SHALL 按 Gemini `data: {...}\n\n` 单行格式解析：
 | `candidates[0].content.parts[].functionCall` | `tool_call_done(call_id=auto, name, arguments=json.dumps(args))` —— Gemini 不流式发 tool args delta |
 | `candidates[0].finishReason` | `STOP` → end_turn=True；`TOOL_CALL` / `MAX_TOKENS` → end_turn=False |
 | 末 chunk 的 `usageMetadata` | 更新 `_last_usage` + emit `prompt_cache` |
+
+非 200 响应 SHALL 经 `classify_gemini_http_error` 分类：body 是 Google 错误体（`{"error": {"status", "message",
+"details"}}`）时只按 `status` + `message` 做关键字判定，不看 `details`——参数错误的 `fieldViolations` 不得被当成
+安全拦截；错误文本保留完整 body。
+
+#### Scenario: 内置工具的 schema 被端点接受
+- **WHEN** 请求带 `read_skill` / `call_skill`（它们的 schema 含 `additionalProperties`）
+- **THEN** 送出的 `functionDeclarations[].parameters` 不含 `additionalProperties`
+- **AND** 真实端点接受该请求（2026-09-30，`gemini-3.1-pro-preview`，`examples/real_llm/e2e.py`）
 
 #### Scenario: 最小文本 turn
 - **WHEN** `GeminiSession.stream(ApiRequest(messages=[user="hi"]))` 被消费
