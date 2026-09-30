@@ -16,6 +16,10 @@ from taifeng.conversation.journal.records import (
     SubmissionAppliedV1,
     ThreadTerminalV1,
 )
+from taifeng.conversation.journal.suspension_records import (
+    SESSION_DETACHED_RECORD_TYPE,
+    SessionDetachedV1,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection
@@ -177,22 +181,19 @@ class _FinishFuture:
         return _copy_finish_result(self._result)
 
 
-def _build_terminal_records(
-    *,
-    session_id: str,
+DETACHED_STATUS = "detached"
+"""``finish`` 的 ``status``：Session 在等人作答的状态下被释放，不是终结。"""
+
+
+def _ended_records(
+    factory: JournalRecordFactory,
+    operation_id: str,
     requests: tuple[ThreadTerminalRequest, ...],
     committed_thread_ids: Collection[str],
     status: str,
     reason: str,
-    shutdown_admission: tuple[str, str, str] | None = None,
-) -> tuple[JournalRecord, ...]:
-    """生成可选 Shutdown applied 与排序、稳定 ordinal 的 terminal batch。"""
-    operation_id = f"{session_id}:lifecycle:end"
-    factory = JournalRecordFactory(
-        session_id=session_id,
-        actor=ActorRef(kind="system", source="session_lifecycle"),
-        identities=JournalIdentities(session_id, "lifecycle", "finish"),
-    )
+) -> list[JournalRecord]:
+    """Session 终结的 terminal batch：尚未落终态的 thread 各一条，最后是 ``session_ended``。"""
     pending = sorted(
         (
             request
@@ -226,6 +227,45 @@ def _build_terminal_records(
             ),
         )
     )
+    return records
+
+
+def _build_terminal_records(
+    *,
+    session_id: str,
+    requests: tuple[ThreadTerminalRequest, ...],
+    committed_thread_ids: Collection[str],
+    status: str,
+    reason: str,
+    shutdown_admission: tuple[str, str, str] | None = None,
+) -> tuple[JournalRecord, ...]:
+    """生成可选 Shutdown applied 与排序、稳定 ordinal 的 terminal batch。
+
+    ``status == "detached"``（ADR 0097）：Session 在等人作答的状态下被释放。写者离开而 Session
+    没有终结，故不写 ``thread_terminal`` / ``session_ended``，只写一条 ``session_detached``；
+    ``requests`` 里各项的 ``end_reason`` 是仍在等待的挂起 id。
+    """
+    operation_id = f"{session_id}:lifecycle:end"
+    factory = JournalRecordFactory(
+        session_id=session_id,
+        actor=ActorRef(kind="system", source="session_lifecycle"),
+        identities=JournalIdentities(session_id, "lifecycle", "finish"),
+    )
+    if status == DETACHED_STATUS:
+        records = [
+            factory.build(
+                operation_id=operation_id,
+                record_type=SESSION_DETACHED_RECORD_TYPE,
+                payload=SessionDetachedV1(
+                    reason=reason,
+                    suspension_ids=tuple(request.end_reason for request in requests),
+                ),
+            )
+        ]
+    else:
+        records = _ended_records(
+            factory, operation_id, requests, committed_thread_ids, status, reason,
+        )
     if shutdown_admission is None:
         return tuple(records)
     submission_id, accepted_record_id, thread_id = shutdown_admission
@@ -255,6 +295,7 @@ def _build_terminal_records(
 
 
 __all__ = [
+    "DETACHED_STATUS",
     "AcceptedWork",
     "SessionFinishResult",
     "SessionFinishingError",

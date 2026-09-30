@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from taifeng.conversation.models import function_call, system_injection
+from taifeng.conversation.models import system_injection
+from taifeng.conversation.reconstruct import reconstruct_before_compaction
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext
 from taifeng.loop.engine_types import _PendingTurn
@@ -25,12 +27,22 @@ from taifeng.loop.event import (
     RewindTableRebuilt,
     TurnRewound,
 )
-from taifeng.loop.rewind import count_turns
+from taifeng.loop.rewind import (
+    CompactionUndo,
+    RetryCut,
+    awaits_model,
+    count_turns,
+    derive_rewind_log,
+    plan_retry_cut,
+    suspended_rewind_rejection,
+)
 from taifeng.loop.submission import Rewind, Submission, UpdateBudget, UpdateInstructions
 
 if TYPE_CHECKING:
+    from taifeng.conversation.models import ResponseItem
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
+    from taifeng.loop.rewind import RewindCheckpoint
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +79,197 @@ def rewrite_seed_args(engine: AgentEngine, call_id: str, new_args: dict[str, Any
     只改内存(自洽 + 供重跑读新参);store 保持 append-only,arg 覆盖经 rewind
     marker 留痕。调用方已持锁。
     """
-    for i, item in enumerate(engine._history):
+    rewrite_call_args(engine._history, call_id, new_args)
+
+
+def rewrite_call_args(
+    history: list[ResponseItem], call_id: str, new_args: dict[str, Any],
+) -> None:
+    """把 history 里**最后一次**该 call id 的 function_call 换成新参数(原地改)。
+
+    只换 ``arguments``:条目 id、附加内容与采样归属(metadata)原样保留,否则 Responses
+    路径下补跑出的结果就对不上它所属的采样。
+    """
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
         if item.kind == "function_call" and item.payload.get("call_id") == call_id:
-            engine._history[i] = function_call(
-                call_id=call_id, name=item.payload["name"],
-                arguments=json.dumps(new_args, ensure_ascii=False),
-                thread_id=engine._thread_id,
-            )
+            payload = {**item.payload, "arguments": json.dumps(new_args, ensure_ascii=False)}
+            history[index] = item.model_copy(update={"payload": payload})
+            return
+
+@dataclass(frozen=True, slots=True)
+class _AppliedRewind:
+    """一次已应用到内存 history 的 rewind。"""
+
+    plan: RetryCut | CompactionUndo
+    discarded_suspension: str | None
+    """随截断一并作废的挂起 record id；turn 未挂起为 None。"""
+
+
+def rewind_mode_mismatch(cp: RewindCheckpoint, mode: str) -> bool:
+    """mode 与节点类型是否不相容。
+
+    - ``retry_tool`` 仅 dispatch 节点（且有 inner 切点）；
+    - ``restore`` 仅 compaction 节点；
+    - ``re_reason`` 适用于全部节点类型。
+    """
+    if mode == "retry_tool":
+        return cp.kind != "dispatch" or cp.inner_history_len is None
+    if mode == "restore":
+        return cp.kind != "compaction"
+    return False
+
+
+def _plan_cut(
+    history: list[ResponseItem],
+    cp: RewindCheckpoint,
+    mode: str,
+    raw: list[ResponseItem] | None,
+) -> RetryCut | CompactionUndo:
+    """按节点类型与 mode 选规划。
+
+    Raises:
+        ValueError: 节点与 history / transcript 对不上。
+    """
+    if cp.kind == "compaction":
+        if raw is None or cp.target_id is None:
+            raise ValueError(f"compaction node requires the raw transcript: {cp.node_id}")
+        restored = reconstruct_before_compaction(raw, cp.target_id)
+        placeholder = next(
+            (i for i in history if i.kind == "compacted" and i.id == cp.target_id), None
+        )
+        if placeholder is None:
+            raise ValueError(f"compaction placeholder not in history: {cp.node_id}")
+        return CompactionUndo(
+            restored=tuple(restored),
+            compaction_id=cp.target_id,
+            first_changed_index=int(placeholder.payload["replaced_range"][0]),
+        )
+    if mode == "retry_tool":
+        return plan_retry_cut(history, cp)
+    return RetryCut(cut_index=cp.history_len)
+
+
+def plan_rewind(
+    history: list[ResponseItem],
+    cp: RewindCheckpoint,
+    mode: str,
+    suspension_record_id: str | None,
+    raw: list[ResponseItem] | None = None,
+) -> tuple[RetryCut | CompactionUndo, list[ResponseItem]] | str:
+    """规划一次 rewind 并给出截断后的 history；不可行时返回拒绝原因（纯函数）。
+
+    根路径与 spawn 子 thread 路径共用：retry_tool 按批次规划，compaction 节点还原到压缩
+    之前（需 ``raw`` = 该 thread 的完整 transcript），其余截到采样前；turn 处于挂起态时再过
+    挂起态守卫（``suspended_rewind_rejection``）。
+    """
+    try:
+        plan = _plan_cut(history, cp, mode, raw)
+    except ValueError:
+        # 节点表与 history 对不上（该调用 / 压缩已不在其中）：不猜截点
+        return "unknown_node"
+    kept = plan.apply(history)
+    if cp.kind == "compaction" and mode == "re_reason" and not awaits_model(kept):
+        # 压缩之前的最后一条对话项不是用户消息 / 工具结果：没有可回应的输入
+        return "nothing_to_redrive"
+    if suspension_record_id is not None:
+        rejection = suspended_rewind_rejection(
+            kept,
+            suspension_record_id=suspension_record_id,
+            retried_call_id=cp.call_id if mode == "retry_tool" else None,
+        )
+        if rejection is not None:
+            return rejection
+    return plan, kept
+
+
+async def _apply_rewind(
+    engine: AgentEngine, op: Rewind, cp: RewindCheckpoint,
+) -> _AppliedRewind | str:
+    """锁内规划并截断内存 history、回退 cache anchor；不可行时返回拒绝原因且不改动状态。
+
+    append-only：store 不删，仅内存截。挂起态下截断把挂起 record 一并带走（挂起态 rewind，
+    ADR 0080）。
+    """
+    raw: list[ResponseItem] | None = None
+    if cp.kind == "compaction":
+        # 压缩之前的内容只在 transcript 里（热内存已是压缩后的）；engine 此刻空闲，无并发写者
+        raw = [item async for item in await engine._store.load_thread(engine._thread_id)]
+    async with engine._lock:
+        suspended = engine._find_active_suspension()
+        record_id = suspended.record_id if suspended is not None else None
+        planned = plan_rewind(engine._history, cp, op.mode, record_id, raw)
+        if isinstance(planned, str):
+            return planned
+        plan, kept = planned
+        engine._history = kept
+        if engine._cache_anchor_index >= plan.first_changed_index:
+            engine._cache_anchor_index = plan.first_changed_index - 1
+        # retry_tool + new_args：改写悬空 fc 的 arguments（自洽 + 重跑用新参）
+        if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
+            rewrite_seed_args(engine, cp.call_id, op.new_args)
+    return _AppliedRewind(plan, record_id)
+
+
+async def _record_rewind(
+    engine: AgentEngine,
+    sub: Submission,
+    cp: RewindCheckpoint,
+    applied: _AppliedRewind,
+) -> None:
+    """落 rewind marker（store，不进 history）并 emit ``turn_rewound``（R3）。
+
+    marker 持久化截断坐标，供 ``reconstruct_logical_history`` 冷恢复时按同一规划重建。
+    """
+    op = sub.op
+    assert isinstance(op, Rewind)
+    marker = system_injection(
+        f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
+        thread_id=engine._thread_id, source="rewind",
+        extra=applied.plan.marker_extra(),
+    )
+    await engine._store.append(marker)
+    await engine._emit(EventMsg(submission_id=sub.id, msg=TurnRewound(data={
+        "node_id": op.node_id, "node_kind": cp.kind, "mode": op.mode,
+        "cut_index": applied.plan.cut_index, "drop_index": applied.plan.drop_index,
+        "cache_anchor": engine._cache_anchor_index,
+        "discarded_suspension": applied.discarded_suspension,
+        "undo_compaction": applied.plan.marker_extra().get("undo_compaction"),
+        "redriven": op.mode != "restore",
+    })))
+
+
+async def _resolve_instructions_if_cold(engine: AgentEngine) -> None:
+    """冷 engine 惰性 resolve 指令层（spec §7 lazy-on-rewind）。
+
+    正常 turn 结束后 ``_last_resolved`` 已由 ``_handle_user_message`` 填充；冷 engine
+    （initial_history 注入、未跑任何 turn）为空。resolver 存在 + ``_last_resolved`` 空 +
+    history 非空 → 补一次 resolve，以构造期 entry skill 为锚点（已知限制：不还原历史 turn
+    里曾使用的不同 entry skill 的指令层）。
+    """
+    if engine._instruction_resolver is None or engine._last_resolved or not engine._history:
+        return
+    # cancel=None:rewind 时无活跃 turn-level token,刻意不传(同 warmup_engine_scope)
+    ctx = InstructionContext(
+        session_id=engine._session_id,
+        thread_id=engine._thread_id,
+        entry_skill_id=engine._entry_skill.id,
+        turn_index=engine._turn_index,
+        metadata=engine._request_metadata,
+        cancel=None,
+    )
+    # best-effort:turn_rewound 已发出,resolve 失败不硬 abort(会留下不一致),
+    # 但不静默——按仓库惯例(turn.py on_pre_evict)落 warning 日志,保留可观测(R3)
+    try:
+        engine._last_resolved = await engine._instruction_resolver.resolve(
+            ("engine", "session", "turn"), ctx,
+        )
+    except InstructionFetchError:
+        logger.warning(
+            "冷 rewind 指令 resolve 失败,以空指令层续推(thread=%s)",
+            engine._thread_id,
+        )
+
 
 async def handle_rewind(
     engine: AgentEngine, sub: Submission, root_cancel: CancellationToken
@@ -81,12 +277,13 @@ async def handle_rewind(
     """回退到 turn 内某回访节点并主动重推(turn-rewind 能力)。
 
     - re_reason：截到节点采样前 → 重采样(LLM 重新决定下游)。
-    - retry_tool：截到 retry_tool 切点(保留 assistant 的 function_call)→ 补跑
-      该工具(可换 new_args)→ 续推。仅 dispatch 节点。
+    - retry_tool：按批次截断(保留同批其他调用与结果)→ 补跑该工具(可换 new_args)→
+      续推。仅 dispatch 节点。
+    - restore：还原到某次压缩之前,不重推。仅 compaction 节点(ADR 0081)。
 
-    actor 模型下提交 Rewind 时上一 turn 已结束(engine 空闲),故"重推" = 截断
-    engine history → 建新 root TurnRunner 重跑。详见设计 spec
-    2026-06-05-addressable-dispatch-rewind。
+    actor 模型下提交 Rewind 时上一 turn 已结束或已挂起(engine 空闲),故"重推" = 截断
+    engine history → 建新 root TurnRunner 重跑。turn 处于挂起态时,挂起随截断一并作废
+    (ADR 0080)。详见设计 spec 2026-06-05-addressable-dispatch-rewind。
     """
     op = sub.op
     assert isinstance(op, Rewind)
@@ -105,81 +302,25 @@ async def handle_rewind(
     if cp is None:
         await emit_rewind_rejected(engine, sub.id, op.node_id, "unknown_node")
         return
-    # 2. mode/kind 相容:retry_tool 仅 dispatch 节点(且有 inner 切点)
-    if op.mode == "retry_tool" and (
-        cp.kind != "dispatch" or cp.inner_history_len is None
-    ):
+    # 2. mode/kind 相容:retry_tool 仅 dispatch 节点;restore 仅 compaction 节点
+    if rewind_mode_mismatch(cp, op.mode):
         await emit_rewind_rejected(engine, sub.id, op.node_id, "mode_kind_mismatch")
         return
-    # 3. 挂起态守卫:活跃挂起的 turn v1 不支持 rewind(挂起态 rewind 留待后续)
-    if engine._find_active_suspension() is not None:
-        await emit_rewind_rejected(engine, sub.id, op.node_id, "turn_suspended")
+    # 3. 规划 + 截断(含挂起态守卫);不可行即显式拒绝,状态不动
+    applied = await _apply_rewind(engine, op, cp)
+    if isinstance(applied, str):
+        await emit_rewind_rejected(engine, sub.id, op.node_id, applied)
         return
+    # 4. marker + turn_rewound;冷 engine 补 resolve 指令层
+    await _record_rewind(engine, sub, cp, applied)
+    if op.mode == "restore":
+        # 只还原、不重推:节点表随 history 重算(没有 runner 回写这一步)
+        async with engine._lock:
+            engine._rewind_checkpoints = derive_rewind_log(engine._history)
+        return
+    await _resolve_instructions_if_cold(engine)
 
-    # 4. 选截点:retry_tool 用 inner(保 fc);其余用 history_len(re_reason)
-    cut = (
-        cp.inner_history_len
-        if op.mode == "retry_tool" and cp.inner_history_len is not None
-        else cp.history_len
-    )
-
-    # 5. 截断 history + 回退 cache_anchor(锁内;append-only:store 不删,仅内存截)
-    async with engine._lock:
-        engine._history = engine._history[:cut]
-        if engine._cache_anchor_index >= cut:
-            engine._cache_anchor_index = cut - 1
-        # 5b. retry_tool + new_args:改写悬空 fc 的 arguments(自洽 + 重跑用新参)
-        if op.mode == "retry_tool" and op.new_args is not None and cp.call_id:
-            rewrite_seed_args(engine, cp.call_id, op.new_args)
-
-    # 6. marker(审计;同 rollback 范式,落 store、不进 history)
-    # cut_index 持久化：供 reconstruct_logical_history 冷恢复时按截断点重建逻辑 history
-    marker = system_injection(
-        f"[rewind] node={op.node_id} kind={cp.kind} mode={op.mode}",
-        thread_id=engine._thread_id, source="rewind",
-        extra={"cut_index": cut},
-    )
-    await engine._store.append(marker)
-
-    # 7. emit turn_rewound(R3)
-    await engine._emit(EventMsg(submission_id=sub.id, msg=TurnRewound(data={
-        "node_id": op.node_id, "node_kind": cp.kind, "mode": op.mode,
-        "cut_index": cut, "cache_anchor": engine._cache_anchor_index,
-    })))
-
-    # 8a. 冷 engine 惰性 resolve 指令层（spec §7 lazy-on-rewind）：
-    #   正常 turn 结束后 _last_resolved 已由 _handle_user_message 填充；
-    #   冷 engine（initial_history 注入、未跑任何 turn）_last_resolved 为空。
-    #   此处检测：resolver 存在 + _last_resolved 空 + history 非空 → 补一次
-    #   resolve，以构造期 entry skill 为锚点（已知限制：不还原历史 turn 里曾
-    #   使用的不同 entry skill 的指令层，v1 范围外）。
-    if (
-        engine._instruction_resolver is not None
-        and not engine._last_resolved
-        and engine._history
-    ):
-        # cancel=None:rewind 时无活跃 turn-level token,刻意不传(同 warmup_engine_scope)
-        ctx = InstructionContext(
-            session_id=engine._session_id,
-            thread_id=engine._thread_id,
-            entry_skill_id=engine._entry_skill.id,
-            turn_index=engine._turn_index,
-            metadata=engine._request_metadata,
-            cancel=None,
-        )
-        # best-effort:turn_rewound 已发出,resolve 失败不硬 abort(会留下不一致),
-        # 但不静默——按仓库惯例(turn.py on_pre_evict)落 warning 日志,保留可观测(R3)
-        try:
-            engine._last_resolved = await engine._instruction_resolver.resolve(
-                ("engine", "session", "turn"), ctx,
-            )
-        except InstructionFetchError:
-            logger.warning(
-                "冷 rewind 指令 resolve 失败,以空指令层续推(thread=%s)",
-                engine._thread_id,
-            )
-
-    # 8b. 主动重推:截断后建新 root TurnRunner;retry_tool 先补跑悬空 call
+    # 5. 主动重推:截断后建新 root TurnRunner;retry_tool 先补跑悬空 call
     turn_cancel = root_cancel.child(f"sub:{sub.id}")
     engine._pending[sub.id] = _PendingTurn(
         submission_id=sub.id, cancel=turn_cancel
@@ -257,6 +398,7 @@ def handle_update_budget(engine: AgentEngine, submission_id: str, op: UpdateBudg
         for name in (
             "context_window", "soft_limit_ratio", "hard_limit_ratio",
             "preserve_tail_messages", "output_reserve_tokens",
+            "recompact_min_growth_ratio",
         )
         if getattr(op, name) is not None
     }
@@ -266,12 +408,13 @@ def handle_update_budget(engine: AgentEngine, submission_id: str, op: UpdateBudg
         logger.exception("budget update rejected (kept previous budget): %s", changes)
         return
     logger.info(
-        "budget updated: window=%d soft=%.2f hard=%.2f tail=%d reserve=%d",
+        "budget updated: window=%d soft=%.2f hard=%.2f tail=%d reserve=%d regrowth=%.2f",
         engine._budget.context_window,
         engine._budget.soft_limit_ratio,
         engine._budget.hard_limit_ratio,
         engine._budget.preserve_tail_messages,
         engine._budget.output_reserve_tokens,
+        engine._budget.recompact_min_growth_ratio,
     )
 
 async def handle_update_instructions(

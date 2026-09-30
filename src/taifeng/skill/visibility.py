@@ -25,6 +25,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.eligibility import RuntimeCapabilities
     from taifeng.skill.registry import SkillSnapshot
@@ -118,6 +120,8 @@ def visible_child_skills(
     entry: SkillDefinition,
     snapshot: SkillSnapshot,
     capabilities: RuntimeCapabilities | None = None,
+    *,
+    hidden: Collection[str] = (),
 ) -> list[VisibleChild]:
     """解析 caller entry 的 ``child_skills`` 并施加 G4 过滤，返回可见候选列表。
 
@@ -126,6 +130,7 @@ def visible_child_skills(
     1. 在 snapshot 内解析；解析不到（注册表里没有）直接跳过。
     2. **G4b**：``exposure.model_invocable == False`` → 对模型隐藏，跳过。
     3. **G4a**：提供 ``capabilities`` 时，``is_skill_eligible`` 不满足 → 跳过。
+    4. 在 ``hidden`` 里（按战绩被隔离，见 ``working_set_runtime``）→ 跳过。
 
     与 ``loop/prompt.py::render_system_prompt`` 的 inline 列表过滤逐条对齐——本函数即
     那段过滤逻辑的**唯一实现**，供 inline 与 deferred 召回池复用（避免双实现漂移）。
@@ -134,6 +139,7 @@ def visible_child_skills(
         entry: 当前 caller composite skill（提供 ``child_skills`` 白名单）。
         snapshot: skill 注册表快照（据 id 解析子 skill 定义）。
         capabilities: 运行时能力快照；``None`` 时跳过 G4a（与 prompt.py 一致）。
+        hidden: 对模型隐藏的 skill id；inline 列表、召回池、deferred 判定须传同一份。
 
     Returns:
         通过 G4 过滤的 ``VisibleChild`` 列表，按 ``skill_id`` 升序（确定性）。
@@ -145,8 +151,8 @@ def visible_child_skills(
     # 按 id 升序遍历 child 白名单：确定性输出，且与 prompt.py 的 sorted 一致
     for child_id in sorted(entry.child_skills):
         child = snapshot.get(child_id)
-        if child is None:
-            # 注册表里没有该 child（声明了但未加载）：跳过，不凭空构造候选
+        if child is None or child_id in hidden:
+            # 注册表里没有该 child（声明了但未加载）或已被隔离：跳过，不凭空构造候选
             continue
         # G4b：对模型隐藏的 skill 不进候选（inline 与 deferred 一致）
         if not child.exposure.model_invocable:

@@ -15,12 +15,10 @@ from taifeng.context.budget import ContextBudget
 from taifeng.context.compressor import CompressionOrchestrator, CompressionStrategy
 from taifeng.context.strategies import HandoffCompactionStrategy, SlidingWindowStrategy
 from taifeng.conversation.hook_runner import HookRunner
-from taifeng.conversation.models import ResponseItem, ThreadInfo, ThreadMetadata
 from taifeng.conversation.protocols import IndexHook, NoopIndexHook, ThreadDirectory
 from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
 from taifeng.conversation.store import (
     AtomicBatchMessageStore,
-    BatchAppendAck,
     MessageStore,
 )
 from taifeng.conversation.transcript import JsonlMessageStore
@@ -48,6 +46,7 @@ from taifeng.loop.pool_session import (
     prepare_pool_session,
     start_skill_watcher,
 )
+from taifeng.loop.pool_store import _HookEmittingStore
 from taifeng.loop.tool_recovery import validate_tool_recovery_mode
 from taifeng.loop.tool_set_events import bind_tool_set_events
 from taifeng.skill.dispatch import DispatchPolicy
@@ -64,130 +63,38 @@ from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
 
+    from taifeng.context.engine import ContextEngine
     from taifeng.llm.client import ModelClient
+    from taifeng.llm.prewarm import ModelPrewarmer
     from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.audit_config import AuditConfig
+    from taifeng.skill.selection import SkillSelectionGate
     from taifeng.skill.watcher import SkillFileWatcher
     from taifeng.telemetry.sink import TelemetrySink
     from taifeng.tool.spec import ToolSpec
-
 
 # -----------------------------------------------------------------
 # _HookEmittingStore —— 包装 MessageStore，写完成后 spawn IndexHook 后台 task
 # -----------------------------------------------------------------
 
-
-class _HookEmittingStore(MessageStore):
-    """MessageStore 代理 —— 所有写操作完成后 spawn IndexHook 后台 task（fire-and-forget）。
-
-    EnginePool 在用户传入 ``index_hook`` 时用本代理包装真实 store，让 engine / turn 透明走 hook。
-    业务对协议无感（仍是 MessageStore），但所有 ``create_thread`` / ``append`` 都会触发对应 hook。
-    """
-
-    def __init__(
-        self,
-        *,
-        inner: MessageStore,
-        runner: HookRunner,
-        directory: ThreadDirectory,
-        custom_directory: object | None = None,
-        index_hook: object | None = None,
-    ) -> None:
-        self._inner = inner
-        self._runner = runner
-        self._directory = directory
-        self._audit_custom_directory = custom_directory
-        self._audit_index_hook = index_hook
-
-    async def create_thread(
-        self,
-        *,
-        cwd: str | None = None,
-        entry_skill_id: str | None = None,
-        source: str | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> str:
-        thread_id = await self._inner.create_thread(
-            cwd=cwd, entry_skill_id=entry_skill_id, source=source, extra=extra
-        )
-        # 拉取刚写入的 metadata 作为 hook 入参（兼容封装内 JsonlMessageStore
-        # 已 upsert 到 directory）。
-        meta = await self._directory.get_metadata(thread_id)
-        if meta is None:
-            # 极少数情况（用户传入自定义 store 不 upsert 元数据）：合成最小 metadata
-            import time as _t
-            meta = ThreadMetadata(
-                thread_id=thread_id,
-                created_at=_t.time(),
-                updated_at=_t.time(),
-                entry_skill_id=entry_skill_id or "general",
-                source=source or "user",
-                tags=(),
-                extra={"cwd": cwd} if cwd is not None else {},
-            )
-        self._runner.spawn_on_thread_created(meta)
-        return thread_id
-
-    async def append(self, item: ResponseItem) -> None:
-        await self._inner.append(item)
-        self._runner.spawn_on_message_appended(item.thread_id, [item])
-
-    async def append_batch(self, items: list[ResponseItem]) -> None:
-        if not items:
-            return
-        await self._inner.append_batch(items)
-        # 按 thread 分组发 hook
-        by_thread: dict[str, list[ResponseItem]] = {}
-        for it in items:
-            by_thread.setdefault(it.thread_id, []).append(it)
-        for tid, group in by_thread.items():
-            self._runner.spawn_on_message_appended(tid, group)
-
-    async def append_atomic_batch(
-        self,
-        items: Sequence[ResponseItem],
-        *,
-        batch_id: str,
-    ) -> BatchAppendAck:
-        """把 Responses 原子提交委派给 inner，并在新提交后触发 hook。"""
-        if not isinstance(self._inner, AtomicBatchMessageStore):
-            raise UnsupportedPersistenceCapabilityError(
-                "wrapped store does not support atomic response batches"
-            )
-        ack = await self._inner.append_atomic_batch(items, batch_id=batch_id)
-        if ack.already_committed:
-            return ack
-        by_thread: dict[str, list[ResponseItem]] = {}
-        for item in items:
-            by_thread.setdefault(item.thread_id, []).append(item)
-        for thread_id, group in by_thread.items():
-            self._runner.spawn_on_message_appended(thread_id, group)
-        return ack
-
-    async def load_thread(self, thread_id: str) -> AsyncIterator[ResponseItem]:
-        return await self._inner.load_thread(thread_id)
-
-    async def list_threads(
-        self, *, cwd: str | None = None, limit: int = 50
-    ) -> list[ThreadInfo]:
-        return await self._inner.list_threads(cwd=cwd, limit=limit)
-
-    async def select_resume_path(self, cwd: str) -> str | None:
-        return await self._inner.select_resume_path(cwd)
-
-    async def audited_projection_marker(self, thread_id: str) -> object | None:
-        """把 metadata-only audited marker 检查委派给默认 JSONL store。"""
-        if type(self._inner) is not JsonlMessageStore:
-            return None
-        return await self._inner.audited_projection_marker(thread_id)
-
-    async def close(self) -> None:
-        # 不在此处 shutdown runner —— 由 pool.close 统一调度（先 await hook，后关 store）
-        await self._inner.close()
-
+async def _cleanup_failed_factory(
+    *,
+    store: MessageStore | None,
+    hook_runner: HookRunner | None,
+    owned_directory: SqliteThreadDirectory | None,
+) -> None:
+    """构造失败时逐项释放已成功创建的 factory-owned 资源。"""
+    if hook_runner is not None:
+        with suppress(BaseException):
+            await hook_runner.shutdown(grace_seconds=5.0)
+    if store is not None:
+        with suppress(BaseException):
+            await store.close()
+    if owned_directory is not None:
+        with suppress(BaseException):
+            await owned_directory.close()
 
 def _resolve_store_binding(
     audit: AuditConfig | None,
@@ -223,25 +130,6 @@ def _resolve_store_binding(
         )
     return AuditStoreBinding(projection_store, None, None, None)
 
-
-async def _cleanup_failed_factory(
-    *,
-    store: MessageStore | None,
-    hook_runner: HookRunner | None,
-    owned_directory: SqliteThreadDirectory | None,
-) -> None:
-    """构造失败时逐项释放已成功创建的 factory-owned 资源。"""
-    if hook_runner is not None:
-        with suppress(BaseException):
-            await hook_runner.shutdown(grace_seconds=5.0)
-    if store is not None:
-        with suppress(BaseException):
-            await store.close()
-    if owned_directory is not None:
-        with suppress(BaseException):
-            await owned_directory.close()
-
-
 def _prepare_factory_components(
     *,
     model_client: ModelClient,
@@ -252,6 +140,7 @@ def _prepare_factory_components(
     recall_max_top_k: int,
     extra_tools: list[ToolSpec] | None,
     compressors: list[CompressionStrategy] | None,
+    selection_gate: SkillSelectionGate | None = None,
 ) -> tuple[
     SkillRecall | None,
     SkillVerifier | None,
@@ -267,7 +156,7 @@ def _prepare_factory_components(
         resolved_verifier = LlmSkillVerifier(model_client)
     tools = ToolRegistry()
     tools.register(make_read_skill_tool())
-    tools.register(make_call_skill_tool())
+    tools.register(make_call_skill_tool(selection_gate=selection_gate))
     tools.register(make_run_script_tool())
     if resolved_recall is not None:
         tools.register(
@@ -276,6 +165,7 @@ def _prepare_factory_components(
                 default_top_k=recall_default_top_k,
                 max_top_k=recall_max_top_k,
                 verifier=resolved_verifier,
+                selection_policy=selection_gate.policy if selection_gate else None,
             )
         )
     for tool in extra_tools or []:
@@ -287,7 +177,6 @@ def _prepare_factory_components(
             SlidingWindowStrategy(),
         ]
     return resolved_recall, resolved_verifier, tools, resolved_compressors
-
 
 class EnginePool:
     """进程级单例 —— 持有所有共享依赖 + 缓存活跃 Engine。"""
@@ -346,8 +235,12 @@ class EnginePool:
         image_input_policy: ImageInputPolicy | None = None,
         input_cost_estimator: InputCostEstimator | None = None,
         file_input_policy: FileInputPolicy | None = None,
+        model_prewarmer: ModelPrewarmer | None = None,
+        context_engine: ContextEngine | None = None,
     ) -> None:
         self._registry = skill_registry
+        # 模型侧预热器（ADR 0092）：注入到每个 engine，供 Prewarm 的 model 步骤使用
+        self._model_prewarmer = model_prewarmer
         # ADR 0041：池级默认套有界重试，recall / verifier / 引擎共用同一包装（幂等）
         self._model_client = with_default_retry(
             model_client, config=retry_config, enabled=auto_retry,
@@ -360,8 +253,10 @@ class EnginePool:
         self._store = store
         self._tool_registry = tool_registry
         self._tool_runtime = ToolCallRuntime(tool_registry)
+        # 注入了 ContextEngine（ADR 0093）时即便没有压缩策略也要有协调器：引擎随它到达各 runner
         self._compressors = (
-            CompressionOrchestrator(compressors) if compressors else None
+            CompressionOrchestrator(list(compressors or []), context_engine=context_engine)
+            if compressors or context_engine is not None else None
         )
         self._budget = budget or ContextBudget()
         self._dispatch_policy = dispatch_policy or DispatchPolicy()
@@ -506,6 +401,9 @@ class EnginePool:
             failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
             failure_suspend_max_auto_retries=self._failure_suspend_max_auto_retries,
             failure_suspend_on_expire=self._failure_suspend_on_expire,
+            skill_authorization=self._dispatch_policy.authorization,
+            skill_working_set=self._dispatch_policy.working_set,
+            context_engine=context_engine,
         )
 
         self._engines: dict[str, AgentEngine] = {}
@@ -591,6 +489,9 @@ class EnginePool:
         image_input_policy: ImageInputPolicy | None = None,
         input_cost_estimator: InputCostEstimator | None = None,
         file_input_policy: FileInputPolicy | None = None,
+        selection_gate: SkillSelectionGate | None = None,
+        model_prewarmer: ModelPrewarmer | None = None,
+        context_engine: ContextEngine | None = None,
     ) -> EnginePool:
         """便捷构造。
 
@@ -660,6 +561,7 @@ class EnginePool:
                     recall_max_top_k=recall_max_top_k,
                     extra_tools=extra_tools,
                     compressors=compressors,
+                    selection_gate=selection_gate,
                 )
             )
             pool = cls(
@@ -712,7 +614,8 @@ class EnginePool:
                 skill_verifier=resolved_verifier,
                 audit=audit,
                 image_input_policy=image_input_policy, file_input_policy=file_input_policy,
-                input_cost_estimator=input_cost_estimator,
+                input_cost_estimator=input_cost_estimator, model_prewarmer=model_prewarmer,
+                context_engine=context_engine,
             )
             pool._owned_directory = owned_directory
             await start_skill_watcher(

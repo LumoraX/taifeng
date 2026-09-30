@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -316,6 +317,9 @@ class ContextBudget:
             省中间并写明省略量；None = 不限。默认 128KiB（约 3–4 万 token）：防止 MCP /
             业务工具的超大输出一次吃掉大半窗口。配置了 OffloadStrategy 时不生效（大结果
             交给 offload 无损落盘）。
+        recompact_min_growth_ratio: 压缩增量基线（ADR 0083）。上次压缩后的估算为基线，
+            当前估算未达 ``基线 × (1 + 本值)`` 且未到硬阈值时，pre_turn / mid_turn 不再触发
+            压缩。0 = 不设闸（默认，行为不变）。
     """
 
     context_window: int = 200_000
@@ -325,10 +329,16 @@ class ContextBudget:
     max_request_bytes: int | None = None
     output_reserve_tokens: int = 0
     max_tool_result_bytes: int | None = 128 * 1024
+    recompact_min_growth_ratio: float = 0.0
 
     def __post_init__(self) -> None:
         """构造期校验：预留必须非负且小于窗口，否则 usable 为 0 / 负，阈值失去意义；
-        工具结果上限须留得下截断标记（< 1KiB 的上限截完只剩标记）。"""
+        工具结果上限须留得下截断标记（< 1KiB 的上限截完只剩标记）；增量基线比例须是
+        有限的非负数。"""
+        ratio = self.recompact_min_growth_ratio
+        if not (math.isfinite(ratio) and ratio >= 0):
+            raise ValueError(
+                f"recompact_min_growth_ratio must be a finite number >= 0, got {ratio!r}")
         if self.max_tool_result_bytes is not None and self.max_tool_result_bytes < 1024:
             raise ValueError(
                 f"max_tool_result_bytes must be >= 1024 or None, got {self.max_tool_result_bytes}")
@@ -382,3 +392,60 @@ class ContextBudget:
 
     def is_hard_exceeded(self, current: int) -> bool:
         return current >= self.hard_limit
+
+
+POST_COMPACTION_TOKENS_KEY = "post_compaction_tokens"
+"""压缩条目 metadata 里记录「压缩刚结束时的上下文估算」的键（压缩增量基线，ADR 0083）。"""
+
+
+@dataclass(frozen=True)
+class RecompactionBlocked:
+    """增量基线拦下了一次压缩。
+
+    Attributes:
+        baseline_tokens: 上次压缩结束时的估算。
+        required_tokens: 估算达到该值才再次压缩。
+    """
+
+    baseline_tokens: int
+    required_tokens: int
+
+
+def last_compaction_baseline(history: Sequence[ResponseItem]) -> int | None:
+    """history 中最后一次压缩记录的基线；没有压缩、或该压缩没有记录基线时返回 None。
+
+    基线随压缩条目落在 transcript 里，冷加载后依然可读（R5）。引入本机制之前写下的压缩条目
+    没有基线，对它们不设闸。值不是非负整数时同样视为没有（不猜）。
+    """
+    for item in reversed(history):
+        if item.kind != "compacted":
+            continue
+        value = item.metadata.get(POST_COMPACTION_TOKENS_KEY)
+        if type(value) is int and value >= 0:
+            return value
+        return None
+    return None
+
+
+def recompaction_blocked(
+    history: Sequence[ResponseItem],
+    token_estimate: int,
+    budget: ContextBudget,
+) -> RecompactionBlocked | None:
+    """按增量基线判断这次压缩是否该推迟；不该推迟返回 None。
+
+    推迟的条件（同时成立）：配置了 ``recompact_min_growth_ratio > 0``；上次压缩记录了基线；
+    当前估算未达 ``基线 + ceil(基线 × 比例)``；当前估算未到硬阈值。
+    到了硬阈值必须压——不压就要溢出，此时腾出多少算多少。
+    """
+    ratio = budget.recompact_min_growth_ratio
+    if ratio <= 0 or budget.is_hard_exceeded(token_estimate):
+        return None
+    baseline = last_compaction_baseline(history)
+    if baseline is None:
+        return None
+    # round 消去浮点乘法的尾差（860 × 0.1 = 86.00000000000001），再向上取整
+    required = baseline + math.ceil(round(baseline * ratio, 6))
+    if token_estimate >= required:
+        return None
+    return RecompactionBlocked(baseline_tokens=baseline, required_tokens=required)

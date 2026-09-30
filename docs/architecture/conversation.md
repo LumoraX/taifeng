@@ -46,15 +46,24 @@ verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
 - **resume（Journal 接管）**：`get_or_create(resume_thread_id=...)` 经投影 marker 定位 Journal Session →
   `open_existing` 接管（epoch+1）→ root thread 上结果未知的工具调用（intent 无 outcome / outcome 已落 unknown）
   按副作用分流收敛：可回查的回查、幂等的判可安全重发、其余经 `AuditConfig.tool_outcome_resolver` 征求人裁决，
-  结论作为 `tool_recovery_committed`（+ 补写的 `function_call_output` 会话项）原子追加（ADR 0070）；其余未结算
-  effect（LLM attempt / skill 派发 / submission 未 applied）或仍需人裁决的调用即
+  结论作为 `tool_recovery_committed`（+ 补写的 `function_call_output` 会话项）原子追加（ADR 0070）；已随模型
+  回复落账、却从未登记意图的调用确定未执行，结论作为 `tool_call_undispatched`（+ 补写的「未执行」结果）随同一
+  batch 追加（ADR 0075）；被中断的同步 `call_skill` 派发沿派发树自底向上收敛——子 thread 的调用先结算，派发落
+  `skill_dispatch_finished(cancelled)` + 子 thread `thread_terminal`，父调用得到一条列出子调用处置的结果
+  （ADR 0076）；其余未结算
+  effect（LLM attempt / submission 未 applied / 无法归属的 skill 派发）或仍需人裁决的调用即
   `AuditResumeError("audit_resume_recovery_required")` 并列出 record id。通过后用 root thread 已提交
   `conversation_item` 重建 history、复用并核对既有投影 thread 后续跑；已 `session_ended` 的 Session 不可重开。
   resume 失败只释放 lease，不写 `session_ended`。
 - **current recovery exclusions（本阶段不支持）**：custom store/directory、IndexHook、hooks、permission/HITL、
   compressor、memory、instruction layers、orchestration、spawn/peer、非 attempt-observable client、可
-  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。工具以外未结算
-  effect 的 repair/unfreeze、子 thread 工具调用的收敛、历史迁移仍不在本阶段范围（resume 只 fail closed）。
+  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。已冻结 Session 的
+  repair/unfreeze 不在范围（resume 只 fail closed）。
+- **Timeline 与迁移**（`journal/timeline.py`、`redaction.py`、`legacy_import.py`、`projection_rebuild.py`，
+  ADR 0104）：Timeline 从 Journal 投影（按 seq、可筛选、`after_seq` 接力），三种视图（full / redacted /
+  metadata_only）；旧 transcript 经 `import_legacy_transcript` 导入为可接管的审计 Session（旧文件留档在
+  `legacy/`，历史标 `legacy_unverified`）；投影可经 `rebuild_projections` 从 Journal 重建。契约见
+  [session-journal-timeline](capabilities/session-journal-timeline.md)。
 
 完整数据契约与边界以
 [SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)、
@@ -210,7 +219,7 @@ reasoning provider state、function call 和后续 `origin_llm_sample_id` 工具
 | --- | --- |
 | `system_injection`，`source == memory_pre_evict`（压缩 salvage digest） | 暂存，等下一个 `compacted` 时挪到 placeholder 之后（复现热内存 `insert_at = summary_index + 1` 行为） |
 | `compacted`（带 `replaced_range=(s, e)`） | 把 `logical[s:e]` 折叠掉：`logical = logical[:s] + [placeholder] + ([salvage] if salvage else []) + logical[e:]` |
-| `system_injection`，`source ∈ {rewind, rollback}` | 截断信号：`logical = logical[:cut_index]`（`cut_index` 从 payload 读），**marker 本身不进 logical** |
+| `system_injection`，`source ∈ {rewind, rollback}` | 截断信号：`logical = logical[:cut_index]`（`cut_index` 从 payload 读）；payload 另带 `drop_index` 时再去掉保留范围内那一条旧 `function_call_output`（并行批次 retry_tool，ADR 0079；越界或指向的不是 `function_call_output` 即 `ValueError`）；payload 带 `undo_compaction` 时不截断，而是把 logical 还原为该压缩条目之前的那一份（去掉压缩动作写下的抢救摘要 / 钉回项，ADR 0081；指向未知压缩或 `cut_index` 与还原后长度不符即 `ValueError`）。**marker 本身不进 logical** |
 | `skill_outcome`（战绩旁路记账） | `logical.append(item)`（正常追加，保留在 logical history 供后续相位读取）；但 `build_api_request` 在构建 LLM 消息序列时**跳过**此 kind——旁路语义，不进 LLM 视图 |
 | `tool_intent`（工具派发前的 write-ahead 意图，Chat 协议路径） | `logical.append(item)`；`build_api_request` 跳过；冷恢复据「有意图、无 output」识别在飞调用（见 [tool-crash-reconciliation](capabilities/tool-crash-reconciliation.md)） |
 | `spawn_settled`（spawn 句柄终态锚，落子 thread） | `logical.append(item)`；`build_api_request` 同样跳过（与 `spawn` / `suspension` 等记账 item 同类）；rewind 截断时随 `cut_index` 一并折叠，重推后由新终态再落一条（冷推断取最后一条） |
@@ -223,6 +232,15 @@ reasoning provider state、function call 和后续 `origin_llm_sample_id` 工具
 ## 关键决策与备选方案
 
 详见 ADR `docs/decisions/0008-store-protocol-decoupling.md`。
+
+## 输入来源标记（input-origin，ADR 0085）
+
+条目的 `metadata["origin"]` 记录这段内容是谁送进来的、声明的可信度：`{kind, trust, label?}`。由送入方声明
+（业务在 Op 上、工具在 `ToolSpec.output_trust` 上）；内核派生的内容（压缩摘要、`call_skill` 子 thread 的种子消息、
+`send_message` 发出的 peer 消息）继承其来源上下文的不可信标记。标记只在 metadata 里，不进 prompt。
+
+`summarize_taint(history)` 汇总上下文里的不可信内容，随每次工具派发经 `ToolContext.extras["input_taint"]` 与 hook
+上下文交给业务。内核不依据它做任何裁决。契约见 `capabilities/input-origin.md`。
 
 ## 红线影响
 

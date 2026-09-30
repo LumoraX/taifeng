@@ -28,11 +28,11 @@ from tests.loop.test_audit_engine_bootstrap import (
     _config,
     _EngineSpy,
     _JournalCore,
+    _noncompliant_tool,
     _observed_client,
     _pool,
     _Registry,
     _SpyStore,
-    _suspending_tool,
 )
 
 if TYPE_CHECKING:
@@ -414,7 +414,7 @@ async def test_public_create_static_failure_releases_projection_handle(
             model_client=_observed_client(),
             compressors=[],
             audit=_config(core),
-            extra_tools=[_suspending_tool()],
+            extra_tools=[_noncompliant_tool()],
         )
 
     assert root not in _TARGETS

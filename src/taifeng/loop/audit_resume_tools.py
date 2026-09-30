@@ -3,8 +3,8 @@
 把 tool-crash-reconciliation（ADR 0045）的按副作用分流接进 strict audit 冷恢复。待收敛的调用有两类：
 悬空 ``tool_intent_committed``（崩溃在执行途中，模型看不到任何结果），以及已 durable 为
 ``unknown`` 的 ``tool_outcome_committed``（取消 / 超时判不清，模型已看到一条错误结果，Session
-当时即冻结）。只处理 root thread 的调用——子 thread 的调用必然伴随未结算的 skill 派发，仍整体
-fail closed。
+当时即冻结）。参与收敛的是 root thread 与「被中断的 skill 派发」的子 thread 上的调用
+（``audit_resume_dispatch``，ADR 0076）；``call_skill`` 自身的意图按派发谱系结算，不走本表。
 
 | 条件（按序判定） | 结论 | 随 batch 补写给模型的 output |
 | --- | --- | --- |
@@ -124,7 +124,7 @@ class AuditToolRecoveryPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class _Decision:
+class ToolCallDecision:
     """一个调用的收敛结论。"""
 
     basis: RecoveryBasis
@@ -139,6 +139,10 @@ class _Decision:
         """映射到 ``thread_resumed.recovered_tool_calls`` 的处置取值。"""
         if self.basis == "operator":
             return "operator_resolved"
+        if self.verdict == "interrupted":
+            return "dispatch_interrupted"
+        if self.verdict == "not_started":
+            return "not_dispatched"
         return "reconciled" if self.verdict == "completed" else "safe_to_retry"
 
 
@@ -146,18 +150,24 @@ def split_unsettled(
     envelopes: Sequence[JournalEnvelope],
     pending: Sequence[str],
     root_thread_id: str,
+    *,
+    eligible_threads: frozenset[str] | None = None,
 ) -> tuple[tuple[UnresolvedToolCall, ...], tuple[str, ...]]:
     """把未结算 record 分成可按工具恢复收敛的调用与其余（仍一律 fail closed）。
+
+    ``eligible_threads`` 缺省只含 root thread；传入时须包含 root thread，其余为被中断的 skill
+    派发的子 thread（ADR 0076）。
 
     Raises:
         pydantic.ValidationError: 工具 intent / outcome payload 形状违约（Journal 不可信）。
     """
+    threads = eligible_threads if eligible_threads is not None else frozenset({root_thread_id})
     by_id = {envelope.record_id: envelope for envelope in envelopes}
-    samples = _function_call_samples(envelopes, root_thread_id)
+    samples = _function_call_samples(envelopes, threads)
     calls: list[UnresolvedToolCall] = []
     others: list[str] = []
     for record_id in pending:
-        call = _tool_call_for(by_id[record_id], by_id, samples, root_thread_id)
+        call = _tool_call_for(by_id[record_id], by_id, samples, threads)
         if call is None:
             others.append(record_id)
         else:
@@ -168,10 +178,10 @@ def split_unsettled(
 def _tool_call_for(
     envelope: JournalEnvelope,
     by_id: Mapping[str, JournalEnvelope],
-    samples: Mapping[str, str],
-    root_thread_id: str,
+    samples: Mapping[tuple[str, str], str],
+    threads: frozenset[str],
 ) -> UnresolvedToolCall | None:
-    """未结算 record 若是 root thread 的工具 intent / unknown outcome，还原成待收敛调用。"""
+    """未结算 record 若是可收敛 thread 上的工具 intent / unknown outcome，还原成待收敛调用。"""
     if envelope.record_type == "tool_intent_committed":
         intent: JournalEnvelope | None = envelope
         outcome_record_id: str | None = None
@@ -181,11 +191,12 @@ def _tool_call_for(
         outcome_record_id = envelope.record_id
     else:
         return None
-    # 引用缺失 / 非 root thread / 缺 operation lineage 的调用无法安全落账结论，留给人
+    # 引用缺失 / 不在可收敛 thread 上 / 缺 operation lineage 的调用无法安全落账结论，留给人
     if (
         intent is None
         or intent.record_type != "tool_intent_committed"
-        or intent.thread_id != root_thread_id
+        or intent.thread_id is None
+        or intent.thread_id not in threads
         or intent.operation_id is None
     ):
         return None
@@ -194,19 +205,20 @@ def _tool_call_for(
         intent=intent,
         intent_payload=payload,
         outcome_record_id=outcome_record_id,
-        origin_sample_id=samples.get(payload.call_id),
+        origin_sample_id=samples.get((intent.thread_id, payload.call_id)),
     )
 
 
 def _function_call_samples(
-    envelopes: Sequence[JournalEnvelope], root_thread_id: str,
-) -> dict[str, str]:
-    """root thread 已提交 function_call 会话项的 call_id → Responses 采样 id。"""
-    samples: dict[str, str] = {}
+    envelopes: Sequence[JournalEnvelope], threads: frozenset[str],
+) -> dict[tuple[str, str], str]:
+    """已提交 function_call 会话项的 (thread_id, call_id) → Responses 采样 id。"""
+    samples: dict[tuple[str, str], str] = {}
     for envelope in envelopes:
         if (
             envelope.record_type != "conversation_item"
-            or envelope.thread_id != root_thread_id
+            or envelope.thread_id is None
+            or envelope.thread_id not in threads
             or envelope.payload.get("item_kind") != "function_call"
         ):
             continue
@@ -214,7 +226,7 @@ def _function_call_samples(
         sample_id = item.metadata.get("llm_sample_id")
         call_id = item.payload.get("call_id")
         if isinstance(sample_id, str) and sample_id and isinstance(call_id, str):
-            samples[call_id] = sample_id
+            samples[envelope.thread_id, call_id] = sample_id
     return samples
 
 
@@ -266,11 +278,11 @@ async def plan_audited_tool_recovery(
     pending: list[str] = []
     for call in calls:
         spec = registry.get(call.intent_payload.name)
-        decision = await _decide(call, spec, resolver, session_id=session_id)
+        decision = await decide_tool_call(call, spec, resolver, session_id=session_id)
         if decision is None:
             pending.append(call.record_id)
             continue
-        records.extend(_recovery_records(
+        records.extend(recovery_records(
             call, decision, session_id=session_id, recovery_operation_id=recovery_operation_id,
         ))
         recovered.append(RecoveredCall(
@@ -279,13 +291,13 @@ async def plan_audited_tool_recovery(
     return AuditToolRecoveryPlan(tuple(records), tuple(recovered), tuple(pending))
 
 
-async def _decide(
+async def decide_tool_call(
     call: UnresolvedToolCall,
     spec: ToolSpec | None,
     resolver: AuditToolOutcomeResolver | None,
     *,
     session_id: str,
-) -> _Decision | None:
+) -> ToolCallDecision | None:
     """按 ADR 0045 顺序分流：回查 → 副作用声明 → 人；都给不出结论返回 None。"""
     status: ReconcileStatus | None = None
     if spec is not None and spec.reconcile is not None:
@@ -296,7 +308,7 @@ async def _decide(
             return automatic
     elif _retry_safe(call, spec):
         effect = call.intent_payload.effect_kind
-        return _Decision("effect_kind", "retry_safe", safe_to_retry_text(effect), True, None)
+        return ToolCallDecision("effect_kind", "retry_safe", safe_to_retry_text(effect), True, None)
     if resolver is None:
         return None
     resolution = await resolver(_operator_request(call, session_id, status))
@@ -307,7 +319,7 @@ async def _decide(
 
 def _reconciled_decision(
     call: UnresolvedToolCall, verdict: ReconcileVerdict | None,
-) -> _Decision | None:
+) -> ToolCallDecision | None:
     """把回查结论映射为自动收敛；查不清或无法向模型纠正时返回 None（交人）。"""
     if verdict is None:
         return None
@@ -315,10 +327,10 @@ def _reconciled_decision(
     if verdict.status == "not_executed":
         # 已有结果的调用：模型看到的错误结果与「未执行」一致，只落结论不补写
         text = NOT_EXECUTED_TEXT if dangling else None
-        return _Decision("reconcile", "not_executed", text, True if dangling else None,
+        return ToolCallDecision("reconcile", "not_executed", text, True if dangling else None,
                          "not_executed")
     if verdict.status == "completed" and dangling:
-        return _Decision("reconcile", "completed", verdict.output, verdict.is_error, "completed")
+        return ToolCallDecision("reconcile", "completed", verdict.output, verdict.is_error, "completed")
     return None
 
 
@@ -345,7 +357,7 @@ def _operator_request(
 
 def _operator_decision(
     call: UnresolvedToolCall, resolution: object, status: ReconcileStatus | None,
-) -> _Decision:
+) -> ToolCallDecision:
     """校验 resolver 的裁决并映射为结论。
 
     Raises:
@@ -361,16 +373,16 @@ def _operator_decision(
             raise AuditToolResolutionError(
                 call.record_id, "provide cannot replace an output the model already saw"
             )
-        return _Decision("operator", "provided", resolution.output, resolution.is_error,
+        return ToolCallDecision("operator", "provided", resolution.output, resolution.is_error,
                          status, resolution.operator_id)
     text = OPERATOR_ABORTED_TEXT if dangling else None
-    return _Decision("operator", "aborted", text, True if dangling else None,
+    return ToolCallDecision("operator", "aborted", text, True if dangling else None,
                      status, resolution.operator_id)
 
 
-def _recovery_records(
+def recovery_records(
     call: UnresolvedToolCall,
-    decision: _Decision,
+    decision: ToolCallDecision,
     *,
     session_id: str,
     recovery_operation_id: str,
@@ -446,8 +458,11 @@ def _recovery_output_item(call: UnresolvedToolCall, output: str, is_error: bool)
 
 __all__ = [
     "AuditToolRecoveryPlan",
+    "ToolCallDecision",
     "UnresolvedToolCall",
+    "decide_tool_call",
     "needs_operator_without_lock",
     "plan_audited_tool_recovery",
+    "recovery_records",
     "split_unsettled",
 ]

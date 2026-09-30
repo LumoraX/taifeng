@@ -13,7 +13,7 @@ from taifeng.llm.audit import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from taifeng.conversation.journal.models import (
         JournalAck,
@@ -133,6 +133,9 @@ class AuditStaticInputs:
     failure_suspend_max_auto_retries: int | None = None
     failure_suspend_on_expire: Literal["abort", "retry"] = "abort"
     skill_suspension_enabled: bool = True
+    skill_authorization: object | None = None
+    skill_working_set: object | None = None
+    context_engine: object | None = None
 
 
 class AuditCapabilityError(ValueError):
@@ -186,10 +189,13 @@ _OBJECT_CAPABILITY_RULES = (
     ("hooks", "audit_hooks_unsupported"),
     ("permission_policy", "audit_permission_unsupported"),
     ("permission_prompter", "audit_hitl_unsupported"),
+    ("context_engine", "audit_context_engine_unsupported"),
     ("compressor", "audit_compressor_unsupported"),
     ("memory_store", "audit_memory_unsupported"),
     ("memory_query_builder", "audit_memory_query_builder_unsupported"),
     ("failure_policy", "audit_failure_policy_unsupported"),
+    ("skill_authorization", "audit_skill_authorization_unsupported"),
+    ("skill_working_set", "audit_skill_working_set_unsupported"),
 )
 
 _COLLECTION_CAPABILITY_RULES = (
@@ -206,10 +212,12 @@ _BOOLEAN_CAPABILITY_RULES = (
     ("skill_suspension_enabled", "audit_skill_suspension_unsupported"),
 )
 
-_SPAWN_TOOL_NAMES = frozenset({"spawn_skill", "kill_skill", "run_in_background"})
-_BARRIER_TOOL_NAMES = frozenset({"await_skills", "join_skill", "wait_for_task"})
-_PEER_TOOL_NAMES = frozenset({"send_message", "wait_peer"})
-_HITL_TOOL_NAMES = frozenset({"request_user_input"})
+# 分离式派发（spawn_skill / kill_skill / join_skill / wait_peer / wait_any）、join-barrier
+# （await_skills）与 peer 消息（send_message）已接入（ADR 0098 / 0099 / 0100）；
+# 仍在能力面之外的是后台 shell 任务。
+_SPAWN_TOOL_NAMES = frozenset({"run_in_background"})
+_BARRIER_TOOL_NAMES = frozenset({"wait_for_task"})
+_PEER_TOOL_NAMES: frozenset[str] = frozenset()
 _MISSING = object()
 
 
@@ -232,8 +240,13 @@ def validate_audit_config(
 def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
     """按稳定优先级拒绝未接入的 store/context/suspension 能力。"""
     for field_name, code in _OBJECT_CAPABILITY_RULES:
-        if getattr(inputs, field_name) is not None:
-            raise AuditCapabilityError(code)
+        value = getattr(inputs, field_name)
+        if value is None:
+            continue
+        admit = _ADMISSION_CHECKS.get(field_name)
+        if admit is not None and admit(value):
+            continue
+        raise AuditCapabilityError(code)
     for field_name, code in _COLLECTION_CAPABILITY_RULES:
         if getattr(inputs, field_name):
             raise AuditCapabilityError(code)
@@ -246,6 +259,50 @@ def _validate_unsupported_fields(inputs: AuditStaticInputs) -> None:
         or inputs.failure_suspend_on_expire != "abort"
     ):
         raise AuditCapabilityError("audit_failure_suspension_unsupported")
+
+
+_AUDITABLE_COMPRESSION = frozenset({"fold", "fold_model"})
+
+
+def _compressor_is_auditable(compressor: object) -> bool:
+    """压缩协调器里的每个策略都声明了折叠式的审计支持（ADR 0094）。
+
+    声明读类属性 ``audit_support``，不执行任何 descriptor；没有策略的协调器无事可审。
+    """
+    strategies = _static_tool_attribute(compressor, "strategies")
+    if strategies is _MISSING:
+        strategies = getattr(compressor, "strategies", _MISSING)
+    if not isinstance(strategies, tuple):
+        return False
+    return all(
+        inspect.getattr_static(type(strategy), "audit_support", None) in _AUDITABLE_COMPRESSION
+        for strategy in strategies
+    )
+
+
+def _hooks_are_auditable(hooks: object) -> bool:
+    """hook 运行器是内核的 ``HookRunner``：裁决可以按 turn 绑定落账（ADR 0096）。"""
+    from taifeng.hooks.types import HookRunner
+
+    return isinstance(hooks, HookRunner)
+
+
+def _permission_is_auditable(policy: object) -> bool:
+    """权限策略是内核的 ``PermissionPolicy``（ADR 0096）。
+
+    以挂起的方式征求审批同样可用：挂起与恢复本身进 Journal（ADR 0097）。
+    """
+    from taifeng.permission.policy import PermissionPolicy
+
+    return isinstance(policy, PermissionPolicy)
+
+
+# 字段 → 「这个具体的值可以在审计模式下使用」的判定；没有列出的字段一律拒绝
+_ADMISSION_CHECKS: dict[str, Callable[[object], bool]] = {
+    "compressor": _compressor_is_auditable,
+    "hooks": _hooks_are_auditable,
+    "permission_policy": _permission_is_auditable,
+}
 
 
 def _validate_model_capability(inputs: AuditStaticInputs) -> None:
@@ -272,8 +329,6 @@ def _validate_tool_capabilities(tools: tuple[object, ...]) -> None:
             raise AuditCapabilityError("audit_barrier_unsupported")
         if name in _PEER_TOOL_NAMES:
             raise AuditCapabilityError("audit_peer_unsupported")
-        if name in _HITL_TOOL_NAMES:
-            raise AuditCapabilityError("audit_hitl_unsupported")
         _validate_tool_metadata(tool)
 
 
@@ -303,8 +358,8 @@ def _validate_tool_metadata(tool: object) -> None:
         or (effect_kind, reconciliation) not in AUDIT_TOOL_EFFECT_RECONCILIATION
     ):
         raise AuditCapabilityError("audit_tool_reconciliation_invalid")
-    if can_suspend is not False:
-        raise AuditCapabilityError("audit_tool_suspension_unsupported")
+    if type(can_suspend) is not bool:
+        raise AuditCapabilityError("audit_tool_metadata_incomplete")
 
 
 def _static_tool_attribute(tool: object, attribute: str) -> object:

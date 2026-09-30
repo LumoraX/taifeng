@@ -39,6 +39,7 @@ class SlidingWindowStrategy:
 
     name = "sliding"
     priority = 10
+    audit_support = "fold"
 
     def __init__(self, *, keep_tail: int = 6) -> None:
         self._keep_tail = keep_tail

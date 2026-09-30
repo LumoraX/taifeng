@@ -452,9 +452,46 @@ class CallSkillTool:
 - **召回后验证门（适配精验）**：召回只看 `description`（长相，浅），启用验证（注入 `skill_verifier` 或开总闸）时再经 `SkillVerifier` 拉**完整 SKILL.md body**，LLM 判「就当前任务能提供的输入 / 条件，该能力声明要的输入是否满足、前提是否具备」（判**适配**，不判能否跑通），滤掉「描述像但输入要求不满足」的误召。`LlmSkillVerifier` 有 C2 护栏（只验前 `verify_max_candidates`(5) 个、单 body 超 `verify_body_char_limit`(4000) 截断）；`VerifiedCandidate` 把 `recall_confidence`（长相）与 `verify_confidence`（适配）**分字段**（防呆）。
 - **置信路由（禁 silent）**：启用验证时 `search_skills` 走「召回 → 验证 → 路由」——有 applicable 候选透 `[{skill_id, description, confidence(=verify), reason}]`；全不适用 / 召回空返回**显式** `{"no_match": true, "hint": ...}`，不返回空数组伪装。未启用验证时退化为 0023 行为（召回直接路由，`confidence` 为召回长相、含 `matched_snippet`，内核**不据其分流**）。
 - **选择溯源连回战绩**：经 `search_skills` 召回 / 验证选中再 `call_skill` 派发的 skill，其 `SkillExecutionRecord.selection_origin="discovered"` + `selection_confidence`（= payload `confidence`：启用验证时即 `verify_confidence`，否则即召回长相；复用 v1 [skill-outcome-record](capabilities/skill-outcome-record.md) 的 `SelectionOrigin` Literal）；未经召回的派发仍为 `whitelist` / `None`。
+- **按置信度分流（opt-in，[skill-selection-gate](capabilities/skill-selection-gate.md)）**：注入 `selection_gate=SkillSelectionGate(policy, trial_judge)` 后，`search_skills` 给每个候选标 `route`（`proceed` / `trial` / `escalate`，全部 `escalate` 时返回带 `low_confidence` 的 `no_match`），`call_skill` / `spawn_skill` 在 `DispatchPolicy.check` 之后过分流门：`trial` 档须模型先 `read_skill` 或试用门放行，`escalate` 档本轮不可派发。只约束本轮经召回看到的 skill；判定全部由 history 推导，不持有状态。事件 `skill_selection_routed` / `skill_selection_gated`。
+- **白名单外授权（opt-in，[skill-authorization](capabilities/skill-authorization.md)）**：`DispatchPolicy(authorization=...)` 注入 `SkillAuthorizationPolicy` 后，召回池并入白名单外可发现的 skill（结果里标 `requires_authorization`），即便 child 列表是 inline 也暴露 `search_skills`；`call_skill` 的目标不在白名单时先过 `authorize`，放行只豁免白名单一层，深度 / 环 / entry、分流门、hook、`skill_dispatch` 审批照常。参考实现：`CallbackSkillAuthorization`（业务回调）、`PermissionSkillAuthorization`（权限门的规则 / 可复用授权 / 人工审批，范围 `skill_authorization`）。`spawn_skill` 与声明式编排不走白名单外授权。
 - **可观测**：`skill_search_invoked`（query / top_k / pool_size）+ `skill_candidates_returned`（count / top_ids）覆盖召回链；启用验证时追加 `skill_candidates_verified`（verified_count / dropped_count）覆盖验证门。三事件均不进 LLM 视图。
 
 完整数据契约与场景见 `capabilities/skill-recall.md`；为何这么定见 ADR 0023（召回）+ ADR 0024（opt-in 总闸 + 验证门）。
+
+## 按战绩算分、影子评估与生效（skill-working-set）
+
+每次 `call_skill` 子 skill 到达终态都会产生一条战绩（`skill_outcome_recorded`）。`SkillFitnessStore` 把它们聚合成
+每个 skill 的成败计数与成本累计；`working_set` 模块在聚合之上算分并规划工作集：
+
+```
+skill_outcome_recorded ──► SkillFitnessShadow（TelemetrySink，attach 到 engine）
+                              ├─ store.record                      聚合（按 call_id 幂等）
+                              ├─ FitnessScorer.score × 全部 skill  Wilson 置信下界，可选成本折减
+                              ├─ plan_working_set                  提拔 / 逐出 / 隔离 / 解除（无状态重算）
+                              └─ ShadowObserver.on_evaluation      只记录「如果生效会发生什么」
+```
+
+- **长相与战绩分离**：算分只读成败计数与成本，不读 `selection_confidence`。
+- **放弃不算失败**；没有成败样本的 skill 得 0 分；样本越少分数被压得越低。
+- **超预算逐出最低分者**，不是最早进入者；**高选中、低成功**的 skill 被隔离且不得提拔。
+- **影子模式**：`SkillFitnessShadow` 经事件流旁路挂接，prompt 组装、召回、派发路径都不持有它的引用，
+  skill 的可见性与排序不受影响。
+- **生效模式**：`DispatchPolicy(working_set=SkillWorkingSet(...), trust=...)`。子 skill 到达终态后战绩交给
+  `observe`，变更打成 `skill_promoted` / `skill_evicted` / `skill_quarantined` / `skill_released`；
+  每个 turn 首次采样前取一份结论快照，整 turn 使用：
+
+  ```
+  快照.promoted ──► deferred 模式的 system prompt 直接列出这些 child（免搜索）
+  快照.hidden   ──► child 列表、召回池、白名单外可发现范围都不含这些 skill
+  blocks(id)    ──► call_skill 拒绝派发（仅 quarantine_effect="block"）
+  ```
+
+- **来源信任分层**：`SkillTrustPolicy` 给出 `trusted` / `standard` / `untrusted`，默认实现
+  `SourceTrustPolicy` 按加载来源分层（`FilesystemSkillRegistry(..., sources={目录: 来源})`）。层级写进战绩记录的
+  `trust_tier`、召回候选与白名单外授权请求；`WorkingSetPolicy.tier_rules` 按层级调整提拔与隔离的门槛；
+  `ThresholdSelectionPolicy(trial_tiers=...)` 让指定层级的候选置信再高也须先试用。层级不改战绩分。
+
+数据契约见 `capabilities/skill-working-set.md`；为何这么定见 ADR 0077（算分与影子）、0090（生效与信任分层）。
 
 ## scripts 与执行器（scripts-runtime）
 

@@ -48,7 +48,6 @@ from taifeng.loop.submission import (
     CompactNow,
     InjectSystemMessage,
     RefreshSnapshot,
-    Resume,
     Rewind,
     Submission,
     ThreadRollback,
@@ -464,13 +463,14 @@ async def test_audited_enabled_image_preserves_detail_in_journal(
     accepted = SubmissionAcceptedV1.model_validate(accepted_envelope.payload)
     assert accepted.attachments is not None
     assert accepted.attachments[0].detail == "high"
-    conversation = next(
-        envelope
-        for envelope in committed
-        if envelope.record_type == "conversation_item"
-        and envelope.submission_id == submission_id
-    )
-    assert conversation.payload["payload"]["attachments"][0]["detail"] == "high"
+    # 对话项在应用时才落账（ADR 0101）；待应用的对话项由准入记录确定
+    assert [
+        envelope.record_type for envelope in committed
+        if envelope.submission_id == submission_id
+    ] == ["submission_accepted"]
+    token = engine._submissions.get_nowait()  # noqa: SLF001
+    item = token.validated_application()
+    assert item.payload["attachments"][0]["detail"] == "high"
 
 
 async def _wait_for_applied_history(engine: AgentEngine) -> None:
@@ -502,7 +502,7 @@ async def test_audited_submit_waits_for_durable_ack_before_enqueue(
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
-    """Journal 三记录未 durable ack 前，queue/history/projection 均不得前进。"""
+    """准入记录未 durable ack 前，queue/history/projection 均不得前进。"""
     real_core = JsonlSessionJournalCore(tmp_path / "journal")
     pausing_core = _PausingJournalCore(real_core)
     engine, coordinator, _ = await _engine_with_audit(
@@ -536,17 +536,13 @@ async def test_audited_submit_waits_for_durable_ack_before_enqueue(
     token = engine._submissions.get_nowait()  # noqa: SLF001
     assert token.submission_id == submission_id
     assert token.ack.record_ids == token.accepted_record_ids
+    # 准入只落准入记录；对话项与 applied 在应用时落账（ADR 0101）
     assert [envelope.record_type for envelope in token.envelopes] == [
         "submission_accepted",
-        "conversation_item",
-        "submission_applied",
     ]
     envelopes = [item async for item in real_core.load("ses_audit_submission")]
-    assert [item.record_type for item in envelopes[3:]] == [
-        "submission_accepted",
-        "conversation_item",
-        "submission_applied",
-    ]
+    assert [item.record_type for item in envelopes[3:]] == ["submission_accepted"]
+    assert envelopes[3].occurred_at is not None
 
 
 @pytest.mark.anyio
@@ -554,7 +550,7 @@ async def test_actor_applies_only_acknowledged_user_envelope_then_completes_work
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
-    """actor 消费 token 后才更新 hot history/projector，并在 finally 退休 work。"""
+    """actor 消费 token 时才落对话项、更新 hot history/projector，并在 finally 退休 work。"""
     client = _blocking_sim_client()
     engine, coordinator, core = await _engine_with_audit(
         tmp_path,
@@ -562,13 +558,20 @@ async def test_actor_applies_only_acknowledged_user_envelope_then_completes_work
         model_client=client,
     )
     submission_id = await engine.submit(UserMessage(text="apply acknowledged"))
-    token = engine._submissions.get_nowait()  # noqa: SLF001
-    engine._submissions.put_nowait(token)  # noqa: SLF001
-    user_envelope = token.envelopes[1]
+    before = [item async for item in core.load("ses_audit_submission")]
+    assert [item.record_type for item in before[3:]] == ["submission_accepted"]
     cancel = CancellationToken(name="test-root")
     actor = asyncio.create_task(engine.run(cancel))
     try:
         await _wait_for_applied_history(engine)
+        committed = [item async for item in core.load("ses_audit_submission")]
+        assert [item.record_type for item in committed[3:6]] == [
+            "submission_accepted", "conversation_item", "submission_applied",
+        ]
+        user_envelope = committed[4]
+        assert user_envelope.causation_id == committed[3].record_id
+        assert committed[5].payload["accepted_record_id"] == committed[3].record_id
+        assert committed[5].payload["conversation_item_ids"] == [user_envelope.record_id]
         with anyio.fail_after(GUARD_TIMEOUT_SECONDS):
             while (
                 engine._audit_state.projector.state(engine.thread_id).projected_seq  # type: ignore[attr-defined]  # noqa: SLF001
@@ -582,8 +585,6 @@ async def test_actor_applies_only_acknowledged_user_envelope_then_completes_work
         assert projected.projected_seq == user_envelope.seq
         assert projected.stale is False
         assert coordinator.health is AuditHealth.HEALTHY
-        committed = [item async for item in core.load("ses_audit_submission")]
-        assert user_envelope == committed[4]
     finally:
         cancel.cancel()
         await actor
@@ -640,7 +641,6 @@ async def test_queued_user_messages_receive_unique_durable_turn_indexes(
     [
         CompactNow(),
         Rewind(node_id="n1"),
-        Resume(thread_id="t1", resolutions={}),
         InjectSystemMessage(text="x"),
         RefreshSnapshot(),
         ThreadRollback(),
@@ -768,7 +768,7 @@ async def test_same_logical_submission_retries_with_exact_idempotent_ack(
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
-    """相同 id/op/submitted_at 重建三记录必须得到原 ack，且 coordinator 不冻结。"""
+    """相同 id/op/submitted_at 重建准入记录必须得到原 ack，且 coordinator 不冻结。"""
     engine, coordinator, core = await _engine_with_audit(tmp_path, skills_dir)
     submitted_at = datetime(2026, 7, 24, 8, 30, tzinfo=UTC)
     submission = _audited_submission(
@@ -787,8 +787,9 @@ async def test_same_logical_submission_retries_with_exact_idempotent_ack(
     assert second.ack == first.ack
     assert second.envelopes == first.envelopes
     committed = [envelope async for envelope in core.load("ses_audit_submission")]
-    assert len(committed) == 6
-    assert ConversationItemV1.model_validate(committed[4].payload).created_at == submitted_at
+    assert len(committed) == 4
+    assert committed[3].occurred_at == submitted_at
+    assert first.validated_application().created_at == submitted_at
     assert coordinator.expected_seq == first.ack.last_seq
     assert coordinator.health is AuditHealth.HEALTHY
     assert coordinator.snapshot().accepted_work_ids == ()
@@ -891,7 +892,7 @@ async def test_incomplete_accepted_submission_cannot_execute_twice(
         await admit_user_message(state, submission)
 
     committed = [envelope async for envelope in core.load("ses_audit_submission")]
-    assert len(committed) == 6
+    assert len(committed) == 4
     assert coordinator.snapshot().accepted_work_ids == (submission.id,)
     assert coordinator.health is AuditHealth.HEALTHY
     await first.accepted_work.complete()
@@ -941,7 +942,7 @@ async def test_forged_acknowledged_receipt_freezes_before_enqueue(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("corruption", ["source_link", "mismatched_thread"])
+@pytest.mark.parametrize("corruption", ["forged_text", "mismatched_thread", "submitted_at"])
 async def test_actor_revalidates_full_token_before_hot_history_mutation(
     tmp_path: Path,
     skills_dir: Path,
@@ -956,12 +957,16 @@ async def test_actor_revalidates_full_token_before_hot_history_mutation(
     await engine.submit(UserMessage(text="valid durable input"))
     token = engine._submissions.get_nowait()  # noqa: SLF001
     envelopes = list(token.envelopes)
-    if corruption == "source_link":
-        payload = dict(envelopes[1].payload)
-        payload["source_record_id"] = "forged-source"
-        envelopes[1] = envelopes[1].model_copy(update={"payload": payload})
+    if corruption == "forged_text":
+        payload = dict(envelopes[0].payload)
+        payload["text"] = "forged input"
+        envelopes[0] = envelopes[0].model_copy(update={"payload": payload})
+    elif corruption == "mismatched_thread":
+        envelopes[0] = envelopes[0].model_copy(update={"thread_id": "thr_forged"})
     else:
-        envelopes[2] = envelopes[2].model_copy(update={"thread_id": "thr_forged"})
+        object.__setattr__(
+            token, "submitted_at", datetime(2001, 1, 1, tzinfo=UTC),
+        )
     object.__setattr__(token, "envelopes", tuple(envelopes))
     engine._submissions.put_nowait(token)  # noqa: SLF001
     cancel = CancellationToken(name="test-root")

@@ -13,10 +13,18 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 | **内部** | 其余子模块中未经上述两处导出的符号 | 无 | 随时可改；子包自己的 `__all__`（如 `taifeng.tool.builtins`）只表示模块内的组织，不构成稳定承诺，除非同时出现在顶层 |
 
 当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`、
-审计 resume 人裁决 `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`）、
-Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
-（`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitness`、`SkillFitnessRecorder`、
-`InMemorySkillFitnessStore`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
+审计 resume 人裁决 `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`、
+审计模式下不适用的 `Resume` 抛出的 `AuditedResumeRejectedError`；Timeline 投影 `JournalTimelineProjector` /
+`TimelineFilter` / `TimelineItem` / `TimelinePage`、脱敏 `redact_payload` / `RedactedPayload`、旧 transcript 导入
+`import_legacy_transcript` / `LegacyImportResult` / `LegacyImportError`、投影重建 `rebuild_projections` /
+`ProjectionRebuildResult`）、
+Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools` / `recorded_tool_calls` / `RecordedToolCall` /
+`ToolReplayLedger` / `KERNEL_TOOLS`，整条重放 `replay_session` / `recorded_submissions` / `RecordedSubmission` /
+`ReplayReport` / `ReplayStep`）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
+（`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitnessCatalog`、`SkillFitnessLedger`、`SkillFitness`、
+`SkillFitnessRecorder`、`InMemorySkillFitnessStore`）、按战绩算分与影子评估（`FitnessScorer`、`WilsonFitnessScorer`、
+`SkillFitnessScore`、`WorkingSetPolicy`、`WorkingSetPlan`、`plan_working_set`、`SkillFitnessShadow`、
+`ShadowEvaluation`、`ShadowObserver`）、工作集生效与来源信任分层（`SkillWorkingSet`、`WorkingSetView`、`WorkingSetChange`、`TierRule`、`SkillTrustPolicy`、`SourceTrustPolicy`）、上下文引擎（`ContextEngine`、`AssembleRequest`、`AssembledContext`、`TurnUpdate`、`ContextEngineError`、`TailWindowContextEngine`）、预热（`Prewarm`、`ModelPrewarmer`、`PrewarmOutcome`、`CachePrimingPrewarmer`）、白名单外 skill 授权（`SkillAuthorizationPolicy`、`SkillAuthorizationRequest`、`SkillAuthorizationDecision`、`CallbackSkillAuthorization`、`PermissionSkillAuthorization`）、按选择置信度分流（`SkillSelectionGate`、`SelectionConfidencePolicy`、`ThresholdSelectionPolicy`、`SelectionCandidate`、`RoutedCandidate`、`TrialJudge`、`TrialVerdict`、`VerifierTrialJudge`）、输入来源标记（`InputOrigin`、`InputTaint`、`origin_of`、`summarize_taint`、`taint_from_extras`）、可声明的失败恢复配方（`RecoveryRecipeBook`、`RecipeDeclaringPolicy`、`RecoveryRecipeProvider`）、后台延迟压缩（`BackgroundCompactionStrategy`）、多模态重载荷驱逐（`MultimodalEvictionStrategy`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
 
 ## 类型标记
 

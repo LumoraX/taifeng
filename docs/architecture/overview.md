@@ -94,7 +94,10 @@ src/taifeng/
 │
 ├── loop/         # §1.2 主循环部分
 │   ├── submission.py     # Submission / Op（13 种含 SendToPeer，全集见 docs/capability-matrix.md）
-│   ├── event.py          # EventMsg（输出事件总线）
+│   ├── event.py          # EventMsg（输出事件总线）：Msg 联合 + EventMsg，原名再导出全部事件类
+│   ├── event_base.py         # MsgKind / _Msg 基类
+│   ├── event_turn.py         # turn 内事件类（采样 / 工具 / skill / 压缩 / provider / 注入 / hook / peer）
+│   ├── event_lifecycle.py    # 生命周期事件类（挂起 / 恢复 / 终态 / 指令 / 存储 / rewind / spawn / barrier）
 │   ├── engine.py         # AgentEngine —— 主 actor（注入 entry_skill）
 │   │   # Wave 4 切分：engine 的实现按职责下沉到以下协作者模块，engine.py 保留
 │   │   # 公共 API、run() 主循环与同名薄委托（唯一白盒寻址面，见 ADR 0038）
@@ -106,10 +109,15 @@ src/taifeng/
 │   ├── engine_runner.py      # runner 回写 / 构建并跑 / post-turn 钩子
 │   ├── engine_resume.py      # 根 thread Resume
 │   ├── engine_ops.py         # rewind / rollback / update_budget / refresh_snapshot
+│   ├── engine_public.py      # 方法体：公开只读视图（类里按原名赋值，ADR 0106）
+│   ├── engine_submit.py      # 方法体：submit / subscribe / shutdown / instructions 桥
+│   ├── engine_loop.py        # 方法体：run() 主循环 / 审计 turn 的应用与运行
+│   ├── engine_facade.py      # 方法体：对协作者模块的薄委托
 │   ├── suspension_ttl.py     # 挂起到期武装 / 触发 / 路由裁决 / 冷重武装
 │   ├── suspension_access.py  # thread 历史读取 / 活跃挂起定位 / 已批准工具执行
 │   ├── child_resume_chain.py # call_skill 子链续跑（逐层回填父 fc_output）
 │   ├── pool.py           # EnginePool —— 多 thread engine 复用 + resume
+│   ├── pool_store.py         # hook 转发的 store 包装
 │   ├── turn.py           # TurnRunner —— 单轮采样 + tool 调度 + 压缩
 │   │   # Wave 4 切分：同上，turn.py 保留 run() 主循环、字段与薄委托
 │   ├── turn_helpers.py       # 模块级纯函数（摘要哈希 / 孤儿 call_id / 失败上下文）
@@ -123,7 +131,8 @@ src/taifeng/
 │   ├── tool_batch.py     # dispatch_batch —— 一批 tool call 三段式并发派发
 │   ├── orchestration_exec.py # 声明式编排执行器（检测到 orchestration 则跳过 LLM 采样）
 │   ├── spawn.py          # K1 SpawnSlotRegistry —— 广度准入（fork-bomb 防护）
-│   ├── spawn_driver.py   # detached spawn 协调器（状态单一持有 + 发起/驱动/终态收敛 + 查询/终止）
+│   ├── spawn_driver.py   # detached spawn 协调器（状态单一持有 + 发起/驱动 + 查询/终止）
+│   ├── spawn_settle.py       # 方法体：终态收敛（finalize / settle / persist）
 │   ├── spawn_resume.py   # 挂起 spawn 错峰续跑链（直接核销重跑 / 嵌套下探回填）
 │   ├── spawn_rewind.py   # thread 寻址 rewind：spawn 子 thread 截断重推（活性守卫）
 │   ├── spawn_barrier.py  # join-barrier 生命周期（登记/重查/触发聚合）+ 冷恢复重建

@@ -14,9 +14,12 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import user_message
+from taifeng.conversation.origin import tag_origin
 from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext, ResolvedInstruction
+from taifeng.loop.audit_gates import engine_turn_hooks
 from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
+from taifeng.loop.engine_prewarm import yield_to_turn
 from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EventMsg,
@@ -61,7 +64,7 @@ class EngineGate:
         `asyncio.Lock` 是 FIFO：提交序即执行序。与 cancel token 竞速——CancelTurn 命中
         排队中的 submission（_pending 已登记）→ 放弃排队，调用方发 cancelled 终结。
         """
-        if cancel.is_cancelled:
+        if cancel.is_cancelled or self._engine._ops.converging:
             return False
         if self._engine._root_gate.locked():
             await self._engine._emit(EventMsg(
@@ -91,6 +94,10 @@ class EngineGate:
             # 会在 release 期间跑起 turn——一律视为未获取，把锁归还后按取消传播
             await self._engine._abandon_acquire(acquire)
             raise asyncio.CancelledError("engine converging")
+        if acquire.done() and not acquire.cancelled() and self._engine._ops.converging:
+            # Engine 收敛期间空出的 gate 不再放行新 turn（ADR 0102）：归还，按取消处理
+            await self._engine._abandon_acquire(acquire)
+            return False
         if acquire.done() and not acquire.cancelled():
             acquire.result()
             self._engine._root_gate_owner = submission_id
@@ -161,6 +168,8 @@ class EngineGate:
         """
         # cancel-reason-deadline：UserMessage 可带墙钟上限，挂在本 turn 子树根上
         # （级联覆盖其全部 call_skill 子 turn 与工具调用）
+        # 用户消息到达：未完成的预热让路（ADR 0092）
+        yield_to_turn(self._engine)
         turn_cancel = root_cancel.child(f"sub:{sub.id}", deadline_seconds=_turn_deadline(sub))
         self._engine._pending[sub.id] = _PendingTurn(sub.id, turn_cancel, audited_turn_index(sub))
         if gate_held:
@@ -181,10 +190,12 @@ class EngineGate:
         turn_cancel: CancellationToken,
     ) -> None:
         """持有 root gate 后的根 turn 主体（挂起守卫 → 落 user → 指令 → hook → runner）。"""
+        origin = None
         if isinstance(sub, Submission):
             assert isinstance(sub.op, UserMessage)
             user_text = sub.op.text
             attachments = sub.op.attachments
+            origin = sub.op.origin
         else:
             user_text = sub.text
             attachments = None
@@ -211,10 +222,13 @@ class EngineGate:
 
         # 把 user 消息落 buffer + 持久化
         if attachments is not None:
-            item = user_message(
-                user_text,
-                thread_id=self._engine._thread_id,
-                attachments=attachments,
+            item = tag_origin(
+                user_message(
+                    user_text,
+                    thread_id=self._engine._thread_id,
+                    attachments=attachments,
+                ),
+                origin,
             )
             # resume/内部路径仍在 durable append 前执行 defense-in-depth 校验。
             from taifeng.llm.client import model_capabilities
@@ -276,7 +290,9 @@ class EngineGate:
         #   3) 此处 hook deny → 不创建 TurnRunner、emit turn_failed
         if self._engine._hooks is not None:
             from taifeng.hooks.types import HookContext, PreTurnHook
-            pre_decision = await self._engine._hooks.run(
+            pre_decision = await engine_turn_hooks(
+                self._engine, sub.id, audited_turn_index(sub),
+            ).run(
                 "pre_turn",
                 PreTurnHook(
                     user_text=user_text,

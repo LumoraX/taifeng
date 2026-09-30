@@ -14,8 +14,9 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from taifeng.llm.errors import classify_failure, suggested_action_for
-from taifeng.llm.recovery import recommend_recovery
+from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.event import EventMsg, TurnFailed
+from taifeng.loop.failure_policy import resolve_recovery
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -24,9 +25,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_COOPERATIVE_CANCEL_SECONDS = 2.0
+"""审计模式关闭时给在飞 turn 的协作取消宽限期；须小于 pool 对 actor 收敛的上限（5s）。"""
+
 
 class EngineOperations:
     """engine operation 生命周期协作器（持 engine 引用，自身无状态）。"""
+
+    converging: bool = False
+    """Engine 正在收敛：root gate 不再放行新的 turn（拿到 gate 的排队消息只应用不运行）。"""
 
     def __init__(self, engine: AgentEngine) -> None:
         """
@@ -103,7 +110,9 @@ class EngineOperations:
                         "kind": error_kind,
                         "failure_class": failure_class,
                         "suggested_action": suggested_action,
-                        "recovery": recommend_recovery(failure_class).to_dict(),
+                        "recovery": resolve_recovery(
+                            self._engine._failure_policy, failure_class
+                        ),
                         "request_id": None,
                         "iterations": 0,
                         "is_root": True,
@@ -127,7 +136,12 @@ class EngineOperations:
             )
 
     async def converge_operations(self) -> asyncio.CancelledError | None:
-        """取消并等待所有 operation；actor 自身取消也不得截断收敛。"""
+        """取消并等待所有 operation；actor 自身取消也不得截断收敛。
+
+        审计模式先协作取消（ADR 0102）：让在飞的 turn 经自己的取消 token 收尾——工具给出确定的
+        结果、意图收敛为 cancelled 终态——再对没有在期限内收敛的 task 做 raw cancel。raw cancel
+        会截断意图落账与收敛之间的窗口，留下没有结果的意图。
+        """
         actor_cancellation: asyncio.CancelledError | None = None
         while self._engine._operation_tasks:
             tasks = tuple(self._engine._operation_tasks)
@@ -151,6 +165,35 @@ class EngineOperations:
             for task in tasks:
                 self._engine._operation_tasks.discard(task)
         return actor_cancellation
+
+    async def converge_turns_cooperatively(self) -> asyncio.CancelledError | None:
+        """审计模式：取消持有 root gate 的 turn，在宽限期内等 operation 自行退出（ADR 0102）。
+
+        在 raw cancel 之前调用，且此时 Engine 根取消 token 尚未取消。只取消在飞的那个 turn；
+        排队的消息不动它们的 token——它们在 gate 空出来之后照常拿到 gate，此时 ``converging``
+        已置位，gate 拒绝它们运行 turn，于是「只应用不运行」，且应用发生在在飞 turn 收尾之后
+        （对话顺序不被打乱）。没有 turn 在飞或排队时什么都不等。
+        """
+        engine = self._engine
+        self.converging = True
+        if engine._audit_state is None or not engine._pending or not engine._operation_tasks:
+            return None
+        owner = engine._root_gate_owner
+        for pending in list(engine._pending.values()):
+            if pending.submission_id == owner:
+                pending.cancel.cancel(CancelReason.REQUESTED, "engine_shutdown")
+        waiter = asyncio.gather(*engine._operation_tasks, return_exceptions=True)
+        try:
+            await asyncio.wait_for(asyncio.shield(waiter), _COOPERATIVE_CANCEL_SECONDS)
+        except TimeoutError:
+            # 宽限期内没收敛：交给 raw cancel（冻结与否由落账路径自己判定）
+            logger.warning("audited turns did not converge cooperatively before shutdown")
+        except asyncio.CancelledError as exc:
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+            return exc
+        return None
 
     # suspension-TTL 实现已下沉 suspension_ttl.py（Wave 4 模块切分）。
     # 以下薄委托保留白盒寻址名：spawn_driver / 多个测试按 engine._arm_ttl_timer、

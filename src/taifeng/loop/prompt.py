@@ -31,6 +31,7 @@ from taifeng.loop.attachment_parts import (
     to_image_parts,
     user_attachment_parts,
 )
+from taifeng.skill.working_set_runtime import EMPTY_VIEW
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -41,6 +42,8 @@ if TYPE_CHECKING:
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.eligibility import RuntimeCapabilities
     from taifeng.skill.registry import SkillSnapshot
+    from taifeng.skill.visibility import VisibleChild
+    from taifeng.skill.working_set_runtime import WorkingSetView
 
 # default 召回阈值（child 数 > 此值时 auto 模式切 deferred）。turn 层会用 pool
 # 注入的 recall_threshold 覆盖；这里仅作 render_system_prompt 缺省参数兜底，保证
@@ -78,6 +81,31 @@ _DEFERRED_CHILD_BLOCK = """子 skill 较多（共 {child_count} 个），未逐�
 3. 观察+反思：读候选 description / confidence；若无贴切候选或 confidence 普遍偏低，换一组关键词再 search。
 4. 选定后立即用 call_skill(skill_id, args) 派发，不要停在检索。"""
 
+# 相位 5 生效（ADR 0090）：deferred 模式下，按战绩进入工作集的 child 直接列出，免搜索。
+_PROMOTED_CHILD_BLOCK = """
+
+These skills have a proven track record here; call them directly with `call_skill(skill_id, args)` when they fit, without searching first:
+
+{child_lines}"""
+
+# 启用白名单外授权（相位 4，ADR 0089）且确有可发现的白名单外 skill 时追加在 child 块之后。
+_OUTSIDE_DISCOVERY_NOTE = """
+
+More skills beyond your pre-approved set can be found with `search_skills(query)`. A candidate marked `requires_authorization` is outside that set: calling it goes through an authorization check first and may be denied."""
+
+
+def _promoted_block(visible: list[VisibleChild], promoted: tuple[str, ...]) -> str:
+    """deferred 模式下直接列出工作集里的 child（按战绩分从高到低）；没有则为空串。"""
+    by_id = {child.skill_id: child for child in visible}
+    lines = [
+        f"- `{skill_id}`: {by_id[skill_id].description}"
+        for skill_id in promoted
+        if skill_id in by_id
+    ]
+    if not lines:
+        return ""
+    return _PROMOTED_CHILD_BLOCK.format(child_lines="\n".join(lines))
+
 
 def _render_instructions_block(instructions: list[ResolvedInstruction]) -> str:
     """把 ResolvedInstruction 列表渲染为 XML 块串联，每层一个独立块。
@@ -108,6 +136,8 @@ def render_system_prompt(
     *,
     recall_threshold: int = DEFAULT_RECALL_THRESHOLD,
     has_recall_backend: bool = False,
+    outside_discovery: bool = False,
+    working_set: WorkingSetView | None = None,
 ) -> str:
     """生成入口 system prompt（只管文本，不碰 per-turn tools 列表）。
 
@@ -138,6 +168,11 @@ def render_system_prompt(
         has_recall_backend: 是否注入了 SkillRecall 召回后端。``False`` → 默认 inline
             （LLM 自己找）；显式 ``child_recall=deferred`` 但无后端会抛
             ``SkillValidationError``（见 ``effective_child_recall``）。
+        outside_discovery: 本 entry 能否发现白名单之外的 skill（相位 4）。``True`` 时在
+            child 块之后追加一段说明；与 ``search_skills`` 的暴露同一判定，整 turn 稳定。
+        working_set: 本 turn 的工作集快照（相位 5 生效，ADR 0090）。被隐藏的 child 不进
+            列表也不计数；deferred 模式下工作集里的 child 直接列出。快照在 turn 开始时
+            取定，故 system prompt 只在 turn 之间变化。
 
     spec Requirement: 装配顺序 = system_instructions → entry_skill →
     available_child_skills → dispatch_policy。``instructions=None`` 或空时
@@ -149,7 +184,8 @@ def render_system_prompt(
     )
 
     # 单一真相：inline / deferred 两条路径同源同过滤，得到可见 child 列表
-    visible = visible_child_skills(entry, snapshot, capabilities)
+    view = working_set or EMPTY_VIEW
+    visible = visible_child_skills(entry, snapshot, capabilities, hidden=view.hidden)
     mode = effective_child_recall(
         entry,
         child_count=len(visible),
@@ -159,12 +195,15 @@ def render_system_prompt(
     if mode == "deferred":
         # deferred：不列 child，提示用 search_skills 召回（N=可见 child 数）
         child_block = _DEFERRED_CHILD_BLOCK.format(child_count=len(visible))
+        child_block += _promoted_block(visible, view.promoted)
     else:
         # inline：逐字保持「- `id`: desc」格式（向后兼容，现有 prompt 测试不变）
         child_lines = [f"- `{v.skill_id}`: {v.description}" for v in visible]
         child_block = _INLINE_CHILD_BLOCK.format(
             child_lines="\n".join(child_lines) if child_lines else "  (none)"
         )
+    if outside_discovery:
+        child_block += _OUTSIDE_DISCOVERY_NOTE
     body = SKILLS_INSTRUCTIONS_HEADER.format(
         id=entry.id,
         name=entry.name,
@@ -550,6 +589,8 @@ def build_api_request(
     image_input_policy: ImageInputPolicy | None = None,
     model_input_capabilities: ModelCapabilities | None = None,
     file_input_policy: FileInputPolicy | None = None,
+    outside_discovery: bool = False,
+    working_set: WorkingSetView | None = None,
 ) -> ApiRequest:
     resolved_policy = image_input_policy or DISABLED_IMAGE_POLICY
     resolved_file_policy = file_input_policy or DISABLED_FILE_POLICY
@@ -561,6 +602,8 @@ def build_api_request(
         capabilities=_with_modality_tags(capabilities, resolved_capabilities),
         recall_threshold=recall_threshold,
         has_recall_backend=has_recall_backend,
+        outside_discovery=outside_discovery,
+        working_set=working_set,
     )
     contains_provider_state = any(
         item.kind == "reasoning" and item.payload.get("provider_state") is not None

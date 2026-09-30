@@ -6,7 +6,8 @@
     - **原子语义**：所有 patch 先 dry-run 全量校验，全过才执行；任一失败
       → 0 文件被修改
     - **沙盒路径**：复用 ``file_io._resolve_safe`` 同语义
-    - **可选权限**：整组 patch 一次 ``PermissionPolicy.check``（不是每个）
+    - **可选权限**：效果模型（ADR 0028 / 0073）——每个被改动的路径各发一条
+      ``file_write`` 请求（target = 解析后绝对路径），任一被拒则整组不执行
 
 不支持（spec Non-goal）：
     - unified diff 格式（业务侧自己 wrap）
@@ -60,14 +61,15 @@ def _classify_patch(p: dict[str, Any]) -> str | None:
     return None
 
 
-def _validate_patch(
+def _resolve_patch(
     p: dict[str, Any], root: Path,
 ) -> tuple[Path | None, str, str | None]:
-    """phase 1 dry-run 校验单条 patch。
+    """解析单条 patch 的类型与沙盒内绝对路径；**不读文件内容**。
 
-    返回 ``(resolved_path | None, kind, error_or_none)``：
-        - 校验通过 → (path, kind, None)
-        - 失败 → (None, kind or "?", error_message)
+    权限审批需要解析后的路径，而审批必须先于任何内容读取（否则被拒的请求
+    仍能从报错里探出目标文件的内容特征），故路径解析单独成步。
+
+    返回 ``(resolved_path | None, kind, error_or_none)``。
     """
     path_str = p.get("path")
     if not isinstance(path_str, str) or not path_str:
@@ -84,36 +86,98 @@ def _validate_patch(
     resolved = _resolve_safe(root, path_str)
     if resolved is None:
         return None, kind, f"sandbox_violation: {path_str}"
+    return resolved, kind, None
 
+
+def _check_patch_content(
+    resolved: Path, kind: str, p: dict[str, Any],
+) -> str | None:
+    """phase 1 dry-run 内容校验；调用方保证路径已解析且审批已通过。
+
+    返回错误描述，校验通过返回 None。
+    """
+    path_str = p["path"]
     if kind == _PATCH_KIND_EDIT:
         if not resolved.is_file():
-            return None, kind, f"path_not_found: {path_str}"
+            return f"path_not_found: {path_str}"
         try:
             content = resolved.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
-            return None, kind, f"read_error: {e}"
+            return f"read_error: {e}"
         old_text = p["old_text"]
         if not isinstance(old_text, str):
-            return None, kind, "old_text_must_be_string"
+            return "old_text_must_be_string"
         occurrences = content.count(old_text)
         if occurrences == 0:
-            return None, kind, f"old_text_not_found: {path_str}"
+            return f"old_text_not_found: {path_str}"
         if occurrences > 1:
-            return None, kind, (
-                f"ambiguous_old_text: {path_str} (occurrences={occurrences})"
-            )
+            return f"ambiguous_old_text: {path_str} (occurrences={occurrences})"
         if not isinstance(p.get("new_text"), str):
-            return None, kind, "new_text_must_be_string"
+            return "new_text_must_be_string"
     elif kind == _PATCH_KIND_CREATE:
         if resolved.exists():
-            return None, kind, f"path_exists: {path_str}"
+            return f"path_exists: {path_str}"
         if not isinstance(p.get("new_text"), str):
-            return None, kind, "new_text_must_be_string"
+            return "new_text_must_be_string"
     elif kind == _PATCH_KIND_DELETE:
         if not resolved.exists():
-            return None, kind, f"path_not_found: {path_str}"
+            return f"path_not_found: {path_str}"
+    return None
 
-    return resolved, kind, None
+
+def _validation_error(index: int, kind: str, err: str) -> ToolResult:
+    """统一构造 ``patch_validation_failed`` 错误结果。"""
+    return ToolResult.error(
+        f"patch_validation_failed: patches[{index}] {err}",
+        reason="patch_validation_failed",
+        patch_index=index,
+        patch_kind=kind,
+        error=err,
+    )
+
+
+def _group_kinds_by_path(
+    resolved: list[tuple[Path, str, dict[str, Any]]],
+) -> dict[Path, list[str]]:
+    """按路径聚合 patch 类型，保持路径首次出现的顺序。"""
+    grouped: dict[Path, list[str]] = {}
+    for path, kind, _ in resolved:
+        grouped.setdefault(path, []).append(kind)
+    return grouped
+
+
+async def _check_write_permissions(
+    policy: PermissionPolicy,
+    resolved: list[tuple[Path, str, dict[str, Any]]],
+    ctx: ToolContext,
+) -> ToolResult | None:
+    """逐路径发 ``file_write`` 审批；首个被拒即返回错误结果，全过返回 None。
+
+    同一路径的多条 patch 只审批一次。遇拒即停：整组已注定不执行，继续为
+    其余路径打扰审批人没有意义。
+    """
+    for path, kinds in _group_kinds_by_path(resolved).items():
+        req = PermissionRequest(
+            scope="file_write",
+            target=str(path),
+            reason="LLM 请求以结构化补丁改动文件",
+            metadata={
+                "tool": "apply_patch",
+                "patch_kinds": kinds,
+                "patch_count": len(resolved),
+                "thread_id": ctx.thread_id,
+                "call_id": ctx.call_id,
+                "submission_id": ctx.extras.get("submission_id"),
+            },
+        )
+        decision = await policy.check(req)
+        if not decision.granted:
+            return ToolResult.error(
+                f"permission_denied: {decision.reason}",
+                reason="permission_denied",
+                denied_path=str(path),
+            )
+    return None
 
 
 def _apply_one(resolved: Path, kind: str, p: dict[str, Any]) -> None:
@@ -143,7 +207,8 @@ def make_apply_patch_tool(
 
     Args:
         root_dir: 沙盒根目录；所有 patch 的 path 必须落在此目录下
-        policy: 可选权限策略；非 None 时整组 patch 调一次 check
+        policy: 可选权限策略；非 None 时每个被改动的路径发一条 ``file_write``
+            审批（target = 解析后绝对路径），任一被拒则整组不执行
         max_bytes: 单个 patch 的 new_text 字节上限（防止 LLM 大段贴）
     """
     root = Path(root_dir).expanduser().resolve()
@@ -173,38 +238,26 @@ def make_apply_patch_tool(
                     reason="too_large",
                 )
 
-        # 整组一次 permission 审批（spec: apply_patch 是一组原子操作）
-        if policy is not None:
-            req = PermissionRequest(
-                scope="tool_use",
-                target="apply_patch",
-                reason="LLM 请求应用一组结构化补丁",
-                metadata={
-                    "patch_count": len(patches),
-                    "thread_id": ctx.thread_id,
-                    "call_id": ctx.call_id,
-                },
-            )
-            decision = await policy.check(req)
-            if not decision.granted:
-                return ToolResult.error(
-                    f"permission_denied: {decision.reason}",
-                    reason="permission_denied",
-                )
-
-        # phase 1: dry-run 全量校验
-        validated: list[tuple[Path, str, dict[str, Any]]] = []
+        # 先做纯路径解析（不读内容）：审批需要解析后的绝对路径
+        resolved_patches: list[tuple[Path, str, dict[str, Any]]] = []
         for i, p in enumerate(patches):
-            resolved, kind, err = _validate_patch(p, root)
+            resolved, kind, err = _resolve_patch(p, root)
             if err is not None or resolved is None:
-                return ToolResult.error(
-                    f"patch_validation_failed: patches[{i}] {err}",
-                    reason="patch_validation_failed",
-                    patch_index=i,
-                    patch_kind=kind,
-                    error=err,
-                )
-            validated.append((resolved, kind, p))
+                return _validation_error(i, kind, err or "unresolved_path")
+            resolved_patches.append((resolved, kind, p))
+
+        # 按路径逐个审批（效果模型：写 / 删文件 → file_write + 绝对路径）
+        if policy is not None:
+            denied = await _check_write_permissions(policy, resolved_patches, ctx)
+            if denied is not None:
+                return denied
+
+        # phase 1: dry-run 内容校验（审批通过后才读文件）
+        for i, (resolved, kind, p) in enumerate(resolved_patches):
+            content_err = _check_patch_content(resolved, kind, p)
+            if content_err is not None:
+                return _validation_error(i, kind, content_err)
+        validated = resolved_patches
 
         # phase 2: 实际应用（phase 1 全过才走到这里）
         applied: list[dict[str, Any]] = []

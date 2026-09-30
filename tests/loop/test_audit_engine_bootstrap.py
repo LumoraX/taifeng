@@ -394,19 +394,20 @@ async def _suspending_handler(
     return ToolResult.ok("ok")
 
 
-def _suspending_tool() -> ToolSpec:
-    """构造声明 can_suspend=True 的 extra tool（strict audit 拒绝）。"""
+def _noncompliant_tool() -> ToolSpec:
+    """构造效果分类与恢复策略自相矛盾的 extra tool（strict audit 拒绝）。"""
     return ToolSpec(
-        name="suspends_tool",
-        description="suspends",
+        name="contradictory_tool",
+        description="declares a pure effect with manual reconciliation",
         input_schema={"type": "object"},
         handler=_suspending_handler,
-        can_suspend=True,
+        effect_kind="pure",
+        reconciliation="manual",
     )
 
 
 @pytest.mark.asyncio
-async def test_public_create_rejects_injected_suspending_tool(
+async def test_public_create_rejects_injected_noncompliant_tool(
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
@@ -421,10 +422,10 @@ async def test_public_create_rejects_injected_suspending_tool(
             model_client=_observed_client(),
             compressors=[],
             audit=_config(core),
-            extra_tools=[_suspending_tool()],
+            extra_tools=[_noncompliant_tool()],
         )
 
-    assert caught.value.code == "audit_tool_suspension_unsupported"
+    assert caught.value.code == "audit_tool_reconciliation_invalid"
     assert events == []
 
 

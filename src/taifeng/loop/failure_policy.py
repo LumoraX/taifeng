@@ -20,9 +20,17 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+
+from taifeng.llm.recovery import RecoveryPlan, recommend_recovery
+
+if TYPE_CHECKING:
+    from taifeng.llm.recovery import RecoveryRecipeBook
+
+logger = logging.getLogger(__name__)
 
 # 等外部介入即可恢复的 failure_class(鉴权 / 配额 / 余额)——与原
 # ``_should_suspend_on_error`` 判据一致;quota / balance 命名保留以兼容其他 provider。
@@ -122,3 +130,72 @@ class SuspendByDefaultPolicy:
 
 # 模块级默认单例:TurnRunner.failure_policy 为 None 时使用(零行为变化)。
 DEFAULT_FAILURE_POLICY = ConservativeFailurePolicy()
+
+
+@runtime_checkable
+class RecoveryRecipeProvider(Protocol):
+    """失败处置 policy 的可选能力：为失败分类声明恢复配方（ADR 0084）。
+
+    同步纯函数，禁 IO / 阻塞。返回 None 表示该分类沿用内核配方。
+    """
+
+    def recovery_for(self, failure_class: str) -> RecoveryPlan | None:
+        """该失败分类上声明的恢复配方；未声明返回 None。"""
+        ...
+
+
+class RecipeDeclaringPolicy:
+    """给任一失败处置 policy 加上声明的恢复配方；处置裁决原样委托。"""
+
+    def __init__(self, policy: FailureDispositionPolicy, recipes: RecoveryRecipeBook) -> None:
+        """
+        Args:
+            policy: 被包装的处置 policy（挂起还是终态由它决定）。
+            recipes: 已在构造期校验过的配方表。
+        """
+        self._policy = policy
+        self._recipes = recipes
+
+    def decide(self, ctx: FailureContext) -> FailureDisposition:
+        """委托被包装的 policy。"""
+        return self._policy.decide(ctx)
+
+    def recovery_for(self, failure_class: str) -> RecoveryPlan | None:
+        """配方表里声明的配方；未声明返回 None。"""
+        return self._recipes.declared(failure_class)
+
+
+def resolve_recovery(policy: object, failure_class: str) -> dict[str, object]:
+    """取一次失败的恢复配方（事件里的 ``recovery``）：声明优先，否则内核配方。
+
+    声明的配方在结果里带 ``source: "declared"``；内核配方的形状不变。
+
+    本函数运行在失败处置路径上，自身不能再抛：provider 抛异常、或返回了针对其他分类的配方时，
+    记 error 日志并退回内核配方。
+
+    Args:
+        policy: 失败处置 policy（可以没有实现 ``RecoveryRecipeProvider``，也可以是 None）。
+        failure_class: 失败的稳定分类。
+    """
+    kernel = recommend_recovery(failure_class).to_dict()  # type: ignore[arg-type]
+    if not isinstance(policy, RecoveryRecipeProvider):
+        return kernel
+    try:
+        declared = policy.recovery_for(failure_class)
+    except Exception:
+        logger.exception(
+            "recovery recipe provider raised for failure_class=%s; using kernel recipe",
+            failure_class,
+        )
+        return kernel
+    if declared is None:
+        return kernel
+    if declared.failure_class != failure_class:
+        logger.error(
+            "recovery recipe provider returned a recipe for %s when asked about %s; "
+            "using kernel recipe",
+            declared.failure_class,
+            failure_class,
+        )
+        return kernel
+    return {**declared.to_dict(), "source": "declared"}

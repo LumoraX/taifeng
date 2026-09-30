@@ -27,8 +27,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from taifeng.skill.authorization import REQUIRES_AUTHORIZATION_FIELD, discoverable_outside
 from taifeng.skill.recall import RecallEntry
+from taifeng.skill.selection import ROUTE_FIELD, TRUST_TIER_FIELD, SelectionCandidate
 from taifeng.skill.visibility import visible_child_skills
+from taifeng.skill.working_set_runtime import view_from_extras
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -36,6 +39,7 @@ if TYPE_CHECKING:
     from taifeng.skill.eligibility import RuntimeCapabilities
     from taifeng.skill.recall import SkillRecall
     from taifeng.skill.registry import SkillSnapshot
+    from taifeng.skill.selection import SelectionConfidencePolicy
     from taifeng.skill.verify import SkillVerifier
 
 
@@ -61,12 +65,14 @@ async def _emit_event(ctx: ToolContext, kind: str, data: dict[str, Any]) -> None
         SkillCandidatesReturned,
         SkillCandidatesVerified,
         SkillSearchInvoked,
+        SkillSelectionRouted,
     )
 
     msg_cls_map: dict[str, type] = {
         "skill_search_invoked": SkillSearchInvoked,
         "skill_candidates_returned": SkillCandidatesReturned,
         "skill_candidates_verified": SkillCandidatesVerified,
+        "skill_selection_routed": SkillSelectionRouted,
     }
     cls = msg_cls_map.get(kind)
     if cls is None:
@@ -107,12 +113,106 @@ def _clamp_top_k(raw: Any, *, default_top_k: int, max_top_k: int) -> int:
     return min(value, max_top_k)
 
 
+_LOW_CONFIDENCE_HINT = (
+    "找到的候选置信度都太低，本轮不可派发。请换关键词重新搜索；仍找不到时如实说明"
+    "没有匹配的 skill，或向用户确认需求"
+)
+
+
+def _outside_pool(
+    ctx: ToolContext,
+    caller: SkillDefinition,
+    snapshot: SkillSnapshot,
+    capabilities: RuntimeCapabilities | None,
+) -> list[RecallEntry]:
+    """当前 skill 在白名单外可发现的 skill；未启用白名单外授权时为空。"""
+    authorization = getattr(ctx.extras.get("dispatch_policy"), "authorization", None)
+    if authorization is None:
+        return []
+    stack = ctx.extras.get("call_stack")
+    return [
+        RecallEntry(skill_id=item.skill_id, description=item.description)
+        for item in discoverable_outside(
+            caller, snapshot, authorization, capabilities,
+            on_stack=stack.path() if stack is not None else (),
+            hidden=view_from_extras(ctx.extras).hidden,
+        )
+    ]
+
+
+def _annotate(
+    ctx: ToolContext,
+    payload: list[dict[str, Any]],
+    outside_ids: frozenset[str],
+    snapshot: SkillSnapshot,
+) -> None:
+    """给候选补上内核掌握的事实：是否须经授权、来源信任层级。
+
+    两者都只在对应能力启用时出现，未启用时候选的键与此前一致。
+    """
+    trust = getattr(ctx.extras.get("dispatch_policy"), "trust", None)
+    for entry in payload:
+        skill_id = entry["skill_id"]
+        if skill_id in outside_ids:
+            entry[REQUIRES_AUTHORIZATION_FIELD] = True
+        definition = snapshot.get(skill_id)
+        if trust is not None and definition is not None:
+            entry[TRUST_TIER_FIELD] = trust.tier(definition)
+
+
+async def _routed_result(
+    ctx: ToolContext,
+    payload: list[dict[str, Any]],
+    policy: SelectionConfidencePolicy | None,
+) -> ToolResult:
+    """把候选交给模型；启用分流时给每个候选标上结论（skill-selection-gate，ADR 0088）。
+
+    全部候选都被判为升级时不返回候选列表，而是显式的 ``no_match``——低置信候选列在
+    ``low_confidence`` 里供模型了解搜到了什么，但它们本轮不可派发。
+    """
+    if policy is None or not payload:
+        return ToolResult.ok(
+            json.dumps(payload, ensure_ascii=False), candidate_count=len(payload)
+        )
+    routed = policy.route([
+        SelectionCandidate(
+            str(entry["skill_id"]), float(entry["confidence"]),
+            trust_tier=entry.get(TRUST_TIER_FIELD),
+        )
+        for entry in payload
+    ])
+    routes = {item.skill_id: item for item in routed}
+    for entry in payload:
+        decision = routes[str(entry["skill_id"])]
+        entry[ROUTE_FIELD] = decision.route
+        entry["route_reason"] = decision.reason
+    counts = {
+        route: sum(1 for item in routed if item.route == route)
+        for route in ("proceed", "trial", "escalate")
+    }
+    await _emit_event(ctx, "skill_selection_routed", {
+        **counts, "routes": {item.skill_id: item.route for item in routed},
+    })
+    if counts["escalate"] == len(payload):
+        return ToolResult.ok(
+            json.dumps(
+                {"no_match": True, "hint": _LOW_CONFIDENCE_HINT, "low_confidence": payload},
+                ensure_ascii=False,
+            ),
+            candidate_count=0,
+        )
+    return ToolResult.ok(
+        json.dumps(payload, ensure_ascii=False), candidate_count=len(payload)
+    )
+
+
 def _make_search_skills_handler(
     recall: SkillRecall,
     *,
     default_top_k: int,
     max_top_k: int,
     verifier: SkillVerifier | None = None,
+    selection_policy: SelectionConfidencePolicy | None = None,
 ) -> Any:
     """闭包出 search_skills handler，捕获注入的召回后端、top_k 边界与（可选）验证后端。
 
@@ -154,18 +254,23 @@ def _make_search_skills_handler(
         # ---- 构召回池：caller.child_skills + G4 过滤（与 inline 列表同源同过滤）----
         # 召回池**仅含 caller 的 child_skills**（更窄），不是 reachable 全集——
         # 召回是「为 LLM 选下一个 call_skill 目标」服务，目标必须在白名单内。
-        visible = visible_child_skills(caller, snapshot, capabilities)
+        hidden = view_from_extras(ctx.extras).hidden
+        visible = visible_child_skills(caller, snapshot, capabilities, hidden=hidden)
         pool = [
             RecallEntry(skill_id=v.skill_id, description=v.description)
             for v in visible
         ]
+        # 启用白名单外授权（相位 4，ADR 0089）时，可发现的白名单外 skill 一并入池；
+        # 它们的派发须逐次授权，结果里单独标记
+        outside = _outside_pool(ctx, caller, snapshot, capabilities)
+        pool.extend(outside)
+        outside_ids = frozenset(entry.skill_id for entry in outside)
 
         # ---- 可观测：发起检索打点（pool_size = 过滤后的可见池规模）----
-        await _emit_event(
-            ctx,
-            "skill_search_invoked",
-            {"query": query, "top_k": top_k, "pool_size": len(pool)},
-        )
+        invoked: dict[str, Any] = {"query": query, "top_k": top_k, "pool_size": len(pool)}
+        if outside_ids:
+            invoked["outside_pool_size"] = len(outside_ids)
+        await _emit_event(ctx, "skill_search_invoked", invoked)
 
         # ---- 调召回后端（白名单封闭由内核钉死：pool 即可召回的全集）----
         candidates = await recall.recall(query, pool, top_k=top_k, cancel=ctx.cancel)
@@ -189,10 +294,8 @@ def _make_search_skills_handler(
                 }
                 for c in candidates
             ]
-            return ToolResult.ok(
-                json.dumps(payload, ensure_ascii=False),
-                candidate_count=len(candidates),
-            )
+            _annotate(ctx, payload, outside_ids, snapshot)
+            return await _routed_result(ctx, payload, selection_policy)
 
         # ---- 启用验证：召回与 verify 之间再 check 取消（R4：长链路尽早中断）----
         ctx.cancel.raise_if_cancelled()
@@ -252,10 +355,8 @@ def _make_search_skills_handler(
             }
             for v in verified
         ]
-        return ToolResult.ok(
-            json.dumps(payload, ensure_ascii=False),
-            candidate_count=len(verified),
-        )
+        _annotate(ctx, payload, outside_ids, snapshot)
+        return await _routed_result(ctx, payload, selection_policy)
 
     return _handler
 
@@ -289,6 +390,7 @@ def make_search_skills_tool(
     default_top_k: int,
     max_top_k: int,
     verifier: SkillVerifier | None = None,
+    selection_policy: SelectionConfidencePolicy | None = None,
 ) -> ToolSpec:
     """构造 search_skills 工具规范（相位 2 deferred 召回入口）。
 
@@ -300,6 +402,8 @@ def make_search_skills_tool(
         verifier: 可选验证后端；非 None 时在召回后追加一道输入要求适配精验并据结果
             做置信路由（仅返回 applicable 候选 / 全空显式 no_match）。None 时退化为
             直接透召回候选。
+        selection_policy: 可选的选择置信度分流策略（相位 3，ADR 0088）；非 None 时每个候选
+            带 ``route`` / ``route_reason``，全部判为升级时返回显式 ``no_match``。
 
     Returns:
         ``search_skills`` ToolSpec：``parallel_safe=True``（只读 snapshot + 召回）。
@@ -311,6 +415,7 @@ def make_search_skills_tool(
             "列在 available_child_skills 时用它发现目标）。返回候选含 skill_id / "
             "description / confidence / matched_snippet；据此再 call_skill 派发。"
             "可用不同关键词多次调用以精炼召回。"
+            "候选带 requires_authorization 时表示它不在预授权范围内，派发会先过授权、可能被拒绝。"
         ),
         input_schema=SEARCH_SKILLS_SCHEMA,
         handler=_make_search_skills_handler(
@@ -318,6 +423,7 @@ def make_search_skills_tool(
             default_top_k=default_top_k,
             max_top_k=max_top_k,
             verifier=verifier,
+            selection_policy=selection_policy,
         ),
         parallel_safe=True,  # 只读 snapshot + 召回，安全并行
         timeout_seconds=10.0,

@@ -11,14 +11,14 @@
 | `threads_dir` | (必填) | JSONL 持久化目录 | — |
 | `model_client` | (必填) | `ModelClient` 实现（OpenAI Chat / OpenAI Responses / OpenAICompat / Anthropic / Gemini / DeepSeek / LiteLLM / Sim 任选其一，详见 §1.3） | codex `ModelClient` |
 | `extra_tools` | `[]` | 额外注册的 `ToolSpec` | claw-code custom tools |
-| `compressors` | `[Handoff, Sliding]` | `CompressionStrategy` 列表；空列表禁用压缩。内置四档谱系：`OffloadStrategy`（无损落盘+stub，超大 tool 结果优先无损回收，构造参 `file_root` / `offload_bytes_threshold=8192` / `preview_head_lines·tail_lines=5`，应与 `file_read` 工具同 `root_dir`，参数见 [capabilities/compaction-offload-strategy.md](architecture/capabilities/compaction-offload-strategy.md)）/ `SurgicalTrimStrategy`（手术刀就地剪枝，推荐最高优先级，参数见 [capabilities/compaction-surgical-trim.md](architecture/capabilities/compaction-surgical-trim.md)）/ `HandoffCompactionStrategy`（LLM 摘要；构造参 `quality_max_attempts=2`、`preserve_user_message_tokens=20000`——被压缩区间最近用户原话原样保留的 token 预算，0 关闭，ADR 0059）/ `SlidingWindowStrategy`（滑窗兜底） | codex `CompactionConfig` |
+| `compressors` | `[Handoff, Sliding]` | `CompressionStrategy` 列表；空列表禁用压缩。审计模式（`audit=`）下没有默认值可用的说法：须显式给出，且每个策略都声明 `audit_support`（`fold` / `fold_model`，内置的 `SlidingWindowStrategy` 与 `HandoffCompactionStrategy` 满足），否则 `audit_compressor_unsupported`（ADR 0094）。内置谱系：`OffloadStrategy`（无损落盘+stub，超大 tool 结果优先无损回收，构造参 `file_root` / `offload_bytes_threshold=8192` / `preview_head_lines·tail_lines=5`，应与 `file_read` 工具同 `root_dir`，参数见 [capabilities/compaction-offload-strategy.md](architecture/capabilities/compaction-offload-strategy.md)）/ `SurgicalTrimStrategy`（手术刀就地剪枝，推荐最高优先级，参数见 [capabilities/compaction-surgical-trim.md](architecture/capabilities/compaction-surgical-trim.md)）/ `HandoffCompactionStrategy`（LLM 摘要；构造参 `quality_max_attempts=2`、`preserve_user_message_tokens=20000`——被压缩区间最近用户原话原样保留的 token 预算，0 关闭，ADR 0059）/ `SlidingWindowStrategy`（滑窗兜底）；实验层的 `BackgroundCompactionStrategy([...内层策略], urgent_ratio=0.85)` 把压缩计算挪到后台、下一轮开始时应用，须作为唯一策略（[capabilities/compaction-background.md](architecture/capabilities/compaction-background.md)）；另有实验层的 `MultimodalEvictionStrategy`（旧图片 / 文件附件换成描述，构造参 `keep_recent=2` / `trigger_ratio=0.3` / `min_attachment_bytes=0` / `allow_head_evict=False`，见 [capabilities/compaction-multimodal-eviction.md](architecture/capabilities/compaction-multimodal-eviction.md)） | codex `CompactionConfig` |
 | `budget` | `ContextBudget()` 默认 200k window / 0.85 soft / 0.95 hard / 4 tail | 整体 token 预算 | claw-code `auto_compaction_input_tokens_threshold` |
-| `dispatch_policy` | `DispatchPolicy()` | call_skill 派发策略 | — |
+| `dispatch_policy` | `DispatchPolicy()` | call_skill 派发策略。字段：`subagent_approval_mode`（子 turn 如何处理 `ask`）、`trust`（skill 来源信任分层，默认 `None`；`SourceTrustPolicy()` 按加载来源分层，来源经 `FilesystemSkillRegistry(..., sources=)` 指定）、`working_set`（按战绩规划的工作集，默认 `None` = 不生效；`SkillWorkingSet(store, policy=WorkingSetPolicy(budget=..., tier_rules=...), quarantine_effect="hide")`，实验层，ADR 0090，详见 [capabilities/skill-working-set.md](architecture/capabilities/skill-working-set.md)）、`authorization`（白名单外 skill 的授权策略，默认 `None` = 白名单是硬边界；注入 `PermissionSkillAuthorization()` / `CallbackSkillAuthorization(...)` / 自实现的 `SkillAuthorizationPolicy` 后，调用方可发现并经授权派发白名单外的 skill，实验层，ADR 0089，详见 [capabilities/skill-authorization.md](architecture/capabilities/skill-authorization.md)） | — |
 | `hooks` | `None` | `HookRunner`（PreToolUse/PostToolUse/PreCompact） | claw-code hooks |
 | `max_iterations` | `32` | 单 turn 内 LLM ↔ tool 最大循环 | claw-code `max_iterations` |
 | **`denial_breaker_config`** | `None` | turn 内连续拒绝断路器（`DenialBreakerConfig{max_consecutive_denials, max_recent_denials, window_size}`）。None=不启用零变化；越阈值 emit `denial_circuit_open` + turn 以同名 end_reason 提前终止。详见 [capabilities/turn-resource-guards.md](architecture/capabilities/turn-resource-guards.md) | codex `guardian` 断路器 |
 | **`doom_loop_config`** | `None` | turn 内重复同 `(tool,args)` 成功调用空转的先警后断守卫（`DoomLoopConfig{max_consecutive_repeats}`）。None=不启用零变化；连续 N 次同签名 → 注中性事实 + emit `doom_loop_warned`，警后到 2N → emit `doom_loop_circuit_open` + 以同名 end_reason 终止。详见 [capabilities/turn-resource-guards.md](architecture/capabilities/turn-resource-guards.md) | opencode 重复调用检测（ADR 0021） |
-| **`failure_policy`** | `None` | `FailureDispositionPolicy`；失败处置裁决（挂起 vs 终态）。`None` = 内置 `ConservativeFailurePolicy`（可恢复 LLM 错误挂起、其余终态——历史行为零变化）；注入 `SuspendByDefaultPolicy` 后一切失败（含确定性 LLM 失败与三类护栏触顶）转挂起等 Resume 裁决（护栏触顶以 `RESOURCE_LIMIT` reason 落挂起，retry=重建续跑/abort=终态）。**仅适合有人值守或有自动决策器的部署**。详见 [capabilities/suspend-resume.md](architecture/capabilities/suspend-resume.md) | — |
+| **`failure_policy`** | `None` | `FailureDispositionPolicy`；失败处置裁决（挂起 vs 终态）。`None` = 内置 `ConservativeFailurePolicy`（可恢复 LLM 错误挂起、其余终态——历史行为零变化）；注入 `SuspendByDefaultPolicy` 后一切失败（含确定性 LLM 失败与三类护栏触顶）转挂起等 Resume 裁决（护栏触顶以 `RESOURCE_LIMIT` reason 落挂起，retry=重建续跑/abort=终态）。**仅适合有人值守或有自动决策器的部署**。详见 [capabilities/suspend-resume.md](architecture/capabilities/suspend-resume.md)。用实验层的 `RecipeDeclaringPolicy(policy, RecoveryRecipeBook.default().declare(...))` 包一层即可按失败分类声明恢复配方，随 `turn_failed.data["recovery"]` 透出（[capabilities/failure-recovery-recipes.md](architecture/capabilities/failure-recovery-recipes.md)） | — |
 | **`auto_retry`** / **`retry_config`** | `True` / `None` | **内核默认套有界重试**（ADR 0041）：`AgentEngine` / `AgentEnginePool` / `EnginePool.create` 三处经 `with_default_retry` 把 `model_client` 包成 `RetryingModelClient`——幂等：已套过（`bounded_retry` 标记，台账录制等 `__getattr__` 透明包装可穿透）/ strict audit 适配器 / `auto_retry=False` 均原样。`retry_config=None` → `RetryConfig()`（3 次、500ms 起指数退避封顶 30s、尊重服务端 hint、四类零产出可重试 kind，见 §7）；`auto_retry=False` 关闭（业务自管重试，或测试复现「重试已耗尽」）。池级包装同时覆盖压缩摘要 / skill recall 的 LLM 侧调用；每次重试 emit `provider_retry`（ADR 0039） | — |
 | **`failure_suspend_max_auto_retries`** | `None` | TTL 自动 retry 的谱系上限（resource-limit-retry-semantics）：同一失败谱系经 N 次「到期自动 retry → 再失败再挂起」后,下次到期强制 abort 并在 `suspension_expired.data` 标注 `auto_retry_exhausted: true`。None = 不限——**配 `on_expire="retry"` 时强烈建议设置**,否则确定性失败会无界自动循环烧钱。人工 Resume 不计数 | — |
 | **`failure_suspend_ttl_seconds`** / **`failure_suspend_on_expire`** | `None` / `"abort"` | 内核自产挂起（SYSTEM_RETRY / RESOURCE_LIMIT）的存活期与到期动作（suspension-ttl）。None = 永不过期；无人值守部署配 ttl + `"retry"` 实现「限流/触顶到期自动续跑」。业务挂起的 ttl 在 `make_request_user_input_tool(ttl_seconds=...)` 工厂声明（DATA 到期恒 abort）。详见 [capabilities/suspend-resume.md](architecture/capabilities/suspend-resume.md) §挂起存活期 | — |
@@ -45,6 +45,9 @@
 | **`recall_max_top_k`** | `20` | **skill 召回（发现）**：**仅在注入了召回后端时生效**。`search_skills` 工具 `top_k` 的上界（LLM 传更大值被夹到此）。必须 ≥ `recall_default_top_k`（否则构造期 `ValueError`）。在 `EnginePool.create` | — |
 | **`enable_auto_discovery`** | `False` | **skill 自动发现 opt-in 总闸（ADR 0024）**：让「超量子 skill 自动走 LLM 召回 + 验证」开箱即用，**不**改 `skill_recall=None=inline` 零成本默认。`False`（默认）= 维持现状（inline、不验证、零额外 LLM）。`True` = 在未显式注入处自动兜底——`skill_recall=None` 自动 `LlmSkillRecall(model_client)`、`skill_verifier=None` 自动 `LlmSkillVerifier(model_client)`，deferred 仍按 `recall_threshold` 伸缩。**显式注入优先于总闸**；显式 `child_recall: deferred` 但既无注入又没开总闸 → 抛 `SkillValidationError`。在 `EnginePool.create` / `EnginePool.__init__`。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
 | **`skill_verifier`** | `None` | **skill 召回后验证门后端（ADR 0024）**：与 `skill_recall` 正交。`None`（默认）= 不验证（召回直接路由），除非开 `enable_auto_discovery`（开后自动补 `LlmSkillVerifier`）。可注入 `LlmSkillVerifier(model_client)`（拉完整 SKILL.md body 判**输入要求适配**、滤误召）或业务自实现的 `SkillVerifier` 协议（规则 / 向量）。显式注入即启用验证（不依赖总闸，可「keyword 召回 + LLM 验证」）。在 `EnginePool.create`。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
+| **`context_engine`** | `None` | **上下文引擎（ADR 0093，实验层）**：`None`（默认）= 每次采样发送完整 history。注入 `ContextEngine` 实现后，由它装配每次采样的视图（history 不动），预算提示与压缩触发按视图估算。参考实现 `TailWindowContextEngine(keep_last_turns=N)` 只发开头与最近 N 轮。作用于根 thread、子 skill 与分离派发的 child。在 `EnginePool.create` / `EnginePool.__init__`。详见 [capabilities/context-engine.md](architecture/capabilities/context-engine.md) | — |
+| **`model_prewarmer`** | `None` | **模型侧预热器（ADR 0092，实验层）**：`None`（默认）= `Prewarm` 的 `model` 步骤为 `unsupported`，不发任何请求。注入 `ModelPrewarmer` 实现（参考实现 `CachePrimingPrewarmer(model_client)`，用一次输出极短的采样把静态前缀写进 provider 的 prompt cache，会消耗 token）后，业务经 `engine.submit(Prewarm())` 在用户输入到来之前预热。在 `EnginePool.create` / `EnginePool.__init__`。详见 [capabilities/prewarm.md](architecture/capabilities/prewarm.md) | — |
+| **`selection_gate`** | `None` | **按选择置信度分流（相位 3，ADR 0088，实验层）**：`None`（默认）= 不分流，`search_skills` 输出与派发行为不变。注入 `SkillSelectionGate(policy=ThresholdSelectionPolicy(tau_high=0.75, tau_low=0.4, ambiguity_margin=0.05), trial_judge=None)` 后，召回候选标 `route`，`call_skill` 派发经发现选中的 skill 前过分流门：`trial` 档须先 `read_skill` 或由 `trial_judge`（如 `VerifierTrialJudge(LlmSkillVerifier(...))`）放行，`escalate` 档本轮不可派发。只在注入了召回后端时有意义。在 `EnginePool.create`；`spawn_skill` 须经 `make_spawn_skill_tool(selection_gate=...)` 传同一个门。详见 [capabilities/skill-selection-gate.md](architecture/capabilities/skill-selection-gate.md) | — |
 | **`verify_max_candidates`** | `5` | **skill 验证（C2 护栏）**：`LlmSkillVerifier` 只对召回头部前 N 个候选精验（召回宽筛、验证精验少量，控成本 / prompt 体积）。`LlmSkillVerifier.__init__` 参数（业务构造 verifier 时传）。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
 | **`verify_body_char_limit`** | `4000` | **skill 验证（C2 护栏）**：`LlmSkillVerifier` 单个 SKILL.md body 入验证 prompt 的字符上限，超出截前缀（截断标记注入候选 `reason`，审计可见）。`LlmSkillVerifier.__init__` 参数。详见 [capabilities/skill-recall.md](architecture/capabilities/skill-recall.md) | — |
 
@@ -54,7 +57,7 @@
 
 | 参数 | 默认值 | 内核维度 | 说明 | 对标 |
 | --- | --- | --- | --- | --- |
-| **`max_concurrent_spawns`** | `16` | K1 广度准入 | 单 engine 内并发**在飞**（running）detached spawn 的上限。防 fork-bomb。超限时内核把 `SpawnLimitError` 转成 `SkillSpawnRejected` **事件** + `ToolResult.error`。⚠️ **nuance**：只统计 `runner.run()` in-flight 的 spawn；HITL 挂起的 spawn **退栈即释放 slot**（suspended 不计并发），resume / rewind 重推经统一驱动重新占用——满额时**排队等待**而非拒绝（被 kill / 根取消即放弃；ADR 0035）——HITL 等待期不消耗并发额度。详见 [detached-spawn 契约](architecture/capabilities/detached-spawn.md) §K1 | codex `agent/registry.rs::reserve_spawn_slot` |
+| **`max_concurrent_spawns`** | `16` | K1 广度准入 | 单 engine 内并发**在飞**（running）detached spawn 的上限。防 fork-bomb。超限时内核把 `SpawnLimitError` 转成 `SkillSpawnRejected` **事件**（`reason="spawn_limit_concurrent"` / `"spawn_limit_total"`，`origin` 标明来自 `call_skill` 还是 `spawn_skill`）+ 带同一分类的 `ToolResult.error`。⚠️ **nuance**：只统计 `runner.run()` in-flight 的 spawn；HITL 挂起的 spawn **退栈即释放 slot**（suspended 不计并发），resume / rewind 重推经统一驱动重新占用——满额时**排队等待**而非拒绝（被 kill / 根取消即放弃；ADR 0035）——HITL 等待期不消耗并发额度。详见 [detached-spawn 契约](architecture/capabilities/detached-spawn.md) §K1 | codex `agent/registry.rs::reserve_spawn_slot` |
 | **`max_total_spawns`** | `1000` | K1 广度准入 | 单 engine 生命周期内累计 spawn 上限（单调递增，不回收；兜底 runaway 循环），与并发上限独立 | codex 同上 |
 | **`max_session_tokens`** | `None` | K2 资源强制 | 会话累计 token 硬天花板（OOM-killer）。累计口径 = 整棵 turn 树（根 + call_skill 子 turn + detached spawn + 续跑链）每次采样实时入账（ADR 0044）。`None`=不强制（只告警）。设值后：跨 turn 累计触顶 → pre-turn 拒新 turn（`turn_refused`）；turn 内触顶且有后续 tool call → `ResourceLimitExceeded(turn_aborted)` 事件 + 停采样 | codex `UsageLimitReached` |
 | **`memory_store`** | `None` | K3 内存层级 | `MemoryStore` 协议实现（长期记忆 swap/缺页接口）：`prefetch` 换入注入 prompt 尾部 / `writeback` 脏页写回 / `on_pre_evict` 换出前抢救 digest / `on_session_end` teardown。`None`=无内存层级（=`NullMemoryStore`）。全 best-effort（钩子异常不打断 turn）。后端（向量库/KV/RAG）是 **userspace**，业务自接。协议见 `src/taifeng/context/memory.py`。**最简只读接入**：继承 `NullMemoryStore` 仅覆写 `prefetch`；**多源**：`CompositeMemoryStore([知识库, 会话记忆])` fan-out 组合（单子异常不传染）。**模型主动读写**：`extra_tools=[make_memory_tool(store)]`（见 §6.8） | hermes `memory_provider.py`（剔业务字段） |
@@ -101,6 +104,7 @@ ContextBudget(
     output_reserve_tokens=0,     # 输出预留下限：soft/hard 按「窗口 - 生效预留」计算（ADR 0043）；
                                  # 生效预留 = max(本值, entry skill 的 inference.max_output_tokens)（ADR 0071）
     max_tool_result_bytes=128 * 1024,  # 单条工具结果进历史前的字节上限，超限保头尾；None=不限；配 OffloadStrategy 时不生效（ADR 0061）
+    recompact_min_growth_ratio=0.0,    # 压缩增量基线：上次压缩后估算未增长到「基线 × (1 + 本值)」且未到硬阈值时不再压缩；0=不设闸（ADR 0083）
 )
 ```
 
@@ -240,11 +244,12 @@ class TenantPolicySource:
 | `InjectSystemMessage` | 注入业务 system 消息 | `text`, `source` |
 | **`ThreadRollback`** | 回滚最近 N 轮对话 | `num_turns` |
 | **`UserMessage(deadline_seconds=)`** | 本 turn 墙钟上限（含其全部 call_skill 子 turn）；到点 `cancel_reason="deadline_exceeded"`（ADR 0049） | `deadline_seconds: float > 0` |
-| **`UpdateBudget`** | 运行时调整 ContextBudget（只覆盖显式字段，其余保留；非法组合拒绝并保持原值） | `context_window` / `soft_limit_ratio` / `hard_limit_ratio` / `preserve_tail_messages` / `output_reserve_tokens` |
+| **`UpdateBudget`** | 运行时调整 ContextBudget（只覆盖显式字段，其余保留；非法组合拒绝并保持原值） | `context_window` / `soft_limit_ratio` / `hard_limit_ratio` / `preserve_tail_messages` / `output_reserve_tokens` / `recompact_min_growth_ratio` |
 | **`RefreshSnapshot`** | 拉最新 SkillSnapshot | — |
 | **`UpdateInstructions`** | 热更指定 layer 的 source；缓存立即失效；下个 turn 生效 | `layer_name`, `new_source` (str 或 `InstructionSource`) |
 | **`Resume`** | 续跑一个挂起的 thread（`end_reason="suspended"` 的 turn）。配对 `resolutions` → 补齐 history-gap → 续采样。详见 §8 与 [suspend-resume 契约](architecture/capabilities/suspend-resume.md) | `thread_id`, `resolutions: {request_id: payload}` |
-| **`Rewind`** | 回退到某回访节点并重推。`re_reason` 截到节点采样前重采样（LLM 重决下游）；`retry_tool`（仅 dispatch 节点）保留 assistant 的 function_call、只重跑该工具。缺省作用于 root turn（配 `engine.rewind_nodes()` 取节点）；`thread_id` 指向 spawn 子 thread 时对其截断重推（失败 spawn 从失败步人工 retry，配 `engine.rewind_nodes_for(tid)` 取节点）。详见 [turn-rewind 契约](architecture/capabilities/turn-rewind.md) + ADR 0014/0018 | `node_id`, `mode ∈ {re_reason, retry_tool}`, `new_args?`, `thread_id?` |
+| **输入来源标记** | `UserMessage` / `InjectUserInput` / `InjectSystemMessage` / `SendToPeer` 可带 `origin=InputOrigin(kind, trust, label)` 声明这段输入的来源与可信度；工具经 `ToolSpec(output_trust=)` 声明结果的可信度。标记只落条目 metadata，汇总经 `ctx.extras["input_taint"]` 交给工具与 hook（ADR 0085） | `origin` |
+| **`Rewind`** | 回退到某回访节点并重推。`re_reason` 截到节点采样前重采样（LLM 重决下游）；`retry_tool`（仅 dispatch 节点）保留 assistant 的 function_call、只重跑该工具（同批其他调用原样保留）；`restore`（仅 compaction 节点）把 history 还原到那次压缩之前、不重推。turn 挂起时也可提交，挂起随截断一并作废。缺省作用于 root turn（配 `engine.rewind_nodes()` 取节点）；`thread_id` 指向 spawn 子 thread 时对其截断重推（失败 spawn 从失败步人工 retry，配 `engine.rewind_nodes_for(tid)` 取节点）。详见 [turn-rewind 契约](architecture/capabilities/turn-rewind.md) + ADR 0014/0018 | `node_id`, `mode ∈ {re_reason, retry_tool}`, `new_args?`, `thread_id?` |
 | `Shutdown` | 关闭 engine | — |
 
 加粗的 6 个是本轮新增。
@@ -489,6 +494,7 @@ return PermissionDecision.allow(grant=PermissionGrant(scope="tool_use", target_p
 | `pre_turn` | `AgentEngine._run_turn_for`：user_message 已持久化 + instruction resolve 完成后，TurnRunner 实例化前 | deny → emit `pre_turn_hook_denied` + `turn_failed`；TurnRunner 不实例化；`_turn_index` 仍 +1 |
 | `post_turn` | `AgentEngine._fire_post_turn_hook`（`_build_and_run_runner` 收尾）：状态回写后、本 turn task 内（**收尾的同步一步**），仅 root turn 真终态（suspended/cancelled 跳过） | 审计型不可否决；deny/异常仅写日志；emit `post_turn_hook_fired`；R4 经 `ctx.extras["cancel"]` 传 token。**引擎不串行化相邻 turn**——要跨 turn 顺序须等 `post_turn_hook_fired` 再提交下一轮 |
 | `pre_compact` | `TurnRunner._maybe_compress`：budget 阈值判断后，`CompactionStarted` 之前（pre_turn / mid_turn / manual 三阶段都触发） | deny → emit `pre_compact_hook_skipped`；history / cache_anchor 不动；turn 继续 |
+| `outbound_message` | `TurnRunner.run`：root turn 真终态、`turn_completed` 之前（挂起不触发） | 不可否决；`HookDecision.ok(text_override="...")` 链式改写出站文本并 emit `outbound_message`；只改事件里的文本，history 不变。内核自带 `make_outbound_normalizer_hook()`（去推理块 / 规整换行与空白，代码块内不动）可直接注册（ADR 0086） |
 | `pre_tool_use` | 工具执行前 | deny → ToolResult.error（reason=`hook_denied`） |
 | `post_tool_use` | 工具执行后 | 仅审计 |
 | **`pre_skill_dispatch`** *(ADR 0010)* | call_skill：DispatchPolicy 通过后、PermissionPolicy 之前 | deny → ToolResult.error + emit `skill_dispatch_hook_denied` |
@@ -853,7 +859,7 @@ from taifeng import make_apply_patch_tool
 
 tool = make_apply_patch_tool(
     root_dir="./workspace",          # 沙盒根
-    policy=my_permission_policy,     # 可选；整组 patch 一次审批
+    policy=my_permission_policy,     # 可选；每个被改动的路径一条 file_write 审批
     max_bytes=1024 * 1024,           # 单 patch new_text 上限
 )
 ```
@@ -871,6 +877,8 @@ tool = make_apply_patch_tool(
 ```
 
 **两阶段原子语义**：所有 patch 先 dry-run 全量校验（路径在沙盒 / `old_text` 唯一 / `create` 时 path 不存在 / `delete` 时 path 存在），任一失败 → 0 文件被改；全过才执行。
+
+**权限**：每个被改动的路径（含删除）各发一条 `scope="file_write"`、`target=<绝对路径>` 的审批，同一路径只问一次；任一被拒则整组不执行。按路径写的 `FileWrite(...)` / `ApplyPatch(...)` 规则对它生效（ADR 0073）。
 
 与 unified diff 的对比：结构化输入避开 diff parser 复杂度与 LLM 格式错误（缩进 / 行号偏移）；想用 unified diff 业务侧自己包装一层。
 
@@ -1151,6 +1159,10 @@ policy = PermissionPolicy(
 
 挂起后业务侧 emit / 持久化 pending（前端据 `payload_schema` 渲染审批 UI），收到决定后 `engine.submit(Resume(thread_id, {request_id: {"granted": True/False, "reason": "..."}}))` 续跑。
 
+审计模式（`audit=`）下同样可用（ADR 0097）：挂起、答复与处置都进 Journal；一次 `Resume` 必须答复该挂起的全部请求，
+不适用的 `Resume` 使 `submit()` 抛 `taifeng.experimental.AuditedResumeRejectedError`（`.reason` 为稳定原因）；
+等待期间释放 Session 不会终结它，之后以 `get_or_create(resume_thread_id=)` 接管再提交 `Resume`。
+
 ### 8.2 `request_user_input` 内置工具（opt-in 采集型 HITL）
 
 LLM 向人类发起结构化问询并等待回答的内置工具。**业务侧按需 register**（不默认注入）。调用即抛 `SuspendSignal(reason=data)`，turn 挂起；resume 时该 `request_id`（= call_id）的 payload 回填成该 call 的 `function_call_output`。`parallel_safe=False`，应作为该 step 唯一的工具调用。
@@ -1165,6 +1177,9 @@ await engine.submit(Resume(thread_id, {call_id: {"answer": "..."}}))
 ```
 
 `prompt` 必填非空（系统边界校验）；`response_schema` 不透明透传（R1，内核不解析）。
+
+审计模式下可用的条件：工具声明 `ToolSpec.can_suspend=True`（本工具已声明；自定义的发问工具同理），且不带
+`ttl_seconds`——带到期时间的挂起在审计模式下是能力违约。
 
 ### 8.3 retry-then-suspend（系统态挂起，复用 RetryConfig）
 

@@ -20,6 +20,7 @@ HookKind = Literal[
     "post_skill_dispatch",
     "pre_script_use",
     "post_script_use",
+    "outbound_message",
 ]
 
 
@@ -261,6 +262,31 @@ class HookSink(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class OutboundMessageHook:
+    """root turn 的最终回答交给业务之前 —— 出站归一点（ADR 0086）。
+
+    handler 返回 ``HookDecision.ok(text_override="...")`` 即改写出站文本；多个 handler 链式
+    生效（后者看到前者改写后的文本）。**不可否决**：回答已经产生，deny / 异常 / 非字符串的
+    改写只记错误日志，文本保持上一步的结果。改写只影响 ``outbound_message`` 事件里的文本，
+    history 里模型的原话不变。
+
+    仅 root turn 的真终态触发（挂起不触发；取消 / 失败类终态照常触发，``text`` 为已产出的部分）。
+    """
+
+    text: str
+    """当前的出站文本（首个 handler 拿到的是模型原话）。"""
+
+    end_reason: str
+    """turn 终态。"""
+
+    success: bool
+    """turn 是否成功。"""
+
+    iteration: int
+    """本 turn 的采样圈数。"""
+
+
 # === 注册表 ===
 
 
@@ -278,6 +304,7 @@ class HookRegistry:
             "post_skill_dispatch": [],
             "pre_script_use": [],
             "post_script_use": [],
+            "outbound_message": [],
         }
 
     def register(self, kind: HookKind, handler: HookHandler) -> None:

@@ -7,8 +7,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from taifeng.conversation.journal.records import StableErrorV1
+from taifeng.loop.audit_awaiting import awaiting_suspensions
 from taifeng.loop.audit_bootstrap import AuditSessionReleaseError
-from taifeng.loop.audit_lifecycle import SessionFinishResult, ThreadTerminalRequest
+from taifeng.loop.audit_lifecycle import (
+    DETACHED_STATUS,
+    SessionFinishResult,
+    ThreadTerminalRequest,
+)
 from taifeng.loop.cancellation import CancelReason
 
 if TYPE_CHECKING:
@@ -278,6 +283,18 @@ async def _finish_audited_session(
     state = snapshot.audit_state
     if state is None:
         return None
+    waiting = awaiting_suspensions(state) if first is None else ()
+    if waiting:
+        # 在等人作答：释放写者但不终结 Session，之后可以接管并提交 Resume（ADR 0097）
+        return await state.coordinator.finish(
+            thread_terminals=(
+                ThreadTerminalRequest(
+                    thread_id=state.thread_id, status="suspended", end_reason=waiting[0],
+                ),
+            ),
+            reason="awaiting_resume",
+            status=DETACHED_STATUS,
+        )
     status = "complete"
     reason = "session_released"
     stable_error: StableErrorV1 | None = None
@@ -370,6 +387,25 @@ async def _drive_pool_close(pool: EnginePool) -> None:
         raise first
 
 
+async def _close_compressors(
+    pool: EnginePool,
+    first: BaseException | None,
+) -> BaseException | None:
+    """关闭带后台任务的压缩策略（提供 ``aclose`` 的策略，如 BackgroundCompaction）。"""
+    compressors = pool._compressors  # noqa: SLF001
+    if compressors is None:
+        return first
+    for strategy in compressors.strategies:
+        aclose = getattr(strategy, "aclose", None)
+        if aclose is None:
+            continue
+        try:
+            await aclose()
+        except BaseException as exc:  # noqa: BLE001
+            first = first or exc
+    return first
+
+
 async def _cleanup_pool_resources(
     pool: EnginePool,
     first: BaseException | None,
@@ -377,6 +413,7 @@ async def _cleanup_pool_resources(
     """逐段清理非 Session 资源，每段失败均不阻断后续资源。"""
     first = await _stop_watcher(pool, first)
     pool._root_cancel.cancel(CancelReason.SHUTDOWN, "pool_close")  # noqa: SLF001
+    first = await _close_compressors(pool, first)
     if pool._hook_runner is not None:  # noqa: SLF001
         try:
             await pool._hook_runner.shutdown(grace_seconds=5.0)  # noqa: SLF001

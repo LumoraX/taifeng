@@ -7,15 +7,31 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from taifeng.context.budget import ContextBudget
+    from taifeng.context.engine import ContextEngine
     from taifeng.context.injection import InitialContextInjection
     from taifeng.conversation.models import ResponseItem
+    from taifeng.llm.client import ModelClientSession
+
+    ModelSessionFactory = Callable[[str | None], ModelClientSession]
 
 CompressionPhase = Literal["pre_turn", "mid_turn", "manual", "overflow"]
+
+AuditSupport = Literal["fold", "fold_model"]
+"""策略声明的审计模式支持（类属性 ``audit_support``；没有该属性 = 不支持）。
+
+- ``fold``：折叠式、不调用模型——结果是「一段 history 被一条 ``compacted`` 条目替代」；
+- ``fold_model``：折叠式、调用模型，且只经 ``CompressionContext.model_session`` 调用。
+
+原地改写条目的策略（裁剪、驱逐、落盘）不是折叠式：改写后的条目不进 Journal，
+hot history 会与 Journal 不一致，故不能在审计模式下使用。
+"""
 
 
 @dataclass(frozen=True)
@@ -30,6 +46,13 @@ class CompressionContext:
 
     phase: CompressionPhase
     available_injections: frozenset[InitialContextInjection]
+
+    model_session: ModelSessionFactory | None = None
+    """需要调用模型的策略应当从这里取会话（入参是模型名，None = 默认模型）。
+
+    None（默认）= 策略用自己持有的客户端。审计模式下内核在此提供受审计的会话：经它发起的
+    每次调用都会落账；绕过它直接用客户端的调用不会落账，也不被允许（ADR 0094）。
+    """
 
 
 @dataclass(frozen=True)
@@ -57,6 +80,8 @@ class CompressionResult:
     """策略自报的结构化明细计数（如 surgical_trim 的 deduped / soft_trimmed /
     hard_cleared）。默认空 dict —— 既有策略零改动兼容；turn 组装
     ``compaction_completed`` 事件时透传（R3 机读，不编码进 reason 字符串）。"""
+    strategy: str = ""
+    """给出这个结果的策略名；由协调器填写，策略自己不必设置。"""
 
 
 @runtime_checkable
@@ -77,11 +102,28 @@ class CompressionStrategy(Protocol):
         ...
 
 
+def _named(result: CompressionResult, strategy: str) -> CompressionResult:
+    """给结果记上策略名；策略自己已经写了的保留。"""
+    return result if result.strategy else replace(result, strategy=strategy)
+
+
 class CompressionOrchestrator:
     """按优先级倒序尝试多策略；第一个返回 trigger 的策略执行。"""
 
-    def __init__(self, strategies: list[CompressionStrategy]) -> None:
+    def __init__(
+        self,
+        strategies: list[CompressionStrategy],
+        *,
+        context_engine: ContextEngine | None = None,
+    ) -> None:
+        """
+        Args:
+            strategies: 压缩策略，按 priority 倒序尝试。
+            context_engine: 上下文引擎（ADR 0093）；None = 每次采样发送完整 history。
+                随协调器到达每一个 runner（根 turn、子 skill、分离派发的 child）。
+        """
         self._strategies = sorted(strategies, key=lambda s: -s.priority)
+        self.context_engine = context_engine
 
     @property
     def strategies(self) -> tuple[CompressionStrategy, ...]:
@@ -95,7 +137,7 @@ class CompressionOrchestrator:
     ) -> CompressionResult | None:
         for strat in self._strategies:
             if strat.should_trigger(ctx):
-                return await strat.compress(ctx, injection)
+                return _named(await strat.compress(ctx, injection), strat.name)
         return None
 
     async def force_compress(
@@ -119,4 +161,5 @@ class CompressionOrchestrator:
         """
         if not self._strategies:
             return None
-        return await self._strategies[0].compress(ctx, injection)
+        strat = self._strategies[0]
+        return _named(await strat.compress(ctx, injection), strat.name)

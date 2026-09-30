@@ -65,6 +65,7 @@ skill 发现 / 召回 —— 认知回路⑥「发现相位」的地基。
 - **G4b**：`exposure.model_invocable == False` 的子 skill 不进池（与 inline 一致）。
 - **G4a**：提供 `RuntimeCapabilities` 时，`requires` 不满足的子 skill 不进池（与 inline 一致）。
 - 召回**不触碰授权 / 准入**：发现一个 skill ≠ 有权派发它；准入仍由 `DispatchPolicy`（深度 / 环 / 白名单）在 `call_skill` 派发时裁决。
+- **启用白名单外授权时**（`DispatchPolicy.authorization`，[skill-authorization](skill-authorization.md)）：召回池在上述可见集之外并入「白名单外可发现的 skill」，施加同一套 G4 过滤；这些候选在结果里带 `requires_authorization: true`。池仍由内核构造，召回后端依旧只能在传入的 `pool` 内排名。
 
 #### Scenario: deferred 不构成 G4 旁路
 - **GIVEN** caller 的某 child `model_invocable=False` 或 `requires` 不满足
@@ -412,6 +413,9 @@ LLM 调 search_skills(query, top_k?)
             ├─ 有 applicable → ToolResult.ok(json([{skill_id, description, confidence(=verify), reason}]))
             └─ 全不适用 / 空 → ToolResult.ok(json({"no_match": true, "hint": ...}))
 ```
+
+启用按置信度分流（`selection_gate`）时，两条返回候选的分支都会给每个候选追加 `route` / `route_reason`，
+全部为 `escalate` 时改返回带 `low_confidence` 的 `no_match`；详见 [skill-selection-gate](skill-selection-gate.md)。
 
 ### per-turn 工具裁剪（`src/taifeng/loop/turn.py`）
 

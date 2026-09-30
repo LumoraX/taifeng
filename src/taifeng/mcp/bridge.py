@@ -210,6 +210,8 @@ def _tools_from_listing(
             handler=_make_handler(client, name, config, output_schema),
             parallel_safe=parallel_safe,
             effect_kind=effect_kind,
+            # MCP server 是外部进程 / 服务：结果打不可信来源标记（input-origin，ADR 0085）
+            output_trust="untrusted",
             reconciliation=reconciliation,
             timeout_seconds=config.timeout_seconds + 5.0,
         )

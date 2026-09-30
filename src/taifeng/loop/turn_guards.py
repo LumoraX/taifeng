@@ -15,11 +15,14 @@ from taifeng.loop.failure_policy import (
     FailureContext,
     FailureDisposition,
 )
+from taifeng.loop.working_set_events import emit_working_set_changes
+from taifeng.skill.working_set_runtime import EMPTY_VIEW
 from taifeng.suspend.reason import PendingRequest
 from taifeng.suspend.signal import SuspendSignal
 
 if TYPE_CHECKING:
     from taifeng.loop.turn import TurnRunner
+    from taifeng.skill.working_set_runtime import WorkingSetView
 
 
 class TurnGuards:
@@ -31,6 +34,25 @@ class TurnGuards:
             owner: 宿主 TurnRunner —— 提供 turn 运行态与共享依赖。
         """
         self.__guards_owner = owner
+        # 本 turn 的工作集快照：首次采样前取一次，整 turn 不变（system prompt 不在中途改变）
+        self.working_set_view: WorkingSetView = EMPTY_VIEW
+        self._working_set_captured = False
+
+    async def capture_working_set(self) -> WorkingSetView:
+        """取本 turn 的工作集快照（相位 5 生效，ADR 0090）；未启用时为空快照。
+
+        首次调用时让工作集由已有战绩重算一次，并把重算产生的变更打成事件。
+        """
+        if self._working_set_captured:
+            return self.working_set_view
+        owner = self.__guards_owner
+        working_set = owner.dispatch_policy.working_set
+        if working_set is not None:
+            changes = await working_set.restore(owner.snapshot, owner.dispatch_policy.trust)
+            await emit_working_set_changes(owner._emit, changes)  # noqa: SLF001
+            self.working_set_view = working_set.view()
+        self._working_set_captured = True
+        return self.working_set_view
 
     def deferred_exposure_active(self) -> bool:
         """本 entry 是否处于 deferred 召回模式（决定是否暴露 search_skills 工具）。
@@ -48,7 +70,8 @@ class TurnGuards:
         )
 
         visible = visible_child_skills(
-            self.__guards_owner.entry_skill, self.__guards_owner.snapshot, self.__guards_owner.capabilities
+            self.__guards_owner.entry_skill, self.__guards_owner.snapshot,
+            self.__guards_owner.capabilities, hidden=self.working_set_view.hidden,
         )
         mode = effective_child_recall(
             self.__guards_owner.entry_skill,
@@ -57,6 +80,23 @@ class TurnGuards:
             has_recall_backend=self.__guards_owner.has_recall_backend,
         )
         return mode == "deferred"
+
+    def outside_discovery_active(self) -> bool:
+        """本 entry 能否发现白名单之外的 skill（相位 4，ADR 0089）。
+
+        注入了授权策略、有召回后端、且确有可发现的白名单外 skill 时为 True：此时即便
+        child 列表是 inline，也要暴露 ``search_skills``，否则模型无从发现它们。
+        """
+        from taifeng.skill.authorization import discoverable_outside
+
+        owner = self.__guards_owner
+        authorization = owner.dispatch_policy.authorization
+        if authorization is None or not owner.has_recall_backend:
+            return False
+        return bool(discoverable_outside(
+            owner.entry_skill, owner.snapshot, authorization, owner.capabilities,
+            on_stack=owner.call_stack.path(), hidden=self.working_set_view.hidden,
+        ))
 
     def system_retry_pending(self, e: Exception) -> Any:
         """构造 LLM 失败挂起的 SYSTEM_RETRY PendingRequest(policy 裁决 SUSPEND 后用)。

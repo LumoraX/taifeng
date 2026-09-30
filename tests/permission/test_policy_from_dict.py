@@ -80,9 +80,17 @@ def test_parse_script_alias() -> None:
 
 
 def test_parse_apply_patch_alias() -> None:
+    """ApplyPatch 并入 FileWrite：payload 匹配被改动的绝对路径（ADR 0073）。"""
     rule = PermissionRule.parse("ApplyPatch(*)", mode="ask")
-    assert rule.scope == "tool_use"
+    assert rule.scope == "file_write"
     assert rule.target_pattern == "glob:*"
+    assert rule.args_match is None
+
+
+def test_parse_apply_patch_alias_path_pattern() -> None:
+    rule = PermissionRule.parse("ApplyPatch(/data/*)", mode="deny")
+    assert rule.scope == "file_write"
+    assert rule.target_pattern == "glob:/data/*"
 
 
 def test_parse_unknown_alias_raises() -> None:

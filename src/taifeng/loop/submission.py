@@ -10,6 +10,8 @@ from typing import Any, Literal, Union
 
 from pydantic import BaseModel, Field
 
+from taifeng.conversation.origin import InputOrigin  # noqa: TC001  # Pydantic 运行期需要
+
 
 def _gen_sub_id() -> str:
     return f"sub_{secrets.token_hex(6)}"
@@ -27,6 +29,9 @@ class UserMessage(BaseModel):
     到点以 ``CancelReason.DEADLINE_EXCEEDED`` 取消整棵 turn 树，终态
     ``turn_completed.end_reason="cancelled"`` 且 ``cancel_reason="deadline_exceeded"``
     （cancel-reason-deadline）。计时自 turn 开始排队起（含等待 root gate 的时间）。"""
+    # None 时不参与序列化：未声明来源的 UserMessage 外形与引入本字段前逐字一致
+    origin: InputOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    """这条输入的来源标记（input-origin，ADR 0085）；None = 未声明。"""
 
 
 class CancelTurn(BaseModel):
@@ -65,6 +70,8 @@ class InjectSystemMessage(BaseModel):
     kind: Literal["inject_system"] = "inject_system"
     text: str
     source: str = "business"
+    origin: InputOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    """这条注入的来源标记（input-origin，ADR 0085）；None = 未声明。"""
 
 
 class InjectUserInput(BaseModel):
@@ -79,6 +86,8 @@ class InjectUserInput(BaseModel):
     kind: Literal["inject_user_input"] = "inject_user_input"
     submission_id: str
     text: str
+    origin: InputOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    """这条输入的来源标记（input-origin，ADR 0085）；None = 未声明。"""
 
 
 class ThreadRollback(BaseModel):
@@ -109,6 +118,8 @@ class UpdateBudget(BaseModel):
     preserve_tail_messages: int | None = None
     output_reserve_tokens: int | None = None
     """输出预留 token（token-accounting-calibration）；None = 保持原值。"""
+    recompact_min_growth_ratio: float | None = None
+    """压缩增量基线比例（ADR 0083）；0 = 不设闸；None = 保持原值。"""
 
 
 class RefreshSnapshot(BaseModel):
@@ -167,6 +178,9 @@ class Rewind(BaseModel):
     - ``retry_tool``:仅 dispatch 节点。保留 assistant「决定调它」的 function_call,
       只用 ``new_args``(或原 args)重跑该工具/子 skill、替换其 output;若 ``new_args``
       改了入参,同步改写 function_call.arguments 保持历史自洽。
+    - ``restore``:仅 compaction 节点(且仅 root thread)。把 history 还原到那次压缩之前,
+      **不重推**;之后由业务决定下一步(调整预算、继续提问等)。compaction 节点上的
+      ``re_reason`` = 还原后从那里重推,仅当还原后的 history 轮到模型说话时可用。
 
     ``new_args`` 仅 ``retry_tool`` + dispatch 节点有意义,其余模式忽略。
 
@@ -178,7 +192,7 @@ class Rewind(BaseModel):
 
     kind: Literal["rewind"] = "rewind"
     node_id: str
-    mode: Literal["retry_tool", "re_reason"] = "re_reason"
+    mode: Literal["retry_tool", "re_reason", "restore"] = "re_reason"
     new_args: dict[str, Any] | None = None
     thread_id: str | None = None
 
@@ -188,7 +202,8 @@ class SendToPeer(BaseModel):
 
     参数：
         - ``target_thread_id``: 目标寻址 —— child_thread_id / handle_id / "parent"
-          （"parent" 解析为发送者谱系的 root thread）。
+          （"parent" 解析为发送者谱系的 root thread）/ 拓扑地址
+          ``sibling:<skill_id>[#n]``、``child:<skill_id>[#n]``（ADR 0091）。
         - ``text``: 消息正文（落 ResponseItem，事件只带长度与截断预览）。
         - ``mode``: queue_only（入队/落史）或 trigger_turn（空闲 spawn child 唤醒）。
         - ``from_thread_id``: 发送者 thread（None = root thread 自身）。
@@ -199,6 +214,29 @@ class SendToPeer(BaseModel):
     text: str
     mode: Literal["queue_only", "trigger_turn"] = "queue_only"
     from_thread_id: str | None = None
+    origin: InputOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    """这条消息的来源标记（input-origin，ADR 0085）；None = 未声明。"""
+
+
+PrewarmStep = Literal["instructions", "working_set", "model"]
+"""预热的一个步骤。"""
+
+
+class Prewarm(BaseModel):
+    """在用户输入到来之前做掉首轮采样的准备工作（prewarm，ADR 0092）。
+
+    不改 history、不占用 turn 序号、不产生 turn 事件。用户消息到达时未完成的预热被取消，
+    不让真实的 turn 等它。预热失败只体现在 ``prewarm_completed`` 事件里，不影响之后的 turn。
+
+    Attributes:
+        steps: 要做的步骤，按给定顺序执行：
+            - ``instructions``：解析指令层（首轮解析命中解析器的缓存）；
+            - ``working_set``：由已有战绩重算工作集（ADR 0090）；
+            - ``model``：把下一次采样会发出的请求交给 ``ModelPrewarmer``。
+    """
+
+    kind: Literal["prewarm"] = "prewarm"
+    steps: tuple[PrewarmStep, ...] = ("instructions", "working_set", "model")
 
 
 class Shutdown(BaseModel):
@@ -218,6 +256,7 @@ Op = Union[
     Resume,
     Rewind,
     SendToPeer,
+    Prewarm,
     Shutdown,
 ]
 

@@ -19,6 +19,8 @@ from taifeng.loop.event import (
     SkillSpawnRejected,
     SubagentPolicyOverridden,
 )
+from taifeng.loop.working_set_events import emit_working_set_changes
+from taifeng.skill.trust import tier_of
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -96,9 +98,15 @@ class TurnDispatch:
                 },
             )
             from taifeng.conversation.models import user_message
-            seed = user_message(
-                json.dumps(arguments, ensure_ascii=False),
-                thread_id=sub_thread_id,
+            from taifeng.conversation.origin import summarize_taint, tag_origin
+            # 种子由模型在父上下文里写成：父上下文有不可信内容时种子带派生标记，
+            # 不可信内容不能经子 skill 变干净（input-origin，ADR 0085）
+            seed = tag_origin(
+                user_message(
+                    json.dumps(arguments, ensure_ascii=False),
+                    thread_id=sub_thread_id,
+                ),
+                summarize_taint(self.__dispatch_owner.history_buffer).derived_origin(),
             )
             await self.__dispatch_owner.store.append(seed)
 
@@ -259,7 +267,8 @@ class TurnDispatch:
             parent_call_id=_self_frame.parent_call_id if _self_frame else None,
             depth=parent_stack.depth,
             source=target.source,
-            trust_tier=None,  # v1 留空；来源信任分层在后续相位填
+            # 来源信任层级（ADR 0090）；未配置信任策略时为 None
+            trust_tier=tier_of(self.__dispatch_owner.dispatch_policy.trust, target),
             # 经 search_skills 召回派发 → discovered + confidence；否则 v1 的 whitelist/None
             selection_origin=_selection_origin,
             selection_confidence=_selection_confidence,
@@ -302,7 +311,8 @@ class TurnDispatch:
                 status=_status,
                 end_reason=outcome.end_reason,
                 final_text=outcome.final_text,
-                outcome_payload=_record.as_payload(),
+                # 战绩条目进 Journal：自由文本的错误详情不落账（稳定错误已在 finished 记录里）
+                outcome_payload={**_record.as_payload(), "error_detail": None},
                 error=_child_error,
             )
         else:
@@ -310,6 +320,12 @@ class TurnDispatch:
                 skill_outcome_item(_record.as_payload(), thread_id=sub_thread_id)
             )
         await self.__dispatch_owner._emit(SkillOutcomeRecorded(data=_record.as_payload()))
+        # 相位 5 生效（ADR 0090）：战绩落定后交给工作集重算，变更逐条打事件
+        _working_set = self.__dispatch_owner.dispatch_policy.working_set
+        if _working_set is not None:
+            await emit_working_set_changes(
+                self.__dispatch_owner._emit, await _working_set.observe(_record)
+            )
 
         if outcome.success:
             return ToolResult.ok(outcome.final_text, sub_thread_id=sub_thread_id)
@@ -379,6 +395,9 @@ class TurnDispatch:
                 await self.__dispatch_owner._emit(SkillSpawnRejected(data={
                     "skill_id": target.id,
                     "call_id": ctx.call_id,
+                    "reason": e.reject_reason,
+                    "origin": "call_skill",
+                    "path": list(parent_stack.path()),
                     "limit_kind": e.kind,
                     "limit": e.limit,
                 }))

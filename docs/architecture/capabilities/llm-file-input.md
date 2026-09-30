@@ -42,8 +42,7 @@ canonical 内联正文、业务显式开闸、client 显式声明能力、durabl
   `%%EOF`）。错误分类：`unsupported_modality` / `file_count_exceeded` / `attachment_too_large` / `invalid_file`，均不可重试。
 - 冷恢复：JSONL 里的 canonical attachment 原样读回，prompt 重建按**当前**策略与 client 能力重新 admission；
   策略收紧、改为关闭或换到不支持文件的 client 时 fail closed（turn 以 `unsupported_modality` 失败），不静默丢弃历史里的文件。
-- strict audit（SessionJournal）模式下，Journal 的 `AttachmentV1` 只有图片形状：带文件的 `UserMessage` 在 acceptance 前
-  显式拒绝（durable `submission_rejected`，不写 conversation item，不含正文）。
+- strict audit（SessionJournal）模式下，文件附件以 `FileAttachmentRecordV1` 的形状进 `submission_accepted`（ADR 0095）：准入口径与非审计路径相同（模型支持、策略启用、大小与结构合法），另受 `AuditConfig` 的附件字节上限约束；不合格的带文件 `UserMessage` 在 acceptance 前 durable 拒绝（`submission_rejected`，不保存正文）。
 
 ## 成本与预算
 

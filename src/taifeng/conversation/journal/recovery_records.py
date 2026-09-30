@@ -5,6 +5,10 @@ durable 为 ``unknown`` 的 ``tool_outcome_committed``）按副作用分流收�
 ``tool_recovery_committed`` 记录追加进 Journal——不改写任何历史记录，hash chain 与 durable 语义
 由 core 照常保证；resume 扫描以它为该 intent 的结算依据。
 
+另一类待收敛的调用是**从未登记意图**的调用（ADR 0075）：``function_call`` 会话项已随模型回复
+durable，进程却在意图 batch 落账前死亡。意图先于任何派发落账，这些调用确定没有执行，恢复时
+写一条 ``tool_call_undispatched`` 并补「未执行」结果。
+
 独立成模块而不并入 ``records.py``：后者已超 800 行红线，且本记录只由恢复路径产生。
 """
 
@@ -20,21 +24,26 @@ from taifeng.conversation.journal.records import PayloadModel
 TOOL_RECOVERY_RECORD_TYPE = "tool_recovery_committed"
 """恢复收敛结论的 record_type。"""
 
-type RecoveryBasis = Literal["reconcile", "effect_kind", "operator"]
-"""结论依据：工具回查 / 副作用声明 / 人裁决。"""
+type RecoveryBasis = Literal["reconcile", "effect_kind", "operator", "dispatch"]
+"""结论依据：工具回查 / 副作用声明 / 人裁决 / skill 派发谱系（仅 ``call_skill``，ADR 0076）。"""
 
-type RecoveryVerdict = Literal["completed", "not_executed", "retry_safe", "provided", "aborted"]
+type RecoveryVerdict = Literal[
+    "completed", "not_executed", "retry_safe", "provided", "aborted",
+    "not_started", "interrupted",
+]
 """结论本身；与依据的合法组合见 ``_ALLOWED_VERDICTS``。"""
 
 type ReconcileStatus = Literal["completed", "not_executed", "unknown", "failed"]
 """回查函数的原始结论；``failed`` = 抛异常 / 超时 / 返回值违约。"""
 
 # 依据 → 允许的结论：回查只能给出「已完成 / 未执行」，副作用声明只能给出「可安全重发」，
-# 人裁决只能「给出真实结果 / 接受未知并继续」。其余组合都是写入方违约。
+# 人裁决只能「给出真实结果 / 接受未知并继续」，派发谱系只能给出「从未启动 / 子 skill 已落终态 /
+# 被中断」。其余组合都是写入方违约。
 _ALLOWED_VERDICTS: dict[str, frozenset[str]] = {
     "reconcile": frozenset({"completed", "not_executed"}),
     "effect_kind": frozenset({"retry_safe"}),
     "operator": frozenset({"provided", "aborted"}),
+    "dispatch": frozenset({"not_started", "completed", "interrupted"}),
 }
 
 # 改判已 durable 的 unknown outcome 时，模型早已看到那条结果（function_call_output 不可重写），
@@ -91,10 +100,59 @@ class ToolRecoveryCommittedV1(PayloadModel):
         return self
 
 
+TOOL_CALL_UNDISPATCHED_RECORD_TYPE = "tool_call_undispatched"
+"""从未登记意图的工具调用在恢复时的结论 record_type。"""
+
+
+class ToolCallUndispatchedV1(PayloadModel):
+    """一个从未登记意图（因而确定未执行）的工具调用在恢复时的 durable 结论。
+
+    Attributes:
+        function_call_record_id: 该调用的 ``function_call`` 会话项 record。
+        call_id / name / arguments_raw: 模型发出的调用（取自会话项，原样保留）。
+        output: 随同 batch 补写给模型的 ``function_call_output`` 文本。
+        is_error: 恒为 True——调用没有产生结果。
+        recovery_operation_id: 本次 resume 接管的 operation id（与 ``writer_takeover`` 同源）。
+    """
+
+    function_call_record_id: NonEmptyStr
+    call_id: NonEmptyStr
+    name: NonEmptyStr
+    arguments_raw: str
+    output: NonEmptyStr
+    is_error: Literal[True] = True
+    recovery_operation_id: NonEmptyStr
+
+
+LLM_REQUEST_ABANDONED_RECORD_TYPE = "llm_request_abandoned"
+"""接管时作废一次没有 checkpoint 的 LLM 请求的 record type（ADR 0103）。"""
+
+
+class LlmRequestAbandonedV1(PayloadModel):
+    """进程死在 LLM 调用途中：请求已落账、没有任何 checkpoint，接管时作废。
+
+    LLM 调用对内核没有外部副作用；没有 checkpoint 就没有任何内容进过对话。作废之后这次请求
+    视为已结算，那个 turn 到此为止，模型在下一个 turn 继续。
+
+    Attributes:
+        request_record_id: 被作废的 ``llm_request_committed`` record。
+        reason: 作废原因，恒为 ``process_recovery``。
+        recovery_operation_id: 本次 resume 接管的 operation id（与 ``writer_takeover`` 同源）。
+    """
+
+    request_record_id: NonEmptyStr
+    reason: Literal["process_recovery"] = "process_recovery"
+    recovery_operation_id: NonEmptyStr
+
+
 __all__ = [
+    "LLM_REQUEST_ABANDONED_RECORD_TYPE",
+    "LlmRequestAbandonedV1",
+    "TOOL_CALL_UNDISPATCHED_RECORD_TYPE",
     "TOOL_RECOVERY_RECORD_TYPE",
     "ReconcileStatus",
     "RecoveryBasis",
     "RecoveryVerdict",
+    "ToolCallUndispatchedV1",
     "ToolRecoveryCommittedV1",
 ]

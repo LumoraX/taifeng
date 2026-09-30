@@ -14,6 +14,12 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem, function_call_output
+from taifeng.conversation.origin import (
+    INPUT_TAINT_EXTRAS_KEY,
+    InputOrigin,
+    summarize_taint,
+    tag_origin,
+)
 from taifeng.llm.errors import (
     AttachmentTooLargeError,
     ImageCountExceededError,
@@ -21,10 +27,12 @@ from taifeng.llm.errors import (
     UnsupportedModalityError,
 )
 from taifeng.llm.image_input import admit_tool_attachments
+from taifeng.loop.audit_gates import bind_audit_gates
 from taifeng.loop.event import DenialCircuitOpen, DoomLoopCircuitOpen, DoomLoopWarned
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
 from taifeng.loop.tool_output import tool_result_cap
 from taifeng.loop.turn_helpers import _latest_user_text
+from taifeng.skill.working_set_runtime import WORKING_SET_VIEW_EXTRAS_KEY
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -42,6 +50,10 @@ class TurnTooling:
             owner: 宿主 TurnRunner —— 提供 turn 运行态与共享依赖。
         """
         self.__tooling_owner = owner
+        # 审计模式：hook 与权限策略绑定到本 turn，裁决先落账再生效（ADR 0096）
+        bind_audit_gates(owner)
+        # Resume 批准后须在 turn 内重跑的调用，随下一次 seed 补跑一并执行后清空
+        self.extra_seed_call_ids: tuple[str, ...] = ()
 
     async def note_tool_outcome(
         self, name: str, result: Any, arguments_raw: str = ""
@@ -178,22 +190,73 @@ class TurnTooling:
                 "script_executors": self.__tooling_owner.script_executors,
                 # === detached-spawn 四工具据此拿到 engine 的 spawn API ===
                 "spawn_coordinator": self.__tooling_owner.spawn_coordinator,
+                # === 本 turn 的工作集快照：召回池 / 可发现范围与 prompt 同一份（ADR 0090）===
+                WORKING_SET_VIEW_EXTRAS_KEY: self.__tooling_owner._guards.working_set_view,  # noqa: SLF001
+                # === input-origin：当前上下文里不可信内容的汇总（ADR 0085）===
+                INPUT_TAINT_EXTRAS_KEY: summarize_taint(
+                    self.__tooling_owner.history_buffer
+                ).to_dict(),
             },
         )
 
     async def complete_seed_call(self, call_id: str) -> None:
-        """retry_tool：补跑一个悬空 function_call(history 末尾留 fc、无 fco)→ 追加 fco。
+        """采样前补跑悬空的 function_call(history 里留 fc、无 fco)→ 追加 fco。
 
-        复用 ``dispatch_batch`` + ``_build_tool_context``(含 ``dispatcher``),故
-        ``call_skill`` 子 skill 也能正确重跑。args 取 history 中该 fc 的当前 arguments
-        (engine 已按 new_args 改写过)。若重跑又挂起(子 skill HITL),照常上抛 ``_BatchSuspend``。
+        两个来源：retry_tool 保留的那一条；Resume 批准后须在 turn 内重跑的派发类调用
+        （``extra_seed_call_ids``，见 ``engine_resume``）。复用 ``dispatch_batch`` +
+        ``_build_tool_context``(含 ``dispatcher``),故 ``call_skill`` 子 skill 也能正确重跑。
+        args 取 history 中该 fc 的当前 arguments(engine 已按 new_args 改写过)。重跑又挂起
+        (子 skill HITL、下一道审批)的调用不回填,其余照常回填后上抛 ``_BatchSuspend``。
 
         Raises:
             RuntimeError: history 中找不到该 call_id 的 function_call(断点不一致)。
         """
-        # 找末条匹配的 function_call(即被保留的悬空 fc)
+        owner = self.__tooling_owner
+        call_ids = [call_id, *(cid for cid in self.extra_seed_call_ids if cid != call_id)]
+        self.extra_seed_call_ids = ()
+        if owner.audit_state is not None:
+            # 审计模式：获批的调用重跑后，结果记在它们原来的调用名下（ADR 0097）
+            from taifeng.loop.audit_suspension import rerun_awaited_calls
+
+            await rerun_awaited_calls(owner, call_ids)
+            return
+        calls = [self._seed_request(index, cid) for index, cid in enumerate(call_ids)]
+        outcomes = await dispatch_batch(
+            [request for request, _ in calls], runtime=owner.tool_runtime,
+            ctx_for=lambda cid: owner._build_tool_context(cid, 0),
+            hooks=owner.hooks, emit=owner._emit,
+            semaphore=asyncio.Semaphore(1),
+            thread_id=owner.thread_id, submission_id=owner.submission_id,
+            entry_skill_id=owner.entry_skill.id,
+            # retry 重跑仍受声明层可见集约束（原始派发已过校验；热重载移除声明则如实拒）
+            visible_tools=owner.entry_skill.visible_tool_names(),
+            registry=owner.tool_runtime._registry,  # noqa: SLF001
+            result_cap_bytes=tool_result_cap(owner.budget, owner.compressors),
+        )
+        suspended = []
+        for (request, fc), outcome in zip(calls, outcomes, strict=True):
+            if outcome.suspend is not None:
+                suspended.append(outcome.suspend)
+                continue
+            fco = owner._settle_tool_output(request.call_id, outcome.result)
+            # Responses 路径:结果须带上它所属采样的 id,否则与调用对不上(主派发同此处理)
+            sample_id = fc.metadata.get("llm_sample_id")
+            if isinstance(sample_id, str) and sample_id:
+                fco = fco.model_copy(update={
+                    "metadata": {**fco.metadata, "origin_llm_sample_id": sample_id},
+                })
+            owner.history_buffer.append(fco)
+            await owner.store.append(fco)
+        if suspended:
+            from taifeng.loop import turn as _turn_mod
+
+            raise _turn_mod._BatchSuspend(tuple(suspended))
+
+    def _seed_request(self, index: int, call_id: str) -> tuple[ToolCallRequest, ResponseItem]:
+        """由 history 里末条匹配的悬空 function_call 构造补跑请求。"""
+        owner = self.__tooling_owner
         fc = None
-        for item in self.__tooling_owner.history_buffer:
+        for item in owner.history_buffer:
             if item.kind == "function_call" and item.payload.get("call_id") == call_id:
                 fc = item
         if fc is None:
@@ -203,34 +266,14 @@ class TurnTooling:
         # 与主派发同一解析入口:坏参数不退化为 {} 补跑,由 dispatch_batch 以
         # invalid_arguments 核销(retry_tool 重跑的是同一条 fc,规则不能更宽)
         args, args_error = parse_tool_arguments(raw)
-        tool_spec = self.__tooling_owner.tool_runtime._registry.get(name)  # noqa: SLF001
-        parallel_safe = bool(tool_spec.parallel_safe) if tool_spec else False
-        req = ToolCallRequest(
-            index=0, call_id=call_id, name=name,
-            arguments=args, arguments_raw=raw, parallel_safe=parallel_safe,
+        tool_spec = owner.tool_runtime._registry.get(name)  # noqa: SLF001
+        request = ToolCallRequest(
+            index=index, call_id=call_id, name=name,
+            arguments=args, arguments_raw=raw,
+            parallel_safe=bool(tool_spec.parallel_safe) if tool_spec else False,
             arguments_error=args_error,
         )
-        outcomes = await dispatch_batch(
-            [req], runtime=self.__tooling_owner.tool_runtime,
-            ctx_for=lambda cid: self.__tooling_owner._build_tool_context(cid, 0),
-            hooks=self.__tooling_owner.hooks, emit=self.__tooling_owner._emit,
-            semaphore=asyncio.Semaphore(1),
-            thread_id=self.__tooling_owner.thread_id, submission_id=self.__tooling_owner.submission_id,
-            entry_skill_id=self.__tooling_owner.entry_skill.id,
-            # retry 重跑仍受声明层可见集约束（原始派发已过校验；热重载移除声明则如实拒）
-            visible_tools=self.__tooling_owner.entry_skill.visible_tool_names(),
-            registry=self.__tooling_owner.tool_runtime._registry,  # noqa: SLF001
-            result_cap_bytes=tool_result_cap(
-                self.__tooling_owner.budget, self.__tooling_owner.compressors),
-        )
-        outcome = outcomes[0]
-        if outcome.suspend is not None:
-            from taifeng.loop import turn as _turn_mod
-
-            raise _turn_mod._BatchSuspend((outcome.suspend,))
-        fco = self.__tooling_owner._settle_tool_output(call_id, outcome.result)
-        self.__tooling_owner.history_buffer.append(fco)
-        await self.__tooling_owner.store.append(fco)
+        return request, fc
 
     def settle_tool_output(self, call_id: str, result: ToolResult) -> ResponseItem:
         """把 ToolResult 结算成 function_call_output item（两处结算点共用）。
@@ -263,10 +306,31 @@ class TurnTooling:
                 thread_id=self.__tooling_owner.thread_id,
                 is_error=True,
             )
-        return function_call_output(
-            call_id=call_id,
-            output=result.output,
-            thread_id=self.__tooling_owner.thread_id,
-            is_error=result.is_error,
-            attachments=attachments,
+        return tag_origin(
+            function_call_output(
+                call_id=call_id,
+                output=result.output,
+                thread_id=self.__tooling_owner.thread_id,
+                is_error=result.is_error,
+                attachments=attachments,
+            ),
+            self._output_origin(call_id),
         )
+
+    def _output_origin(self, call_id: str) -> InputOrigin | None:
+        """该调用结果的来源标记：工具声明了 ``output_trust`` 才有（input-origin）。"""
+        name = next(
+            (
+                item.payload.get("name")
+                for item in reversed(self.__tooling_owner.history_buffer)
+                if item.kind in ("function_call", "tool_intent")
+                and item.payload.get("call_id") == call_id
+            ),
+            None,
+        )
+        if not isinstance(name, str):
+            return None
+        spec = self.__tooling_owner.tool_runtime._registry.get(name)  # noqa: SLF001
+        if spec is None or spec.output_trust is None:
+            return None
+        return InputOrigin(kind="tool", trust=spec.output_trust, label=name[:128])

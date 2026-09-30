@@ -16,28 +16,36 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from taifeng.conversation.journal.models import ActorRef
 from taifeng.conversation.journal.records import (
+    AttachmentV1,
     JournalIdentities,
     JournalRecordFactory,
     ToolIntentCommittedV1,
     ToolOutcomeCommittedV1,
     ToolStatus,
     conversation_item_record,
+    record_id,
     stable_error,
+    validate_attachments,
 )
 from taifeng.conversation.models import function_call_output
+from taifeng.llm.errors import LLMError
+from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, admit_tool_attachments
 from taifeng.loop.audit_support import SessionAuditFrozenError
+from taifeng.suspend.reason import PendingRequest
 from taifeng.tool.spec import ToolResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from taifeng.conversation.models import ResponseItem
+    from taifeng.llm.image_input import ImageInputPolicy
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.tool_batch import ToolCallOutcome, ToolCallRequest
@@ -90,6 +98,56 @@ def _classify_outcome(
     return ToolStatus.SUCCESS
 
 
+_AWAITED_REASONS = frozenset({"permission", "form", "data"})
+
+
+@dataclass(frozen=True, slots=True)
+class AwaitedCall:
+    """一个停下等人作答的工具调用：待答请求 + 它已落账的意图。"""
+
+    pending: Any
+    intent_record_id: str
+
+
+def _awaits_human(
+    outcome: ToolCallOutcome, req: ToolCallRequest, spec: ToolSpec | None,
+) -> bool:
+    """这次调用是不是停下来等人对它作答（审批、填表、给数据）。
+
+    - 等审批：由权限策略发起，任何工具都可能遇到；
+    - 等填表 / 等数据：由工具自己发起，工具须声明 ``can_suspend=True``。
+
+    其余情形（未声明的工具自行挂起、子 skill 挂起、失败处置、资源护栏、带到期时间的挂起）
+    在审计模式下仍是能力违约。调用方另须确认这是 root thread 上的调用。
+    """
+    pending = outcome.suspend
+    if not isinstance(pending, PendingRequest) or pending.related_call_id != req.call_id:
+        return False
+    if pending.ttl_seconds is not None:
+        return False
+    reason = str(getattr(pending.reason, "value", pending.reason))
+    if reason == "permission":
+        return True
+    return reason in _AWAITED_REASONS and spec is not None and spec.can_suspend is True
+
+
+def _attachment_summary(attachments: list[dict[str, Any]]) -> dict[str, Any]:
+    """outcome record 里的附件摘要：类型、大小与摘要值，不含正文。"""
+    if not attachments:
+        return {}
+    return {
+        "attachments": [
+            {
+                "kind": item["kind"],
+                "media_type": item["media_type"],
+                "size": item["size"],
+                "sha256": item["sha256"],
+            }
+            for item in attachments
+        ]
+    }
+
+
 class _AuditedToolConvergence:
     """一批 Tool call 的 durable 意图提交与取消无关的终态收敛。"""
 
@@ -104,9 +162,11 @@ class _AuditedToolConvergence:
         registry: object,
         cancel: CancellationToken,
         origin_sample_ids: Mapping[str, str] | None = None,
+        image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY,
     ) -> None:
         """冻结本批 identity 派生器与按 call-index 有序的请求视图。"""
         self._state = state
+        self._image_input_policy = image_input_policy
         self._coordinator = state.coordinator
         self._cancel = cancel
         self._iteration = iteration
@@ -129,6 +189,8 @@ class _AuditedToolConvergence:
         )
         # call_id → 该 call 的 tool_intent_committed record_id（收敛时回链）
         self._intent_ids: dict[str, str] = {}
+        # 本批里停下等人作答的调用（意图保持未结算）
+        self.awaited: list[AwaitedCall] = []
 
     async def commit_intents(self) -> None:
         """派发前把整批有序 tool_intent_committed 作为一个原子 batch 落 durable。"""
@@ -171,6 +233,7 @@ class _AuditedToolConvergence:
         """按 call-index 有序为每个意图落 outcome + function_call_output，并推进 projection。
 
         任一终态为 UNKNOWN → 记录完本 call 后冻结 Session（下一次效果前 fail closed）。
+        停下等人作答的调用不结算：意图保持未结算，待答请求记进 ``awaited``（ADR 0097）。
         返回供 hot history 追加的 function_call_output 会话项（与 durable 内容一致）。
         """
         by_call = {outcome.call_id: outcome for outcome in outcomes}
@@ -179,6 +242,11 @@ class _AuditedToolConvergence:
         for req in self._requests:
             outcome = by_call[req.call_id]
             spec = self._registry.get(req.name)  # type: ignore[attr-defined]  # noqa: SLF001
+            if self._state.root and _awaits_human(outcome, req, spec):
+                self.awaited.append(
+                    AwaitedCall(outcome.suspend, self._intent_ids[req.call_id])
+                )
+                continue
             effect_kind, _, _ = _tool_effect_metadata(spec)
             status = _classify_outcome(outcome, effect_kind)
             fco_item = await self._commit_outcome(
@@ -210,6 +278,26 @@ class _AuditedToolConvergence:
             fco_items.append(fco_item)
         return fco_items
 
+    def _admitted_attachments(
+        self, result: ToolResult,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """工具结果的附件过准入；返回 (可落账的附件, 拒绝说明)。
+
+        先过图片策略（数量、MIME、尺寸），再过审计 Session 的字节上限（与用户附件同一组）。
+        """
+        if not result.attachments:
+            return [], None
+        try:
+            admitted = admit_tool_attachments(result.attachments, self._image_input_policy)
+            validate_attachments(
+                [AttachmentV1.model_validate(item) for item in admitted],
+                max_item_bytes=self._state.max_attachment_bytes,
+                max_total_bytes=self._state.max_total_attachment_bytes,
+            )
+        except (LLMError, ValueError) as exc:
+            return [], f"tool_attachment_rejected: {exc}"
+        return admitted, None
+
     async def _commit_outcome(
         self,
         req: ToolCallRequest,
@@ -217,14 +305,16 @@ class _AuditedToolConvergence:
         duration_ms: int,
         status: ToolStatus,
     ) -> ResponseItem:
-        """原子提交单个 tool_outcome_committed + 唯一 function_call_output 会话项。"""
-        # strict audit 的批形态是「单个 outcome + 唯一 fco 会话项」，图片附件需要
-        # 第二条会话项才能表达，属能力契约违约 → fail closed 冻结整个 Session。
-        # 不静默丢图：丢了模型看不见、审计也无从追溯，比直接停下更危险。
-        if result.attachments:
-            raise self._coordinator.freeze(
-                RuntimeError("audit_tool_attachment_unsupported")
-            )
+        """原子提交单个 tool_outcome_committed + 唯一 function_call_output 会话项。
+
+        图片附件随 function_call_output 会话项落账（完整正文），outcome record 只记摘要
+        （ADR 0095）。附件在落账前过准入；不合格的附件使这次调用的结果变成错误，
+        与非审计路径的处置一致——不丢图，也不让脏条目进 Journal。
+        """
+        attachments, rejection = self._admitted_attachments(result)
+        if rejection is not None:
+            result = ToolResult.error(rejection, reason="tool_attachment_rejected")
+            status = ToolStatus.ERROR
         operation_id = self._identities.tool(self._turn_id, req.call_id)
         intent_record_id = self._intent_ids[req.call_id]
         is_error = status is not ToolStatus.SUCCESS
@@ -238,7 +328,7 @@ class _AuditedToolConvergence:
                 name=req.name,
                 status=status,
                 output=result.output,
-                data={},
+                data=_attachment_summary(attachments),
                 duration_ms=float(duration_ms),
                 stable_error=failure,
             ),
@@ -252,17 +342,13 @@ class _AuditedToolConvergence:
             output=result.output,
             thread_id=self._state.thread_id,
             is_error=is_error,
+            attachments=attachments or None,
         )
         origin_sample_id = self._origin_sample_ids.get(req.call_id)
         if origin_sample_id:
-            fco_item = fco_item.model_copy(
-                update={
-                    "metadata": {
-                        **fco_item.metadata,
-                        "origin_llm_sample_id": origin_sample_id,
-                    }
-                }
-            )
+            fco_item = fco_item.model_copy(update={"metadata": {
+                **fco_item.metadata, "origin_llm_sample_id": origin_sample_id,
+            }})
         conv_record = conversation_item_record(
             self._factory,
             operation_id=operation_id,
@@ -276,20 +362,43 @@ class _AuditedToolConvergence:
         ack = await self._coordinator.append_batch(batch)
         envelopes = await self._coordinator.load_acknowledged(ack, batch)
         conversation_envelopes = tuple(
-            envelope
-            for envelope in envelopes
+            envelope for envelope in envelopes
             if envelope.record_type == "conversation_item"
         )
         try:
-            projection = await self._state.projector.project(
-                conversation_envelopes, ack
-            )
+            projection = await self._state.projector.project(conversation_envelopes, ack)
         except (KeyboardInterrupt, SystemExit):
             raise
         except BaseException as error:
             raise self._coordinator.freeze(error) from None
         self._coordinator.update_projection(projection)
         return fco_item
+
+
+class AwaitedToolConvergence(_AuditedToolConvergence):
+    """等过人的调用的结算器：意图早已落账，结果记在原来的调用名下（ADR 0097）。"""
+
+    def __init__(self, *, intent_ids: Mapping[str, str], **kwargs: Any) -> None:
+        """
+        Args:
+            intent_ids: 调用 id → 已落账的意图 record id。
+            **kwargs: 其余同 ``_AuditedToolConvergence``；``submission_id`` / ``turn_index``
+                须是这些调用**原来**所在的 turn。
+        """
+        super().__init__(**kwargs)
+        self._intent_ids = dict(intent_ids)
+
+    def outcome_record_id(self, request: ToolCallRequest) -> str:
+        """该调用的 ``tool_outcome_committed`` 的 record id（结算前后都是它）。"""
+        operation = self._identities.tool(self._turn_id, request.call_id)
+        return record_id(operation, "tool_outcome_committed")
+
+    async def settle(
+        self, request: ToolCallRequest, result: ToolResult, status: ToolStatus,
+    ) -> tuple[ResponseItem, str]:
+        """以给定结果结算一次调用；返回 (function_call_output 对话项, outcome record id)。"""
+        item = await self._commit_outcome(request, result, 0, status)
+        return item, self.outcome_record_id(request)
 
 
 async def audited_tool_batch(
@@ -304,8 +413,13 @@ async def audited_tool_batch(
     cancel: CancellationToken,
     finalization_timeout: float,
     origin_sample_ids: Mapping[str, str] | None = None,
+    image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY,
+    awaited: list[AwaitedCall] | None = None,
 ) -> list[ResponseItem]:
     """audit 模式下一批 Tool 的端到端收敛：意图 → 派发 → 终态 → projection。
+
+    ``awaited``：调用方给出的列表会被填入本批里停下等人作答的调用（ADR 0097）；不给即
+    不关心——那些调用的意图保持未结算，调用方有责任随后落挂起记录。
 
     先原子落有序意图；随后在 shield 内跑既有 dispatch_batch —— 工具仍经 ctx.cancel
     协作取消产出确定结果，而意图收敛不被外层取消打断（取消无关的有界 finalization）。
@@ -320,6 +434,7 @@ async def audited_tool_batch(
         registry=registry,
         cancel=cancel,
         origin_sample_ids=origin_sample_ids,
+        image_input_policy=image_input_policy,
     )
     # 取消无关的有界 finalization：意图落账 + 收敛都在 shield 内，无论外层取消与否
     # 每个已提交意图都必须收敛出唯一终态。
@@ -334,7 +449,12 @@ async def audited_tool_batch(
             if cancel.is_cancelled:
                 return await convergence.converge_cancelled()
             outcomes = await run_dispatch()
-            return await convergence.converge(outcomes)
+            items = await convergence.converge(outcomes)
+            if awaited is not None:
+                awaited.extend(convergence.awaited)
+            elif convergence.awaited:
+                raise RuntimeError("audited tool suspended without a suspension owner")
+            return items
     except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
         raise
     except SessionAuditFrozenError:
@@ -345,4 +465,50 @@ async def audited_tool_batch(
         raise state.coordinator.freeze(error) from None
 
 
-__all__ = ["audited_tool_batch"]
+async def run_audited_tools(
+    runner: Any,
+    *,
+    iteration: int,
+    requests: Sequence[ToolCallRequest],
+    run_dispatch: Callable[[], Awaitable[Sequence[ToolCallOutcome]]],
+    origin_sample_ids: Mapping[str, str] | None,
+) -> None:
+    """turn 的审计工具批：结算的结果进 hot history；有调用在等人则让 turn 挂起。
+
+    Raises:
+        _BatchSuspend: 本批有调用停下等人作答（已结算的结果已进 hot history）。
+    """
+    awaited: list[AwaitedCall] = []
+    state = runner.audit_state
+    items = await audited_tool_batch(
+        state=state,
+        submission_id=runner.submission_id,
+        turn_index=runner.turn_index,
+        iteration=iteration,
+        requests=requests,
+        registry=runner.tool_runtime._registry,  # noqa: SLF001
+        run_dispatch=run_dispatch,
+        cancel=runner.cancel,
+        finalization_timeout=state.coordinator.finalization_timeout,
+        origin_sample_ids=origin_sample_ids,
+        image_input_policy=runner.image_input_policy,
+        awaited=awaited,
+    )
+    runner.history_buffer.extend(items)
+    if not awaited:
+        return
+    # 挂起落账时要回指这些调用的意图
+    runner._persist.awaited_intents = {  # noqa: SLF001
+        call.pending.related_call_id: call.intent_record_id for call in awaited
+    }
+    from taifeng.loop import turn as _turn_mod
+
+    raise _turn_mod._BatchSuspend(tuple(call.pending for call in awaited))  # noqa: SLF001
+
+
+__all__ = [
+    "AwaitedCall",
+    "AwaitedToolConvergence",
+    "audited_tool_batch",
+    "run_audited_tools",
+]

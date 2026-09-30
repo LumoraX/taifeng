@@ -18,8 +18,11 @@ from taifeng.context.budget import (
 )
 from taifeng.context.budget_hint import evaluate_budget_hint, render_budget_hint
 from taifeng.context.pinned_state import pinned_injection_source, turns_since_injection
+from taifeng.conversation.journal.context_records import BudgetHintInjectedV1
+from taifeng.loop.audit_compaction import commit_audited_budget_hint
 from taifeng.loop.event import BudgetHintInjected, EngineLog, PinnedStateReinjected
 from taifeng.loop.turn_helpers import _latest_user_text
+from taifeng.loop.turn_view import TurnContextView
 
 if TYPE_CHECKING:
     from taifeng.context.pinned_state import PinnedRenderResult
@@ -38,6 +41,10 @@ class TurnContextLoad:
             owner: 宿主 TurnRunner —— 提供 turn 运行态与共享依赖。
         """
         self.__ctxload_owner = owner
+        # 上下文视图（ADR 0093）：未注入 ContextEngine 时不起作用
+        self.view = TurnContextView(owner)
+        # 审计模式下本 turn 已落账的预算提示数（ADR 0094）
+        self._audit_budget_hints = 0
 
     async def prefetch_memory(self) -> None:
         """K3 page-in：按最近用户消息 prefetch 长期记忆 → ``_prefetched_memory``。
@@ -66,6 +73,7 @@ class TurnContextLoad:
 
     async def writeback_memory(self, new_items: list[ResponseItem]) -> None:
         """K3 dirty-page 写回：本 turn 新增 items 异步写回长期存储。best-effort。"""
+        await self.view.notify_turn_end(new_items)
         if self.__ctxload_owner.memory_store is None or not new_items:
             return
         try:
@@ -201,6 +209,30 @@ class TurnContextLoad:
             "phase": phase,
         }))
 
+    async def _persist_budget_hint(self, note: ResponseItem, tokens: int) -> None:
+        """落预算提示：审计模式经 Journal 与它的 record 同批提交，否则直写 store。"""
+        owner = self.__ctxload_owner
+        if owner.audit_state is None:
+            await owner.store.append(note)
+            return
+        budget = owner.effective_budget
+        await commit_audited_budget_hint(
+            state=owner.audit_state,
+            submission_id=owner.submission_id,
+            turn_index=owner.turn_index,
+            ordinal=self._audit_budget_hints,
+            payload=BudgetHintInjectedV1(
+                used_tokens=tokens,
+                context_window=budget.context_window,
+                soft_limit=budget.soft_limit,
+                hard_limit=budget.hard_limit,
+                item_id=note.id,
+            ),
+            note=note,
+            cancel=owner.cancel,
+        )
+        self._audit_budget_hints += 1
+
     def estimate_items(self, items: list[ResponseItem]) -> int:
         """本地粗估一段 items 的 token（按本 turn 的图片 / 文件策略与业务估算器）。"""
         return estimate_history_tokens(
@@ -212,7 +244,14 @@ class TurnContextLoad:
         )
 
     def history_token_estimate(self) -> int:
-        """当前上下文 token 占用：有实测锚点走「实测 + 增量粗估」，否则退回粗估。"""
+        """当前上下文 token 占用：有实测锚点走「实测 + 增量粗估」，否则退回粗估。
+
+        注入了 ContextEngine 且已为当前 history 装配出视图时，占用按视图算——发给模型的是
+        视图，预算与压缩触发都应以它为准（ADR 0093）。
+        """
+        assembled = self.view.cached()
+        if assembled is not None:
+            return self.estimate_items(list(assembled.items))
         return calibrated_history_tokens(
             self.__ctxload_owner.history_buffer,
             self.__ctxload_owner.token_calibration,
@@ -228,6 +267,9 @@ class TurnContextLoad:
                 没回报 usage，此时保留旧锚点不动（无实测就不伪造实测）。
         """
         if prompt_tokens <= 0:
+            return
+        if self.view.cached() is not None:
+            # 实测值对应的是视图而非 history 前缀：不能拿来校准 history 的估算
             return
         self.__ctxload_owner.token_calibration = build_token_calibration(
             self.__ctxload_owner.history_buffer[:sent_history_len],
@@ -245,6 +287,7 @@ class TurnContextLoad:
         语义把每个超限 episode 的额外 system 消息限到 1 条，避免反复刷新打断 cache。
         R1：只陈述客观事实，不含「该不该收敛」的产品意见——怎么做交给模型/业务侧。
         """
+        await self.view.refresh()
         tokens = self.__ctxload_owner._history_token_estimate()
         # 生效预算（输出预留含 entry skill 的 max_output_tokens，ADR 0071）：soft 穿越判定与
         # 「距 hard 还剩多少」都按它算，与压缩触发同一口径
@@ -258,8 +301,8 @@ class TurnContextLoad:
         note = system_injection(
             render_budget_hint(tokens, budget),
             thread_id=self.__ctxload_owner.thread_id, source="budget_hint")
+        await self._persist_budget_hint(note, tokens)
         self.__ctxload_owner.history_buffer.append(note)
-        await self.__ctxload_owner.store.append(note)
         window = budget.context_window
         await self.__ctxload_owner._emit(BudgetHintInjected(data={
             "used": tokens,

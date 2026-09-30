@@ -17,19 +17,87 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+
+
+SpawnRejectReason = Literal[
+    "unknown_skill",
+    "max_depth_exceeded",
+    "cycle_detected",
+    "not_in_whitelist",
+    "cannot_call_entry_skill",
+    "arguments_not_canonical",
+    "spawn_limit_concurrent",
+    "spawn_limit_total",
+]
+"""子 skill 派发 / 分离发起被准入拒绝的稳定分类（spawn-reject 分类，ADR 0078）。
+
+前五个来自 ``DispatchPolicy``（结构性门控），后两个来自 K1 配额。
+``arguments_not_canonical`` 只出现在审计模式：种子输入进不了 Journal（ADR 0098）。"""
+
+_LIMIT_REASONS: dict[str, SpawnRejectReason] = {
+    "concurrent": "spawn_limit_concurrent",
+    "total": "spawn_limit_total",
+}
+_POLICY_REASONS: frozenset[str] = frozenset({
+    "unknown_skill",
+    "max_depth_exceeded",
+    "cycle_detected",
+    "not_in_whitelist",
+    "cannot_call_entry_skill",
+    "arguments_not_canonical",
+})
 
 
 class SpawnLimitError(Exception):
     """spawn 配额超限。``kind`` ∈ {"concurrent", "total"}。"""
 
     def __init__(self, kind: str, limit: int) -> None:
+        if kind not in _LIMIT_REASONS:
+            raise ValueError(f"spawn limit kind must be concurrent / total, got {kind!r}")
         super().__init__(f"spawn_limit_exceeded: {kind} >= {limit}")
         self.kind = kind
         self.limit = limit
+
+    @property
+    def reject_reason(self) -> SpawnRejectReason:
+        """配额拒绝的稳定分类。"""
+        return _LIMIT_REASONS[self.kind]
+
+
+class SpawnRejectedError(ValueError):
+    """分离发起被结构性门控拒绝（目标不存在 / 白名单 / 深度 / 环 / entry）。
+
+    继承 ``ValueError``：既有按 ``ValueError`` 捕获、按消息前缀匹配的调用方不受影响
+    （消息仍是 ``unknown_skill: <id>`` / ``dispatch_rejected: <reason>``）。
+    """
+
+    def __init__(
+        self,
+        reject_reason: str,
+        *,
+        skill_id: str,
+        path: tuple[str, ...] = (),
+    ) -> None:
+        """记录稳定分类、目标 skill 与裁决时的调用路径。
+
+        Raises:
+            ValueError: ``reject_reason`` 不是结构性门控的分类。
+        """
+        if reject_reason not in _POLICY_REASONS:
+            raise ValueError(f"unknown spawn reject reason: {reject_reason!r}")
+        message = (
+            f"unknown_skill: {skill_id}"
+            if reject_reason == "unknown_skill"
+            else f"dispatch_rejected: {reject_reason}"
+        )
+        super().__init__(message)
+        self.reject_reason: SpawnRejectReason = reject_reason  # type: ignore[assignment]
+        self.skill_id = skill_id
+        self.path = path
 
 
 @dataclass

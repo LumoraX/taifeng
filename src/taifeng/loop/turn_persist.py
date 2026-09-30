@@ -27,6 +27,9 @@ class TurnPersist:
             owner: 宿主 TurnRunner —— 提供 turn 运行态与共享依赖。
         """
         self.__persist_owner = owner
+        # 审计模式（ADR 0097）：本 turn 已落账的挂起数；停下等人的调用 → 它们已落账的意图
+        self._audit_suspensions = 0
+        self.awaited_intents: dict[str, str] = {}
 
     async def persist_suspension(self, pending: tuple[Any, ...]) -> Any:
         """把本次挂起落 store 并返回 SuspensionRecord（R5 跨进程 resume 的真相）。
@@ -50,6 +53,19 @@ class TurnPersist:
             pending=pending,
             created_at=self.__persist_owner._now_factory(),
         )
+        owner = self.__persist_owner
+        if owner.audit_state is not None:
+            # 审计模式：挂起记录与断点条目同批落账，ack 后才进 hot history（ADR 0097）
+            from taifeng.loop.audit_suspension import commit_turn_suspended
+
+            item = await commit_turn_suspended(
+                state=owner.audit_state, submission_id=owner.submission_id,
+                turn_index=owner.turn_index, ordinal=self._audit_suspensions,
+                record=record, awaited_intents=self.awaited_intents, cancel=owner.cancel,
+            )
+            self._audit_suspensions += 1
+            owner.history_buffer.append(item)
+            return record
         item = record.to_item()
         self.__persist_owner.history_buffer.append(item)
         await self.__persist_owner.store.append(item)
@@ -124,10 +140,25 @@ class TurnPersist:
         # 同 event loop 协作式调度：取出 + 清空在无 await 的同步段完成，避免与
         # engine 主循环 append 竞态（无需锁）。
         drained = list(self.__persist_owner.pending_input)
-        self.__persist_owner.pending_input.clear()
+        state = self.__persist_owner.audit_state
+        if state is not None:
+            if not state.coordinator.effect_gate_open:
+                # Session 已不再接受写入：消息留在队列里，接管后从 Journal 回到队列
+                return
+            self.__persist_owner.pending_input.clear()
+            # 审计：消息由本 thread 的写者写进对话（ADR 0100）
+            from taifeng.loop.audit_peer import deliver_peer_items
+
+            await deliver_peer_items(
+                state, drained, submission_id=self.__persist_owner.submission_id,
+                turn_index=self.__persist_owner.turn_index,
+            )
+        else:
+            self.__persist_owner.pending_input.clear()
         for item in drained:
             self.__persist_owner.history_buffer.append(item)
-            await self.__persist_owner.store.append(item)
+            if state is None:
+                await self.__persist_owner.store.append(item)
             await self.__persist_owner._emit(
                 injection_event(
                     item, self.__persist_owner.submission_id,

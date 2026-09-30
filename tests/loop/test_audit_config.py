@@ -401,22 +401,15 @@ def test_official_adapter_subclass_cannot_override_and_drop_observer() -> None:
 @pytest.mark.parametrize(
     ("tool_name", "expected_code"),
     [
-        ("spawn_skill", "audit_spawn_unsupported"),
-        ("kill_skill", "audit_spawn_unsupported"),
         ("run_in_background", "audit_spawn_unsupported"),
-        ("await_skills", "audit_barrier_unsupported"),
-        ("join_skill", "audit_barrier_unsupported"),
         ("wait_for_task", "audit_barrier_unsupported"),
-        ("send_message", "audit_peer_unsupported"),
-        ("wait_peer", "audit_peer_unsupported"),
-        ("request_user_input", "audit_hitl_unsupported"),
     ],
 )
 def test_registered_unsupported_tools_are_rejected(
     tool_name: str,
     expected_code: str,
 ) -> None:
-    """已注册 Tool 名称足以暴露 detached/barrier/peer/HITL 能力。"""
+    """已注册 Tool 名称足以暴露后台 shell 任务能力。"""
     inputs = replace(
         _static_inputs(),
         tools=(_AuditedTool(name=tool_name),),
@@ -490,17 +483,43 @@ def test_complete_non_suspending_tool_metadata_view_passes() -> None:
     )
 
 
-def test_suspending_tool_metadata_view_is_rejected() -> None:
-    """完整 metadata 仍必须显式声明 non-suspending。"""
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "spawn_skill", "kill_skill", "join_skill", "wait_peer", "wait_any",
+        "await_skills", "send_message",
+    ],
+)
+def test_detached_spawn_tools_are_admitted(tool_name: str) -> None:
+    """分离式派发、join-barrier 与 peer 消息的工具可以进审计 Session（ADR 0098–0100）。"""
+    validate_audit_config(
+        _config(),
+        static_inputs=replace(_static_inputs(), tools=(_AuditedTool(name=tool_name),)),
+    )
+
+
+def test_suspending_tool_metadata_view_is_admitted() -> None:
+    """声明会停下等人作答的工具可以进审计 Session（ADR 0097）。"""
+    for tool in (
+        _AuditedTool(can_suspend=True),
+        _AuditedTool(name="request_user_input", can_suspend=True),
+    ):
+        validate_audit_config(
+            _config(), static_inputs=replace(_static_inputs(), tools=(tool,)),
+        )
+
+
+def test_suspension_declaration_must_be_a_bool() -> None:
+    """``can_suspend`` 只认布尔值：含糊的声明按 metadata 不完整拒绝。"""
     inputs = replace(
         _static_inputs(),
-        tools=(_AuditedTool(can_suspend=True),),
+        tools=(_AuditedTool(can_suspend="yes"),),  # type: ignore[arg-type]
     )
 
     with pytest.raises(AuditCapabilityError) as caught:
         validate_audit_config(_config(), static_inputs=inputs)
 
-    assert caught.value.code == "audit_tool_suspension_unsupported"
+    assert caught.value.code == "audit_tool_metadata_incomplete"
 
 
 def test_tool_effect_kind_uses_adr_0025_taxonomy() -> None:
@@ -719,6 +738,8 @@ def test_legacy_tool_spec_shape_is_fully_restored() -> None:
         "can_suspend",
         # tool-crash-reconciliation：崩溃恢复回查函数（默认 None）
         "reconcile",
+        # input-origin：工具结果的可信度声明（默认 None = 不打来源标记）
+        "output_trust",
     }
     tool = _legacy_tool()
     assert tool.parallel_safe is False

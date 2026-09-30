@@ -1,14 +1,21 @@
 """Turn 内回访节点(rewind checkpoint)侧录。
 
 一次 root turn 的执行轨迹被拆成一张**可寻址的回访节点表**,业务侧可对任意节点
-直接 retry(见 ``Rewind`` Op)。节点三类:
+直接 retry(见 ``Rewind`` Op)。节点四类:
 
 - ``turn_root``：整条 turn 重来(re_reason)。
 - ``iteration``：每圈 LLM 采样前。rewind 它 = 重采样该圈,LLM 重决下游(re_reason)。
 - ``dispatch``：每次工具 / call_skill 派发。两个切点——``history_len`` = 所属
   iteration 采样前(re_reason,与该圈 iteration 节点同值,因 assistant 消息原子、
   不可切在并行 tool_call 中间);``inner_history_len`` = function_call 之后 /
-  function_call_output 之前(retry_tool 切点,只重跑该工具)。
+  function_call_output 之前(单调用批次的 retry_tool 切点)。
+
+- ``compaction``：每次压缩(逻辑 history 里仍在的 ``compacted`` 条目)。rewind 它 =
+  回到那次压缩之前(``CompactionUndo``,ADR 0081);``target_id`` 是压缩条目的 id。
+
+retry_tool 的实际截断由 ``plan_retry_cut`` 按**批次**规划(ADR 0079):一次采样发出多个
+调用时,只去掉目标调用的旧结果,同批其他调用的调用记录与结果原样保留,批次之后的内容
+丢弃。单调用批次下规划结果与 ``inner_history_len`` 相同。
 
 设计:ADR 0014(turn-rewind)+ ADR 0016(冷场景重建);契约 docs/architecture/capabilities/turn-rewind.md
 约束:checkpoint 只记 history **下标**,不物理删 store —— append-only 不破(R5)。
@@ -22,7 +29,13 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from taifeng.conversation.models import ResponseItem
 
-RewindKind = Literal["turn_root", "iteration", "dispatch"]
+RewindKind = Literal["turn_root", "iteration", "dispatch", "compaction"]
+
+# 只做记账、不影响「轮到谁说话」判断的条目(与 conversation.models 的记账类一致,外加注入项)
+_NON_CONVERSATIONAL_KINDS = frozenset({
+    "system_injection", "suspension", "spawn", "join_barrier", "join_barrier_fired",
+    "skill_outcome", "spawn_settled", "tool_intent",
+})
 
 
 def count_turns(history: list[ResponseItem]) -> int:
@@ -58,7 +71,7 @@ class RewindCheckpoint:
     # 仅 dispatch 节点:
     call_id: str | None = None
     target_id: str | None = None
-    """子 skill / 工具名(供 UI / 审计)。"""
+    """dispatch:子 skill / 工具名(供 UI / 审计);compaction:压缩条目的 id。"""
     inner_history_len: int | None = None
     """retry_tool 切点(function_call 后、function_call_output 前)。"""
     args_digest: str | None = None
@@ -71,6 +84,7 @@ class RewindLog:
 
     checkpoints: list[RewindCheckpoint] = field(default_factory=list)
     _dispatch_seq: int = 0
+    _compaction_seq: int = 0
 
     def record_iteration(
         self,
@@ -132,18 +146,216 @@ class RewindLog:
         self.checkpoints.append(cp)
         return cp
 
+    def record_compaction(
+        self,
+        *,
+        turn_index: int,
+        iteration_index: int,
+        history_len: int,
+        compaction_id: str,
+    ) -> RewindCheckpoint:
+        """记一次压缩的 compaction 节点。
+
+        node_id 格式为 t{k}:cmp{m}，m = 本 turn 内压缩序号(0-based)。``history_len`` 是
+        placeholder 在逻辑 history 中的下标;rewind 不按它截断,而是还原到压缩之前。
+        """
+        cp = RewindCheckpoint(
+            node_id=f"t{turn_index}:cmp{self._compaction_seq}",
+            turn_index=turn_index,
+            kind="compaction",
+            history_len=history_len,
+            cache_anchor=-1,
+            iteration_index=iteration_index,
+            target_id=compaction_id,
+        )
+        self._compaction_seq += 1
+        self.checkpoints.append(cp)
+        return cp
+
     def reset_dispatch_seq(self) -> None:
-        """跨 turn 重置 dispatch 序号 —— disp 编号在每个 turn 内从 0 起。
+        """跨 turn 重置 dispatch / compaction 序号 —— 编号在每个 turn 内从 0 起。
 
         derive_rewind_log 扫到新 turn(user_message)时调用。
         """
         self._dispatch_seq = 0
+        self._compaction_seq = 0
 
     def find(self, node_id: str) -> RewindCheckpoint | None:
         """按 node_id 查 checkpoint;不存在返回 None(调用方负责拒绝路径)。"""
         return next(
             (c for c in self.checkpoints if c.node_id == node_id), None
         )
+
+
+# 属于「一次采样的工具批次」的条目类型:意图(Chat 路径写前日志)/ 调用 / 结果
+_BATCH_KINDS = frozenset({"tool_intent", "function_call", "function_call_output"})
+
+
+@dataclass(frozen=True)
+class RetryCut:
+    """retry_tool 的截断规划:保留 ``history[:cut_index]``,再去掉 ``drop_index`` 那一条。
+
+    Attributes:
+        cut_index: 截断点;其后的条目全部丢弃。
+        drop_index: 保留范围内需去掉的旧结果下标;None = 无需另删(旧结果本就在截断点
+            之后,或目标调用本就没有结果)。
+    """
+
+    cut_index: int
+    drop_index: int | None = None
+
+    @property
+    def first_changed_index(self) -> int:
+        """history 中第一个发生变化的下标(cache anchor 回退到它之前)。"""
+        return self.cut_index if self.drop_index is None else self.drop_index
+
+    def apply(self, history: list[ResponseItem]) -> list[ResponseItem]:
+        """按规划产出新的 history 列表(不修改入参)。"""
+        kept = list(history[: self.cut_index])
+        if self.drop_index is not None:
+            del kept[self.drop_index]
+        return kept
+
+    def marker_extra(self) -> dict[str, int]:
+        """落进 rewind marker 的坐标(冷重建按它重放);无需另删时不带 ``drop_index``。"""
+        extra = {"cut_index": self.cut_index}
+        if self.drop_index is not None:
+            extra["drop_index"] = self.drop_index
+        return extra
+
+
+@dataclass(frozen=True)
+class CompactionUndo:
+    """回到某次压缩之前的规划:整个 history 换成压缩之前的那一份。
+
+    与 ``RetryCut`` 同形(``cut_index`` / ``drop_index`` / ``first_changed_index`` /
+    ``apply`` / ``marker_extra``),调用方不区分两者。
+
+    Attributes:
+        restored: 压缩之前的逻辑 history。
+        compaction_id: 被撤销的压缩条目 id。
+        first_changed_index: 相对当前 history 第一个发生变化的下标(= 压缩替换区间的起点)。
+    """
+
+    restored: tuple[ResponseItem, ...]
+    compaction_id: str
+    first_changed_index: int
+    drop_index: None = None
+
+    @property
+    def cut_index(self) -> int:
+        """还原后的 history 长度。"""
+        return len(self.restored)
+
+    def apply(self, history: list[ResponseItem]) -> list[ResponseItem]:
+        """产出还原后的 history(入参不被使用也不被修改)。"""
+        return list(self.restored)
+
+    def marker_extra(self) -> dict[str, int | str]:
+        """落进 rewind marker 的坐标(冷重建按它还原)。"""
+        return {"cut_index": self.cut_index, "undo_compaction": self.compaction_id}
+
+
+def awaits_model(history: list[ResponseItem]) -> bool:
+    """history 末尾是否轮到模型说话(最后一条对话项是用户消息或工具结果)。
+
+    注入项与记账项不算对话项,向前跳过。空 history、以模型回答结尾、以压缩摘要结尾都
+    不算——从这样的状态重推没有可回应的输入。
+    """
+    for item in reversed(history):
+        if item.kind in _NON_CONVERSATIONAL_KINDS:
+            continue
+        return item.kind in ("user_message", "function_call_output")
+    return False
+
+
+def _sample_id(item: ResponseItem) -> str | None:
+    """调用 / 结果所属的采样 id(Responses 路径才有);没有返回 None。"""
+    key = "llm_sample_id" if item.kind == "function_call" else "origin_llm_sample_id"
+    value = item.metadata.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _target_call_index(history: list[ResponseItem], cp: RewindCheckpoint) -> int:
+    """节点对应的那一次 function_call 的下标(call id 被复用时取节点所在位置的那次)。
+
+    Raises:
+        ValueError: history 在节点位置之前找不到该调用(节点表与 history 不一致)。
+    """
+    assert cp.inner_history_len is not None
+    upper = min(cp.inner_history_len, len(history))
+    for index in range(upper - 1, -1, -1):
+        item = history[index]
+        if item.kind == "function_call" and item.payload.get("call_id") == cp.call_id:
+            return index
+    raise ValueError(f"function_call for node {cp.node_id} not found in history")
+
+
+def plan_retry_cut(history: list[ResponseItem], cp: RewindCheckpoint) -> RetryCut:
+    """规划对 dispatch 节点做 retry_tool 时的截断(纯函数)。
+
+    批次 = 目标调用所在的、由意图 / 调用 / 结果组成的连续段;遇到其他类型的条目,或属于
+    另一次采样的调用 / 结果(Responses 路径下一圈可能没有文本项,靠采样 id 划界)即止。
+    两种落史布局都适用:Chat 路径逐对交错(调用, 结果),Responses 路径调用成组在前、
+    结果成组在后。
+
+    Raises:
+        ValueError: 节点不是 dispatch 节点,或与 history 不一致。
+    """
+    if cp.kind != "dispatch" or cp.call_id is None or cp.inner_history_len is None:
+        raise ValueError(f"retry_tool requires a dispatch node, got {cp.kind}: {cp.node_id}")
+    call_index = _target_call_index(history, cp)
+    sample = _sample_id(history[call_index])
+    end = call_index + 1
+    output_index: int | None = None
+    while end < len(history):
+        item = history[end]
+        if item.kind not in _BATCH_KINDS:
+            break
+        if item.kind != "tool_intent" and _sample_id(item) != sample:
+            break
+        is_output = item.kind == "function_call_output"
+        if is_output and output_index is None and item.payload.get("call_id") == cp.call_id:
+            output_index = end
+        end += 1
+    if output_index is None:
+        return RetryCut(cut_index=end)
+    if output_index == end - 1:
+        # 旧结果是批次最后一条:截到它之前即可(单调用批次即此形态)
+        return RetryCut(cut_index=output_index)
+    return RetryCut(cut_index=end, drop_index=output_index)
+
+
+def suspended_rewind_rejection(
+    kept: list[ResponseItem],
+    *,
+    suspension_record_id: str,
+    retried_call_id: str | None,
+) -> str | None:
+    """挂起态下的 rewind 能否进行(纯函数);可以返回 None,否则返回拒绝原因。
+
+    挂起态 rewind 的语义是「不回答、回到之前重来」:截断必须把挂起 record 连同它等待的
+    调用一起带走。两种情形不成立:
+
+    - ``turn_suspended``:截断后挂起 record 仍在保留范围内(节点在挂起之后,不应出现);
+    - ``sibling_calls_pending``:截断后还留着没有结果的调用,且不是本次要重跑的那一个。
+      典型是对同批里已有结果的调用做 retry_tool——同批等人的调用会随挂起作废而永远
+      悬空。回到采样前重来(re_reason)不留任何调用,不受此限。
+
+    Args:
+        kept: 按规划截断后的 history。
+        suspension_record_id: 当前活跃挂起的 record id。
+        retried_call_id: retry_tool 要重跑的调用;re_reason 为 None。
+    """
+    for item in kept:
+        if item.kind == "suspension" and item.payload.get("record_id") == suspension_record_id:
+            return "turn_suspended"
+    calls = {i.payload.get("call_id") for i in kept if i.kind == "function_call"}
+    outputs = {i.payload.get("call_id") for i in kept if i.kind == "function_call_output"}
+    dangling = {call_id for call_id in calls - outputs if call_id is not None}
+    if dangling - {retried_call_id}:
+        return "sibling_calls_pending"
+    return None
 
 
 def derive_rewind_log(history: list[ResponseItem]) -> list[RewindCheckpoint]:
@@ -156,7 +368,8 @@ def derive_rewind_log(history: list[ResponseItem]) -> list[RewindCheckpoint]:
     - user_message: 进入新 turn k(=已见 user_message 数),重置 iteration/cur_iter_history_len
     - assistant_message: 记 iteration 节点(history_len=本项下标,存入游标)
     - function_call: 记 dispatch 节点(history_len=当前圈游标,inner=fc 下标+1)
-    - 其余 kind(含 compacted/system_injection/spawn/...): 计入下标、不产节点(default)
+    - compacted: 记 compaction 节点(history_len=本项下标,target_id=本项 id)
+    - 其余 kind(含 system_injection/spawn/...): 计入下标、不产节点(default)
 
     Args:
         history: reconstruct 后的逻辑 ResponseItem 列表(与热内存坐标系一致)。
@@ -215,7 +428,15 @@ def derive_rewind_log(history: list[ResponseItem]) -> list[RewindCheckpoint]:
                 inner_history_len=idx + 1,
                 args_digest=item.payload["arguments"][:200],
             )
-        # 其余 kind(compacted / system_injection / spawn / suspension / ...):
+        elif item.kind == "compacted":
+            # 压缩:compaction 节点(rewind 它 = 回到这次压缩之前)
+            log.record_compaction(
+                turn_index=k,
+                iteration_index=iteration,
+                history_len=idx,
+                compaction_id=item.id,
+            )
+        # 其余 kind(system_injection / spawn / suspension / ...):
         # 只占下标(idx 已累积),不产节点
 
     return log.checkpoints

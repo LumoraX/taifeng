@@ -34,12 +34,15 @@ from taifeng.hooks.types import (
     PreSkillDispatchHook,
 )
 from taifeng.permission.types import PermissionRequest
+from taifeng.tool.builtins.selection_gate import check_selection_gate
+from taifeng.tool.builtins.skill_authorization import authorize_outside_whitelist
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.dispatch import CallStack, DispatchPolicy
     from taifeng.skill.registry import SkillSnapshot
+    from taifeng.skill.selection import SkillSelectionGate
 
 
 class SkillDispatcher(Protocol):
@@ -93,8 +96,13 @@ async def _emit_event(ctx: ToolContext, kind: str, data: dict[str, Any]) -> None
         logging.getLogger(__name__).exception("emit %s failed", kind)
 
 
-async def _call_skill_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    """call_skill handler —— 5 阶段派发。"""
+async def _call_skill_handler(
+    args: dict[str, Any],
+    ctx: ToolContext,
+    *,
+    selection_gate: SkillSelectionGate | None = None,
+) -> ToolResult:
+    """call_skill handler —— 5 阶段派发（启用相位 3 时阶段 1 之后另过选择置信度分流门）。"""
     # ---- 参数校验 ----
     skill_id = args.get("skill_id")
     if not skill_id or not isinstance(skill_id, str):
@@ -159,6 +167,21 @@ async def _call_skill_handler(args: dict[str, Any], ctx: ToolContext) -> ToolRes
     # ============================================================
     target = snapshot.get(skill_id)
     verdict = policy.check(stack=stack, caller=caller, target=target)
+    if (
+        verdict.reason == "not_in_whitelist"
+        and policy.authorization is not None
+        and target is not None
+    ):
+        # 阶段 1a：白名单外授权（相位 4，ADR 0089）——放行后只豁免白名单一层
+        refused = await authorize_outside_whitelist(
+            policy.authorization, caller=caller, target=target, snapshot=snapshot,
+            stack=stack, dispatch_reason=dispatch_reason, ctx=ctx,
+        )
+        if refused is not None:
+            return refused
+        verdict = policy.check(
+            stack=stack, caller=caller, target=target, authorized_outside_whitelist=True
+        )
     if not verdict.allowed:
         return ToolResult.error(
             f"dispatch_rejected: {verdict.reason} "
@@ -167,6 +190,19 @@ async def _call_skill_handler(args: dict[str, Any], ctx: ToolContext) -> ToolRes
             path=list(verdict.path),
         )
     assert target is not None
+    if policy.working_set is not None and policy.working_set.blocks(target.id):
+        # 按战绩被隔离且配置为拒绝派发（相位 5 生效，ADR 0090）
+        return ToolResult.error(
+            f"dispatch_rejected: skill_quarantined (path: {caller.id} → {target.id})",
+            reason="skill_quarantined",
+            path=[caller.id, target.id],
+        )
+
+    # 阶段 1b：选择置信度分流门（相位 3，ADR 0088）——经发现选中的低置信 / 难分候选
+    # 须先试用或升级，不得直接派发
+    gated = await check_selection_gate(selection_gate, target, ctx)
+    if gated is not None:
+        return gated
 
     # ============================================================
     # 阶段 2：pre_skill_dispatch hook —— 业务侧动态拦截
@@ -347,7 +383,19 @@ CALL_SKILL_SCHEMA = {
 }
 
 
-def make_call_skill_tool() -> ToolSpec:
+def make_call_skill_tool(
+    *, selection_gate: SkillSelectionGate | None = None,
+) -> ToolSpec:
+    """构造 call_skill 工具。
+
+    Args:
+        selection_gate: 可选的选择置信度分流门（相位 3，ADR 0088）；None = 不启用。
+    """
+
+    async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        """带分流门的 call_skill handler。"""
+        return await _call_skill_handler(args, ctx, selection_gate=selection_gate)
+
     return ToolSpec(
         name="call_skill",
         description=(
@@ -360,7 +408,7 @@ def make_call_skill_tool() -> ToolSpec:
             "审批方将无法判断你的意图，很可能直接拒绝派发。"
         ),
         input_schema=CALL_SKILL_SCHEMA,
-        handler=_call_skill_handler,
+        handler=handler,
         parallel_safe=False,  # 子 LLM 调用，独占
         # 触发子 skill（含子 LLM 调用）是外部不可幂等副作用，恢复需人工核对
         effect_kind="external_non_idempotent",

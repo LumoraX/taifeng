@@ -88,7 +88,7 @@ class SkillExecutionRecord:
     parent_call_id:         str | None        # 父调用的 call_id（根层为 None）
     depth:                  int               # 调用深度（根层=0，每层 call_skill +1）
     source:                 SkillSource       # "atomic" | "composite" | "orchestration"
-    trust_tier:             str | None        # 信任层级（v1 恒 None；预留给发现相位）
+    trust_tier:             str | None        # 来源信任层级；未配置 DispatchPolicy.trust 时为 None（见 skill-working-set）
     selection_origin:       SelectionOrigin   # "whitelist"（v1 恒）| "discovered"（发现相位填）
     selection_confidence:   float | None      # 长相分（v1 恒 None；发现 / 评估相位填；禁止喂提拔）
     outcome:                OutcomeStatus     # "success" | "failure" | "abandoned"
@@ -196,7 +196,7 @@ call_skill 工具触发 → _spawn_sub_runner
 | 不做 | 原因 |
 | --- | --- |
 | 战绩检索 / 向量化 | 存储由业务侧 `IndexHook` / `MessageWriter` 决定，内核不越界 |
-| fitness 计算 / 提拔 / 逐出 | 认知回路 ⑦ 的上层相位，不在本契约范围 |
+| fitness 计算 / 提拔 / 逐出 | 认知回路 ⑦ 的上层相位，见 [skill-working-set](skill-working-set.md)（当前为影子模式） |
 | selection_confidence 策略化 | 发现相位（⑥）尚未实现；v1 恒 None |
 | 跨 session 聚合统计 | 外部 DB / 分析层的职责，内核不承载 |
 | spawn detached 子 skill 的战绩记录 | detached spawn 子 thread 为独立 TurnRunner，其终态处理路径与 call_skill 不同；v1 仅覆盖 call_skill 路径 |
@@ -207,9 +207,15 @@ v1 的记录散落在各子 thread 的 JSONL 里。聚合由业务存储承担�
 
 - `SkillFitnessStore`（Protocol）：`async record(record: SkillExecutionRecord)`（实现须按 `call_id` 幂等）/
   `async fitness(skill_id) -> SkillFitness | None`。
-- `SkillFitness`：`skill_id` / `successes` / `failures` / `abandoned` / `last_ts_unix`，`total` 为三态之和。
+- `SkillFitness`：`skill_id` / `successes` / `failures` / `abandoned` / `last_ts_unix`，成本累计
+  `cost_tokens_total` / `cost_duration_ms_total` / `cost_iterations_total`，`discovered_selections`（经发现被选中的
+  次数，不含置信度）；`total` 为三态之和，`decided` 为成败之和。
+- `SkillFitnessCatalog`（Protocol）：`async all_fitness() -> Sequence[SkillFitness]`，供按战绩算分的上层遍历；
+  `SkillFitnessLedger` = `SkillFitnessStore` + `SkillFitnessCatalog`。
 - `SkillFitnessRecorder(store)`：`TelemetrySink` 实现，只处理 `skill_outcome_recorded`，经
   `SkillExecutionRecord.from_payload` 还原后交给 store；`attach(engine)` 订阅全量事件流（与 `JsonlSink` 同形）。store 异常原样上抛。
-- `InMemorySkillFitnessStore`：进程内参考实现（按 call_id 去重）。
+- `InMemorySkillFitnessStore`：进程内参考实现（按 call_id 去重），同时实现 `SkillFitnessCatalog`。
 
 **只沉淀、不决策**：内核任何路径 SHALL NOT 读取 fitness 来改变 skill 的可见性、排序、召回或派发；`selection_confidence` 不参与聚合。
+
+按战绩算分、工作集规划与影子评估见 [skill-working-set](skill-working-set.md)。

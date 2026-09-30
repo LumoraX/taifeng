@@ -319,6 +319,10 @@ class ToolCallRuntime:
 
 **可见才可执行（tool-whitelist）**：`dispatch_batch` 必填 `visible_tools`——本轮实际注入请求的工具名集（由 `SkillDefinition.visible_tool_names()` ∩ registry 派生，与请求严格同源）。LLM 幻觉调用集合外的工具在 PreToolUse hook **之前**被拒：is_error 的 `function_call_output` 核销 call_id（`tool_not_offered`），不消耗 hook / 权限 / 锁，turn 不中断；engine 的 resume 重放与业务直发 Op 不经此层（豁免）。详见 `capabilities/tool-whitelist.md`。
 
+**出站消息归一化（ADR 0086）**：root turn 到达真终态、发 `turn_completed` 之前，若注册了 `outbound_message` hook，`loop/outbound.py::emit_outbound` 串行执行 handler（`text_override` 链式改写，不可否决）并 emit `outbound_message`。只改出站文本，history 里模型的原话不变；未注册时不发事件。
+
+**输入来源汇总（input-origin，ADR 0085）**：`_build_tool_context` 把 `summarize_taint(history).to_dict()` 放进 `ToolContext.extras["input_taint"]`，派发层再转给 `pre_tool_use` / `post_tool_use` hook 的 `HookContext.extras`；工具声明了 `output_trust` 时，结算出的 `function_call_output` 带来源标记。内核不依据汇总改变任何裁决。
+
 **结算可带图（tool-image-attachment）**：阶段 3 回填 `function_call_output` 的两处结算点（批量循环与 `retry_tool`）收敛在 `TurnRunner._settle_tool_output`。工具经 `ToolResult.attachments` 返回的图片在此完成 **durable append 之前**的 admission，通过后写进同一条 fco 的 payload——**不合成 `user_message`**，故 turn 边界锚点与同轮合并均不受影响。附件违反策略时该次调用判错（`tool_attachment_rejected`）而非上抛出批，以保住 fc/fco 配对。详见 `capabilities/tool-image-attachment.md`。
 
 ```
@@ -398,7 +402,7 @@ async with interrupt_on_cancel(token): ...                    # 取消原地打�
 | Rust `tokio::mpsc` unbounded | Python `asyncio.Queue`（默认 bounded=1024，可配） |
 | `Submission` 含 `id: SubmissionId` | 同 |
 | `Event` 含 `id: EventId` + `submission_id` | 简化为 `EventMsg(submission_id, msg)` |
-| `Op::*` 枚举 ~20 种 | 实现 13 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / InjectUserInput / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Rewind / SendToPeer / Shutdown），见 `loop/submission.py` |
+| `Op::*` 枚举 ~20 种 | 实现 14 种（UserMessage / CancelTurn / CompactNow / InjectSystemMessage / InjectUserInput / ThreadRollback / UpdateBudget / RefreshSnapshot / UpdateInstructions / Resume / Rewind / SendToPeer / Prewarm / Shutdown），见 `loop/submission.py` |
 
 ## 测试用例（M3 验收）
 
@@ -481,6 +485,7 @@ post_turn hook ───────────────── 仅审计（r
 
 - **排队可观测**：gate 被占时 emit `submission_queued{submission_id, waiting_on}`。
 - **排队中可取消**：`_pending` 在排队前登记，`CancelTurn` 命中 → `turn_failed{kind: cancelled}`，不起 turn。
+- **预热（`Prewarm`，[capabilities/prewarm.md](capabilities/prewarm.md)）**：持有 root gate 执行，但不是 turn——不改 history、不占 turn 序号。用户消息开始排队前先取消在飞的预热，真实的 turn 不等它。
 - **不排队的 Op**：`CancelTurn` / `InjectUserInput` / `InjectSystemMessage` / `SendToPeer` / `UpdateBudget` / `RefreshSnapshot` / `UpdateInstructions` / `Shutdown`；命中 spawn 句柄的 `Resume` 与 child thread 的 `Rewind` 作用于子 thread，不排队。
 - **`CompactNow` / `ThreadRollback` 是 operation**：以 `_run_gated_op` 派成 task 排队，不再内联在 actor 循环里（否则饿死 CancelTurn / Shutdown）。
 - **在飞期间 root history 单写者**：turn 在飞时只有 runner 写 root history；`InjectSystemMessage` 与 `InjectUserInput` 同走 runner 的 pending 队列，热 == 冷由构造保证（见下节）。
@@ -528,16 +533,18 @@ node_id 为 turn 限定格式：`t{k}:it{n}`（iteration）/ `t{k}:disp{m}`（di
 
 ### 重推（`engine._handle_rewind`）
 
-actor 模型下提交 `Rewind` 时上一 turn 已结束（engine 空闲），故「重推」= 截断 engine history（仅内存）+ 回退 `cache_anchor` + 落 rewind marker（store，payload 含 `cut_index`）+ emit `turn_rewound` + 建新 root TurnRunner 重跑：
+actor 模型下提交 `Rewind` 时上一 turn 已结束或已挂起（engine 空闲；挂起态下挂起随截断一并作废，ADR 0080），故「重推」= 截断 engine history（仅内存）+ 回退 `cache_anchor` + 落 rewind marker（store，payload 含 `cut_index`；并行批次 retry_tool 另含 `drop_index`）+ emit `turn_rewound` + 建新 root TurnRunner 重跑：
 
 ```
 Rewind(node_id, mode, new_args?)
   → 查 checkpoint（缺 → rewind_rejected(unknown_node)）
-  → retry_tool 仅 dispatch 节点（否则 rewind_rejected(mode_kind_mismatch)）
+  → retry_tool 仅 dispatch 节点、restore 仅 compaction 节点（否则 rewind_rejected(mode_kind_mismatch)）
   → 活跃挂起 → rewind_rejected(turn_suspended)   # 挂起态 rewind v1 不支持
   → 冷 engine 首次操作：_last_resolved 为空 + _history 非空
       → 惰性按构造时 entry skill resolve 指令层（resolve 失败 → log warning，不 silent suppress）
-  → 选截点：retry_tool=inner_history_len（保 fc）/ re_reason=history_len
+  → 选截点：retry_tool=按批次规划（保同批其他调用与结果）/ re_reason=history_len
+             / compaction 节点=还原到那次压缩之前（从 transcript 重放，ADR 0081）
+  → restore：落 marker + emit turn_rewound{redriven:false} 后结束，不建 runner
   → 截断 history + 回退 anchor（锁内；store append-only，旧 items 不删）
   → re_reason：新 runner 从截点重采样（LLM 重决下游）
     retry_tool：新 runner 先 _complete_seed_call 补跑悬空 call（复用 dispatch_batch +
@@ -558,8 +565,10 @@ R2：rewind 蓄意回退 anchor → 首采样 cache 失效标 **expected**（`re
 
 ```
 业务 / LLM 工具 spawn_skill(skill_id, args, reason)
-  → DispatchPolicy.check（白名单/深度/环/cannot_call_entry → ValueError）
-  → K1 SpawnSlotRegistry.reserve（超限 → SpawnLimitError）
+  → DispatchPolicy.check（未知 skill / 白名单 / 深度 / 环 → SpawnRejectedError，带稳定分类）
+  → K1 SpawnSlotRegistry.reserve（超限 → SpawnLimitError，分类 spawn_limit_concurrent / spawn_limit_total）
+      拒绝经 spawn_skill 工具时：emit skill_spawn_rejected{reason, origin, path, ...}
+      + ToolResult.error("spawn_rejected: <reason> ...")，不记异常日志（ADR 0078）
   → 建 child thread + detached asyncio task（cancel = root_cancel.child("spawn:xxx")）
   → 追加 spawn ResponseItem 到父 thread（R5）
   → emit spawn_started{handle_id, skill_id, child_thread_id}
@@ -679,7 +688,7 @@ K1（广度）/ K2（token）之外，turn 级还有两条 opt-in 护栏（默�
 
 steering 解决「用户 → 运行中 turn」；peer-mailbox 把同一 seam 推广到「agent → agent」（同 engine 谱系内 sibling↔sibling / child→parent）：
 
-- **Op + 工具同路径**：`SendToPeer{target_thread_id, text, mode}` 与 `send_message` 工具都收敛到 `engine.deliver_peer_message`（SpawnDriver 实现）。寻址 = child_thread_id / handle_id / `"parent"`（解析为谱系 root）；未知目标显式 error。
+- **Op + 工具同路径**：`SendToPeer{target_thread_id, text, mode}` 与 `send_message` 工具都收敛到 `engine.deliver_peer_message`（SpawnDriver 实现）。寻址 = child_thread_id / handle_id / `"parent"`（解析为谱系 root）/ 拓扑地址 `sibling:<skill_id>`、`child:<skill_id>`（按对方跑的 skill 指代，ADR 0091）；未知目标显式 error。
 - **双模式**：`queue_only`（运行中投目标 runner 的 `pending_input`——B1 同一队列；空闲即时 `store.append` 落史，R5）；`trigger_turn`（空闲 spawn child 落史后以续跑范式唤醒新 detached turn，emit `peer_agent_woken`；运行中自动降级 `mode_downgraded=true`；root 拒绝；suspended 只落史——挂起只能由 Resume 解除）。
 - **消息形态**：`user_message` + payload `source="peer", from_thread`（不新增 kind）；事件 `peer_message_sent` 不含正文。
 - **wait_peer / wait_any**：turn 内轮询句柄表等终态——前者等**一个**、后者等**任一**（唤醒时收走当时全部已终态），与 `await_skills`（barrier，turn 结束后等**全部**再聚合）构成「等一个 / 等任一 / 等全部」三档。中间那档对标 codex `wait_agent`：缺它则错峰完成的 N 个子任务只能盯死一个或等最慢的。
@@ -729,9 +738,10 @@ Resume(thread_id, resolutions)
 [SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)；此处只记模块协作。
 
 - **Submission admission（动态门）**：`AgentEngine.submit()` 在 audit 模式仅放行 UserMessage / CancelTurn /
-  Shutdown。UserMessage 的 durable acceptance（`submission_accepted` + user 会话项 + `submission_applied`
-  原子三记录）**先于**入队，actor 只应用已 ack 的 envelope 才更新 hot history/projection；非法输入落安全
-  `submission_rejected` 不入队；能力面外的 Op（CompactNow/Rewind/Resume/… 共 10 类）在执行前 durable 拒绝
+  Shutdown / Resume。UserMessage 的 durable acceptance（`submission_accepted`）**先于**入队；这条消息拿到
+  root gate 时 actor 才落应用批次（user 会话项 + `submission_applied`，落账与取消无关）、更新 hot history
+  与 projection——Journal 顺序即对话顺序（ADR 0101）；非法输入落安全
+  `submission_rejected` 不入队；能力面外的 Op（CompactNow / Rewind / InjectSystemMessage 等）在执行前 durable 拒绝
   （`reject_unsupported_audited_op`，failure_class=capability），不入队、不执行。
 - **effect gate**：每个 durable 效果前 `coordinator.ensure_effect_allowed()`；首个 Journal IO / 完整性 /
   ack 不确定失败即 freeze（关闭 effect gate），此后该 Session 的 LLM/Tool/Skill 效果全部被拒。
@@ -744,14 +754,39 @@ Resume(thread_id, resolutions)
   `dispatch_batch`，让工具经 `ctx.cancel` 协作取消产出确定结果，而 outcome 落账不被外层取消打断；每个已提交
   意图恰好收敛到一个 `tool_outcome_committed`（success/error/rejected/cancelled/unknown）+ 唯一
   `function_call_output` 会话项，按 call-index 有序。整批派发前取消 → cancelled（不进 runtime）；dispatch
-  中途取消/超时对 reconcilable/external_non_idempotent → UNKNOWN（无法证明外部效果）→ 记录后 freeze；声明
-  non-suspending 却运行时挂起 → error 终态 + freeze（不进 HITL）。
+  中途取消/超时对 reconcilable/external_non_idempotent → UNKNOWN（无法证明外部效果）→ 记录后 freeze；未声明
+  `can_suspend` 却运行时挂起 → error 终态 + freeze。
+- **挂起与恢复**（`audit_suspension`）：停下等人作答的调用（挂起式审批，或声明 `can_suspend=True` 的工具发问）
+  在 `converge` 里保持未结算，`run_audited_tools` 把已有结果写进 history 后抛 `_BatchSuspend`；
+  `persist_suspension` 走 `commit_turn_suspended`（`turn_suspended` + `suspension` 对话项同批）。`Resume`
+  在 `submit()` 里先过准入并落 `resume_accepted` 才入队（`submit_audited_resume`）；actor 侧
+  `run_audited_resume` 依次结算被拒 / 直接作答的调用、落 `suspension_resolved` 与 `resume_applied`，
+  再把续跑的 turn 登记为可取消目标运行，获批的调用经 seed 机制在其中重跑（`rerun_awaited_calls`），
+  结果记在原来的 operation 下。续跑的 turn 发出终态事件之后不再写记录。`audit_awaiting` 记着此刻已落账
+  而未结清的挂起：释放 Session 时据此写 `session_detached` 而不是 `session_ended`，接管时由 Journal 重建。
 - **同步 call_skill lineage**（`audit_skill.AuditedSkillDispatch`）：复用根 coordinator/lease；外层 Tool 意图
   之后先 durable `skill_selected`（完整 definition/body 快照）→ 配额拒绝走 `skill_dispatch_finished(rejected)`
   无 child；接受走原子 `skill_dispatch_started`+`thread_created`+`thread_bound`+child-seed，子 runner 携
   child `audit_state`（child thread、共享根 coordinator、同一 projector）→ 子 turn 的 LLM/Tool/Skill 效果
   递归走同一审计路径 → 原子 `skill_dispatch_finished`+`thread_terminal`+`skill_outcome`，先于外层 Tool
   outcome。嵌套 call_skill 天然形成三级谱系；子 turn 若挂起属 capability 违约 → freeze。
+- **分离式派发**（`spawn_ledger` / `audit_spawn`）：`SpawnDriver` 的持久化经 `spawn_ledger` 分流——
+  非审计写 store（建子 thread、种子、`spawn` / `spawn_settled` 锚），审计写 Journal（`spawn_started`
+  批次、`spawn_settled` + `thread_terminal`），不写锚点条目。子 runner 由 `_build_child_runner(audit_state=)`
+  带上子 thread 的审计状态（`root=False`，turn 从 0 编号）。接管时 `audit_resume` 把 Journal 里的派发
+  交给 `remember_spawns`，`rebuild_from_history` 据此重建句柄表；没有终态的派发由
+  `audit_resume_spawn` 在恢复批次里落 `cancelled`。join-barrier 同理：`JoinBarrierCoordinator` 的登记、
+  点火经 `spawn_ledger` 分流，审计模式下聚合 turn 由 `run_audited_barrier` 包着跑，跑完落
+  `barrier_settled`；接管时 barrier 表与已点火集合由记录重建。
+- **peer 消息**（`audit_peer`）：`PeerMailbox._deliver_audited` 落 `peer_message_sent` 后把消息放进目标的
+  收件队列——root 是 Session 级的 `root_inbox`（root runner 的 `pending_input` 就是它），子 thread 是
+  live runner 的 `pending_input`。runner 在迭代边界 `drain_pending_input` 时经 `deliver_peer_items`
+  把消息写进对话；子 runner 退栈时 `retire_runner` 收下收尾之后才到的消息。接管时未进入对话的消息
+  由 `undelivered_peer_messages` 找回。
+- **Engine 收敛**（`EngineOperations.converge_turns_cooperatively`，ADR 0102）：审计模式下 `run()` 的收尾
+  先置 `converging`、取消持有 root gate 的 turn 的 token，并在 2 秒宽限期内等 operation 自行退出——
+  意图收敛为终态之后才做根取消与 raw cancel；`converging` 期间 gate 不再放行新 turn，拿到 gate 的排队
+  消息只应用不运行。没有 turn 在飞或排队时不等。
 - **cancellation**：每个 active turn 有目标取消子树（CancelTurn 只取消其目标 turn/子树），Session root 取消
   保留给 freeze 与 Shutdown；LLM checkpoint 与 Tool outcome 的落账均为取消无关（shield）。
 - **Session isolation**：coordinator/writer 健康态每 Session 独立；一个 Session freeze 不影响其他 Session 的

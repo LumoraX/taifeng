@@ -322,6 +322,8 @@ def make_http_request_tool(
         effect_kind="external_non_idempotent",
         reconciliation="manual",
         timeout_seconds=timeout_seconds,
+        # 响应来自外部站点：结果打不可信来源标记（input-origin，ADR 0085）
+        output_trust="untrusted",
     )
 
 

@@ -23,39 +23,34 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from taifeng.conversation.models import (
-    ResponseItem,
-    spawn_settled_item,
-    user_message,
-)
+from taifeng.loop import spawn_settle
 from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.event import (
     EventMsg,
-    SpawnCancelled,
-    SpawnCompleted,
-    SpawnFailed,
     SpawnStarted,
-    SpawnSuspended,
 )
 from taifeng.loop.peer_mailbox import PeerMailbox
+from taifeng.loop.spawn import SpawnRejectedError
 from taifeng.loop.spawn_barrier import JoinBarrierCoordinator
 from taifeng.loop.spawn_handle import (
     SpawnDrivePlan,
     SpawnHandle,
     SpawnHandleRegistry,
 )
+from taifeng.loop.spawn_ledger import anchor_spawn, open_spawn
 from taifeng.loop.spawn_resume import SpawnResumeChain
 from taifeng.loop.spawn_rewind import SpawnRewindChain
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
+    from taifeng.conversation.models import ResponseItem
+    from taifeng.conversation.origin import InputOrigin
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
     from taifeng.loop.submission import Submission
 
 logger = logging.getLogger(__name__)
-
 
 class SpawnDriver:
     """detached-spawn 协调器：句柄 / 分离驱动 / 错峰 resume / join-barrier / 冷恢复。
@@ -99,6 +94,10 @@ class SpawnDriver:
         # history → 登记 live runner」段与 peer 投递的「非 live 判定 → 落史 / 唤醒」
         # 段互斥,杜绝消息落在「已重载、未登记」窗口只存 store 不进 buffer(热冷分叉)。
         self._thread_locks: dict[str, asyncio.Lock] = {}
+        # 审计模式：handle_id → 子 thread 的审计状态（子 runner 的效果记在子 thread 名下）。
+        self._audit_children: dict[str, Any] = {}
+        # 终态正在持久化的句柄:其他收敛路径见到即让开(终态恰好一次)。
+        self._settling: set[str] = set()
         # 子协调器（spawn-module-structure 契约:无自有状态,经本 driver 访问
         # 上述运行态表;公共入口由本类同名转发器暴露,外部契约不变）。
         self._peers = PeerMailbox(self)
@@ -132,6 +131,7 @@ class SpawnDriver:
     async def spawn_skill(
         self, *, skill_id: str, args: dict[str, Any], reason: str,
         deadline_seconds: float | None = None,
+        handle_id: str | None = None,
     ) -> dict[str, str]:
         """分离式发起一个子 skill：立即返回句柄，子 skill 在后台分离 task 跑完。
 
@@ -139,33 +139,33 @@ class SpawnDriver:
         上的 detached ``asyncio.create_task`` 跑（非阻塞），登记句柄后立刻返回。
         后台 task（``_drive_spawn``）跑完后回写句柄状态并 emit 终态事件。
 
-        准入门控与 ``call_skill`` 一致（除 reject 分类细化留待后续 task）：
-          1. 目标 skill 必须存在（unknown_skill → ValueError）
-          2. ``DispatchPolicy.check``（深度 / 环 / 白名单 / 不可调 entry）→ 拒绝即抛错
-          3. K1 spawn 配额预留（``SpawnSlotRegistry`` 超限 → SpawnLimitError 上抛）
+        准入门控与 ``call_skill`` 一致，拒绝带稳定分类（``reject_reason``，ADR 0078）：
+          1. 目标 skill 必须存在（``SpawnRejectedError(unknown_skill)``）
+          2. ``DispatchPolicy.check``（深度 / 环 / 白名单）→ ``SpawnRejectedError(<reason>)``
+          3. K1 spawn 配额预留（``SpawnSlotRegistry`` 超限 → ``SpawnLimitError`` 上抛）
 
         Args:
             skill_id: 要分离发起的子 skill id（须在 entry skill 的 child_skills 白名单内）。
             args: 子 skill 的种子输入（序列化为子 thread 首条 user_message）。
             reason: LLM / 业务自陈的发起理由（透传到事件 / 审计，taifeng 不解析语义）。
+            handle_id: 调用方指定的句柄 id（``spawn_skill`` 工具按 turn 与调用 id 派生，让录后重放
+                得到同样的句柄，ADR 0105）；None 或已被占用时随机生成。
 
         Returns:
             ``{"handle_id": ..., "child_thread_id": ...}`` —— 立即可用于 ``spawn_status``。
 
         Raises:
-            ValueError: 目标 skill 不存在。
-            DispatchRejectedError 语义：派发被策略拒绝（此处直接抛 ValueError 带 reason）。
+            SpawnRejectedError: 目标 skill 不存在，或派发被策略拒绝（``ValueError`` 子类）。
             SpawnLimitError: K1 spawn 配额超限。
             RuntimeError: engine.run 尚未启动（根取消 token 未就绪）。
         """
-        import json
         import secrets
 
         eng = self._engine
         # 1. 目标 skill 必须存在
         target = eng._snapshot.get(skill_id)  # noqa: SLF001
         if target is None:
-            raise ValueError(f"unknown_skill: {skill_id}")
+            raise SpawnRejectedError("unknown_skill", skill_id=skill_id)
 
         # 2. DispatchPolicy 门控：以 entry skill 为唯一栈帧的调用栈做派发裁决
         from taifeng.skill.dispatch import CallStack
@@ -181,7 +181,9 @@ class SpawnDriver:
             allow_entry_target=True,
         )
         if not verdict.allowed:
-            raise ValueError(f"dispatch_rejected: {verdict.reason}")
+            raise SpawnRejectedError(
+                verdict.reason or "not_in_whitelist", skill_id=skill_id, path=verdict.path
+            )
 
         # spawn_skill 紧随 get_or_create 调用时可能 run() 尚未被调度 → 有界让步等待
         # 根取消 token 就绪（R4：分离 task 必须挂在根取消树上，不可凭空造游离 token）。
@@ -198,24 +200,18 @@ class SpawnDriver:
         # 一旦 create_task 成功，子 task 的 finally 负责释放，本路径不再释放。
         try:
             # 4. 建 child thread + 落种子 user_message（与 turn.py::_spawn_sub_runner 对账）
-            handle_id = f"sp_{secrets.token_hex(4)}"
-            child_thread_id = await eng._store.create_thread(  # noqa: SLF001
-                cwd=None,
-                entry_skill_id=skill_id,
-                source=f"spawn:{eng._entry_skill.id}",  # noqa: SLF001
-                extra={
-                    "parent_thread_id": eng._thread_id,  # noqa: SLF001
-                    "spawn_handle_id": handle_id,
-                    "reason": reason,
-                },
+            #    C1 修复：seed 只创建一次，落盘后传递给 _drive_spawn，不再重建。
+            if handle_id is None or self._spawn_handles.get(handle_id) is not None:
+                handle_id = f"sp_{secrets.token_hex(4)}"
+                while self._spawn_handles.get(handle_id) is not None:
+                    handle_id = f"sp_{secrets.token_hex(4)}"
+            opened = await open_spawn(
+                eng, handle_id=handle_id, target=target, args=args, reason=reason,
+                deadline_seconds=deadline_seconds,
             )
-            # C1 修复：seed 只创建一次，此处落盘并传递给 _drive_spawn。
-            # _drive_spawn 不再重建 seed（那会产生新 id，导致 store 里的 id 与
-            # 内存中 history_buffer[0].id 不一致，冷恢复时会重建出不同的消息图谱）。
-            seed = user_message(
-                json.dumps(args, ensure_ascii=False), thread_id=child_thread_id
-            )
-            await eng._store.append(seed)  # noqa: SLF001
+            child_thread_id, seed = opened.child_thread_id, opened.seed
+            if opened.audit_state is not None:
+                self._audit_children[handle_id] = opened.audit_state
 
             # 5. 登记句柄 + 在 parent thread 落 spawn 锚（冷恢复可重建 registry）+ emit
             self._spawn_handles.register(
@@ -228,17 +224,10 @@ class SpawnDriver:
             cancel = eng._root_cancel.child(  # noqa: SLF001
                 f"spawn:{handle_id}", deadline_seconds=deadline_seconds)
             self._spawn_cancels[handle_id] = cancel
-            from taifeng.conversation.models import spawn_item
-
-            anchor = spawn_item(
-                handle_id=handle_id,
-                skill_id=skill_id,
+            await anchor_spawn(
+                eng, handle_id=handle_id, skill_id=skill_id,
                 child_thread_id=child_thread_id,
-                thread_id=eng._thread_id,  # noqa: SLF001
             )
-            async with eng._lock:  # noqa: SLF001
-                eng._history.append(anchor)  # noqa: SLF001
-            await eng._store.append(anchor)  # noqa: SLF001
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnStarted(data={
@@ -427,6 +416,7 @@ class SpawnDriver:
                     history=plan.history,
                     auto_retry_count=plan.auto_retry_count,
                     sample_scope_id=plan.sample_scope_id,
+                    audit_state=self._audit_children.get(handle_id),
                 )
                 if plan.seed_pending_call_id is not None:
                     # rewind retry_tool:采样前先补跑被保留的悬空 call
@@ -439,7 +429,7 @@ class SpawnDriver:
             try:
                 outcome = await runner.run()
             finally:
-                self._live_runners.pop(child_tid, None)
+                await self._peers.retire_runner(child_tid, runner)
             await self._finalize_spawn(handle_id, child_tid, outcome)
         except Exception as e:  # noqa: BLE001
             # 兜底:不让句柄卡死在 running。记日志(不静默)+ 单点收敛失败终态
@@ -450,188 +440,6 @@ class SpawnDriver:
         finally:
             # K1:无论谁预留的 slot,都在驱动收尾时释放。
             eng._spawn_registry.release_manual()  # noqa: SLF001
-
-    async def _finalize_spawn(
-        self, handle_id: str, child_thread_id: str, outcome: Any
-    ) -> None:
-        """按子 turn 的 end_reason 回写句柄状态并 emit 对应终态事件。
-
-        - completed → done + SpawnCompleted(result=final_text)
-        - suspended → suspended + SpawnSuspended（Resume 经 match_suspended_spawn 路由续跑）
-        - cancelled → cancelled + SpawnCancelled
-        - 其余（error / 未知）→ error + SpawnFailed
-
-        **终态幂等（单点收敛）**：若句柄已处于终态（done/error/cancelled），直接
-        no-op 返回——不覆盖状态、不重复 emit、不重复跑 _check_barriers。这使
-        _finalize_spawn 成为唯一安全收敛点：kill 一个 running spawn 时，
-        kill_spawn 已显式取消 token 但**不**内联落终态/emit（见 kill_spawn），
-        由被取消的 live runner 退栈后唯一一次走到本方法 emit SpawnCancelled；
-        而 kill 一个 suspended spawn（无 live runner 驱动本方法）由 kill_spawn
-        内联收敛。两路径合计对同一句柄**恰好一次** SpawnCancelled。
-        """
-        eng = self._engine
-        # 终态幂等：已收敛的句柄不再二次处理（防 running-kill 双发 spawn_cancelled）。
-        if self._spawn_handles.is_terminal(handle_id):
-            return
-        end = outcome.end_reason
-        if end == "completed":
-            self._spawn_handles.set_result(
-                handle_id, status="done", result=outcome.final_text
-            )
-            await self._persist_settled(child_thread_id, "done", outcome.final_text)
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle_id,
-                msg=SpawnCompleted(data={
-                    "handle_id": handle_id, "result": outcome.final_text,
-                }),
-            ))
-        elif end == "suspended":
-            # 子 thread 内已落 SuspensionRecord 并 emit turn_suspended；句柄标 suspended。
-            # Resume(thread_id=child_thread_id) 经 match_suspended_spawn 命中后由
-            # resume_spawn / resume_spawn_nested 续跑（支持多轮错峰 HITL）。
-            self._spawn_handles.set_result(
-                handle_id, status="suspended", result=None
-            )
-            # record_id 与 pending 同源派生：消费方按 (handle_id, record_id) 做幂等键
-            # —— 首挂 / 每次二次挂起各带不同 record_id（新挂起点 = 新 record），
-            # 同一 record_id 重放（冷恢复 / 部分核销后仍挂）视作同一逻辑挂起。
-            # 与 turn_suspended 的 record_id 同源，便于跨事件对齐。
-            suspension = outcome.suspension
-            pending = (
-                suspension.to_item().payload["pending"]
-                if suspension is not None
-                else []
-            )
-            record_id = suspension.record_id if suspension is not None else None
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle_id,
-                msg=SpawnSuspended(data={
-                    "handle_id": handle_id,
-                    "thread_id": child_thread_id,
-                    "record_id": record_id,
-                    "pending": pending,
-                }),
-            ))
-        elif end == "cancelled":
-            self._spawn_handles.set_result(
-                handle_id, status="cancelled", result=outcome.error
-            )
-            await self._persist_settled(child_thread_id, "cancelled", outcome.error)
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle_id,
-                msg=SpawnCancelled(data={"handle_id": handle_id}),
-            ))
-        else:
-            # error / max_iterations / resource_limit 等非成功终态 → error
-            err = outcome.error or end
-            self._spawn_handles.set_result(
-                handle_id, status="error", result=err
-            )
-            await self._persist_settled(child_thread_id, "error", err)
-            await eng._emit(EventMsg(  # noqa: SLF001
-                submission_id=handle_id,
-                msg=SpawnFailed(data={"handle_id": handle_id, "error": err}),
-            ))
-        # join-barrier:本 spawn 进入终态(含 suspended——但 suspended 非终态,
-        # all_terminal 不满足 → 不触发),检查是否凑齐某 barrier 的全终态条件。
-        await self._check_barriers(handle_id)
-
-    async def _settle_failed(
-        self,
-        handle_id: str,
-        error: str,
-        *,
-        suppress_barrier_errors: bool = False,
-    ) -> None:
-        """失败终态的**唯一收敛点**:回写 error + emit SpawnFailed + barrier 重查。
-
-        (spawn-terminal-single-convergence)任何使句柄进入 error 终态的路径
-        ——abort 裁决 / 驱动·续跑·唤醒的宽 except 兜底——必须走本方法,禁止
-        各自手写三件套。历史事故:abort 分支漏调 ``_check_barriers``,被等待的
-        句柄虽落终态但 barrier 永不重查 → 聚合 turn 永不触发、下游挂死。
-
-        终态幂等(对齐 ``_finalize_spawn`` 守卫):已终态句柄 no-op——不覆盖
-        状态、不重复 emit、不重复 barrier 重查;终态事件对外恰好一次。
-
-        Args:
-            handle_id: 要收敛的 spawn 句柄 id。
-            error: 失败原因串(落入句柄 result 与 SpawnFailed.error)。
-            suppress_barrier_errors: True(仅限 except 兜底场景)时 barrier
-                重查自身抛错只 ``logger.exception`` 记日志、不外抛——此时原始
-                异常已记录、句柄终态与 SpawnFailed 已完成,barrier 配置故障
-                (如聚合 skill 随 snapshot 热更消失)不得逃出后台 task 成为
-                unhandled exception;False(正常控制流,如 abort 裁决分支)
-                时自然向上传播,禁 silent fallback。
-        """
-        eng = self._engine
-        # 终态幂等:已收敛句柄不二次处理(终态事件恰好一次)。
-        if self._spawn_handles.is_terminal(handle_id):
-            return
-        handle = self._spawn_handles.get(handle_id)
-        assert handle is not None  # is_terminal 已判存在
-        self._spawn_handles.set_result(handle_id, status="error", result=error)
-        await self._persist_settled(handle.child_thread_id, "error", error)
-        await eng._emit(EventMsg(  # noqa: SLF001
-            submission_id=handle_id,
-            msg=SpawnFailed(data={"handle_id": handle_id, "error": error}),
-        ))
-        # join-barrier:本句柄进入 error 终态,可能凑齐某 barrier 的全终态条件。
-        try:
-            await self._check_barriers(handle_id)
-        except Exception:
-            if not suppress_barrier_errors:
-                raise
-            # 兜底场景:句柄已收敛、事件已发,仅 barrier 触发这一独立故障被
-            # 显式记录(冷恢复 rebuild_from_history 末尾补查可兜底)。
-            logger.exception(
-                "join-barrier recheck failed after spawn settled error: %s",
-                handle_id)
-
-    async def _persist_settled(
-        self, child_thread_id: str, status: str, result: str | None,
-    ) -> None:
-        """终态持久锚:向子 thread append ``spawn_settled``(三个收敛点共用)。
-
-        冷恢复 ``_infer_spawn_status_from_child`` 据此得到与热状态一致的终态,不再
-        凭「有无 assistant 文本」猜 done(wave2b 复现 f)。durable 先于 emit。
-        """
-        handle_id = next(
-            h.handle_id for h in self._spawn_handles.handles.values()
-            if h.child_thread_id == child_thread_id
-        )
-        await self._engine._store.append(spawn_settled_item(  # noqa: SLF001
-            handle_id=handle_id, status=status, result=result,
-            thread_id=child_thread_id,
-        ))
-
-    async def _settle_cancelled_suspended(self, handle: SpawnHandle) -> None:
-        """挂起句柄的 cancelled 收敛(kill / 续跑链取消共用):落盘 + 撤销 TTL + emit + barrier。
-
-        前置:调用方已在**同步步**把句柄置 cancelled(与 token.cancel 同步,使并发
-        resume 的 CAS 据此放弃)。无 live runner 驱动 _finalize_spawn,故在此内联。
-        落盘两条(append-only,子 thread):
-          - ``suspend_resolved:<record_id>`` marker:活跃挂起随取消一并核销——否则
-            冷恢复推断回 suspended(僵尸复活)、TTL 重武装后对已 kill 句柄提交裁决、
-            match_suspended_spawn 允许再次 Resume(wave2b 复现 e);
-          - ``spawn_settled(cancelled)`` 终态锚。
-        同时撤销该 record 的到期定时器(R4:被 kill 的句柄不再收到裁决)。
-        """
-        eng = self._engine
-        child_tid = handle.child_thread_id
-        record = eng._find_active_suspension_in(  # noqa: SLF001
-            await eng._load_thread_items(child_tid))  # noqa: SLF001
-        if record is not None:
-            timer = eng._ttl_timers.pop(record.record_id, None)  # noqa: SLF001
-            if timer is not None:
-                timer.cancel()
-            await eng._append_resolved_marker(child_tid, record.record_id)  # noqa: SLF001
-        await self._persist_settled(child_tid, "cancelled", None)
-        await eng._emit(EventMsg(  # noqa: SLF001
-            submission_id=handle.handle_id,
-            msg=SpawnCancelled(data={"handle_id": handle.handle_id}),
-        ))
-        # join-barrier:本句柄进入 cancelled 终态,可能凑齐某 barrier → 检查。
-        await self._check_barriers(handle.handle_id)
 
     def suspended_handles(self) -> list[SpawnHandle]:
         """当前 suspended 状态句柄的只读快照(suspension-ttl 冷重武装枚举用)。"""
@@ -785,10 +593,11 @@ class SpawnDriver:
         mode: str = "queue_only",
         from_thread_id: str | None = None,
         submission_id: str | None = None,
+        origin: InputOrigin | None = None,
     ) -> dict[str, Any]:
-        """转发到 ``PeerMailbox.deliver_peer_message``（公共入口签名不变）。"""
+        """转发到 ``PeerMailbox.deliver_peer_message``。"""
         return await self._peers.deliver_peer_message(
-            target=target, text=text, mode=mode,
+            target=target, text=text, mode=mode, origin=origin,
             from_thread_id=from_thread_id, submission_id=submission_id)
 
     async def wait_spawn_terminal(
@@ -800,7 +609,19 @@ class SpawnDriver:
     ) -> dict[str, Any]:
         """转发到 ``PeerMailbox.wait_spawn_terminal``（``wait_peer`` 工具实现体）。"""
         return await self._peers.wait_spawn_terminal(
-            handle_id=handle_id, timeout_seconds=timeout_seconds, cancel=cancel)
+            handle_id=handle_id, timeout_seconds=self._bounded_wait(timeout_seconds),
+            cancel=cancel)
+
+    def _bounded_wait(self, timeout_seconds: float) -> float:
+        """审计模式下等待时长不超过工具收敛期限的一半；非审计原样返回。
+
+        审计模式里一次工具调用必须在收敛期限内给出结果，否则 Session 冻结。等待到点返回
+        ``timeout`` 是正常结果，模型可以再等一次。
+        """
+        state = self._engine._audit_state  # noqa: SLF001
+        if state is None:
+            return timeout_seconds
+        return min(timeout_seconds, state.coordinator.finalization_timeout / 2)
 
     async def wait_spawn_any(
         self,
@@ -811,8 +632,8 @@ class SpawnDriver:
     ) -> dict[str, Any]:
         """转发到 ``PeerMailbox.wait_spawn_any``（``wait_any`` 工具实现体）。"""
         return await self._peers.wait_spawn_any(
-            handle_ids=handle_ids, timeout_seconds=timeout_seconds, cancel=cancel)
-
+            handle_ids=handle_ids, timeout_seconds=self._bounded_wait(timeout_seconds),
+            cancel=cancel)
 
     # -----------------------------------------------------------------
     # join-barrier + 冷恢复 —— 实现体在 loop/spawn_barrier.py（JoinBarrierCoordinator）
@@ -840,3 +661,13 @@ class SpawnDriver:
     async def rebuild_from_history(self) -> None:
         """转发到 ``JoinBarrierCoordinator.rebuild_from_history``（冷恢复，R5）。"""
         await self._barriers.rebuild_from_history()
+
+    # -----------------------------------------------------------------
+    # 终态收敛的方法体在 spawn_settle.py（W7.1 拆文件，零行为变更）；此处按原名赋值，
+    # driver 仍是唯一白盒寻址面。
+    # -----------------------------------------------------------------
+    _finalize_spawn = spawn_settle._finalize_spawn
+    _settle_failed = spawn_settle._settle_failed
+    _settle = spawn_settle._settle
+    _persist_settled = spawn_settle._persist_settled
+    _settle_cancelled_suspended = spawn_settle._settle_cancelled_suspended

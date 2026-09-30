@@ -77,4 +77,5 @@ def make_request_user_input_tool(
         },
         handler=handler,
         parallel_safe=False,
+        can_suspend=True,
     )

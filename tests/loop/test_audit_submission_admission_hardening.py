@@ -176,11 +176,7 @@ async def test_freeze_during_definite_accept_retires_hidden_work(
     committed = [
         envelope async for envelope in real_core.load("ses_audit_submission")
     ]
-    assert [item.record_type for item in committed[3:]] == [
-        "submission_accepted",
-        "conversation_item",
-        "submission_applied",
-    ]
+    assert [item.record_type for item in committed[3:]] == ["submission_accepted"]
     assert isinstance(submission_error, SessionAuditFrozenError)
     assert coordinator.snapshot().accepted_work_ids == ()
 
@@ -196,7 +192,7 @@ async def test_actor_rejects_coordinated_payload_tamper_with_stale_hashes(
     tmp_path: Path,
     skills_dir: Path,
 ) -> None:
-    """三 envelope 业务字段即使协调一致，旧 hash receipt 也不得应用到 hot history。"""
+    """准入记录的业务字段被改写后，旧 hash receipt 不得应用到 hot history。"""
     engine, coordinator, _ = await _engine_with_audit(
         tmp_path,
         skills_dir,
@@ -209,11 +205,6 @@ async def test_actor_rejects_coordinated_payload_tamper_with_stale_hashes(
     accepted_payload = dict(envelopes[0].payload)
     accepted_payload["text"] = "forged but coordinated"
     envelopes[0] = envelopes[0].model_copy(update={"payload": accepted_payload})
-    conversation_payload = dict(envelopes[1].payload)
-    item_payload = dict(conversation_payload["payload"])
-    item_payload["text"] = "forged but coordinated"
-    conversation_payload["payload"] = item_payload
-    envelopes[1] = envelopes[1].model_copy(update={"payload": conversation_payload})
     object.__setattr__(token, "envelopes", tuple(envelopes))
     engine._submissions.put_nowait(token)  # noqa: SLF001
     cancel = CancellationToken(name="test-root")

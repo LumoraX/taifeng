@@ -8,7 +8,7 @@ ToolContext.extras 必须含 ``skill_snapshot``。
 
 附属文件的安全边界：路径必须解析在该 skill 目录内（拒绝 ``..`` 与符号链接逃逸）、
 必须是 UTF-8 文本、大小不超过 ``MAX_SKILL_FILE_BYTES``；可见性与读正文同一规则
-（只能读当前 entry 可达图内的 skill）。
+（只能读当前 entry 可达图内的 skill；启用白名单外授权时，还包括当前 skill 可发现的 skill）。
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from taifeng.skill.authorization import is_discoverable_outside
+from taifeng.skill.working_set_runtime import view_from_extras
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
@@ -69,6 +71,21 @@ async def _read_skill_file(defn: SkillDefinition, raw_path: str) -> ToolResult:
     return ToolResult.ok(text, skill_id=defn.id, path=raw_path)
 
 
+def _discoverable_outside(skill_id: str, snapshot: SkillSnapshot, ctx: ToolContext) -> bool:
+    """该 skill 是否在当前 skill 的白名单外可发现范围内（未启用相位 4 时恒为 False）。"""
+    policy = ctx.extras.get("dispatch_policy")
+    caller = ctx.extras.get("current_skill")
+    authorization = getattr(policy, "authorization", None)
+    if authorization is None or caller is None:
+        return False
+    stack = ctx.extras.get("call_stack")
+    return is_discoverable_outside(
+        caller, skill_id, snapshot, authorization, ctx.extras.get("capabilities"),
+        on_stack=stack.path() if stack is not None else (),
+        hidden=view_from_extras(ctx.extras).hidden,
+    )
+
+
 async def _read_skill_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """取 skill 正文（无 path）或附属文件（有 path）。"""
     skill_id = args.get("skill_id")
@@ -80,8 +97,13 @@ async def _read_skill_handler(args: dict[str, Any], ctx: ToolContext) -> ToolRes
         return ToolResult.error("skill_snapshot not in tool context", reason="config_error")
 
     # 权限边界：必须在「当前 entry skill 的可达图」内（正文与附属文件同一规则）
+    # 白名单外可发现的 skill 同样可读：试用（读说明书）先于准入（ADR 0089）
     visible: frozenset[str] | None = ctx.extras.get("visible_skills")
-    if visible is not None and skill_id not in visible:
+    if (
+        visible is not None
+        and skill_id not in visible
+        and not _discoverable_outside(skill_id, snapshot, ctx)
+    ):
         return ToolResult.error(
             f"skill_not_visible: {skill_id} not reachable from current entry skill",
             reason="not_visible",

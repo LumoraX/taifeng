@@ -26,6 +26,17 @@ handler SHALL 实现**两阶段原子语义**：
 
 任一 phase 1 校验失败 SHALL 返回 `ToolResult.error` 且 **0 文件被改**。
 
+**权限（效果模型）**：`policy` 非空时，handler SHALL 按以下顺序执行——
+
+1. **路径解析**（不读文件内容）：PatchSpec 互斥校验 + 沙盒解析；失败 → `patch_validation_failed`，SHALL NOT 发出任何审批请求；
+2. **逐路径审批**：对每个**不同的**解析后路径按首次出现顺序各发一条
+   `PermissionRequest(scope="file_write", target=<绝对路径>, metadata={tool: "apply_patch", patch_kinds, patch_count, thread_id, call_id, submission_id})`；
+   `patch_kinds` 是落在该路径上的 patch 类型列表（edit / create / delete，delete 同属写效果）；同一路径多条 patch 只审批一次；
+3. 任一路径被拒 → `ToolResult.error(reason="permission_denied", denied_path=<绝对路径>)`，整组不执行、**0 文件被改**，且 SHALL NOT 继续审批其余路径；
+4. 审批全过后才进入 phase 1 内容校验（读文件）与 phase 2——被拒的请求不得从报错中探知目标文件内容。
+
+handler MUST NOT 以 `tool_use` 形状发请求（见 [permission-gate](permission-gate.md)）。`policy=None` 不审批（同 `file_write`）。
+
 #### Scenario: edit 成功修改文件
 - **WHEN** 沙盒内 `foo.py` 含 `def f(x): return x`
 - **AND** LLM 调 `apply_patch({"patches": [{"path": "foo.py", "old_text": "def f(x): return x", "new_text": "def f(x): return x + 1"}]})`
@@ -60,6 +71,20 @@ handler SHALL 实现**两阶段原子语义**：
 #### Scenario: create 已存在的 path 拒绝
 - **WHEN** path 已存在的文件被请求 create
 - **THEN** SHALL 失败，reason 含 `path_exists`
+
+#### Scenario: 按路径的写禁令拦住补丁
+- **GIVEN** 策略含 deny 规则 `FileWrite(<root>/protected/*)`，其余放行
+- **WHEN** patches=[create `ok.txt`, edit `protected/conf.txt`]
+- **THEN** SHALL 返回 `reason="permission_denied"`，`denied_path` 为 `protected/conf.txt` 的绝对路径
+- **AND** `ok.txt` SHALL 未被创建、`protected/conf.txt` SHALL 未被修改
+
+#### Scenario: 同一路径只审批一次
+- **WHEN** 两条 edit 落在同一文件（路径写法不同但解析后相同）
+- **THEN** SHALL 只发出一条 `file_write` 请求，`metadata.patch_kinds == ["edit", "edit"]`
+
+#### Scenario: 越出沙盒不进审批
+- **WHEN** 任一 patch 的 path 解析后越出 `root_dir`
+- **THEN** SHALL 返回 `patch_validation_failed`，且 SHALL NOT 发出任何审批请求
 
 ### Requirement: 子进程默认继承最小 env 白名单
 

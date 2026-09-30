@@ -197,7 +197,7 @@ PostToolUse handler 返回 `HookDecision.ok(output_override=<str>)` 时，`ToolR
 
 ### Requirement: HookRegistry 桶位完整性（无死代码）
 
-`HookRegistry._handlers` dict SHALL 包含 9 个 kind 桶位，且所有 9 个桶位 SHALL 在 `src/taifeng/` 内有至少一个调用点（即不存在"声明但未触发"的死代码）。
+`HookRegistry._handlers` dict SHALL 包含 10 个 kind 桶位，且所有 10 个桶位 SHALL 在 `src/taifeng/` 内有至少一个调用点（即不存在"声明但未触发"的死代码）。
 
 具体调用点映射（实现层文档，spec 只约束契约）：
 
@@ -210,8 +210,50 @@ PostToolUse handler 返回 `HookDecision.ok(output_override=<str>)` 时，`ToolR
 - `post_skill_dispatch` → `tool/builtins/call_skill.py`：仅审计 run_audit_only
 - `pre_script_use` → `tool/builtins/run_script.py`：deny → run_script 返回 hook_denied error
 - `post_script_use` → `tool/builtins/run_script.py`：仅审计 run_audit_only
+- `outbound_message` → `loop/outbound.py::emit_outbound`（`TurnRunner.run` 发 `turn_completed` 之前）：不可否决；可经 `text_override` 改写出站文本（见下）
 
-#### Scenario: 9 个 hook kind 都有调用点
-- **WHEN** 静态扫描 `grep -rn 'hooks.run\|hook_runner.run\|run_audit_only' src/`
-- **THEN** SHALL 至少出现以下 9 类 hook kind 的调用：上表 9 项全覆盖
+#### Scenario: 10 个 hook kind 都有调用点
+- **WHEN** 静态扫描 `grep -rn 'hooks.run\|hook_runner.run\|run_audit_only\|registry.handlers' src/`
+- **THEN** SHALL 至少出现以下 10 类 hook kind 的调用：上表 10 项全覆盖
+
+### Requirement: outbound_message 可改写出站文本（ADR 0086）
+
+root turn 到达真终态时，若注册了 `outbound_message` handler，系统 SHALL 在发 `turn_completed` **之前**串行执行全部
+handler，并 emit `outbound_message{text, rewritten, raw_chars, end_reason, success, thread_id}`。
+
+- hook 数据 `OutboundMessageHook{text, end_reason, success, iteration}`；首个 handler 的 `text` 是模型原话
+  （`TurnOutcome.final_text`，各采样圈文本的拼接），之后的 handler 看到前一个改写后的文本；
+- handler 返回 `HookDecision.ok(text_override="...")` 即改写；未给 `text_override` 则文本不变；
+- **不可否决**：handler 返回 deny、抛异常、或 `text_override` 不是字符串时，SHALL 记错误日志、文本保持上一步的结果、
+  后续 handler 照常执行、turn 照常以 `turn_completed` 结束；
+- 改写 SHALL NOT 影响 history 与 transcript 里的 `assistant_message`；
+- 触发范围：仅 root turn；`end_reason == "suspended"` 不触发；取消 / 失败类终态照常触发；
+  `call_skill` 子 turn 与 detached spawn 不触发；
+- 未配置 hooks 或该桶位为空时 SHALL NOT emit `outbound_message`（事件流与引入前一致）。
+
+内核自带的归一化 `loop/outbound.py::normalize_outbound_text(text) -> (text, notes)`，以及把它包成 handler 的
+`make_outbound_normalizer_hook()`（opt-in，业务自行注册）。规则只作用于围栏代码块之外：
+
+| note | 处理 |
+| --- | --- |
+| `reasoning_block` | 去掉成对的 `<think>` / `<thinking>` 块（不区分大小写、可跨行；未闭合的不动） |
+| `newlines` | CRLF / CR 统一为 LF |
+| `trailing_whitespace` | 去掉行尾空白 |
+| `blank_lines` | 三个及以上连续换行压成两个 |
+| `trimmed` | 去掉首尾空白 |
+
+归一化幂等。没有任何处理时 handler 不给 `text_override`，事件 `rewritten == false`。
+
+#### Scenario: 去掉漏进正文的推理块
+- **GIVEN** 注册了 `make_outbound_normalizer_hook()`，模型最终回答为 `<think>先想想</think>结论如下  \n\n\n\n完`
+- **THEN** `outbound_message.text == "结论如下\n\n完"`、`rewritten == true`，且先于 `turn_completed`
+- **AND** history 里该 `assistant_message` 的文本仍是模型原话
+
+#### Scenario: 脱敏与签名链式生效
+- **GIVEN** 先后注册了脱敏 handler 与签名 handler
+- **THEN** 签名 handler 看到的是脱敏后的文本；事件里的文本同时带有两者的效果
+
+#### Scenario: handler 出错不影响 turn
+- **GIVEN** 三个 handler 分别抛异常、给出非字符串改写、返回 deny
+- **THEN** `outbound_message.text` 为模型原话、`rewritten == false`；turn 以 `turn_completed` 结束；有错误日志
 

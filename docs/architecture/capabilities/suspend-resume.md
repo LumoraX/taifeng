@@ -127,6 +127,7 @@ Resume(thread_id, resolutions)
 ### Requirement: 四种 reason 的 resume 语义
 
 - **permission allow**（`granted=true`）：resume 时**真正执行**该挂起 tool（`engine._execute_resumed_tool`，复用 `tool_runtime.dispatch`，走 RwLock），回填 `function_call_output`。执行前调 `PermissionPolicy.preapprove(call_id)` 一次性放行，避免 `SuspendingPrompter` 二次挂起（防无限挂）。
+  - **派发类工具（`call_skill`）在续跑的 turn 内重跑**：它依赖 TurnRunner 提供的调用栈与调度器，engine 层的最小上下文跑不了它。Resume 只登记预批准，续跑的 turn 在采样前先补跑这些调用（一次批准多个时按原顺序逐个重跑）；重跑又挂起（下一道审批、子 skill 挂起）则照常落新的挂起。续跑只在 record 全量核销后发生，故这类批准必须出现在结清 record 的那次 Resume 里，否则 `suspension_resolve_rejected(dispatch_approval_requires_full_resolution)`，`detail.call_ids` 列出涉及的调用，状态不变。仅根 thread。
 - **permission deny**（`granted=false`）：回填 `is_error=True` 的 `function_call_output`（`permission_denied: <reason>`），让模型据此改写后续。
 - **form / data**：`resolutions[request_id]` 直接 JSON 序列化成该 `related_call_id` 的 `function_call_output`（`is_error=False`），**不重跑 tool**。
 - **system_retry**：`action=retry`（默认）→ 不动 history，重跑那次 `_sample_once`（获全新 retry 预算）；`action=abort` → turn 终止不续跑。retry 自动机制：`_sample_once` 命中可恢复错误先走 `RetryConfig`（默认 `max_attempts=3`）自动退避重试；**3 次耗尽**或确定性"等外部介入"类（`provider_auth` / `provider_quota` / `provider_balance`）才转 `SYSTEM_RETRY` 挂起。`ContentFilter` / `ContextOverflow` / `InvalidRequest` 这类确定性失败在**默认（保守）policy** 下不挂起、照旧硬失败；注入 `SuspendByDefaultPolicy` 后同样转 `SYSTEM_RETRY` 挂起（裁决权见下「失败处置裁决 policy」）。
@@ -250,6 +251,10 @@ Resume(thread_id, resolutions)
 
 挂起期间收到 `CancelTurn`（目标为挂起 turn 的 submission），`_cancel_active_suspension` SHALL 追加一条 resolved-marker 丢弃该挂起（与 resume 同机制），使其不再被 `_find_active_suspension` 返回；后续 Resume 命中 `no_active_suspension` 被拒。无匹配挂起则 no-op（保持 CancelTurn 宽容语义）。协程已退栈，不阻塞主 actor。
 
+挂起期间收到 `Rewind`：挂起随截断一并作废（不写 resolved-marker，rewind marker 的截断已使该 record 不在逻辑 history 中），
+`turn_rewound.discarded_suspension` 给出被作废的 record id；被拒的 `Rewind` 不作废挂起。见
+[turn-rewind § 挂起态下的 rewind](turn-rewind.md)。
+
 #### Scenario: 挂起中 CancelTurn → 丢弃
 - **WHEN** turn 已 end_reason=suspended，对其 submission 发 `CancelTurn`
 - **THEN** 落 resolved-marker（emit EngineLog）；之后 `Resume` 被拒为 `no_active_suspension`
@@ -264,6 +269,23 @@ Resume(thread_id, resolutions)
 #### Scenario: 跨进程重建续跑
 - **WHEN** engine A 挂起后进程退出；engine B 从同 `thread_id` 重建（`resume_thread_id`），随后 `Resume`
 - **THEN** `_find_active_suspension` 从重建 history 还原 record，配对续跑成功
+
+### Requirement: 审计模式下的挂起与恢复
+
+注入 `AuditConfig` 的 Session 只允许「在工具调用处停下等人作答」的挂起：`permission`（挂起式审批）与
+工具声明 `can_suspend=True` 后发起的 `form` / `data`。挂起、答复与处置都先落 Journal 再生效，
+完整契约见 [session-journal-business-integration §17](session-journal-business-integration.md)。与非审计模式的差异：
+
+- 一次 `Resume` 必须答复该挂起的全部请求；不适用的 `Resume` 在入队之前被拒并留下记录，
+  `submit()` 抛 `AuditedResumeRejectedError`。
+- `CancelTurn` 不丢弃挂起；放弃一次挂起用 `Resume` 拒绝其中的请求。
+- 带 `ttl_seconds` 的挂起、子 skill 内的挂起、失败处置挂起、资源护栏挂起是能力违约（冻结 Session）。
+- Session 在等待期间被释放时写 `session_detached` 而不是终结；之后凭 `resume_thread_id` 接管并提交 `Resume`。
+
+#### Scenario: 审批挂起 → 释放 → 接管 → 批准
+- **WHEN** 审计 Session 的工具调用遇到挂起式审批，pool 关闭；新 pool 以 `resume_thread_id` 接管后提交批准的 `Resume`
+- **THEN** Journal 依次为 `turn_suspended` → `session_detached` → `resume_accepted` → `suspension_resolved` →
+  `resume_applied` → 该调用的 `tool_outcome_committed`（指向挂起前的意图）；Session 最终正常终结
 
 ## R1–R5 影响（见设计 §7）
 

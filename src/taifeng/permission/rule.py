@@ -190,6 +190,8 @@ _PERMISSION_ALIAS_TABLE: dict[str, dict[str, Any]] = {
     "ShellExec":  {"scope": "shell_exec"},
     # 子 skill 派发 —— payload 匹配目标 skill id
     "Skill":      {"scope": "skill_dispatch"},
+    # 白名单外 skill 的派发授权 —— payload 匹配目标 skill id（ADR 0089）
+    "SkillAuthorization": {"scope": "skill_authorization"},
     # SKILL.md 脚本 —— payload 匹配 "<skill_id>/<script_name>"
     "Script":     {"scope": "script_exec"},
     # 文件 IO —— payload 匹配解析后的绝对路径
@@ -197,7 +199,7 @@ _PERMISSION_ALIAS_TABLE: dict[str, dict[str, Any]] = {
     "FileWrite":  {"scope": "file_write"},
     # 网络 —— payload 匹配 "<METHOD> <URL>"，省略 method 时任意 method 命中
     "Network":    {"scope": "network", "normalize": _normalize_network_pattern},
-    # 结构化补丁 —— 过渡形态：apply_patch 目前仍发 tool_use/apply_patch，不带路径
-    # （backlog：改按路径发 file_write 后此别名并入 FileWrite）
-    "ApplyPatch": {"scope": "tool_use"},
+    # 结构化补丁 —— apply_patch 按路径发 file_write（ADR 0073），此别名即 FileWrite
+    # 的同义词，保留是为了让既有 ``ApplyPatch(*)`` 规则继续可解析
+    "ApplyPatch": {"scope": "file_write"},
 }

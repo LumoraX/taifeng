@@ -313,21 +313,45 @@ def test_history_projection_requires_policy_and_capability() -> None:
     assert isinstance(message.content[1], FilePart)
 
 
-def test_strict_audit_admission_rejects_file_attachment() -> None:
-    """strict Journal 的 AttachmentV1 只有图片形状：文件在 acceptance 前显式拒绝。"""
+def test_strict_audit_admission_rejects_file_without_capability_or_policy() -> None:
+    """文件附件的准入与非审计路径同一口径：模型不支持或策略未启用，acceptance 前拒绝。"""
     state = SimpleNamespace(
         thread_id="t", max_attachment_bytes=1 << 20, max_total_attachment_bytes=1 << 20
     )
     submission = Submission(op=UserMessage(text="x", attachments=[pdf_attachment()]))
 
-    with pytest.raises(UnsupportedModalityError, match="strict audit journal"):
+    with pytest.raises(UnsupportedModalityError, match="does not support file input"):
         prepare_user_message(state, submission)  # type: ignore[arg-type]
+    with pytest.raises(UnsupportedModalityError):
+        prepare_user_message(
+            state, submission, model_input_capabilities=_FILE_CAPS,  # type: ignore[arg-type]
+        )
+
+
+def test_strict_audit_admission_accepts_file_attachment() -> None:
+    """模型支持且策略启用：文件附件以自己的 durable 形状通过准入（ADR 0095）。"""
+    from taifeng.conversation.journal.attachment_records import FileAttachmentRecordV1
+
+    state = SimpleNamespace(
+        thread_id="t", max_attachment_bytes=1 << 20, max_total_attachment_bytes=1 << 20
+    )
+    attachment = pdf_attachment()
+    submission = Submission(op=UserMessage(text="x", attachments=[attachment]))
+
+    prepared = prepare_user_message(
+        state, submission,  # type: ignore[arg-type]
+        model_input_capabilities=_FILE_CAPS, file_input_policy=_POLICY,
+    )
+
+    (record,) = prepared.attachments
+    assert type(record) is FileAttachmentRecordV1
+    assert (record.size, record.sha256) == (attachment["size"], attachment["sha256"])
 
 
 async def test_strict_audit_file_submission_is_durably_rejected(
     tmp_path: Path, skills_dir: Path
 ) -> None:
-    """真实 strict audit engine：只落脱敏 submission_rejected，不写 conversation item。"""
+    """文件策略未启用的 strict audit engine：只落脱敏 submission_rejected，不写 conversation item。"""
     from taifeng.loop.audit_admission import InvalidAuditedSubmissionError
     from tests.loop.test_audit_submission_admission import _engine_with_audit
 

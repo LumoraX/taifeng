@@ -259,7 +259,64 @@ class OffloadStrategy:
 
 契约：[capabilities/compaction-offload-strategy.md](capabilities/compaction-offload-strategy.md)。
 
-> `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim / Offload 四档谱系**。
+### 5. MultimodalEvictionStrategy（多模态重载荷驱逐，A4）
+
+把**旧条目**上的图片 / 文件附件换成一行描述，文本原样保留。参照 openclaw context-pruning（旧 image part 换占位文本）
+与 codex（超限时从历史剥离图片）。
+
+```python
+class MultimodalEvictionStrategy:
+    """旧条目上的附件换成描述；文本与最近的附件不动。"""
+
+    name = "multimodal_evict"
+    priority = 25                      # surgical_trim(20) 与 offload(30) 之间
+```
+
+- **只看附件、不动文本**：`user_message` 与 `function_call_output` 都处理；条目不增不减、身份与配对不变。
+- **描述保留指称能力**：类型、大小、文件名、sha256 前 8 位——模型仍能指称「那张图 / 那份文档」，业务可据摘要取回原件。
+- **「最近」按带附件的条目计数**（`keep_recent`），一次截图带两张图是一个整体；尾部保护范围内的附件不动也不占名额。
+- **选择性触发**：有上下文压力且确有可驱逐的附件才触发，否则让位给后面的档。
+- **窗口（R2）**：常规只动 anchor 之后；`allow_head_evict=True` 且 pre_turn 时可越 anchor，如实标 `cache_invalidated`。
+- **明细透出（R3）**：`detail = {"evicted_items", "evicted_attachments", "evicted_bytes"}`。
+
+契约：[capabilities/compaction-multimodal-eviction.md](capabilities/compaction-multimodal-eviction.md)。实验层导出。
+
+> `context/strategies/` 现导出 **Handoff / Sliding / SurgicalTrim / Offload / MultimodalEviction 五档谱系**。
+
+### 后台延迟压缩（ADR 0087）
+
+`BackgroundCompactionStrategy` 包装一组内层策略，把压缩计算挪到后台：
+
+```
+pre_turn 检查（估算 ≥ 软阈值）
+  ├─ 有算好的结果且前缀没变  → 立即应用（不调模型）
+  ├─ 估算 ≥ urgent_ratio     → 同步压缩（与不包装时相同）
+  └─ 其余                    → 后台开始算，本轮不压缩、照常进行
+```
+
+history 只追加，后台在快照上算出的结果可以直接接上之后新增的条目；前缀被改写过则结果作废。延迟逻辑完全落在
+`CompressionStrategy` 协议之内，主循环不感知。应作为 `compressors` 里唯一的策略（兜底策略放进内层）。
+
+契约：[capabilities/compaction-background.md](capabilities/compaction-background.md)。实验层导出。
+
+### 压缩增量基线（A5，ADR 0083）
+
+压缩腾出的空间有限时，估算会停在软阈值之上，之后每次预算检查都再压一次：每次都破坏缓存、每次都对摘要再做摘要。
+`ContextBudget.recompact_min_growth_ratio`（默认 0 = 关闭）打开后：
+
+```
+_maybe_compress(pre_turn | mid_turn)
+  ├─ 估算 < soft_limit                       → 不压
+  ├─ 估算 ≥ hard_limit                       → 照常压（不设闸）
+  ├─ 上次压缩有基线 且 估算 < 基线 + ceil(基线 × ratio)
+  │     → emit compaction_deferred，不压，缓存前缀保住
+  └─ 其余                                    → pre_compact hook → 策略
+```
+
+基线 = 压缩应用完成时的上下文估算，记在 `compacted` 条目的 `metadata["post_compaction_tokens"]` 里并随条目落
+transcript——冷加载后闸门状态与热内存一致，不需要额外的运行态。`CompactNow` 与 overflow 自愈不受闸门约束。
+
+契约：[capabilities/compaction-growth-baseline.md](capabilities/compaction-growth-baseline.md)。
 > 占位符前缀（`[duplicate` / `[pruned:` / `[offloaded:`）统一在 `context/placeholders.py`，被 SurgicalTrim 与 Offload 共用为幂等守卫。
 
 ### 工具图片附件的处置
@@ -499,6 +556,37 @@ _sample_once 采样 → provider 抛 ContextOverflowError
 - **可观测（R3）**：`provider_retry` + 一对 phase=overflow 的 `compaction_started/completed`。
 - 契约见 [`capabilities/reactive-compaction-recovery.md`](capabilities/reactive-compaction-recovery.md)。
 ```
+
+## 审计模式下的压缩（ADR 0094）
+
+审计模式只接受**折叠式**策略（类属性 `audit_support` 为 `fold` 或 `fold_model`），且只在采样之间压缩：
+
+```
+策略经 CompressionContext.model_session 调用模型 ──► 每次调用按 LLM effect 落账
+压缩成功 ──► context_compacted + conversation_item(compacted) 同批落账 ──► ack 后才改 hot history
+```
+
+原地改写条目的策略、手动压缩、溢出自愈在审计模式下不可用。预算提示同样经 Journal 落账。
+记录形状、顺序与恢复见 `capabilities/session-journal-business-integration.md` §15。
+
+## 上下文视图（ContextEngine，ADR 0093）
+
+压缩改写 history；ContextEngine 不改 history，只决定每次采样发出去的**视图**：
+
+```
+history ──(压缩策略：超阈值时改写，破坏性)──► history'
+   │
+   └──(ContextEngine.assemble：每个 history 版本一次，非破坏性)──► 视图 ──► build_api_request
+```
+
+- 未注入引擎时视图就是 history，以上链路不存在。
+- 注入后，预算提示、压缩触发、发送前预检的占用都按视图估算；引擎把视图压在预算之内，压缩就不会被触发。
+- 视图可以比 history 短，也可以包含 history 里没有的条目（检索召回的片段）。内核只校验工具调用与结果成对。
+- 引擎声明 `cache_invalidated` 与 `anchor_preserved_until`，缓存断点按视图里的稳定前缀放置；
+  cache 失效归因为 `context_engine`。
+- 视图不落盘、不进回访节点；视图不合法或引擎出错使 turn 失败，不退回完整 history。
+
+参考实现 `TailWindowContextEngine`（开头 + 最近几轮）。契约见 `capabilities/context-engine.md`。
 
 ## K3 长期记忆 swap 接口（MemoryStore）
 

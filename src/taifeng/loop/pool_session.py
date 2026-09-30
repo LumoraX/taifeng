@@ -200,6 +200,7 @@ async def create_started_pool_engine(
             ),
         )
         _bind_audited_finish_owner(pool, engine, state, session_id)
+        engine._model_prewarmer = pool._model_prewarmer  # noqa: SLF001
         # 让 engine 能在收到 RefreshSnapshot 时拉最新快照。
         engine._registry_ref = pool._registry  # type: ignore[attr-defined]  # noqa: SLF001
         # 启动期一次性 resolve engine scope，失败时由 audited finish 收敛。

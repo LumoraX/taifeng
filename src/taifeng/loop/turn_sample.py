@@ -35,7 +35,7 @@ from taifeng.loop.audit_llm import (
     model_session_for_turn,
     record_model_cache_read,
 )
-from taifeng.loop.audit_tool import audited_tool_batch
+from taifeng.loop.audit_tool import run_audited_tools
 from taifeng.loop.cancellation import interrupt_on_cancel
 from taifeng.loop.event import (
     AssistantReasoning,
@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from taifeng.llm.breaker import CircuitTransition
     from taifeng.llm.retrying import RetryAttempt
     from taifeng.loop.turn import TurnRunner
+    from taifeng.skill.working_set_runtime import WorkingSetView
     from taifeng.tool.spec import ToolContext
 
 
@@ -115,6 +116,76 @@ class TurnSample:
         return detect_structural_break_reason(
             self.__sample_owner.last_prompt_fingerprint, current, self.__sample_owner.history_buffer)
 
+    async def _assemble_tools(self) -> tuple[list[Any], WorkingSetView, bool]:
+        """本次采样的工具清单，连同决定它的工作集快照与白名单外发现判定。"""
+        # 取可用 tool 集合：声明层可见集（单一真相，含 scripts 自动并入 run_script，
+        # 见 SkillDefinition.visible_tool_names）∩ registry 已注册（未注册静默不可见，现状保留）
+        tools = []
+        for name in sorted(self.__sample_owner.entry_skill.visible_tool_names()):
+            spec = self.__sample_owner.tool_runtime._registry.get(name)  # noqa: SLF001
+            if spec is not None:
+                tools.append(spec.to_ref())
+
+        # T6 C3 per-turn 工具裁剪：search_skills 是全局注册的（pool.create），
+        # 但只在 deferred 模式下对本 entry 暴露——inline entry（小白名单 / 显式
+        # inline）不暴露搜索工具（向后兼容：原本就没有 search_skills）。判定走
+        # effective_child_recall（与 system prompt 文本同一真相，保证一致）。
+        working_set = await self.__sample_owner._guards.capture_working_set()  # noqa: SLF001
+        outside_discovery = self.__sample_owner._guards.outside_discovery_active()  # noqa: SLF001
+        if self.__sample_owner._deferred_exposure_active() or outside_discovery:
+            search_spec = self.__sample_owner.tool_runtime._registry.get(  # noqa: SLF001
+                "search_skills"
+            )
+            # M1 去重：若作者在 SKILL.md tool_names 已显式声明 search_skills，
+            # 上面的可见工具循环已把它加进来，这里不能再无条件 append（否则同名
+            # 工具在 per-turn 清单里出现两次）。按已加入的工具名集合去重。
+            already_added = {ref.name for ref in tools}
+            if search_spec is not None and "search_skills" not in already_added:
+                tools.append(search_spec.to_ref())
+        return tools, working_set, outside_discovery
+
+    async def _assemble_request(
+        self, tools: list[Any], working_set: WorkingSetView, outside_discovery: bool,
+    ) -> Any:
+        """由 runner 当前状态组装请求；不登记回访节点、不更新指纹。"""
+        # 注入了 ContextEngine 时发的是它装配的视图，缓存断点按视图里的前缀放（ADR 0093）
+        assembled = await self.__sample_owner._ctxload.view.refresh()  # noqa: SLF001
+        return build_api_request(
+            entry=self.__sample_owner.entry_skill,
+            snapshot=self.__sample_owner.snapshot,
+            history=(
+                self.__sample_owner.history_buffer if assembled is None
+                else list(assembled.items)
+            ),
+            tools=tools,
+            # 空字符串 → 让 provider 用其自身配置的 default_model（避免业务覆盖）
+            model=self.__sample_owner.entry_skill.model or "",
+            cache_anchor_index=(
+                self.__sample_owner.cache_anchor_index if assembled is None
+                else assembled.anchor_preserved_until
+            ),
+            # T3: 已 resolve 的指令；空 list 时 render 不出现 <system_instructions>
+            instructions=self.__sample_owner.instructions if self.__sample_owner.instructions else None,
+            # G4a: 运行时能力快照（None → 不做资格过滤）
+            capabilities=self.__sample_owner.capabilities,
+            # K3: page-in 的长期记忆（注入 prompt 尾部，cache-aware）
+            prefetched_memory=self.__sample_owner._prefetched_memory or None,
+            # reasoning-content-passback:thinking 模型 reasoning 回传开关
+            reasoning_passback=self.__sample_owner.reasoning_passback,
+            # T6: deferred 暴露阈值（驱动 child 列表 inline / deferred 文本）
+            recall_threshold=self.__sample_owner.recall_threshold,
+            # 是否有召回后端：无后端恒 inline（与工具裁剪同口径）
+            has_recall_backend=self.__sample_owner.has_recall_backend,
+            outside_discovery=outside_discovery, working_set=working_set,
+            image_input_policy=self.__sample_owner.image_input_policy,
+            model_input_capabilities=model_capabilities(self.__sample_owner.model_client),
+            file_input_policy=self.__sample_owner.file_input_policy,
+        )
+
+    async def preview_request(self) -> Any:
+        """下一次采样会发出的请求（预热用，ADR 0092）：与真实采样同一套组装，无副作用。"""
+        return await self._assemble_request(*await self._assemble_tools())
+
     async def _prepare_request(self, iteration: int) -> _SamplePrep:
         """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检。
 
@@ -139,28 +210,7 @@ class TurnSample:
                 "history_len": cp.history_len, "target_id": None,
             }))
 
-        # 取可用 tool 集合：声明层可见集（单一真相，含 scripts 自动并入 run_script，
-        # 见 SkillDefinition.visible_tool_names）∩ registry 已注册（未注册静默不可见，现状保留）
-        tools = []
-        for name in sorted(self.__sample_owner.entry_skill.visible_tool_names()):
-            spec = self.__sample_owner.tool_runtime._registry.get(name)  # noqa: SLF001
-            if spec is not None:
-                tools.append(spec.to_ref())
-
-        # T6 C3 per-turn 工具裁剪：search_skills 是全局注册的（pool.create），
-        # 但只在 deferred 模式下对本 entry 暴露——inline entry（小白名单 / 显式
-        # inline）不暴露搜索工具（向后兼容：原本就没有 search_skills）。判定走
-        # effective_child_recall（与 system prompt 文本同一真相，保证一致）。
-        if self.__sample_owner._deferred_exposure_active():
-            search_spec = self.__sample_owner.tool_runtime._registry.get(  # noqa: SLF001
-                "search_skills"
-            )
-            # M1 去重：若作者在 SKILL.md tool_names 已显式声明 search_skills，
-            # 上面的可见工具循环已把它加进来，这里不能再无条件 append（否则同名
-            # 工具在 per-turn 清单里出现两次）。按已加入的工具名集合去重。
-            already_added = {ref.name for ref in tools}
-            if search_spec is not None and "search_skills" not in already_added:
-                tools.append(search_spec.to_ref())
+        tools, working_set, outside_discovery = await self._assemble_tools()
 
         # G-CACHE：算本轮 prompt 结构指纹 + 归因结构性 cache 失效原因，再更新指纹
         prompt_fingerprint = self.__sample_owner._compute_prompt_fingerprint(tools)
@@ -173,30 +223,7 @@ class TurnSample:
         is_responses = input_capabilities.protocol == "responses"
         # cache-anchor:记发出时 history 长度——流成功完成后 anchor 推进到此处的末项
         sent_history_len = len(self.__sample_owner.history_buffer)
-        request = build_api_request(
-            entry=self.__sample_owner.entry_skill,
-            snapshot=self.__sample_owner.snapshot,
-            history=self.__sample_owner.history_buffer,
-            tools=tools,
-            # 空字符串 → 让 provider 用其自身配置的 default_model（避免业务覆盖）
-            model=self.__sample_owner.entry_skill.model or "",
-            cache_anchor_index=self.__sample_owner.cache_anchor_index,
-            # T3: 已 resolve 的指令；空 list 时 render 不出现 <system_instructions>
-            instructions=self.__sample_owner.instructions if self.__sample_owner.instructions else None,
-            # G4a: 运行时能力快照（None → 不做资格过滤）
-            capabilities=self.__sample_owner.capabilities,
-            # K3: page-in 的长期记忆（注入 prompt 尾部，cache-aware）
-            prefetched_memory=self.__sample_owner._prefetched_memory or None,
-            # reasoning-content-passback:thinking 模型 reasoning 回传开关
-            reasoning_passback=self.__sample_owner.reasoning_passback,
-            # T6: deferred 暴露阈值（驱动 child 列表 inline / deferred 文本）
-            recall_threshold=self.__sample_owner.recall_threshold,
-            # 是否有召回后端：无后端恒 inline（与工具裁剪同口径）
-            has_recall_backend=self.__sample_owner.has_recall_backend,
-            image_input_policy=self.__sample_owner.image_input_policy,
-            model_input_capabilities=input_capabilities,
-            file_input_policy=self.__sample_owner.file_input_policy,
-        )
+        request = await self._assemble_request(tools, working_set, outside_discovery)
 
         max_bytes = self.__sample_owner.budget.max_request_bytes
         if max_bytes is not None:
@@ -658,21 +685,10 @@ class TurnSample:
         # + 唯一 function_call_output 会话项；任一 UNKNOWN 记录后冻结。fc 会话项已在
         # §7.6 最终响应批中 durable，此处只补 fco。
         if self.__sample_owner.audit_state is not None:
-            fco_items = await audited_tool_batch(
-                state=self.__sample_owner.audit_state,
-                submission_id=self.__sample_owner.submission_id,
-                turn_index=self.__sample_owner.turn_index,
-                iteration=iteration,
-                requests=requests,
-                registry=self.__sample_owner.tool_runtime._registry,  # noqa: SLF001
-                run_dispatch=_run_dispatch,
-                cancel=self.__sample_owner.cancel,
-                finalization_timeout=(
-                    self.__sample_owner.audit_state.coordinator.finalization_timeout
-                ),
-                origin_sample_ids=origin_samples,
+            await run_audited_tools(
+                self.__sample_owner, iteration=iteration, requests=requests,
+                run_dispatch=_run_dispatch, origin_sample_ids=origin_samples,
             )
-            self.__sample_owner.history_buffer.extend(fco_items)
             return assistant_text, True
 
         # tool-crash-reconciliation：Chat 路径的 function_call 要等执行完才与 output

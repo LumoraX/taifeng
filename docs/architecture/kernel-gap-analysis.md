@@ -73,7 +73,7 @@ taifeng 是"可嵌入、一 session 一 engine"的微内核。换框后，一大
 
 **判为非缺口（userspace / 宿主）**：model failover 链、客户端限流、成本定价（均可按断路器范式做成
 `ModelClient` 包装器）；cron / 定时唤醒（宿主到点提交）；优先级抢占；会话 fork；计划模式（可变
-`PermissionPolicy`）；子 agent 结构化返回；输入来源 / 污染标记（无业务驱动，按规则挂起）。
+`PermissionPolicy`）；子 agent 结构化返回；输入来源 / 污染标记（✅ 已落地为只定协议的能力，ADR 0085）。
 
 ## 能力侧 review（2026-09-28 / 29）：C1–C16
 

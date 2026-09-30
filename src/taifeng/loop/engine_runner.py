@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from taifeng.loop.audit_gates import engine_turn_hooks
 from taifeng.loop.audit_history import (
     AuditedHistoryConflictError,
     audited_history_conflict_failure,
@@ -26,6 +27,12 @@ if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine
     from taifeng.loop.engine_types import _PendingTurn
     from taifeng.loop.turn import TurnOutcome, TurnRunner
+
+
+def _superseded_ids(runner: TurnRunner) -> frozenset[str]:
+    """runner 在本轮压缩里折叠掉的条目 id；没有压缩协作器（测试替身）时为空。"""
+    compaction = getattr(runner, "_compaction", None)
+    return frozenset(getattr(compaction, "superseded_ids", ()))
 
 
 class EngineRunner:
@@ -57,6 +64,9 @@ class EngineRunner:
         路径才有残留。事件与 runner 侧同形，但 delivered=False + reason=turn_ended，
         让宿主知道这段文本没有进入本 turn 的 prompt。
         """
+        if self._engine._audit_state is not None:
+            # 审计：root 的收件队列跟着 Session 走，turn 结束后才到的消息留给下一个 root turn
+            return
         residual = list(runner.pending_input)
         runner.pending_input.clear()
         for item in residual:
@@ -82,6 +92,7 @@ class EngineRunner:
                     merged_history = merge_audited_history(
                         self._engine._history,
                         runner_history,
+                        superseded=_superseded_ids(runner),
                     )
                 except AuditedHistoryConflictError:
                     raise self._engine._audit_state.coordinator.freeze(
@@ -105,6 +116,7 @@ class EngineRunner:
         seed_pending_call_id: str | None = None,
         cache_break_expected_reason: str | None = None,
         auto_retry_count: int = 0,
+        extra_seed_call_ids: tuple[str, ...] = (),
     ) -> None:
         """构造并运行一轮，最后一次性回写 Engine 状态。"""
         runner = self._engine._new_turn_runner(
@@ -115,6 +127,9 @@ class EngineRunner:
         )
         # turn-rewind retry_tool：让 runner 采样前先补跑被保留的悬空 call
         runner._seed_pending_call_id = seed_pending_call_id  # noqa: SLF001
+        if extra_seed_call_ids:
+            # Resume 一次批准了多个派发类调用：其余的随 seed 补跑一并重跑
+            runner._tooling.extra_seed_call_ids = extra_seed_call_ids  # noqa: SLF001
         # turn-rewind R2：rewind 蓄意回退 anchor → 首采样的 cache 失效记为 expected
         if cache_break_expected_reason is not None:
             runner._next_cache_break_expected = True  # noqa: SLF001
@@ -168,7 +183,7 @@ class EngineRunner:
         if not handlers:
             return
         from taifeng.hooks.types import HookContext, PostTurnHook
-        await self._engine._hooks.run_audit_only(
+        await engine_turn_hooks(self._engine, submission_id, iteration).run_audit_only(
             "post_turn",
             PostTurnHook(
                 end_reason=outcome.end_reason,

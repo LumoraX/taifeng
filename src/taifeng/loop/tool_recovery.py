@@ -41,7 +41,7 @@ from taifeng.suspend.record import SuspensionRecord
 from taifeng.tool.spec import ReconcileVerdict
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from taifeng.conversation.store import MessageStore
     from taifeng.tool.registry import ToolRegistry
@@ -54,9 +54,12 @@ ToolRecoveryMode = Literal["suspend", "report"]
 
 Disposition = Literal[
     "safe_to_retry", "reconciled", "awaiting_operator", "reported_unknown", "operator_resolved",
+    "not_dispatched", "dispatch_interrupted",
 ]
-"""悬空调用的处置结论。``operator_resolved`` 只出现在 strict audit resume：人的裁决经
-``AuditConfig.tool_outcome_resolver`` 在接管时提交（审计会话不能挂起，见 ADR 0070）。"""
+"""悬空调用的处置结论。``operator_resolved`` / ``not_dispatched`` / ``dispatch_interrupted`` 只出现
+在 strict audit resume：人的裁决经 ``AuditConfig.tool_outcome_resolver`` 在接管时提交（审计会话
+不能挂起，见 ADR 0070）；调用从未登记意图或派发从未启动、确定未执行（ADR 0075 / 0076）；
+``call_skill`` 派发的子 skill 在执行途中被中断（ADR 0076）。"""
 
 RETRY_SAFE_EFFECTS = frozenset({"pure", "idempotent"})
 """可在不知结局时安全重发的副作用分类。"""
@@ -71,12 +74,42 @@ NOT_EXECUTED_TEXT = (
 )
 """回查确认未执行时回填给模型的文本（is_error=True）。"""
 
+NOT_DISPATCHED_TEXT = (
+    "not_executed: the process stopped before this tool call was registered for "
+    "dispatch, so it never ran and may be called again safely"
+)
+"""调用从未登记意图（确定未执行）时回填给模型的文本（is_error=True）。"""
+
+DISPATCH_NOT_STARTED_TEXT = (
+    "not_executed: the process stopped before the skill dispatch started, so the "
+    "skill never ran and may be called again safely"
+)
+"""``call_skill`` 的派发从未启动（确定未执行）时回填给模型的文本（is_error=True）。"""
+
 OPERATOR_ABORTED_TEXT = (
     "tool_outcome_unknown: aborted by operator after crash recovery; not retried"
 )
 """人裁决放弃查明结局、接受未知并继续时回填的文本（前缀不暗示「确定没执行」）。"""
 
 _UNKNOWN_TEXT = "tool outcome unknown after process recovery; not retried"
+
+
+def dispatch_interrupted_text(skill_id: str, settled: Sequence[RecoveredCall]) -> str:
+    """子 skill 在执行途中被中断时回填给父调用的文本（is_error=True）。
+
+    逐条列出子 skill 内已收敛调用的处置结论：模型据此判断重新派发会不会重复副作用。
+    """
+    if settled:
+        calls = "; ".join(f"{c.name} ({c.call_id}): {c.disposition}" for c in settled)
+        detail = f"Tool calls inside it were settled as: {calls}. "
+    else:
+        detail = "No tool call inside it was left unsettled. "
+    return (
+        f"skill_dispatch_interrupted: skill {skill_id!r} was interrupted by process "
+        "recovery before it finished, and its partial work was not returned. "
+        f"{detail}"
+        "The skill may be called again; review the settled calls before repeating side effects."
+    )
 
 
 def safe_to_retry_text(effect_kind: str) -> str:

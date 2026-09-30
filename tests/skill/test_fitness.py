@@ -50,7 +50,8 @@ async def test_in_memory_store_counts_and_dedupes() -> None:
                                  ("a", "success", 9)]:
         await store.record(_record(call_id, outcome, ts))
     assert await store.fitness("style-checker") == SkillFitness(
-        skill_id="style-checker", successes=1, failures=1, abandoned=1, last_ts_unix=3)
+        skill_id="style-checker", successes=1, failures=1, abandoned=1, last_ts_unix=3,
+        cost_tokens_total=30, cost_duration_ms_total=15, cost_iterations_total=3)
     assert await store.fitness("unknown") is None
 
 

@@ -52,6 +52,7 @@ from taifeng.llm.providers._shared import (
     parse_sse_event,
     transport_error,
 )
+from taifeng.llm.providers._tool_args import replay_tool_arguments
 from taifeng.llm.providers.anthropic_cache import (
     cache_control_for,
     mark_tail,
@@ -203,20 +204,15 @@ def _to_anthropic_messages(
             if msg.role == "assistant" and msg.tool_calls:
                 for tc in msg.tool_calls:
                     fn = tc.get("function") or {}
-                    args_raw = fn.get("arguments", "{}")
-                    try:
-                        args = (
-                            json.loads(args_raw)
-                            if isinstance(args_raw, str)
-                            else args_raw
-                        )
-                    except json.JSONDecodeError:
-                        args = {}
+                    tool_name = fn.get("name", "")
+                    # 写坏的参数按显式标记回放，不静默改成 {}（ADR 0074）
                     content_blocks.append({
                         "type": "tool_use",
                         "id": tc.get("id", ""),
-                        "name": fn.get("name", ""),
-                        "input": args,
+                        "name": tool_name,
+                        "input": replay_tool_arguments(
+                            fn.get("arguments", ""), tool_name=tool_name,
+                        ),
                     })
 
         # cache_control 注入到最后一个 content block
