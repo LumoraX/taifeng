@@ -132,9 +132,7 @@ async def test_a_message_still_queued_at_release_is_applied_without_running(
     assert all(
         e.submission_id != second for e in _of(envelopes, "llm_request_committed")
     )
-    assert all(
-        not record_id.startswith(f"{second}:") for record_id in find_unsettled_effects(envelopes)
-    )
+    assert find_unsettled_effects(envelopes) == ()
     assert len(_of(envelopes, "session_ended")) == 1
     verification = await JsonlSessionJournalCore(tmp_path / "journal").verify(_SESSION)
     assert verification.health is JournalHealth.HEALTHY

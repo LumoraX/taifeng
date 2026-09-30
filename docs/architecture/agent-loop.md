@@ -783,6 +783,10 @@ Resume(thread_id, resolutions)
   live runner 的 `pending_input`。runner 在迭代边界 `drain_pending_input` 时经 `deliver_peer_items`
   把消息写进对话；子 runner 退栈时 `retire_runner` 收下收尾之后才到的消息。接管时未进入对话的消息
   由 `undelivered_peer_messages` 找回。
+- **Engine 收敛**（`EngineOperations.converge_turns_cooperatively`，ADR 0102）：审计模式下 `run()` 的收尾
+  先置 `converging`、取消持有 root gate 的 turn 的 token，并在 2 秒宽限期内等 operation 自行退出——
+  意图收敛为终态之后才做根取消与 raw cancel；`converging` 期间 gate 不再放行新 turn，拿到 gate 的排队
+  消息只应用不运行。没有 turn 在飞或排队时不等。
 - **cancellation**：每个 active turn 有目标取消子树（CancelTurn 只取消其目标 turn/子树），Session root 取消
   保留给 freeze 与 Shutdown；LLM checkpoint 与 Tool outcome 的落账均为取消无关（shield）。
 - **Session isolation**：coordinator/writer 健康态每 Session 独立；一个 Session freeze 不影响其他 Session 的

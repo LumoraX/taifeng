@@ -64,7 +64,7 @@ class EngineGate:
         `asyncio.Lock` 是 FIFO：提交序即执行序。与 cancel token 竞速——CancelTurn 命中
         排队中的 submission（_pending 已登记）→ 放弃排队，调用方发 cancelled 终结。
         """
-        if cancel.is_cancelled:
+        if cancel.is_cancelled or self._engine._ops.converging:
             return False
         if self._engine._root_gate.locked():
             await self._engine._emit(EventMsg(
@@ -94,6 +94,10 @@ class EngineGate:
             # 会在 release 期间跑起 turn——一律视为未获取，把锁归还后按取消传播
             await self._engine._abandon_acquire(acquire)
             raise asyncio.CancelledError("engine converging")
+        if acquire.done() and not acquire.cancelled() and self._engine._ops.converging:
+            # Engine 收敛期间空出的 gate 不再放行新 turn（ADR 0102）：归还，按取消处理
+            await self._engine._abandon_acquire(acquire)
+            return False
         if acquire.done() and not acquire.cancelled():
             acquire.result()
             self._engine._root_gate_owner = submission_id

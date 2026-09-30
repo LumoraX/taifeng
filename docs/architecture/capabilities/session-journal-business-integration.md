@@ -163,6 +163,10 @@ durable 提交 `submission_accepted`，再把携带 ack 的 token 入 actor queu
 - 对话项由准入记录确定：id 为 `item_<submission_id>`，`created_at` 是提交时刻。
 - 应用的落账与取消无关；随后的投影可以被取消。
 - 准入是 durable 承诺：Engine 收敛时仍在排队的消息只应用、不运行它的 turn。
+- Engine 收敛时先让持有 root gate 的 turn 经取消 token 协作收尾（工具给出确定结果、意图收敛为
+  `cancelled` 终态、在飞的 LLM 调用 checkpoint 为 `cancelled`），宽限期 2 秒；期间空出的 gate 不再放行
+  新 turn，排队的消息在在飞 turn 收尾之后才应用。宽限期内没退出的 operation 才 raw cancel
+  （ADR 0102）。
 - 进程死在两个批次之间时，接管把这些消息按准入顺序应用，对话项落在对话末尾、其他恢复结论之后
   （§13.4）；它们的 turn 不补跑。
 

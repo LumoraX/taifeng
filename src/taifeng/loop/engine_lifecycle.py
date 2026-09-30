@@ -54,6 +54,9 @@ class EngineLifecycle:
     ) -> None:
         """按原顺序收敛 actor、operation、持久化 flush 与订阅者终态。"""
         self._engine._running = False
+        # 审计：先让在飞的 turn 协作收尾（意图收敛为终态），排队的消息随后只应用不运行；
+        # 这一步在根取消之前——根取消一到，排队消息会立即应用，抢在在飞 turn 的收尾前面
+        actor_cancellation = await self._engine._ops.converge_turns_cooperatively()
         if self._engine._audit_state is not None:
             self._engine._audit_state.coordinator.cancel_session_root()
             await finalize_audited_mailbox(
@@ -62,7 +65,8 @@ class EngineLifecycle:
             )
         cancel.cancel(CancelReason.SHUTDOWN, "engine_shutdown")
         self._engine._cancel_ttl_timers()
-        actor_cancellation = await self._engine._converge_operations()
+        raw_cancellation = await self._engine._converge_operations()
+        actor_cancellation = actor_cancellation or raw_cancellation
         spawn_cancellation = await self._engine._spawn.converge_owned_tasks()
         actor_cancellation = actor_cancellation or spawn_cancellation
         if shutdown_requested:
