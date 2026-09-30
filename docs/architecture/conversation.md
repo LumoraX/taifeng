@@ -57,8 +57,13 @@ verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
   resume 失败只释放 lease，不写 `session_ended`。
 - **current recovery exclusions（本阶段不支持）**：custom store/directory、IndexHook、hooks、permission/HITL、
   compressor、memory、instruction layers、orchestration、spawn/peer、非 attempt-observable client、可
-  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。LLM attempt / submission
-  未结算 effect 的 repair/unfreeze、历史迁移仍不在本阶段范围（resume 只 fail closed）。
+  suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。已冻结 Session 的
+  repair/unfreeze 不在范围（resume 只 fail closed）。
+- **Timeline 与迁移**（`journal/timeline.py`、`redaction.py`、`legacy_import.py`、`projection_rebuild.py`，
+  ADR 0104）：Timeline 从 Journal 投影（按 seq、可筛选、`after_seq` 接力），三种视图（full / redacted /
+  metadata_only）；旧 transcript 经 `import_legacy_transcript` 导入为可接管的审计 Session（旧文件留档在
+  `legacy/`，历史标 `legacy_unverified`）；投影可经 `rebuild_projections` 从 Journal 重建。契约见
+  [session-journal-timeline](capabilities/session-journal-timeline.md)。
 
 完整数据契约与边界以
 [SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)、

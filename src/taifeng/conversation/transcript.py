@@ -349,6 +349,8 @@ class JsonlMessageStore(MessageStore):
         self._root.mkdir(parents=True, exist_ok=True)
         # 三组件组合：主存 / 索引 / 事件钩子
         self._writer = JsonlMessageWriter(self._root)
+        self.threads_dir = self._root
+        """主存根目录（旧 transcript 导入、投影重建等运维入口用）。"""
         self._directory = SqliteThreadDirectory(
             self._root / "taifeng-index.db",
             threads_dir=self._root,

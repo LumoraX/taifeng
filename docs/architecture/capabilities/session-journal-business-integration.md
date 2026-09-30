@@ -24,8 +24,9 @@ Journal durable ack 之后的内存态或可重建投影，不得领先 Journal�
 在工具调用处停下等人作答的挂起与恢复见 §17，分离式派发见 §18，join-barrier 见 §19，peer 消息见 §20。
 本阶段不支持其余原因的挂起（子 skill 挂起、失败处置、资源护栏、带到期时间的挂起）、手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
 后台 shell 任务、
-已冻结 Session 的 repair/unfreeze、Timeline/export 通用 redaction、
-加密、WORM 或外置 blob。LLM request intent
+已冻结 Session 的 repair/unfreeze、
+加密、WORM 或外置 blob。Timeline、脱敏视图、旧 transcript 导入与投影重建见
+[session-journal-timeline](session-journal-timeline.md)。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
 
 ## 2. 唯一事实源与提交顺序

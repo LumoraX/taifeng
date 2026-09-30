@@ -14,7 +14,10 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 
 当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`、
 审计 resume 人裁决 `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`、
-审计模式下不适用的 `Resume` 抛出的 `AuditedResumeRejectedError`）、
+审计模式下不适用的 `Resume` 抛出的 `AuditedResumeRejectedError`；Timeline 投影 `JournalTimelineProjector` /
+`TimelineFilter` / `TimelineItem` / `TimelinePage`、脱敏 `redact_payload` / `RedactedPayload`、旧 transcript 导入
+`import_legacy_transcript` / `LegacyImportResult` / `LegacyImportError`、投影重建 `rebuild_projections` /
+`ProjectionRebuildResult`）、
 Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
 （`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitnessCatalog`、`SkillFitnessLedger`、`SkillFitness`、
 `SkillFitnessRecorder`、`InMemorySkillFitnessStore`）、按战绩算分与影子评估（`FitnessScorer`、`WilsonFitnessScorer`、

@@ -74,6 +74,7 @@ Aligned with [conversation.md](../conversation.md).
 | Contract | Coverage |
 | --- | --- |
 | [session-journal-business-integration](session-journal-business-integration.md) | Experimental strict runtime slice: Journal-first submissions, LLM/Tool/call_skill intent and outcome, durable conversation items, per-Session fail-closed gating, and Journal-takeover resume that fails closed on unsettled effects (ADR 0053) |
+| [session-journal-timeline](session-journal-timeline.md) | Journal Phase 5：Timeline 投影（按 seq 映射、筛选、`after_seq` 接力）、三种视图（full / redacted / metadata_only）与确定性脱敏、旧 transcript 导入为可接管的审计 Session、从 Journal 重建投影（ADR 0104） |
 | [session-journal-core](session-journal-core.md) | Experimental durable core: canonical envelope/hash chain, atomic JSONL batch frames, cross-process flock writer exclusion, `open_existing` epoch takeover, strict verification incl. monotonic writer epoch |
 | [jsonl-transcript](jsonl-transcript.md) | `MessageWriter`, metadata line, POSIX atomic append, corrupt-line tolerance, `resume_thread_id`, `initial_history`, and `thread_resumed` events |
 | [thread-directory](thread-directory.md) | `ThreadMetadata`, `ThreadFilter`, `ThreadPage`, SQLite self-healing, `NullThreadDirectory`, and directory error classes |

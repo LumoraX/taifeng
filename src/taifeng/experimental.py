@@ -26,6 +26,22 @@ from taifeng.context.strategies import (
     MultimodalEvictionStrategy,
 )
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
+from taifeng.conversation.journal.legacy_import import (
+    LegacyImportError,
+    LegacyImportResult,
+    import_legacy_transcript,
+)
+from taifeng.conversation.journal.projection_rebuild import (
+    ProjectionRebuildResult,
+    rebuild_projections,
+)
+from taifeng.conversation.journal.redaction import RedactedPayload, redact_payload
+from taifeng.conversation.journal.timeline import (
+    JournalTimelineProjector,
+    TimelineFilter,
+    TimelineItem,
+    TimelinePage,
+)
 from taifeng.conversation.origin import (
     InputOrigin,
     InputTaint,
@@ -109,6 +125,18 @@ __all__ = [
     "AuditCapabilityError",
     "AuditConfig",
     "JsonlSessionJournalCore",
+    # Journal Phase 5：Timeline 投影、脱敏、旧 transcript 导入、投影重建（ADR 0104，🧪）
+    "JournalTimelineProjector",
+    "TimelineFilter",
+    "TimelineItem",
+    "TimelinePage",
+    "RedactedPayload",
+    "redact_payload",
+    "LegacyImportError",
+    "LegacyImportResult",
+    "import_legacy_transcript",
+    "ProjectionRebuildResult",
+    "rebuild_projections",
     # 审计 resume 时人对结果未知工具调用的裁决（ADR 0070，🧪）
     "AuditToolOutcomeRequest",
     "AuditToolOutcomeResolution",
