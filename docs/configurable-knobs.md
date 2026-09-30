@@ -879,7 +879,7 @@ fail-closed 判 deny（`reason="elicitation_unsupported: …"`），并经 `McpS
 from taifeng import make_apply_patch_tool
 
 tool = make_apply_patch_tool(
-    root_dir="./workspace",          # 沙盒根
+    root_dir="./workspace",          # 本机沙盒根；或 workspace=<WorkspaceFS>（§6.9），二选一
     policy=my_permission_policy,     # 可选；每个被改动的路径一条 file_write 审批
     max_bytes=1024 * 1024,           # 单 patch new_text 上限
 )
@@ -1066,8 +1066,9 @@ pool = await EnginePool.create(
 
 | 工厂参数 | glob | grep | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `root_dir` | ✓ | ✓ | 必填 | 沙盒根；基点与被读文件都必须在内（同 `file_read`，拒绝 `..` 与符号链接逃逸） |
-| `policy` | ✓ | ✓ | `None` | 每次调用审批一次：`scope="file_read"`、target=基点绝对路径（整棵子树粒度） |
+| `root_dir` | ✓ | ✓ | 与 `workspace` 二选一 | 本机沙盒根；基点与被读文件都必须在内（同 `file_read`，拒绝 `..` 与符号链接逃逸） |
+| `workspace` | ✓ | ✓ | 与 `root_dir` 二选一 | 注入的 `WorkspaceFS`（§6.9）；遍历逻辑不变，符号链接一律不跟随并在尾注计数 |
+| `policy` | ✓ | ✓ | `None` | 每次调用审批一次：`scope="file_read"`、target=基点在工作区里的规范路径（整棵子树粒度） |
 | `max_results` | ✓ | ✓ | `200` | 超出截断并在输出尾告知，遍历提前停止 |
 | `max_line_chars` | — | ✓ | `500` | 单行截断并注明原长度 |
 | `max_file_bytes` | — | ✓ | `2MB` | 超大文件跳过并列出名字 |
@@ -1107,6 +1108,35 @@ make_memory_tool(store, actions=("search", "save"))
 | `timeout_seconds` | `30.0` | ToolSpec 级超时 |
 
 `save` 写入一条 `assistant_message`，`metadata={"source": "memory_tool", "call_id": ...}`——后端据此区分模型主动记忆与 turn 结束的脏页写回、或按 call_id 去重。`delete` 的 `target` 是后端在 search 结果里展示的记忆标识或该条记忆原文（`prefetch` 只返回文本，模型能表达的只有文本），`forget` 返回实际删除条数，0 是正常结果。`NullMemoryStore` 不实现 `forget`；`CompositeMemoryStore` 有可遗忘子时才可遗忘。后端异常以 `reason="memory_error"` 显式返回给模型（不同于被动钩子的 best-effort）。
+
+### 6.9 `WorkspaceFS` —— 文件类工具读写哪里（ADR 0113）
+
+`file_read` / `file_write` / `apply_patch` / `glob` / `grep` 五个工厂都接受 `root_dir=`（本机目录）或
+`workspace=`（注入的工作区），恰好一个。命令经 `CommandExecutor` 放进容器 / 远端沙盒时，把同一处文件系统
+以 `WorkspaceFS` 注入，模型读到的就是命令改动的那些文件。契约见
+[workspace-fs](architecture/capabilities/workspace-fs.md)。
+
+```python
+from taifeng import LocalWorkspaceFS, make_file_read_tool, make_file_write_tool, make_grep_tool
+
+workspace = MySandboxWorkspace(...)     # 实现 WorkspaceFS 的 7 个成员；本机目录用 LocalWorkspaceFS(path)
+extra_tools = [
+    make_file_read_tool(workspace=workspace, policy=my_policy),
+    make_file_write_tool(workspace=workspace, policy=my_policy),
+    make_grep_tool(workspace=workspace, policy=my_policy),
+]
+```
+
+| 成员 | 约定 |
+| --- | --- |
+| `root` | 工作区根的标识；出现在工具描述与权限 target 里 |
+| `resolve(path)` | 规范成以 `root` 为前缀的规范路径；越界抛 `WorkspacePathError` |
+| `read_bytes` / `write_bytes(create_parents=True)` | 整读 / 覆盖写（应当原子） |
+| `metadata` | 不存在返回 `exists=False`，不抛异常 |
+| `list_directory` | 不递归，顺序不限 |
+| `remove(recursive=False)` | 目录非递归时须为空 |
+
+每个方法自己校验边界；失败用标准 `OSError` 子类（`FileNotFoundError` / `PermissionError` / 其余）。
 
 ## 7. LLM 强类型输出（structured_output / P1）
 

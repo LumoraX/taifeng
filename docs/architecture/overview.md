@@ -50,12 +50,14 @@ src/taifeng/
 │   ├── spec.py           # ToolSpec（含 parallel_safe 字段）
 │   ├── registry.py       # ToolRegistry
 │   ├── runtime.py        # ToolCallRuntime —— RwLock 并行 / 独占调度
+│   ├── command_executor.py  # CommandExecutor / StreamingCommandProcess —— 进程启动 seam（ADR 0051 / 0112）
+│   ├── workspace.py      # WorkspaceFS / LocalWorkspaceFS —— 文件访问 seam（ADR 0113）
 │   └── builtins/         # 可选内置工具（业务侧按需 register）
 │       │                 # core:   read_skill / call_skill（skill-as-context 范式）
 │       │                 # io:     file_io（read/write）/ shell / apply_patch
 │       │                 # net:    http_request（受 PermissionPolicy[scope=network] 审批）
 │       │                 # search: glob_search / grep_search + grep_scan（只读 pure；共用 search_walk 沙盒遍历
-│       │                 #         与 gitignore 规则匹配）
+│       │                 #         与 gitignore 规则匹配；文件访问经 search_fs，本机与注入的工作区同一套遍历）
 │       │                 # memory: memory（模型主动读写删 K3 MemoryStore 的薄封装；delete 需 ForgettableMemoryStore）
 │       │                 # bg:     background（run_in_background / wait_for_task）
 │       │                 # script: run_script（SKILL.md scripts 执行）

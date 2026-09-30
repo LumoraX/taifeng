@@ -98,6 +98,9 @@ handler MUST NOT 以 `tool_use` 形状发请求（见 [permission-gate](permissi
 - **WHEN** 业务显式传入 `env`
 - **THEN** 子进程 SHALL 使用该 env
 
+> 文件类工具（`file_read` / `file_write` / `apply_patch` / `glob` / `grep`）读写的工作区是可注入的协议，见
+> [workspace-fs](workspace-fs.md)（ADR 0113）；本篇里的 `root_dir` 都可以换成 `workspace=`。
+
 ### Requirement: 命令执行器 seam（sandbox-seam，ADR 0051 / 0108 / 0112）
 
 `shell_exec` 与 `run_in_background` SHALL 经 `taifeng.tool.command_executor.CommandExecutor` 启动子进程，

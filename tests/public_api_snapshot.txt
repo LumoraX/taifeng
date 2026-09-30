@@ -69,6 +69,7 @@ LlmRequestRecorded
 LlmSkillRecall
 LlmSkillVerifier
 LocalCommandExecutor
+LocalWorkspaceFS
 McpClient
 McpContentError
 McpHttpClient
@@ -176,6 +177,10 @@ TurnRunner
 UpdateInstructions
 UserMessage
 VerifiedCandidate
+WorkspaceEntry
+WorkspaceFS
+WorkspaceFileInfo
+WorkspacePathError
 __version__
 assistant_message
 attach_console_sink

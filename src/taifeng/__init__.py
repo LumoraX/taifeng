@@ -262,6 +262,13 @@ from taifeng.tool.command_executor import (
     LocalCommandExecutor,
     StreamingCommandProcess,
 )
+from taifeng.tool.workspace import (
+    LocalWorkspaceFS,
+    WorkspaceEntry,
+    WorkspaceFileInfo,
+    WorkspaceFS,
+    WorkspacePathError,
+)
 
 __all__ = [
     "AgentEngine",
@@ -281,6 +288,12 @@ __all__ = [
     "CommandInput",
     "CommandOutput",
     "StreamingCommandProcess",
+    # 工作区文件访问（ADR 0113）
+    "LocalWorkspaceFS",
+    "WorkspaceEntry",
+    "WorkspaceFS",
+    "WorkspaceFileInfo",
+    "WorkspacePathError",
     "CompressionContext",
     "CompressionOrchestrator",
     "CompressionResult",

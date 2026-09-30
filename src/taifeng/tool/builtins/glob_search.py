@@ -14,10 +14,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from taifeng.tool.builtins.file_io import _resolve_safe
+from taifeng.tool.builtins.search_fs import SearchFs, search_scope
 from taifeng.tool.builtins.search_walk import (
     DEFAULT_SEARCH_EXCLUDE_DIRS,
     GlobMatcher,
@@ -32,9 +31,11 @@ from taifeng.tool.builtins.search_walk import (
     skip_notes,
 )
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from taifeng.tool.workspace import WorkspaceFS, WorkspacePathError, workspace_for
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path, PurePath
 
     from taifeng.permission.types import PermissionPolicy
 
@@ -43,7 +44,8 @@ if TYPE_CHECKING:
 class _GlobRun:
     """工作线程内的一次 glob：遍历基点、匹配、按上限收集。"""
 
-    root: Path
+    root: PurePath
+    fs: SearchFs
     matcher: GlobMatcher
     max_results: int
     exclude_dirs: frozenset[str]
@@ -52,7 +54,7 @@ class _GlobRun:
     truncated: bool = False
     stats: WalkStats = field(default_factory=WalkStats)
 
-    def run(self, base: Path, should_stop: Callable[[], bool]) -> None:
+    def run(self, base: PurePath, should_stop: Callable[[], bool]) -> None:
         """收集匹配文件；第 ``max_results + 1`` 个命中时标记截断并停止遍历。
 
         Raises:
@@ -60,7 +62,7 @@ class _GlobRun:
         """
         files = iter_files(
             base, root=self.root, exclude_dirs=self.exclude_dirs,
-            should_stop=should_stop, stats=self.stats, gitignore=self.gitignore,
+            should_stop=should_stop, stats=self.stats, gitignore=self.gitignore, fs=self.fs,
         )
         for path in files:
             if not self.matcher.matches(path.relative_to(base).parts):
@@ -126,7 +128,8 @@ _SCHEMA: dict[str, Any] = {
 
 def make_glob_tool(
     *,
-    root_dir: str | Path,
+    root_dir: str | Path | None = None,
+    workspace: WorkspaceFS | None = None,
     policy: PermissionPolicy | None = None,
     max_results: int = 200,
     exclude_dirs: frozenset[str] = DEFAULT_SEARCH_EXCLUDE_DIRS,
@@ -136,8 +139,9 @@ def make_glob_tool(
     """构造 glob 工具（opt-in：经 ``EnginePool.create(extra_tools=[...])`` 注册）。
 
     Args:
-        root_dir: 沙盒根；搜索基点必须落在其内（同 file_read 的 ``_resolve_safe``）。
-        policy: 可选权限策略；每次调用以 ``scope="file_read"``、target=基点绝对路径审批一次。
+        root_dir: 本机沙盒根；搜索基点必须落在其内（同 file_read）；与 ``workspace`` 二选一。
+        workspace: 注入的工作区（ADR 0113）；遍历逻辑不变，文件访问经它进行，符号链接一律跳过。
+        policy: 可选权限策略；每次调用以 ``scope="file_read"``、target=基点的规范路径审批一次。
         max_results: 结果条数上限；超出截断并在输出尾告知。
         exclude_dirs: 不下探的目录名集合（默认 ``DEFAULT_SEARCH_EXCLUDE_DIRS``）。
         respect_gitignore: 按沙盒内的 .gitignore 跳过路径（默认 True，理由见 ADR 0071）；
@@ -145,11 +149,12 @@ def make_glob_tool(
         timeout_seconds: 单次调用超时（ToolSpec 级，超时由 runtime 统一处理）。
 
     Raises:
-        ValueError: ``max_results`` 非正。
+        ValueError: ``max_results`` 非正；``root_dir`` 与 ``workspace`` 都给或都不给。
     """
     if max_results <= 0:
         raise ValueError("max_results must be > 0")
-    root = Path(root_dir).expanduser().resolve()
+    workspace = workspace_for(root_dir, workspace)
+    root = workspace.root
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         """参数校验 → 沙盒 → 审批 → 工作线程遍历 → 渲染；取消返回 cancelled 结果。"""
@@ -159,24 +164,29 @@ def make_glob_tool(
         matcher, rel = parsed
         if ctx.cancel.is_cancelled:
             return cancelled_result(ctx)
-        base = _resolve_safe(root, rel)
-        if base is None:
+        try:
+            scope = search_scope(workspace, rel)
+        except WorkspacePathError:
             return ToolResult.error(
                 f"path_outside_sandbox: {rel} (root={root})", reason="sandbox_violation",
             )
         denied = await check_search_permission(
-            policy, target=base, ctx=ctx, tool_name="glob", pattern=args["pattern"],
+            policy, target=scope.target, ctx=ctx, tool_name="glob", pattern=args["pattern"],
         )
         if denied is not None:
             return denied
-        if not base.is_dir():
+        try:
+            is_directory = (await workspace.metadata(scope.target)).is_directory
+        except OSError:
+            is_directory = False
+        if not is_directory:
             return ToolResult.error(f"not_a_directory: {rel}", reason="not_found")
         run = _GlobRun(
-            root=root, matcher=matcher, max_results=max_results, exclude_dirs=exclude_dirs,
-            gitignore=respect_gitignore,
+            root=scope.root, fs=scope.fs, matcher=matcher, max_results=max_results,
+            exclude_dirs=exclude_dirs, gitignore=respect_gitignore,
         )
         try:
-            await run_in_worker(lambda stop: run.run(base, stop), ctx.cancel)
+            await run_in_worker(lambda stop: run.run(scope.base, stop), ctx.cancel)
         except SearchStopped:
             if ctx.cancel.is_cancelled:
                 return cancelled_result(ctx)

@@ -151,6 +151,7 @@ Later ADRs:
 110. [ADR 0110: 稳定层补齐平台对接面](decisions/0110-stable-layer-platform-surface.md): 下游只 import 稳定层却走不通——稳定协议签名里的类型、稳定入口的参数类型、成熟能力的入口都有没导出的。决策：规则「稳定协议签名里的类必须在公共 API 里」并加测试守护；49 个名字晋升（`ThreadInfo`、`AtomicBatchMessageStore`、`CancelTurn`、`SimClient`、`TelemetrySink`、全部内置工具工厂、MCP HTTP 与绑定等）；MCP 两份契约凭与官方 SDK server 的互通验证转 ✅。Amends #0066。
 111. [ADR 0111: `EnginePool.create` 接受外部 `MessageStore`](decisions/0111-pool-factory-accepts-an-external-message-store.md): 协议早就公开，生产入口却写死 `JsonlMessageStore`，换主存只能绕开工厂重做一遍。决策：`create(message_store=)`，与 `storage_dir` 互斥，所有权随构造成功转移；Responses 协议配非原子 store 在构造时拒绝（此前检查被 hook 转发层骗过）；审计模式仍只支持默认 store。
 112. [ADR 0112: MCP stdio server 经 `CommandExecutor` 启动；持续读走 stderr](decisions/0112-mcp-stdio-server-through-command-executor.md): 宿主代跑的 MCP server 不经执行器，进不了沙盒；且客户端从不读 server 的 stderr，日志写满管道后 server 卡死。决策：`CommandSpec.stdin` + `StreamingCommandProcess`；`McpStdioClient.spawn(executor=)`（默认最小环境）；本机命令的 stdin 接 `DEVNULL`；持续读走 stderr、留 16 KiB 尾部。Amends #0051。
+113. [ADR 0113: WorkspaceFS——文件类工具经协议读写工作区](decisions/0113-workspace-fs.md): 命令进了沙盒，文件类工具却还在读写宿主机目录。决策：`WorkspaceFS` 协议（7 个成员）+ `LocalWorkspaceFS`；五个文件类工具工厂接受 `workspace=`；搜索工具的遍历只写一份，非本机工作区的访问从工作线程桥回事件循环；`apply_patch` 删除目录改在校验阶段拒绝。
 
 ### Fourth Pass: Gap Tracking
 

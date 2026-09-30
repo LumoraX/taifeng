@@ -34,7 +34,8 @@ Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools
 - **可替换的协议及其签名类型**：`MessageStore`（`ThreadInfo`）、`AtomicBatchMessageStore`（`BatchAppendAck` /
   `BatchConflictError`，配 Responses 协议的模型客户端时必须实现）、`ThreadDirectory`、`MemoryStore`、
   `ModelClient`（`ModelClientSession`、`ModelCapabilities`）、`CompressionStrategy`（`CompressionTrigger`）、
-  `CommandExecutor`、`ScriptExecutor`、`TelemetrySink`、`InputCostEstimator` 等；
+  `CommandExecutor`（`StreamingCommandProcess`）、`WorkspaceFS`（`LocalWorkspaceFS`）、`ScriptExecutor`、
+  `TelemetrySink`、`InputCostEstimator` 等；
 - **内置工具工厂**：`make_*_tool` 全部在稳定层，包括 `EnginePool.create` 默认注册的四个；
 - **模拟器**：`SimClient` / `SimTurn` / `RoutingSimClient` 及故障注入、断言类型，下游写测试不必自造模型客户端；
 - **遥测**：`TelemetrySink`、`ConsoleSink`、`JsonlSink`、`attach_console_sink` / `attach_jsonl_sink`、OTel sink；
