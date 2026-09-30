@@ -100,6 +100,7 @@ running → done | error | cancelled
 | --- | --- | --- |
 | 未知 skill_id | `SpawnRejectedError("unknown_skill: <id>")` | `unknown_skill` |
 | 非白名单 / 超深度 / 成环 | `SpawnRejectedError("dispatch_rejected: <reason>")` | `not_in_whitelist` / `max_depth_exceeded` / `cycle_detected` |
+| （句柄 id）经 `spawn_skill` 工具发起时由（turn 序号，调用 id）派生为 `sp_<hash>`，同一段对话录后重放得到同样的句柄（ADR 0105）；直接调 `engine.spawn_skill()` 不给 `handle_id` 时随机；指定的 id 已被占用时也随机 | — | — |
 | 种子输入进不了 Journal（仅审计模式） | `SpawnRejectedError("dispatch_rejected: arguments_not_canonical")` | `arguments_not_canonical` |
 | K1 并发超限 | `SpawnLimitError(kind="concurrent")` | `spawn_limit_concurrent` |
 | K1 累计超限 | `SpawnLimitError(kind="total")` | `spawn_limit_total` |

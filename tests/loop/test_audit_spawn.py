@@ -64,7 +64,7 @@ type: composite
 entry: true
 model: mock-model
 child_skills: [worker, merge]
-tool_names: [spawn_skill, join_skill, kill_skill, wait_peer, wait_any, await_skills, send_message, slow]
+tool_names: [spawn_skill, join_skill, kill_skill, wait_peer, wait_any, await_skills, send_message, slow, guarded]
 max_call_depth: 3
 ---
 ROOT-BODY

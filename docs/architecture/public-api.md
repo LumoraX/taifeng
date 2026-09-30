@@ -18,7 +18,9 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 `TimelineFilter` / `TimelineItem` / `TimelinePage`、脱敏 `redact_payload` / `RedactedPayload`、旧 transcript 导入
 `import_legacy_transcript` / `LegacyImportResult` / `LegacyImportError`、投影重建 `rebuild_projections` /
 `ProjectionRebuildResult`）、
-Journal 确定性回放（`JournalReplayClient` 等）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
+Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools` / `recorded_tool_calls` / `RecordedToolCall` /
+`ToolReplayLedger` / `KERNEL_TOOLS`，整条重放 `replay_session` / `recorded_submissions` / `RecordedSubmission` /
+`ReplayReport` / `ReplayStep`）、工具崩溃对账回查结果（`ReconcileVerdict`）、工具集动态增删与 MCP HTTP
 （`McpHttpClient`、`bind_mcp_tools`、`McpToolBinding`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitnessCatalog`、`SkillFitnessLedger`、`SkillFitness`、
 `SkillFitnessRecorder`、`InMemorySkillFitnessStore`）、按战绩算分与影子评估（`FitnessScorer`、`WilsonFitnessScorer`、
 `SkillFitnessScore`、`WorkingSetPolicy`、`WorkingSetPlan`、`plan_working_set`、`SkillFitnessShadow`、

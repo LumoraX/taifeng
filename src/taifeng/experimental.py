@@ -70,6 +70,13 @@ from taifeng.loop.failure_policy import (
     RecipeDeclaringPolicy,
     RecoveryRecipeProvider,
 )
+from taifeng.loop.replay_session import (
+    RecordedSubmission,
+    ReplayReport,
+    ReplayStep,
+    recorded_submissions,
+    replay_session,
+)
 from taifeng.loop.submission import Prewarm
 from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
 from taifeng.mcp.http_client import McpHttpClient
@@ -118,6 +125,13 @@ from taifeng.skill.working_set_runtime import (
     WorkingSetChange,
     WorkingSetView,
 )
+from taifeng.tool.replay import (
+    KERNEL_TOOLS,
+    RecordedToolCall,
+    ToolReplayLedger,
+    recorded_tool_calls,
+    replay_tools,
+)
 from taifeng.tool.spec import ReconcileVerdict
 
 __all__ = [
@@ -142,7 +156,17 @@ __all__ = [
     "AuditToolOutcomeResolution",
     # 审计模式下不适用的 Resume（ADR 0097，🧪）
     "AuditedResumeRejectedError",
-    # Journal 确定性回放（journal-replay，🧪）
+    # Journal 确定性回放（journal-replay，🧪）；工具回放与整条重放（ADR 0105，🧪）
+    "KERNEL_TOOLS",
+    "RecordedToolCall",
+    "ToolReplayLedger",
+    "recorded_tool_calls",
+    "replay_tools",
+    "RecordedSubmission",
+    "ReplayReport",
+    "ReplayStep",
+    "recorded_submissions",
+    "replay_session",
     "JournalReplayClient",
     "RecordedCall",
     "ReplayDivergenceError",

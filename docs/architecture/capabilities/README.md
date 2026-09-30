@@ -74,6 +74,7 @@ Aligned with [conversation.md](../conversation.md).
 | Contract | Coverage |
 | --- | --- |
 | [session-journal-business-integration](session-journal-business-integration.md) | Experimental strict runtime slice: Journal-first submissions, LLM/Tool/call_skill intent and outcome, durable conversation items, per-Session fail-closed gating, and Journal-takeover resume that fails closed on unsettled effects (ADR 0053) |
+| [journal-replay](journal-replay.md) | 录后整条重放（replay 模式）：工具结果按（名字，参数）从录制匹配（`replay_tools` / `recorded_tool_calls`）、内核编排工具照常运行、按录制的提交序列驱动新 Engine（`replay_session` / `recorded_submissions`）、分叉即停并报告；派发句柄由（turn，调用 id）派生（ADR 0105，LLM 回放见 ADR 0054） |
 | [session-journal-timeline](session-journal-timeline.md) | Journal Phase 5：Timeline 投影（按 seq 映射、筛选、`after_seq` 接力）、三种视图（full / redacted / metadata_only）与确定性脱敏、旧 transcript 导入为可接管的审计 Session、从 Journal 重建投影（ADR 0104） |
 | [session-journal-core](session-journal-core.md) | Experimental durable core: canonical envelope/hash chain, atomic JSONL batch frames, cross-process flock writer exclusion, `open_existing` epoch takeover, strict verification incl. monotonic writer epoch |
 | [jsonl-transcript](jsonl-transcript.md) | `MessageWriter`, metadata line, POSIX atomic append, corrupt-line tolerance, `resume_thread_id`, `initial_history`, and `thread_resumed` events |

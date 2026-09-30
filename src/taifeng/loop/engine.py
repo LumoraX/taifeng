@@ -1671,7 +1671,7 @@ class AgentEngine:
 
     async def spawn_skill(
         self, *, skill_id: str, args: dict[str, Any], reason: str,
-        deadline_seconds: float | None = None,
+        deadline_seconds: float | None = None, handle_id: str | None = None,
     ) -> dict[str, str]:
         """转发到 SpawnDriver.spawn_skill —— 公共 API + tools 的 spawn_coordinator 入口。
 
@@ -1689,7 +1689,8 @@ class AgentEngine:
             ``{"handle_id": ..., "child_thread_id": ...}`` —— 立即可用于 ``spawn_status``。
         """
         return await self._spawn.spawn_skill(
-            skill_id=skill_id, args=args, reason=reason, deadline_seconds=deadline_seconds
+            skill_id=skill_id, args=args, reason=reason, deadline_seconds=deadline_seconds,
+            handle_id=handle_id,
         )
 
     def _build_child_runner(

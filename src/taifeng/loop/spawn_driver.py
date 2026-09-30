@@ -136,6 +136,7 @@ class SpawnDriver:
     async def spawn_skill(
         self, *, skill_id: str, args: dict[str, Any], reason: str,
         deadline_seconds: float | None = None,
+        handle_id: str | None = None,
     ) -> dict[str, str]:
         """分离式发起一个子 skill：立即返回句柄，子 skill 在后台分离 task 跑完。
 
@@ -152,6 +153,8 @@ class SpawnDriver:
             skill_id: 要分离发起的子 skill id（须在 entry skill 的 child_skills 白名单内）。
             args: 子 skill 的种子输入（序列化为子 thread 首条 user_message）。
             reason: LLM / 业务自陈的发起理由（透传到事件 / 审计，taifeng 不解析语义）。
+            handle_id: 调用方指定的句柄 id（``spawn_skill`` 工具按 turn 与调用 id 派生，让录后重放
+                得到同样的句柄，ADR 0105）；None 或已被占用时随机生成。
 
         Returns:
             ``{"handle_id": ..., "child_thread_id": ...}`` —— 立即可用于 ``spawn_status``。
@@ -203,9 +206,10 @@ class SpawnDriver:
         try:
             # 4. 建 child thread + 落种子 user_message（与 turn.py::_spawn_sub_runner 对账）
             #    C1 修复：seed 只创建一次，落盘后传递给 _drive_spawn，不再重建。
-            handle_id = f"sp_{secrets.token_hex(4)}"
-            while self._spawn_handles.get(handle_id) is not None:
+            if handle_id is None or self._spawn_handles.get(handle_id) is not None:
                 handle_id = f"sp_{secrets.token_hex(4)}"
+                while self._spawn_handles.get(handle_id) is not None:
+                    handle_id = f"sp_{secrets.token_hex(4)}"
             opened = await open_spawn(
                 eng, handle_id=handle_id, target=target, args=args, reason=reason,
                 deadline_seconds=deadline_seconds,

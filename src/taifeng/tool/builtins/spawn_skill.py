@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Protocol
 
+from taifeng.conversation.journal.canonical import canonical_hash
 from taifeng.tool.builtins.selection_gate import check_selection_gate_by_id
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
@@ -38,7 +39,8 @@ class SpawnCoordinator(Protocol):
     """
 
     async def spawn_skill(
-        self, *, skill_id: str, args: dict[str, Any], reason: str
+        self, *, skill_id: str, args: dict[str, Any], reason: str,
+        handle_id: str | None = None,
     ) -> dict[str, str]:
         ...
 
@@ -142,9 +144,13 @@ def make_spawn_skill_tool(*, selection_gate: SkillSelectionGate | None = None) -
         # （ADR 0078）；其余异常照常上抛，由 tool runtime 统一落 tool_error。
         from taifeng.loop.spawn import SpawnLimitError, SpawnRejectedError
 
+        # 句柄按 turn 与调用 id 派生：同一段对话录后重放得到同样的句柄（ADR 0105）
+        turn_index = ctx.extras.get("turn_index")
+        seed = f"{turn_index if turn_index is not None else ''}:{ctx.call_id}"
         try:
             out = await coordinator.spawn_skill(
-                skill_id=skill_id, args=sub_args, reason=raw_reason
+                skill_id=skill_id, args=sub_args, reason=raw_reason,
+                handle_id=f"sp_{canonical_hash(seed)[:8]}",
             )
         except SpawnRejectedError as rejected:
             return await _rejected(

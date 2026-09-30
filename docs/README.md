@@ -143,6 +143,7 @@ Later ADRs:
 102. [ADR 0102: 审计 Session 关闭时先协作取消在飞的 turn](decisions/0102-audit-mode-cooperative-shutdown.md): 释放时对 operation 直接 raw cancel，截断了意图落账与收敛之间的窗口，Journal 留下没有结果的意图而 Session 以 complete 终结。决策：先取消持有 root gate 的 turn 的 token、在 2 秒宽限期内等它自行退出，再根取消与 raw cancel；收敛期间 gate 不再放行新 turn，排队的消息在在飞 turn 收尾之后只应用不运行。
 103. [ADR 0103: 接管时作废没有 checkpoint 的 LLM 请求](decisions/0103-audit-resume-abandons-interrupted-llm-requests.md): 进程死在 LLM 调用途中是最常见的崩溃时刻，而这种 Session 恰恰无法接管。决策：可收敛 thread 上没有 checkpoint 的请求落 `llm_request_abandoned` 视为已结算——回复没进过对话，作废不重复任何事情；那个 turn 到此为止不补跑；有 checkpoint 的不作废。
 104. [ADR 0104: Journal Phase 5——Timeline 投影、脱敏、旧 transcript 导入与投影重建](decisions/0104-journal-timeline-redaction-import-rebuild.md): ADR 0025 的第五阶段。决策：Timeline 直接映射领域记录、按 `after_seq` 接力；脱敏按字段名而不是按内容，三种视图，事实源不动；旧 transcript 导入成历史标 `legacy_unverified` 的新 Session，损坏的行让导入失败，不认识的条目记下来；投影重建只补不改，分叉的只报告。
+105. [ADR 0105: replay 模式——工具结果回放与整条 Session 重放](decisions/0105-replay-mode.md): ADR 0054 只回放了 LLM，工具仍要真的执行。决策：工具结果按（名字，有效参数）从 Journal 匹配、内核编排工具照常运行、派发句柄由（turn，调用 id）派生、按录制的提交序列驱动新 Engine 且分叉即停；重放不比较对话内容。
 
 ### Fourth Pass: Gap Tracking
 

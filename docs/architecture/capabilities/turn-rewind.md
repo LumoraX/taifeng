@@ -247,7 +247,7 @@ iteration / dispatch 节点的编号。
 - rewind 已 done 且 barrier 已 fired 的 spawn：重推得新结果但**不自动重聚合**（fired 守卫幂等）；业务要重聚合需自行再 `set_join_barrier`。
 - 多实例部署下"中断遗留 running"的活性不可见（live 运行表是单 engine 实例内闭合）；多实例互斥是业务侧部署约束。
 - 挂起态下对同批**已有结果**的调用做 `retry_tool`：拒绝（`sibling_calls_pending`）；需要时先 `Resume` 或改用 `re_reason`。
-- replay 模式（录后确定性重放整条 call 图）：留待后续（见设计 §8）。
+- replay 模式（录后确定性重放整条 call 图）：已作为独立能力落地，见 [journal-replay](journal-replay.md)（ADR 0105）。
 - compaction 节点只覆盖产生 `compacted` 条目的压缩（sliding / handoff）；就地改写 payload 的策略（surgical_trim / offload）
   不产生条目，不进节点表。指令热更等其他内核动作在 history 中不留条目，同样不进节点表。
 - spawn 子 thread 的 compaction 节点可见（`rewind_nodes_for`）但不可 rewind（`unsupported_node_kind`）。

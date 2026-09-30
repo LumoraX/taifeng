@@ -725,6 +725,7 @@ def _reviewed_one_attempt_client_types() -> tuple[type[object], ...]:
     from taifeng.llm.providers.openai.chat import OpenAIChatClient
     from taifeng.llm.providers.openai.responses import OpenAIResponsesClient
     from taifeng.llm.providers.openai_compat import OpenAICompatClient
+    from taifeng.llm.providers.replay import JournalReplayClient
     from taifeng.llm.providers.sim import RoutingSimClient, SimClient
 
     return (
@@ -737,6 +738,8 @@ def _reviewed_one_attempt_client_types() -> tuple[type[object], ...]:
         OpenAIResponsesClient,
         RoutingSimClient,
         SimClient,
+        # 录制回放：一次 stream 恰好消费一次录制，没有网络也没有重试（ADR 0105）
+        JournalReplayClient,
     )
 
 
