@@ -255,9 +255,12 @@ from taifeng.tool.builtins import (
 )
 from taifeng.tool.command_executor import (
     CommandExecutor,
+    CommandInput,
+    CommandOutput,
     CommandProcess,
     CommandSpec,
     LocalCommandExecutor,
+    StreamingCommandProcess,
 )
 
 __all__ = [
@@ -274,6 +277,10 @@ __all__ = [
     "CommandProcess",
     "CommandSpec",
     "LocalCommandExecutor",
+    # 能持续对话的进程（MCP stdio server 经执行器启动，ADR 0112）
+    "CommandInput",
+    "CommandOutput",
+    "StreamingCommandProcess",
     "CompressionContext",
     "CompressionOrchestrator",
     "CompressionResult",

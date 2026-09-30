@@ -150,6 +150,7 @@ Later ADRs:
 109. [ADR 0109: 工具与脚本执行带归属标识（会话、提交）](decisions/0109-execution-identity-for-tools-and-scripts.md): 审批通过后重跑的工具拿不到 `submission_id`，执行路径上没有会话标识。决策：`ToolContext.extras` 在派发与两条重跑路径上都带 `submission_id` / `session_id`（重跑取 `Resume` 那一轮）；`ScriptInvocation` 增加四个可选归属字段。
 110. [ADR 0110: 稳定层补齐平台对接面](decisions/0110-stable-layer-platform-surface.md): 下游只 import 稳定层却走不通——稳定协议签名里的类型、稳定入口的参数类型、成熟能力的入口都有没导出的。决策：规则「稳定协议签名里的类必须在公共 API 里」并加测试守护；49 个名字晋升（`ThreadInfo`、`AtomicBatchMessageStore`、`CancelTurn`、`SimClient`、`TelemetrySink`、全部内置工具工厂、MCP HTTP 与绑定等）；MCP 两份契约凭与官方 SDK server 的互通验证转 ✅。Amends #0066。
 111. [ADR 0111: `EnginePool.create` 接受外部 `MessageStore`](decisions/0111-pool-factory-accepts-an-external-message-store.md): 协议早就公开，生产入口却写死 `JsonlMessageStore`，换主存只能绕开工厂重做一遍。决策：`create(message_store=)`，与 `storage_dir` 互斥，所有权随构造成功转移；Responses 协议配非原子 store 在构造时拒绝（此前检查被 hook 转发层骗过）；审计模式仍只支持默认 store。
+112. [ADR 0112: MCP stdio server 经 `CommandExecutor` 启动；持续读走 stderr](decisions/0112-mcp-stdio-server-through-command-executor.md): 宿主代跑的 MCP server 不经执行器，进不了沙盒；且客户端从不读 server 的 stderr，日志写满管道后 server 卡死。决策：`CommandSpec.stdin` + `StreamingCommandProcess`；`McpStdioClient.spawn(executor=)`（默认最小环境）；本机命令的 stdin 接 `DEVNULL`；持续读走 stderr、留 16 KiB 尾部。Amends #0051。
 
 ### Fourth Pass: Gap Tracking
 

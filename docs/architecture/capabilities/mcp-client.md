@@ -268,6 +268,22 @@ handler 调用 SHALL 可被两种方式打断：server 的 `notifications/cancel
 `tools/call` 途中发生的 elicitation，其等待用户的时间计入该次调用的超时（stdio
 `request_timeout_seconds`、HTTP `request_timeout_seconds`、桥 `timeout_seconds`）；需要人工交互的宿主应相应调大。
 
+### Requirement: stdio server 可经 `CommandExecutor` 启动（ADR 0112）
+
+`McpStdioClient.spawn(command, executor=)` 给出执行器时 SHALL 经它启动 server：
+`CommandSpec(command=shlex.join(command), shell=False, cwd=cwd, env=..., stdin=True)`。`env` 不给时 SHALL
+使用最小白名单（`default_safe_env`），不把宿主环境送进执行器；不经执行器的路径维持继承宿主环境。执行器
+返回的进程不满足 `StreamingCommandProcess`（或 `stdin` / `stdout` 为 None）时 SHALL 终止该进程并抛
+`TypeError`。
+
+客户端 SHALL 持续读走 server 的 stderr，只保留 16 KiB 尾部（`client.stderr_tail`）：不读的话日志写得多的
+server 会阻塞在写 stderr 上、不再回应请求。
+
+#### Scenario: server 往 stderr 大量写日志
+- **WHEN** server 在应答 `initialize` 之前往 stderr 写了 2 MiB
+- **THEN** 握手照常完成
+- **AND** `stderr_tail` 是输出的最后一段，长度不超过 16 KiB
+
 ## 测试接入
 
 - `tests/mcp/test_protocol.py` —— 版本常量、客户端协商（接受 / 拒绝 / 缺失）、server 协商、stdio 断开子进程、HTTP 版本头与会话结束
@@ -278,6 +294,7 @@ handler 调用 SHALL 可被两种方式打断：server 的 `notifications/cancel
 - `tests/mcp/test_output_schema.py` —— schema 形状、违例判定、桥 handler（合规 / 违例 / 缺失 / isError / 未声明 / 非法 schema 跳过）、sync 替换与重校验、HTTP 端到端
 - `tests/mcp/test_cancellation.py` —— 通知报文、原因提取、发送器（initialize 不发 / 投递失败 / 关闭）、`await_or_abandon` 四条路径；stdio 超时 / 完成不发 / 迟到响应 / 桥 token 取消 / 桥超时，HTTP 超时 / 调用方取消
 - `tests/mcp/test_sse.py` —— SSE 解析（字段、注释、多行、id 提交与清空、NUL、retry、残余事件、中途断开）、退避、续传响应校验
+- `tests/mcp/test_stdio_executor.py` —— 经执行器启动、argv 往返、默认最小环境、无流进程被拒并终止、启动失败上抛、stderr 写满不卡死与尾部上限、本机执行器的 stdin 开关
 - `tests/mcp/test_http_resumption.py` —— POST 流续传（断开 / 提前 EOF、续传流内 server 请求路由、次数用尽、无事件 id、405、0 次）、旋钮校验；推送流带 Last-Event-ID 重连、无事件放弃、非 SSE 停止
 
 ## 能力边界（如实记录）

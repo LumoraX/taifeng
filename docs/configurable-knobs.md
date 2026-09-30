@@ -704,8 +704,9 @@ LiteLLMClient(
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `command` | (必填) | 启动 server 的 argv（如 `["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]`） |
-| `env` | `None` | 子进程环境变量；`None` = 继承当前进程 |
+| `env` | `None` | 子进程环境变量；`None` = 继承当前进程（经 `executor` 启动时为最小白名单 `PATH` / `HOME` / `LANG`） |
 | `cwd` | `None` | 子进程工作目录 |
+| **`executor`** | `None` | `CommandExecutor`；给出时 server 经它启动（可放进容器 / 沙盒，ADR 0112），执行器须返回 `StreamingCommandProcess`；`None` = 本端直接拉起子进程 |
 | **`request_timeout_seconds`** | `60.0` | 单条 JSON-RPC 请求超时；`None` = 关闭 client 层超时，完全由调用方控制。`tools/call` 途中 server 发起的 elicitation 等用户的时间也计入 |
 | **`elicitation_handler`** | `None` | 可选 `ElicitationHandler`；注入则 initialize 声明 `elicitation` 能力并处理 server 的 `elicitation/create`；`None` 不声明，server 仍发时回 `-32601`（见 §4.2） |
 | **`max_list_pages`** | `100` | `tools/list` 跟 `nextCursor` 翻页的页数上限；超限 / 游标重复 / 游标非字符串抛 `McpPaginationError`（不静默截断）；< 1 在拉起子进程前 `ValueError` |

@@ -12,6 +12,8 @@ CancelTurn
 CancellationToken
 CodexResponsesClient
 CommandExecutor
+CommandInput
+CommandOutput
 CommandProcess
 CommandSpec
 CompositeMemoryStore
@@ -145,6 +147,7 @@ SkillVerifier
 SkillVerifyParseError
 SlidingWindowStrategy
 SqliteThreadDirectory
+StreamingCommandProcess
 StructuralOutcomeJudge
 Submission
 SurgicalTrimStrategy

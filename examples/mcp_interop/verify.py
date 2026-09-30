@@ -4,6 +4,8 @@
 工作，验证不了「对规范的理解与别人一致」。本脚本拿官方 SDK 的 server 当对端，走真实的 stdio 子
 进程与真实的 HTTP 连接：
 
+0. 三种接法各跑一遍：直接拉起的 stdio 子进程、经 ``CommandExecutor`` 启动的 stdio 子进程、
+   streamable HTTP；
 1. 协议版本协商（官方 SDK 的最新版本比内核声明的新，须协商到双方都支持的版本）；
 2. ``tools/list``、``tools/call``（文本结果、结构化结果）；
 3. ``bind_mcp_tools`` 注册成 ``ToolSpec`` 后经工具 handler 调用；
@@ -25,9 +27,15 @@ from typing import Any
 
 import httpx
 
-from taifeng.loop.cancellation import CancellationToken
-from taifeng.mcp import McpHttpClient, McpStdioClient, bind_mcp_tools
-from taifeng.tool import ToolContext, ToolRegistry
+from taifeng import (
+    CancellationToken,
+    LocalCommandExecutor,
+    McpHttpClient,
+    McpStdioClient,
+    ToolContext,
+    ToolRegistry,
+    bind_mcp_tools,
+)
 
 _SERVER = str(Path(__file__).with_name("server.py"))
 _failures: list[str] = []
@@ -112,6 +120,14 @@ async def main() -> int:
         await _exercise(stdio, "stdio")
     finally:
         await stdio.close()
+
+    # 同一个 server 经 CommandExecutor 启动（宿主把 server 放进沙盒时走的路径，ADR 0112）
+    sandboxed = await McpStdioClient.spawn(
+        [sys.executable, _SERVER, "stdio"], executor=LocalCommandExecutor())
+    try:
+        await _exercise(sandboxed, "stdio 经 CommandExecutor")
+    finally:
+        await sandboxed.close()
 
     port = _free_port()
     proc = await asyncio.create_subprocess_exec(
