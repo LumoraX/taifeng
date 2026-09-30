@@ -72,6 +72,7 @@
 | --- | --- | --- | --- |
 | `outcome_judge` | `None` | skill 战绩判定器（`skill-outcome-record`）；`None` 则不记战绩 | — |
 | `storage_dir` | `None` | 通用存储根目录（战绩 / 索引等）；`None` 则退回 `threads_dir` 同级 | — |
+| **`message_store`** | `None` | **外部会话主存（ADR 0111）**：注入 `MessageStore` 实现（数据库等）后不再建默认的 `JsonlMessageStore`、不碰本机目录；与 `storage_dir` / `threads_dir` 互斥。池建成后拥有它（`close()` 时关闭）。配 Responses 协议的模型客户端时须同时实现 `AtomicBatchMessageStore`，否则构造即抛 `UnsupportedPersistenceCapabilityError`；审计模式（`audit=`）只支持默认 store。不给 `thread_directory` 时用 `NullThreadDirectory` | — |
 | `thread_directory` | `None` | `ThreadDirectory` 实现；`None` 用默认 JSONL 目录 | — |
 | `index_hook` | `None` | `IndexHook` —— 落盘后建索引的旁路钩子（`index-hook` 契约） | — |
 | `sink` | `None` | `TelemetrySink` —— 事件外发后端；`None` 不外发（R3 仍在总线上） | codex telemetry |
@@ -533,6 +534,25 @@ pool = await EnginePool.create(
 ```
 
 业务侧只实现 4 个 `ThreadDirectory` async 方法（`list_threads / get_metadata / update_metadata / upsert_metadata`），约 30-80 行；taifeng 内部自动透传调用。
+
+### 替换主存（会话不落本机）
+
+```python
+from taifeng import EnginePool
+
+pool = await EnginePool.create(
+    skills_dir=...,
+    message_store=MyDatabaseMessageStore(dsn),   # 实现 MessageStore；不再给 storage_dir
+    thread_directory=MyThreadDirectory(dsn),     # 可选；不给用 NullThreadDirectory
+    model_client=...,
+)
+```
+
+- 池建成后拥有这个 store，`pool.close()` 时调它的 `close()`；
+- 模型客户端走 Responses 协议时，store 还须实现 `AtomicBatchMessageStore.append_atomic_batch`
+  （同一 `batch_id` + 同样内容重试必须幂等，内容不同抛 `BatchConflictError`）；
+- `load_thread` 必须按写入顺序、完整吐回全部条目（resume 依赖它）；
+- 审计模式只支持默认 store。
 
 ### 订阅 IndexHook（业务事件投递）
 
