@@ -27,11 +27,62 @@ from taifeng.context.strategies import (
     BackgroundCompactionStrategy,
     MultimodalEvictionStrategy,
 )
+from taifeng.conversation.journal.backend import (
+    ZERO_HASH,
+    CommittedRecord,
+    SealedBatch,
+    SessionJournalCore,
+    descriptor_fingerprint,
+    ended_record_id,
+    index_envelopes,
+    resolve_idempotent_ack,
+    seal_batch,
+    snapshot_records,
+    verify_envelopes,
+)
+from taifeng.conversation.journal.canonical import canonical_hash, record_fingerprint
+from taifeng.conversation.journal.errors import (
+    CommitNotStartedError,
+    JournalAlreadyExistsError,
+    JournalBusyError,
+    JournalConflictError,
+    JournalError,
+    JournalIntegrityError,
+    JournalLeaseError,
+    JournalLockUnsupportedError,
+    JournalRecoveryRequiredError,
+    JournalSessionEndedError,
+    JournalSessionNotFoundError,
+)
+from taifeng.conversation.journal.file_io import DefaultSyncFileAdapter, SyncFileAdapter
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.legacy_import import (
     LegacyImportError,
     LegacyImportResult,
     import_legacy_transcript,
+)
+from taifeng.conversation.journal.memory import (
+    InMemoryJournalStorage,
+    InMemorySessionJournalCore,
+)
+from taifeng.conversation.journal.models import (
+    SESSION_ENDED_RECORD_TYPE,
+    WRITER_TAKEOVER_RECORD_TYPE,
+    ActorRef,
+    Durability,
+    JournalAck,
+    JournalEnvelope,
+    JournalHealth,
+    JournalRecord,
+    JournalVerification,
+    RootThreadDescriptor,
+    SessionCreateResult,
+    SessionDescriptor,
+    SessionLease,
+    SessionOpenResult,
+    WriterTakeoverV1,
+    build_initialization_records,
+    build_takeover_record,
 )
 from taifeng.conversation.journal.projection_rebuild import (
     ProjectionRebuildResult,
@@ -43,6 +94,11 @@ from taifeng.conversation.journal.timeline import (
     TimelineFilter,
     TimelineItem,
     TimelinePage,
+)
+from taifeng.conversation.journal.writer_lock import (
+    FcntlWriterLockAdapter,
+    WriterLockAdapter,
+    WriterLockBusyError,
 )
 from taifeng.conversation.origin import (
     InputOrigin,
@@ -139,6 +195,59 @@ __all__ = [
     "AuditCapabilityError",
     "AuditConfig",
     "JsonlSessionJournalCore",
+    # Journal 后端 seam（session-journal-backend，ADR 0114，🧪）
+    # —— core 协议与它签名里的类型
+    "SessionJournalCore",
+    "ActorRef",
+    "Durability",
+    "JournalAck",
+    "JournalEnvelope",
+    "JournalHealth",
+    "JournalRecord",
+    "JournalVerification",
+    "RootThreadDescriptor",
+    "SessionCreateResult",
+    "SessionDescriptor",
+    "SessionLease",
+    "SessionOpenResult",
+    "WriterTakeoverV1",
+    # —— 错误
+    "CommitNotStartedError",
+    "JournalAlreadyExistsError",
+    "JournalBusyError",
+    "JournalConflictError",
+    "JournalError",
+    "JournalIntegrityError",
+    "JournalLeaseError",
+    "JournalLockUnsupportedError",
+    "JournalRecoveryRequiredError",
+    "JournalSessionEndedError",
+    "JournalSessionNotFoundError",
+    # —— 换存储：注入 JsonlSessionJournalCore 的两个适配器
+    "DefaultSyncFileAdapter",
+    "FcntlWriterLockAdapter",
+    "SyncFileAdapter",
+    "WriterLockAdapter",
+    "WriterLockBusyError",
+    # —— 换 core：存储无关的构件与参考实现
+    "SESSION_ENDED_RECORD_TYPE",
+    "WRITER_TAKEOVER_RECORD_TYPE",
+    "ZERO_HASH",
+    "CommittedRecord",
+    "InMemoryJournalStorage",
+    "InMemorySessionJournalCore",
+    "SealedBatch",
+    "build_initialization_records",
+    "build_takeover_record",
+    "canonical_hash",
+    "descriptor_fingerprint",
+    "ended_record_id",
+    "index_envelopes",
+    "record_fingerprint",
+    "resolve_idempotent_ack",
+    "seal_batch",
+    "snapshot_records",
+    "verify_envelopes",
     # Journal Phase 5：Timeline 投影、脱敏、旧 transcript 导入、投影重建（ADR 0104，🧪）
     "JournalTimelineProjector",
     "TimelineFilter",

@@ -12,7 +12,9 @@ taifeng 是被业务仓库按 PyPI 版本钉住使用的内核，公共 API 的�
 | **实验层** | `taifeng.experimental.__all__` | 可在任意发布中不兼容地变化，变化记入 ADR | 契约（`docs/architecture/capabilities/`）标 🧪 的能力入口放这里；契约转 ✅ 后晋升顶层，并在本层保留同名导出至少一个发布版本 |
 | **内部** | 其余子模块中未经上述两处导出的符号 | 无 | 随时可改；子包自己的 `__all__`（如 `taifeng.tool.builtins`）只表示模块内的组织，不构成稳定承诺，除非同时出现在顶层 |
 
-当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`、
+当前实验层：strict audit Session 与 durable Journal（`AuditConfig`、`AuditCapabilityError`、`JsonlSessionJournalCore`；
+Journal 后端 seam——`SessionJournalCore` 及其签名类型与错误类型、`SyncFileAdapter` / `WriterLockAdapter`、
+构件 `seal_batch` / `resolve_idempotent_ack` / `verify_envelopes` 等、参考实现 `InMemorySessionJournalCore`，ADR 0114；
 审计 resume 人裁决 `AuditToolOutcomeRequest` / `AuditToolOutcomeResolution`、
 审计模式下不适用的 `Resume` 抛出的 `AuditedResumeRejectedError`；Timeline 投影 `JournalTimelineProjector` /
 `TimelineFilter` / `TimelineItem` / `TimelinePage`、脱敏 `redact_payload` / `RedactedPayload`、旧 transcript 导入
@@ -48,6 +50,12 @@ Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools
 **晋升**：实验层名字转稳定时从 `taifeng.experimental.__all__` 移除，该模块的 `__getattr__` 保留同名入口
 至少一个发布版本，访问时发 `DeprecationWarning` 提示改从顶层导入（当前：`McpHttpClient`、`McpToolBinding`、
 `bind_mcp_tools`）。
+
+## 一致性检查（`taifeng.testing`）
+
+给适配包用的验收检查，不依赖测试框架，随它所检查的协议同层（目前只有 Journal 后端，实验层）：
+`journal_core_cases()` / `journal_storage_cases()` / `writer_lock_cases()` / `run_cases()`。外部后端通过
+检查才可注入（`capabilities/session-journal-backend.md`）。
 
 ## 类型标记
 

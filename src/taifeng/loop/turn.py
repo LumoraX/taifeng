@@ -151,8 +151,7 @@ class TurnRunner:
     request_metadata: dict[str, Any] = field(default_factory=dict)
     """业务侧透传的不透明上下文，原样合并进 PermissionRequest.metadata / 透传到
     HookContext.extras 与 InstructionContext.metadata（taifeng 不解析 keys）。"""
-    session_id: str | None = None
-    """所属会话；随 ``ToolContext.extras['session_id']`` 交给工具，子 turn 继承（ADR 0109）。"""
+    session_id: str | None = None  # 所属会话：随 extras['session_id'] 交给工具，子 turn 继承（ADR 0109）
     turn_index: int = 0
     """父 turn 的迭代序号；用于 PermissionRequest.turn_index 透传。"""
     script_executors: dict[str, Any] = field(default_factory=dict)

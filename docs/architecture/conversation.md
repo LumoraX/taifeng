@@ -23,6 +23,12 @@ writer 互斥是跨进程的：`create_session` / `open_existing` 先取 `<sessi
 拒绝尾损、已 `session_ended` 的 Session，然后以 `writer_epoch + 1` 追加一条 `writer_takeover` 接管；strict
 verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
 
+后端可替换（ADR 0114，契约见 `capabilities/session-journal-backend.md`）：**换存储**——实现 `SyncFileAdapter`
+与 `WriterLockAdapter` 注入 `JsonlSessionJournalCore`，逻辑沿用内核；**换 core**——实现 `SessionJournalCore`
+的五个方法，`conversation/journal/backend.py` 提供存储无关的构件（`seal_batch` / `resolve_idempotent_ack` /
+`verify_envelopes`），`journal/memory.py` 的 `InMemorySessionJournalCore` 是参考实现。两条路都用
+`taifeng.testing.journal_conformance` 验收。
+
 这一能力当前**不是默认 conversation 持久化路径**（legacy 模式）：
 
 - 未注入 `AuditConfig` 时，`AgentEngine`、`EnginePool`、`MessageWriter` / `MessageStore` 和 EventMsg

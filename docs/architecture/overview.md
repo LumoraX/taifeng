@@ -71,7 +71,10 @@ src/taifeng/
 │   ├── sqlite_directory.py # SqliteThreadDirectory —— stdlib sqlite3 derived 索引（可重建）
 │   ├── rebuild.py        # 索引从 JSONL 自愈重建
 │   ├── hook_runner.py    # IndexHook 触发
-│   └── errors.py         # DirectoryError / ThreadNotFoundError 等
+│   ├── errors.py         # DirectoryError / ThreadNotFoundError 等
+│   └── journal/          # SessionJournal（审计模式的事实源，🧪）：jsonl（默认 core）/ framing / records…；
+│                         # backend（后端 seam：SessionJournalCore 协议 + 存储无关的构件，ADR 0114）/
+│                         # memory（参考实现 InMemorySessionJournalCore）/ file_io + writer_lock（存储与锁适配器）
 │
 ├── context/      # §1.4
 │   ├── budget.py         # ContextBudget（含 max_request_bytes 硬护栏 / G2b）
@@ -146,7 +149,9 @@ src/taifeng/
 ├── instructions/ # §1.6 指令分层注入（InstructionResolver + InstructionSource 协议 + engine/session/turn 三档 scope）
 ├── mcp/          # MCP client（stdio / streamable HTTP，2025-06-18 版本协商；tools/list 分页；bridge 随 list_changed 同步 tools、结果投影含图片附件 / structuredContent + outputSchema 校验；放弃请求发 cancelled；HTTP 断流续传；server→client 请求路由 + elicitation 注入口）+ server（taifeng 作为 MCP server，按客户端能力门控 elicitation）+ prompter
 ├── permission/   # HITL 审批：PermissionPolicy + Rule + Decision（per-builtin 权限模型，无中央门）
-└── telemetry/    # TelemetrySink 协议 + Console / Jsonl / OTel 三 sink
+├── telemetry/    # TelemetrySink 协议 + Console / Jsonl / OTel 三 sink
+└── testing/      # 给适配包用的一致性检查（不依赖测试框架）：journal_conformance（core）/
+                  # journal_adapter_conformance（存储与锁适配器），ADR 0114
 ```
 
 ## 数据流（一次 turn 的生命周期）

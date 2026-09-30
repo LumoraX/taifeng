@@ -1,6 +1,7 @@
 # SessionJournal Durable Core 能力契约（Phase 1 + Phase 2 写者接管）
 
 > 状态：Experimental。关联 ADR 0025、ADR 0053。本契约只覆盖 durable core，不表示 Engine 已获得完整审计能力。
+> 换一个后端（共享存储、数据库）怎么做、怎么验收，见 [session-journal-backend](session-journal-backend.md)（ADR 0114）。
 
 ## 1. 范围
 
