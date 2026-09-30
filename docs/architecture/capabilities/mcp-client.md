@@ -9,6 +9,12 @@ server 完成双向 JSON-RPC：本端发请求，server 也会在处理途中反
 工具集的注册 / 同步见 [dynamic-tool-set](dynamic-tool-set.md)；taifeng 作为 server 的一侧见
 [mcp-server](mcp-server.md)。
 
+入口都在稳定层（`taifeng.McpStdioClient` / `McpHttpClient` / `McpClient` / `bind_mcp_tools` /
+`register_mcp_tools_async`，ADR 0110）。**互通验证**：`examples/mcp_interop/verify.py` 拿官方 MCP Python SDK
+写的 server 当对端，真实 stdio 子进程与真实 HTTP 连接各跑一遍（版本协商、`tools/list`、文本与结构化
+结果、server 拒绝参数、`tools/list_changed` 后绑定同步）；运行需要官方 SDK：
+`PYTHONPATH=src uv run --with mcp python examples/mcp_interop/verify.py`。改动 MCP 客户端后重跑。
+
 修复的缺口（2026-09-28 review）：
 
 - 结果投影把 image 降级成 `[image: mime]`、丢弃 `structuredContent`、把其余内容块（含 base64）`json.dumps`

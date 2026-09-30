@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from taifeng.context.engine import (
     AssembledContext,
     AssembleRequest,
@@ -78,8 +80,6 @@ from taifeng.loop.replay_session import (
     replay_session,
 )
 from taifeng.loop.submission import Prewarm
-from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
-from taifeng.mcp.http_client import McpHttpClient
 from taifeng.skill.authorization import (
     CallbackSkillAuthorization,
     PermissionSkillAuthorization,
@@ -174,10 +174,6 @@ __all__ = [
     "recorded_calls",
     # 工具崩溃对账的回查结果（tool-crash-reconciliation，🧪）
     "ReconcileVerdict",
-    # 工具集动态增删 + MCP streamable HTTP（dynamic-tool-set，🧪）
-    "McpHttpClient",
-    "McpToolBinding",
-    "bind_mcp_tools",
     # skill 战绩聚合（skill-fitness，🧪：只沉淀不决策）
     "InMemorySkillFitnessStore",
     "SkillFitness",
@@ -248,3 +244,28 @@ __all__ = [
     "FileInputPolicy",
     "FilePart",
 ]
+
+# 已晋升到稳定层的名字：在本模块保留至少一个发布版本（ADR 0066 决策 5），访问时提示新位置。
+_PROMOTED: dict[str, str] = {
+    # ADR 0110（2026.9.30 之后的第一个发布）：MCP HTTP 与工具集绑定
+    "McpHttpClient": "taifeng.mcp.http_client",
+    "McpToolBinding": "taifeng.mcp.bridge",
+    "bind_mcp_tools": "taifeng.mcp.bridge",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """已晋升的名字照常可用，但发 ``DeprecationWarning`` 指向 ``taifeng`` 顶层。"""
+    module_path = _PROMOTED.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    import warnings
+
+    warnings.warn(
+        f"taifeng.experimental.{name} has been promoted to the stable layer; "
+        f"import it from taifeng instead (the experimental alias will be removed in a later release)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return getattr(importlib.import_module(module_path), name)

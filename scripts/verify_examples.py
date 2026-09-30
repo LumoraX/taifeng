@@ -51,6 +51,7 @@ KEY_MARKER = "_provider_bootstrap"
 # 无法用模式表达的「非独立入口」,逐条显式登记(路径不存在即报错,防条目变陈旧)。
 NOT_ENTRY: dict[str, str] = {
     "examples/mcp_showcase/mcp_server.py": "被 demo spawn 的 stdio 子进程,不独立运行",
+    "examples/mcp_interop/verify.py": "需官方 MCP SDK(uv run --with mcp),不进 sim 档",
     "examples/step_pipeline/pipeline.py": "纯库模块,由 demo/server 导入",
     "examples/real_llm/test_openai_image_matrix.py": "真实图片矩阵,自读 env key",
     "examples/real_llm/test_codex_image_matrix.py": "真实图片矩阵,自读 env key",
