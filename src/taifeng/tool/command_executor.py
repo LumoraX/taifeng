@@ -8,12 +8,20 @@
 协议只管「启动」：返回的进程对象提供 ``communicate`` / ``kill`` / ``wait`` / ``returncode``——
 ``asyncio.subprocess.Process`` 天然满足，远端实现包一层即可。超时、取消、输出截断、
 权限审批仍由工具统一负责，保证换执行器不改变这些语义。
+
+``kill`` 的约定是「这条命令连同它派生的进程一起结束」（ADR 0108）。只杀 shell 本身不够：
+``sh -c "a; b"`` 里 shell 会 fork 出子进程并把 stdout / stderr 留给它，shell 死了子进程还占着
+管道——输出收不完，调用方等不到结束。本机实现让命令自成一个进程组、按组终止
+（与 ``skill/scripts/shell.py`` 同一手法）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import shlex
+import signal
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -49,7 +57,7 @@ class CommandProcess(Protocol):
         ...
 
     def kill(self) -> None:
-        """强制终止。"""
+        """强制终止这条命令连同它派生的进程；已经结束的进程上调用不报错。"""
         ...
 
     async def wait(self) -> int:
@@ -72,26 +80,70 @@ class CommandExecutor(Protocol):
         ...
 
 
+class _LocalProcess:
+    """本机子进程：自成一个进程组，``kill`` 杀整个组。
+
+    ``start_new_session=True`` 启动，进程的 PID 即进程组 ID。只要组里还有成员，这个 ID 就不会被
+    系统挪作他用，所以 shell 本身已经退出、子进程还在时照样能按组杀到。
+    """
+
+    def __init__(self, proc: asyncio.subprocess.Process) -> None:
+        self._proc = proc
+        self._collected = False
+
+    @property
+    def returncode(self) -> int | None:
+        """退出码；未结束为 None。"""
+        return self._proc.returncode
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        """读完 stdout / stderr 并等待退出。"""
+        output = await self._proc.communicate()
+        # 管道读到 EOF 且进程已退出：没有成员还需要杀，此后 kill 不再发信号
+        self._collected = True
+        return output
+
+    def kill(self) -> None:
+        """SIGKILL 整个进程组；输出已收完的进程上是空操作。"""
+        if self._collected:
+            return
+        try:
+            os.killpg(self._proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # 进程组已不存在 / 没权限按组杀：退回只杀主进程
+            if self._proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    self._proc.kill()
+
+    async def wait(self) -> int:
+        """等待退出，返回退出码。"""
+        return await self._proc.wait()
+
+
 class LocalCommandExecutor:
-    """默认执行器：本机子进程（与此前工具内联的行为逐字一致）。"""
+    """默认执行器：本机子进程，每条命令自成一个进程组。"""
 
     async def start(self, spec: CommandSpec) -> CommandProcess:
         """``shell=True`` 走 ``create_subprocess_shell``，否则 ``shlex.split`` 后 exec。"""
         if spec.shell:
-            return await asyncio.create_subprocess_shell(
+            proc = await asyncio.create_subprocess_shell(
                 spec.command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=spec.cwd,
                 env=spec.env,
+                start_new_session=True,
             )
-        return await asyncio.create_subprocess_exec(
-            *shlex.split(spec.command),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=spec.cwd,
-            env=spec.env,
-        )
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *shlex.split(spec.command),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=spec.cwd,
+                env=spec.env,
+                start_new_session=True,
+            )
+        return _LocalProcess(proc)
 
 
 __all__ = ["CommandExecutor", "CommandProcess", "CommandSpec", "LocalCommandExecutor"]

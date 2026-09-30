@@ -98,7 +98,7 @@ handler MUST NOT 以 `tool_use` 形状发请求（见 [permission-gate](permissi
 - **WHEN** 业务显式传入 `env`
 - **THEN** 子进程 SHALL 使用该 env
 
-### Requirement: 命令执行器 seam（sandbox-seam，ADR 0051）
+### Requirement: 命令执行器 seam（sandbox-seam，ADR 0051 / 0108）
 
 `shell_exec` 与 `run_in_background` SHALL 经 `taifeng.tool.command_executor.CommandExecutor` 启动子进程，
 不直接调 `asyncio.create_subprocess_*`：
@@ -107,13 +107,23 @@ handler MUST NOT 以 `tool_use` 形状发请求（见 [permission-gate](permissi
 | --- | --- |
 | `CommandSpec(command, shell, cwd, env)` | 一次执行请求；`env` 为工具按白名单构造的**完整**环境 |
 | `CommandExecutor.start(spec) -> CommandProcess` | 启动并立即返回；失败抛 `OSError` |
-| `CommandProcess` | `returncode` / `communicate()` / `kill()` / `wait()`（`asyncio.subprocess.Process` 天然满足） |
-| `LocalCommandExecutor` | 默认：本机子进程（`shell=True` → shell，否则 `shlex.split` + exec） |
+| `CommandProcess` | `returncode` / `communicate()` / `kill()` / `wait()` |
+| `LocalCommandExecutor` | 默认：本机子进程（`shell=True` → shell，否则 `shlex.split` + exec），每条命令自成一个进程组 |
 | `make_shell_exec_tool(executor=)` / `BackgroundTaskRegistry(executor=)` | 注入点；None = 本机 |
 
 权限审批、黑名单、超时、输出截断、取消仍由工具统一负责——换执行器不改变这些语义。`shell_exec` SHALL
 在 `interrupt_on_cancel(ctx.cancel)` 内等待子进程：turn 取消 / 截止时间到点即 kill 并返回
 `cancelled (<reason>)` 错误结果；外部 task 取消照常外抛。argv 模式下 `shlex` 解析失败归为 `spawn_error`。
+
+`CommandProcess.kill()` SHALL 终止这条命令连同它派生的进程，且在已结束的进程上调用不报错。只杀 shell
+本身不够：shell fork 出的子进程会继续运行并占着输出管道，取消因此不返回（Python 3.12）或留下孤儿
+进程。`LocalCommandExecutor` 以 `start_new_session=True` 启动、`kill()` 时 `killpg(SIGKILL)`；输出已由
+`communicate()` 收完之后 `kill()` 是空操作。自行实现执行器（容器 / 远端沙箱）时须满足同一约定。
+
+#### Scenario: 取消带走 shell 派生的子进程
+- **WHEN** `shell_exec` 正在执行会 fork 子进程的命令（如 `sleep 30 & wait`），turn 被取消或超时
+- **THEN** 调用立即返回 `cancelled` / `timeout` 错误结果
+- **AND** 子进程已不存在
 
 ### Requirement: BackgroundTaskRegistry 进程内管理
 
