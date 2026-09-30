@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem
 from taifeng.conversation.origin import tag_origin
+from taifeng.loop.audit_peer import commit_peer_sent, deliver_peer_items, root_inbox
 from taifeng.loop.event import (
     EventMsg,
     PeerAgentWoken,
@@ -156,6 +157,10 @@ class PeerMailbox:
                 "trigger_turn_root_forbidden: root turn 由用户驱动，不可被 peer 唤醒"
             )
         item = self._peer_item(target_tid, text, sender, origin)
+        if eng._audit_state is not None:  # noqa: SLF001
+            return await self._deliver_audited(
+                item, target=target, mode=mode, sender=sender,
+                submission_id=submission_id)
 
         delivered_via = "history"
         mode_downgraded = False
@@ -194,9 +199,27 @@ class PeerMailbox:
                         # 空闲（终态）spawn child → 续跑范式唤醒；suspended 只落史。
                         woken = await self._wake_peer_turn(handle, submission_id)
 
+        return await self._report_sent(
+            item, target=target, mode=mode, sender=sender, submission_id=submission_id,
+            delivered_via=delivered_via, mode_downgraded=mode_downgraded, woken=woken)
+
+    async def _report_sent(
+        self,
+        item: ResponseItem,
+        *,
+        target: str,
+        mode: str,
+        sender: str,
+        submission_id: str | None,
+        delivered_via: str,
+        mode_downgraded: bool,
+        woken: bool,
+    ) -> dict[str, Any]:
+        """发 ``peer_message_sent`` 事件（不含正文）并组装返回值。"""
+        text = str(item.payload["text"])
         sent: dict[str, Any] = {
             "from": sender,
-            "to": target_tid,
+            "to": item.thread_id,
             "mode": mode,
             "delivered_via": delivered_via,
             "mode_downgraded": mode_downgraded,
@@ -204,7 +227,7 @@ class PeerMailbox:
             "text_preview": text[:80],
         }
         outcome: dict[str, Any] = {
-            "target_thread_id": target_tid,
+            "target_thread_id": item.thread_id,
             "delivered_via": delivered_via,
             "mode_downgraded": mode_downgraded,
             "woken": woken,
@@ -213,10 +236,82 @@ class PeerMailbox:
             # 拓扑寻址：把发送方写的地址一并留痕，审计时能看出它是怎么找到对方的
             sent["address"] = target
             outcome["address"] = target
-        await eng._emit(EventMsg(  # noqa: SLF001
+        await self._driver._engine._emit(EventMsg(  # noqa: SLF001
             submission_id=submission_id or sender, msg=PeerMessageSent(data=sent),
         ))
         return outcome
+
+    async def _deliver_audited(
+        self,
+        item: ResponseItem,
+        *,
+        target: str,
+        mode: str,
+        sender: str,
+        submission_id: str | None,
+    ) -> dict[str, Any]:
+        """审计模式的投递：落「发出」，消息进目标的收件队列（ADR 0100）。
+
+        消息进入对话由目标 thread 的写者完成（runner 的迭代边界）。目标是 root 时进
+        Session 级的收件队列，root 空闲也收；目标是派发出去的子 thread 时，它必须正在
+        运行——已经结束的 thread 不再接受任何内容，也不会被唤醒重跑。
+
+        Raises:
+            ValueError: 目标不在运行（``peer_target_not_running``）。
+        """
+        drv = self._driver
+        eng = drv._engine  # noqa: SLF001
+        state = eng._audit_state  # noqa: SLF001
+        assert state is not None
+        target_tid = item.thread_id
+        address = target if is_topology_address(target) else None
+        if target_tid == eng._thread_id:  # noqa: SLF001
+            active = any(p.kind == "turn" for p in eng._pending.values())  # noqa: SLF001
+            queued = await commit_peer_sent(
+                state, item=item, from_thread_id=sender, mode=mode,
+                mode_downgraded=False, address=address)
+            root_inbox(state).append(queued)
+            return await self._report_sent(
+                queued, target=target, mode=mode, sender=sender,
+                submission_id=submission_id,
+                delivered_via="pending_input" if active else "inbox",
+                mode_downgraded=False, woken=False)
+        handle = next(
+            h for h in drv._spawn_handles.handles.values()  # noqa: SLF001
+            if h.child_thread_id == target_tid
+        )
+        async with drv._thread_lock(target_tid):  # noqa: SLF001
+            live = drv._live_runners.get(target_tid)  # noqa: SLF001
+            if live is None or handle.status != "running":
+                raise ValueError(f"peer_target_not_running: {target}")
+            downgraded = mode == "trigger_turn"
+            queued = await commit_peer_sent(
+                state, item=item, from_thread_id=sender, mode=mode,
+                mode_downgraded=downgraded, address=address)
+            live.pending_input.append(queued)
+        return await self._report_sent(
+            queued, target=target, mode=mode, sender=sender, submission_id=submission_id,
+            delivered_via="pending_input", mode_downgraded=downgraded, woken=False)
+
+    async def retire_runner(self, child_thread_id: str, runner: Any) -> None:
+        """runner 退栈:注销 live 登记。
+
+        审计模式下注销与投递互斥(同一把 thread 锁),并把 turn 收尾之后才到的消息写进
+        对话——它们已经落过「发出」,thread 此刻还没有终态,模型没有看到但消息没丢。
+        """
+        drv = self._driver
+        state = getattr(runner, "audit_state", None)
+        if state is None:
+            drv._live_runners.pop(child_thread_id, None)  # noqa: SLF001
+            return
+        async with drv._thread_lock(child_thread_id):  # noqa: SLF001
+            drv._live_runners.pop(child_thread_id, None)  # noqa: SLF001
+        late = list(runner.pending_input)
+        if late and state.coordinator.effect_gate_open:
+            runner.pending_input.clear()
+            await deliver_peer_items(
+                state, late, submission_id=runner.submission_id,
+                turn_index=runner.turn_index)
 
     async def _wake_peer_turn(
         self, handle: SpawnHandle, submission_id: str | None

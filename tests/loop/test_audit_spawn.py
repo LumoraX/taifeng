@@ -39,11 +39,13 @@ from taifeng.tool.builtins import (
     make_await_skills_tool,
     make_join_skill_tool,
     make_kill_skill_tool,
+    make_run_in_background_tool,
     make_send_message_tool,
     make_spawn_skill_tool,
     make_wait_any_tool,
     make_wait_peer_tool,
 )
+from taifeng.tool.builtins.background import BackgroundTaskRegistry
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 from tests.conftest import run_until_root_done, wait_for_condition
 
@@ -62,7 +64,7 @@ type: composite
 entry: true
 model: mock-model
 child_skills: [worker, merge]
-tool_names: [spawn_skill, join_skill, kill_skill, wait_peer, wait_any, await_skills]
+tool_names: [spawn_skill, join_skill, kill_skill, wait_peer, wait_any, await_skills, send_message, slow]
 max_call_depth: 3
 ---
 ROOT-BODY
@@ -85,7 +87,7 @@ description: 干活的
 version: 1.0.0
 type: composite
 model: mock-model
-tool_names: [slow, guarded]
+tool_names: [slow, guarded, send_message]
 ---
 WORKER-BODY
 """
@@ -110,6 +112,7 @@ def _spawn_tools() -> list[ToolSpec]:
     return [audited(make()) for make in (
         make_spawn_skill_tool, make_join_skill_tool, make_kill_skill_tool,
         make_wait_peer_tool, make_wait_any_tool, make_await_skills_tool,
+        make_send_message_tool,
     )]
 
 
@@ -147,10 +150,13 @@ class _Run:
             return ToolResult.ok("written") if decision.granted else ToolResult.error("denied")
 
         def spec(name: str, handler: Any) -> ToolSpec:
+            # parallel_safe：工具运行时的读写锁是整个 Engine 共用的，独占的慢工具会把
+            # 别的 thread 上的调用一并挡住
             return ToolSpec(
                 name=name, description=name,
                 input_schema={"type": "object", "properties": {}},
                 handler=handler, effect_kind="pure", reconciliation="none",
+                parallel_safe=True,
             )
 
         return [*_spawn_tools(), spec("slow", slow), spec("guarded", guarded)]
@@ -223,18 +229,17 @@ def _handles(envelopes: list[JournalEnvelope]) -> list[str]:
 # ====================================================================
 
 
-async def test_spawn_tools_are_admitted_and_the_rest_stay_out(tmp_path: Path) -> None:
+async def test_spawn_tools_are_admitted_and_background_tasks_stay_out(tmp_path: Path) -> None:
     run = _Run(tmp_path)
     await run.start()
     await run.pool.close()
 
-    for make, code in (
-        (make_send_message_tool, "audit_peer_unsupported"),
-    ):
-        other = _Run(tmp_path / code)
-        with pytest.raises(AuditCapabilityError) as raised:
-            await other.start(extra_tools=[make()])
-        assert raised.value.code == code
+    other = _Run(tmp_path / "background")
+    with pytest.raises(AuditCapabilityError) as raised:
+        await other.start(extra_tools=[
+            make_run_in_background_tool(registry=BackgroundTaskRegistry()),
+        ])
+    assert raised.value.code == "audit_spawn_unsupported"
 
 
 # ====================================================================

@@ -41,6 +41,7 @@ from taifeng.conversation.journal.projector import (
 from taifeng.loop.audit import SessionAuditCoordinator
 from taifeng.loop.audit_awaiting import mark_awaiting
 from taifeng.loop.audit_bootstrap import AuditedSessionState, _emergency_close
+from taifeng.loop.audit_peer import root_inbox, undelivered_peer_messages
 from taifeng.loop.audit_resume_dispatch import (
     RecoveryScope,
     build_recovery_scope,
@@ -319,6 +320,8 @@ async def resume_audited_session(
         )
         # 句柄表是运行态：由派发记录重建，交给新 Engine
         remember_detached(state, detached_from_journal(envelopes))
+        # 发给 root、还没进入对话的 peer 消息回到收件队列，下一个 root turn 收下
+        root_inbox(state).extend(undelivered_peer_messages(envelopes, resume_thread_id))
         for suspension in active_suspensions(envelopes):
             # 接管的 Session 仍在等人作答：再次释放时照样只是离开，不是终结
             mark_awaiting(state, suspension.suspension_id)

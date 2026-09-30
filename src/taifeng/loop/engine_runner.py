@@ -64,6 +64,9 @@ class EngineRunner:
         路径才有残留。事件与 runner 侧同形，但 delivered=False + reason=turn_ended，
         让宿主知道这段文本没有进入本 turn 的 prompt。
         """
+        if self._engine._audit_state is not None:
+            # 审计：root 的收件队列跟着 Session 走，turn 结束后才到的消息留给下一个 root turn
+            return
         residual = list(runner.pending_input)
         runner.pending_input.clear()
         for item in residual:

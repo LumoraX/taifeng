@@ -777,6 +777,11 @@ Resume(thread_id, resolutions)
   `audit_resume_spawn` 在恢复批次里落 `cancelled`。join-barrier 同理：`JoinBarrierCoordinator` 的登记、
   点火经 `spawn_ledger` 分流，审计模式下聚合 turn 由 `run_audited_barrier` 包着跑，跑完落
   `barrier_settled`；接管时 barrier 表与已点火集合由记录重建。
+- **peer 消息**（`audit_peer`）：`PeerMailbox._deliver_audited` 落 `peer_message_sent` 后把消息放进目标的
+  收件队列——root 是 Session 级的 `root_inbox`（root runner 的 `pending_input` 就是它），子 thread 是
+  live runner 的 `pending_input`。runner 在迭代边界 `drain_pending_input` 时经 `deliver_peer_items`
+  把消息写进对话；子 runner 退栈时 `retire_runner` 收下收尾之后才到的消息。接管时未进入对话的消息
+  由 `undelivered_peer_messages` 找回。
 - **cancellation**：每个 active turn 有目标取消子树（CancelTurn 只取消其目标 turn/子树），Session root 取消
   保留给 freeze 与 Shutdown；LLM checkpoint 与 Tool outcome 的落账均为取消无关（shield）。
 - **Session isolation**：coordinator/writer 健康态每 Session 独立；一个 Session freeze 不影响其他 Session 的

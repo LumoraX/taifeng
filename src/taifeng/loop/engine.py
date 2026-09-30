@@ -55,6 +55,7 @@ from taifeng.loop.audit_mailbox import (
     handoff_accepted_user_message,
     retire_started_audited_token,
 )
+from taifeng.loop.audit_peer import root_inbox
 from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shutdown
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.audit_support import _await_owned as audit_await_owned
@@ -1549,6 +1550,8 @@ class AgentEngine:
         """从 Engine 当前快照构造单轮 runner。"""
         pending = self._pending.get(submission_id)
         pending_input = pending.pending_input if pending is not None else []
+        if self._audit_state is not None:
+            pending_input = root_inbox(self._audit_state)  # 跟着 Session 走（ADR 0100）
         turn_index = pending.turn_index if pending is not None else None
         return TurnRunner(
             entry_skill=self._entry_skill,

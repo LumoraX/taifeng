@@ -392,9 +392,10 @@ running），异常上抛。持久化的去处：非审计是子 thread 的 `spa
 
 注入 `AuditConfig` 的 Session 里，发起与终态记在 Journal 的记录里（`spawn_started` / `spawn_settled`），
 不写 `spawn` 与 `spawn_settled` 锚点条目；完整契约见
-[session-journal-business-integration §18–§19](session-journal-business-integration.md)。与非审计模式的差异：
+[session-journal-business-integration §18–§20](session-journal-business-integration.md)。与非审计模式的差异：
 
-- 可用的操作是发起、终止、查询、等待与 join-barrier；peer 消息不可用（静态门拒绝）。
+- 可用的操作是发起、终止、查询、等待、join-barrier 与 peer 消息；已经结束的子 thread 不接受消息、
+  不会被唤醒重跑（§20）。
 - barrier 的登记、点火与聚合 turn 的终态记在 `barrier_registered` / `barrier_fired` / `barrier_settled`
   里，不写 `join_barrier` 与 `join_barrier_fired` 锚点条目（§19）。
 - 子 thread 上的调用不能停下等人作答：错峰 HITL 在审计模式下不可用。

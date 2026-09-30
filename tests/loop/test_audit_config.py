@@ -403,14 +403,13 @@ def test_official_adapter_subclass_cannot_override_and_drop_observer() -> None:
     [
         ("run_in_background", "audit_spawn_unsupported"),
         ("wait_for_task", "audit_barrier_unsupported"),
-        ("send_message", "audit_peer_unsupported"),
     ],
 )
 def test_registered_unsupported_tools_are_rejected(
     tool_name: str,
     expected_code: str,
 ) -> None:
-    """已注册 Tool 名称足以暴露后台任务 / barrier / peer 消息能力。"""
+    """已注册 Tool 名称足以暴露后台 shell 任务能力。"""
     inputs = replace(
         _static_inputs(),
         tools=(_AuditedTool(name=tool_name),),
@@ -486,10 +485,13 @@ def test_complete_non_suspending_tool_metadata_view_passes() -> None:
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["spawn_skill", "kill_skill", "join_skill", "wait_peer", "wait_any", "await_skills"],
+    [
+        "spawn_skill", "kill_skill", "join_skill", "wait_peer", "wait_any",
+        "await_skills", "send_message",
+    ],
 )
 def test_detached_spawn_tools_are_admitted(tool_name: str) -> None:
-    """分离式派发与 join-barrier 的工具可以进审计 Session（ADR 0098 / 0099）。"""
+    """分离式派发、join-barrier 与 peer 消息的工具可以进审计 Session（ADR 0098–0100）。"""
     validate_audit_config(
         _config(),
         static_inputs=replace(_static_inputs(), tools=(_AuditedTool(name=tool_name),)),

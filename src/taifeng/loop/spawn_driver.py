@@ -430,7 +430,7 @@ class SpawnDriver:
             try:
                 outcome = await runner.run()
             finally:
-                self._live_runners.pop(child_tid, None)
+                await self._peers.retire_runner(child_tid, runner)
             await self._finalize_spawn(handle_id, child_tid, outcome)
         except Exception as e:  # noqa: BLE001
             # 兜底:不让句柄卡死在 running。记日志(不静默)+ 单点收敛失败终态

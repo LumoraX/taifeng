@@ -14,15 +14,16 @@ UserMessage → LLM → 基础 Tool / 同步 call_skill → assistant
 工具调用处停下等人（审批 / 填表 / 给数据）→ Resume → 续跑（§17）
 分离式派发：子 skill 在独立子 thread 上后台运行（§18）
 join-barrier：一批派发全部结束后起聚合 turn（§19）
+peer 消息：同一 Session 里的 agent 之间点对点发消息（§20）
 ```
 
 SessionJournal 是执行事实和对话项的唯一可靠事实源。hot history、MessageStore 和 EventMsg 都是
 Journal durable ack 之后的内存态或可重建投影，不得领先 Journal，也不得被声明为第二事实源。
 
 未启用 audit 的 EnginePool/AgentEngine/MessageStore 行为保持不变。hook 与权限裁决见 §16，
-在工具调用处停下等人作答的挂起与恢复见 §17，分离式派发见 §18，join-barrier 见 §19。
+在工具调用处停下等人作答的挂起与恢复见 §17，分离式派发见 §18，join-barrier 见 §19，peer 消息见 §20。
 本阶段不支持其余原因的挂起（子 skill 挂起、失败处置、资源护栏、带到期时间的挂起）、手动压缩与溢出自愈、原地改写条目的压缩策略、rewind、memory、instruction 更新、hooks、orchestration、
-peer 消息、后台 shell 任务、
+后台 shell 任务、
 LLM attempt / submission 未结算 effect 的 repair/unfreeze、Timeline/export 通用 redaction、
 加密、WORM 或外置 blob。LLM request intent
 的写入前 data minimization 是本契约 §8 的强制安全边界，不属于上述未实现的投影视图 redaction。
@@ -356,7 +357,7 @@ LLM request 落账时图片与文件的正文都按 §8 脱敏（`image_base64` 
 | Hook/approval | 内核的 `HookRunner`；内核的 `PermissionPolicy`（规则、可复用授权、当场作答或挂起式的 prompter）（§16、§17） | 其他类型的 hook 运行器 / 权限策略对象 |
 | Context | 无压缩策略，或全部策略声明 `audit_support` 为 `fold` / `fold_model`（§15） | 未声明或原地改写条目的压缩策略、ContextEngine、rewind、memory、instruction |
 | Skill | atomic/composite、同步 call_skill | orchestration、子 skill 内的挂起 |
-| Spawn/peer | 分离式派发：`spawn_skill` / `kill_skill` / `join_skill` / `wait_peer` / `wait_any`（§18）；join-barrier：`await_skills`（§19） | peer 消息（`send_message`）、后台 shell 任务（`run_in_background` / `wait_for_task`） |
+| Spawn/peer | 分离式派发：`spawn_skill` / `kill_skill` / `join_skill` / `wait_peer` / `wait_any`（§18）；join-barrier：`await_skills`（§19）；peer 消息：`send_message`（§20） | 后台 shell 任务（`run_in_background` / `wait_for_task`）；`SendToPeer` Op（§20.5） |
 | LLM | attempt-observable | opaque attempt/retry |
 | Tool | audit metadata 完整；结果可带图片附件；声明 `can_suspend=True` 的工具可以停下等人（§17） | metadata 缺失；未声明却自行挂起（运行期冻结） |
 | 附件 | 用户消息里的图片与文件（PDF）、工具结果里的图片 | 引用型输入、Data URL、超限、策略未启用或模型不支持的模态 |
@@ -798,11 +799,11 @@ spawn_settled + thread_terminal（子 thread）
 - 审计模式下一次工具调用必须在收敛期限内给出结果（§9）。`wait_peer` / `wait_any` 的等待时长因此
   不超过收敛期限的一半；到点返回 `timeout`，可以再等一次。
 - 发起它的工具调用与这次派发经 outcome 里的 `handle_id` 关联，记录之间没有直接的引用字段。
-- peer 消息、被唤醒重跑、子 thread 的 rewind 不在范围内。
+- 被唤醒重跑、子 thread 的 rewind 不在范围内。
 
 ### 18.7 验收
 
-静态门放行五个工具、拒绝 peer 消息；发起批次先于发起它的工具调用结算、子 skill 的 LLM
+静态门放行五个工具、拒绝后台 shell 任务；发起批次先于发起它的工具调用结算、子 skill 的 LLM
 调用记在子 thread 名下且在发起批次之后；终态记录与子 thread 的 `thread_terminal` 相邻；任何 thread
 上都没有锚点条目；查询与等待工具读回结果；两个派发并行；kill 落 `cancelled`；无法规范化的种子输入
 被拒且不占配额；子 thread 停下等人冻结 Session；等待时长有上限；释放时取消仍在运行的派发并正常
@@ -866,3 +867,67 @@ barrier_settled + thread_terminal（聚合 thread）
 经工具登记且成员已结束时立即点火、自定义输入原样交给聚合 skill；无法规范化的自定义输入被拒；
 任何 thread 上都没有锚点条目；释放时取消仍在运行的聚合 turn；登记了没点火的 barrier 在接管后点火；
 被中断的聚合 turn 在接管时落终态且不再点火；strict verify 通过。
+
+## 20. peer 消息（ADR 0100）
+
+同一个 Session 里的 agent 之间点对点发消息：子 thread 发给 root、root 发给子 thread、子 thread 之间互发。
+
+### 20.1 两个事实，两个写者
+
+| 事实 | 记录 | 谁写 | 何时 |
+| --- | --- | --- | --- |
+| 发出 | `peer_message_sent` | 发送方 | 发送方那次工具调用结算之前 |
+| 进入对话 | `conversation_item`（`user_message`，`payload.source = "peer"`） | 目标 thread 的写者 | 目标的 runner 到达迭代边界时 |
+
+消息进入对话由目标 thread 的写者完成。迭代边界是调用与结果都已配对的位置：消息不会落在一次工具调用
+和它的结果之间，接管时按 Journal 重建出的 history 与运行时一致。
+
+### 20.2 记录
+
+`PeerMessageSentV1`（record type `peer_message_sent`，operation 是消息 id，`thread_id` 是发送方 thread）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `message_id` | 消息 id，也是它进入对话后的对话项 id |
+| `from_thread_id` / `to_thread_id` | 发送方与目标 thread |
+| `mode` | 发送方要求的投递方式：`queue_only` / `trigger_turn` |
+| `mode_downgraded` | 要求唤醒、实际只排队 |
+| `address` | 发送方写的拓扑地址（`sibling:<skill>` / `child:<skill>`）；直接寻址时为空 |
+| `item` | 消息本身：它将以什么样子进入目标 thread 的对话 |
+
+进入对话的对话项 `source_record_id` 指向这条发出记录，`metadata.peer_record_id` 同值。
+
+### 20.3 投递
+
+| 目标 | 处置 | 返回的 `delivered_via` |
+| --- | --- | --- |
+| root，有 turn 在运行 | 进 root 的收件队列，运行中的 turn 在下一个迭代边界收下 | `pending_input` |
+| root，空闲 | 进 root 的收件队列，下一个 root turn 开始时收下 | `inbox` |
+| 正在运行的子 thread | 进它的 runner 的收件队列，下一个迭代边界收下 | `pending_input` |
+| 已经结束的子 thread | 拒绝：`ValueError: peer_target_not_running`，什么都不写 | — |
+
+- root 的收件队列跟着 Session 走，不跟着某个 turn。
+- `trigger_turn` 打正在运行的目标降级为排队（`mode_downgraded = true`）；打 root 被拒
+  （`trigger_turn_root_forbidden`，与非审计模式相同）。审计模式下没有唤醒。
+- turn 收尾之后、子 thread 落终态之前到达的消息照样写进对话；模型没有看到，但消息在 thread 里。
+- 消息内容无法规范化时拒绝发出，什么都不写。
+
+### 20.4 释放与接管
+
+- Session 终结时还在 root 收件队列里的消息没有进入对话；Journal 里有它们的发出记录。
+- 接管时，发给 root、还没进入对话的消息从 Journal 回到收件队列，下一个 root turn 收下。
+- 发给子 thread、还没进入对话的消息不再投递：那个子 thread 在接管时被落为 `cancelled`（§18.5）。
+
+### 20.5 边界
+
+- `SendToPeer` Op 仍在能力面之外（动态门拒绝）：它是业务从外部注入的消息，不是 agent 之间的消息。
+- 已经结束的子 thread 不接受消息，也不会被唤醒重跑。
+- 消息全文进 Journal。
+
+### 20.6 验收
+
+静态门放行 `send_message`；发出先于发送方那次工具调用的结算；进入对话在目标的工具调用结算之后、
+下一次采样之前，回指发出记录；目标的模型在下一次采样看到消息；hot history、投影与 Journal 顺序一致；
+root 发给正在运行的子 thread、`trigger_turn` 降级；root 空闲时收到的消息等到下一个 root turn；
+已经结束的子 thread 拒收且什么都不写；接管后未进入对话的消息回到收件队列且只进入对话一次；
+strict verify 通过。

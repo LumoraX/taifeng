@@ -108,6 +108,23 @@
 
 投递与二次驱动重载互斥(ADR 0035):非 root 目标的「live 判定 → 落史 / 唤醒」段与该 child_thread_id 的 `_drive` 重载段持同一把锁,消息要么在重载前落史(进新 runner 的 buffer)、要么在 live 登记后投 `pending_input`,不会落在「已重载、未登记」窗口只存 store 不进 buffer。join-barrier 语义不受影响(peer 消息不计入 barrier 条件);kill_spawn 取消 token 表照常覆盖唤醒 turn(`peer_wake:<handle>`);K1 配额、K2 token 上限、max_iterations 是消息风暴的既有兜底(内核不做限流——「过多」是业务语义,R1)。
 
+### Requirement: 审计模式下的 peer 消息
+
+注入 `AuditConfig` 的 Session 里，发出与进入对话是两条记录、由两个写者各写一条；完整契约见
+[session-journal-business-integration §20](session-journal-business-integration.md)。与非审计模式的差异：
+
+- 目标是 root 时消息进 Session 级的收件队列：root 空闲时收到的消息不立即落史，等下一个 root turn
+  开始时收下（返回 `delivered_via = "inbox"`）。
+- 目标是已经结束的子 thread 时拒绝（`peer_target_not_running`）：不落史、不唤醒。审计模式下
+  `trigger_turn` 不会唤醒任何 thread，只有「打正在运行的目标降级为排队」这一种结果。
+- `SendToPeer` Op 不可用；`send_message` 工具与 `engine.deliver_peer_message()` 可用。
+- `wait_peer` / `wait_any` 的等待时长有上限（工具收敛期限的一半）。
+
+#### Scenario: 子 thread 给正在跑工具的 root 发消息
+- **WHEN** root 的 turn 停在一次工具调用里，子 thread 调 `send_message(target="parent")`
+- **THEN** Journal 里先有 `peer_message_sent`；root 的工具调用结算之后才出现消息的对话项，
+  root 的下一次采样带着这条消息
+
 ## R1–R5 影响
 
 - **R1**:✅ 寻址/投递/唤醒全是机制;无业务概念;限流策略业务自决。

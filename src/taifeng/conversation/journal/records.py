@@ -488,10 +488,12 @@ class ConversationItemV1(PayloadModel):
 
 
 class _UserMessageItemPayload(JournalModel):
-    """user_message 的稳定 payload 形状。"""
+    """user_message 的稳定 payload 形状；``source`` / ``from_thread`` 仅 peer 消息有（ADR 0100）。"""
 
     text: str
     attachments: CanonicalList
+    source: Literal["peer"] | None = None
+    from_thread: NonEmptyStr | None = None
 
 
 class _AssistantMessageItemPayload(JournalModel):
