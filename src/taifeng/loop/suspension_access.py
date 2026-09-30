@@ -241,7 +241,9 @@ class SuspensionAccess:
                 return item.payload.get("name") in _TURN_BOUND_TOOLS
         return False
 
-    async def execute_resumed_tool(self, call_id: str) -> None:
+    async def execute_resumed_tool(
+        self, call_id: str, *, submission_id: str | None = None,
+    ) -> None:
         """resume 时对一个被批准的挂起 tool call 真正执行，回填 function_call_output。
 
         从 history 找到该 call_id 的 function_call（取 name + arguments）→ 经
@@ -249,11 +251,12 @@ class SuspensionAccess:
 
         Args:
             call_id: permission allow 后需真正执行的挂起 tool call id。
+            submission_id: 触发这次重跑的 ``Resume`` 的 submission id，交给工具作归属（ADR 0109）。
 
         Raises:
             RuntimeError: history 中找不到该 call_id 的 function_call（断点不一致）。
         """
-        from taifeng.tool.spec import ToolContext
+        from taifeng.loop.resume_tool_context import resumed_tool_context
 
         # 找原 function_call（取最后一条匹配，与 turn.py 落盘序一致）
         fc: ResponseItem | None = None
@@ -269,24 +272,10 @@ class SuspensionAccess:
         # 工具运行所需的最小上下文（snapshot / 可见 skill / 权限策略 / 元数据）。
         # 关键：permission_policy 不再注入 ask prompter 的挂起语义——本次执行是"已批准"
         # 的二次放行，工具内若再次走 check 应按业务策略放行（业务侧据 resolutions 调整）。
-        cancel = self._engine._resume_tool_cancel(call_id)
-        ctx = ToolContext(
-            call_id=call_id,
-            cancel=cancel,
-            thread_id=self._engine._thread_id,
-            extras={
-                "skill_snapshot": self._engine._snapshot,
-                "visible_skills": self._engine._snapshot.reachable_from(self._engine._entry_skill.id),
-                "dispatch_policy": self._engine._dispatch_policy,
-                "outcome_judge": self._engine._outcome_judge,
-                "current_skill": self._engine._entry_skill,
-                "entry_skill_id": self._engine._entry_skill.id,
-                "permission_policy": self._engine._permission_policy,
-                "hook_runner": self._engine._hooks,
-                "request_metadata": self._engine._request_metadata,
-                "turn_index": self._engine._turn_index,
-                "script_executors": self._engine._script_executors,
-            },
+        ctx = resumed_tool_context(
+            self._engine, call_id=call_id, thread_id=self._engine._thread_id,
+            entry=self._engine._entry_skill,
+            cancel=self._engine._resume_tool_cancel(call_id), submission_id=submission_id,
         )
         rejection = arguments_rejection(
             self._engine._tool_runtime._registry, name, args, args_error)  # noqa: SLF001
@@ -369,6 +358,7 @@ class SuspensionAccess:
             budget=budget,
             thread_id=self._engine._thread_id,
             submission_id=submission_id,
+            session_id=self._engine._session_id,
             emit=self._engine._emit,
             cancel=cancel,
             image_input_policy=self._engine._image_input_policy,

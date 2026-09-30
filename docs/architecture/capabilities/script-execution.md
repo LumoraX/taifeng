@@ -8,7 +8,7 @@ TBD - created by archiving change scripts-runtime. Update Purpose after archive.
 系统 SHALL 提供以下类型作为协议的输入输出：
 
 - `ScriptDescriptor`（frozen）：`skill_id: str / name: str / path: Path / language: Literal['shell','python','custom'] / args_schema: dict / description: str / timeout_seconds: float / max_output_bytes: int = 16384`（timeout 必填无默认）
-- `ScriptInvocation`（frozen）：`descriptor / args: dict / cancel: CancellationToken`（args 已通过 args_schema 校验）
+- `ScriptInvocation`（frozen）：`descriptor / args: dict / cancel: CancellationToken`（args 已通过 args_schema 校验），外加四个可选的归属标识 `thread_id / session_id / submission_id / call_id`（默认 None，由 `run_script` 填入；executor 可据 `session_id` 按会话隔离工作区，ADR 0109）
 - `ScriptResult`（frozen）：`exit_code: int / stdout: str / stderr: str / duration_ms: int / truncated: bool / is_timeout: bool / killed: bool`
 - `ScriptExecutor(Protocol)`：`async def execute(inv: ScriptInvocation) -> ScriptResult`；SHALL NOT 在主进程 exec 业务代码；SHALL 在 `inv.cancel` 触发时尽快终止 subprocess
 - `ScriptExecutionError(LLMError)`：`descriptor / cause`

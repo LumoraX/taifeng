@@ -161,7 +161,7 @@ class SpawnResumeChain:
         auto_retries = eng._apply_plan_session_effects(plan, record)  # noqa: SLF001
         # 补 gap（复用与 leaf resume 同一机制；marker 由全量达成判定后签发）
         await eng._apply_plan_on_thread(  # noqa: SLF001
-            child_tid, handle.skill_id, record, plan)
+            child_tid, handle.skill_id, record, plan, submission_id=sub.id)
         # request 级核销:仍有未核销 pending → 部分核销,句柄保持 suspended
         items_after = await eng._load_thread_items(child_tid)  # noqa: SLF001
         remaining = [

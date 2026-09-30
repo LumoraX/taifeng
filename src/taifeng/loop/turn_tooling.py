@@ -180,6 +180,7 @@ class TurnTooling:
                 "dispatcher": self.__tooling_owner,  # 让 call_skill 找到自己
                 "iteration": iteration,
                 "submission_id": self.__tooling_owner.submission_id,
+                "session_id": self.__tooling_owner.session_id,
                 "entry_skill_id": self.__tooling_owner.entry_skill.id,
                 # === call_skill 走 PermissionPolicy + Hook 所需的上下文 ===
                 "permission_policy": self.__tooling_owner.permission_policy,

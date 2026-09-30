@@ -77,11 +77,22 @@ class ScriptInvocation:
         descriptor: 元数据；不可变
         args: 已校验通过 ``args_schema`` 的参数字典
         cancel: 取消 token（父 turn 的 cancel 派生）；executor 在 await 点 SHALL 检查
+        thread_id: 发起这次调用的 thread（子 skill 里调用时是子 thread）
+        session_id: 所属会话；同一会话的 root 与各子 thread 相同。executor 可据此按会话隔离
+            工作区（ADR 0109）
+        submission_id: 发起这次调用的那一轮提交
+        call_id: 对应的工具调用 id
+
+    四个标识都可能为 None：不经 ``run_script`` 工具、由调用方直接构造的调用不一定有归属。
     """
 
     descriptor: ScriptDescriptor
     args: dict[str, Any]
     cancel: CancellationToken
+    thread_id: str | None = None
+    session_id: str | None = None
+    submission_id: str | None = None
+    call_id: str | None = None
 
 
 @dataclass(frozen=True)

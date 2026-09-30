@@ -445,6 +445,7 @@ class AgentEngine:
             budget=self._budget,
             thread_id=self._thread_id,
             submission_id=submission_id,
+            session_id=self._session_id,
             emit=self._emit,
             cancel=turn_cancel,
             image_input_policy=self._image_input_policy,

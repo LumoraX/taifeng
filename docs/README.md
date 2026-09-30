@@ -147,6 +147,7 @@ Later ADRs:
 106. [ADR 0106: 超长文件按「方法体外置、类里按原名赋值」拆分](decisions/0106-file-size-split.md): engine.py 2092 行，协作者手法已用尽而白盒寻址名不能变。决策：方法定义为模块级函数、类里按原名赋值（绑定与打桩语义不变）；事件类按主题分文件并原名再导出；Journal 记录按层分文件；零行为变更。
 107. [ADR 0107: 重放重现录制里的挂起与 writer 接管](decisions/0107-replay-reproduces-suspension-and-takeover.md): 真实 LLM 录制跨过「挂起 → 释放 → 接管 → Resume」时重放分叉。决策：等过人的调用结果带 `origin_llm_sample_id`；回放工具重现录制的待答请求而不是直接交回结果；`writer_takeover` 是录制序列的一步，`replay_session(reopen=)` 在此换新 Engine；不剔除缓存断点、不重现崩溃式接管。Amends #0105。
 108. [ADR 0108: 本机命令按进程组终止](decisions/0108-command-kill-takes-the-process-group.md): `shell_exec` 取消 / 超时只杀 shell，shell fork 的子进程继续跑并占着管道——Python 3.12 上取消不返回（CI 自 2026-09-29 持续红），各版本都留孤儿进程。决策：`CommandProcess.kill()` 约定为带走整棵命令树；`LocalCommandExecutor` 每条命令自成进程组、按组 SIGKILL；输出收完后 kill 为空操作。Amends #0051。
+109. [ADR 0109: 工具与脚本执行带归属标识（会话、提交）](decisions/0109-execution-identity-for-tools-and-scripts.md): 审批通过后重跑的工具拿不到 `submission_id`，执行路径上没有会话标识。决策：`ToolContext.extras` 在派发与两条重跑路径上都带 `submission_id` / `session_id`（重跑取 `Resume` 那一轮）；`ScriptInvocation` 增加四个可选归属字段。
 
 ### Fourth Pass: Gap Tracking
 

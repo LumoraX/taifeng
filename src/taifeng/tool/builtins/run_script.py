@@ -51,6 +51,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _optional_str(value: Any) -> str | None:
+    """extras 里的标识：有值转成 str，没有就是 None（不造空串）。"""
+    return str(value) if value else None
+
+
 def _truncate_preview(text: str, limit: int = SCRIPT_OUTPUT_PREVIEW_LIMIT) -> str:
     """按字节截断到 ``limit``，并丢弃尾部不完整 UTF-8 字符。"""
     encoded = text.encode("utf-8")
@@ -283,6 +288,11 @@ async def _run_script_handler(args: dict[str, Any], ctx: ToolContext) -> ToolRes
         descriptor=descriptor,
         args=script_args,
         cancel=ctx.cancel.child(f"script:{descriptor.full_target}"),
+        # 归属标识：executor 据此把脚本放进所属会话的工作区（ADR 0109）
+        thread_id=ctx.thread_id,
+        session_id=_optional_str(ctx.extras.get("session_id")),
+        submission_id=_optional_str(ctx.extras.get("submission_id")),
+        call_id=ctx.call_id,
     )
     started_at = time.monotonic()
     await _emit_event(

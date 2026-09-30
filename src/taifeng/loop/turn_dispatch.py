@@ -125,6 +125,7 @@ class TurnDispatch:
             budget=self.__dispatch_owner.budget,
             thread_id=sub_thread_id,
             submission_id=self.__dispatch_owner.submission_id,
+            session_id=self.__dispatch_owner.session_id,
             emit=self.__dispatch_owner.emit,
             cancel=ctx.cancel,
             image_input_policy=self.__dispatch_owner.image_input_policy,
