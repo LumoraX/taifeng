@@ -37,6 +37,7 @@ from taifeng.loop.audit_admission import (
     InvalidAuditedSubmissionError,
     UnsupportedAuditedOperationError,
     admit_user_message,
+    commit_accepted_application,
     prepare_user_message,
     reject_invalid_user_message,
     reject_unsupported_audited_op,
@@ -1343,12 +1344,12 @@ class AgentEngine:
         assert self._audit_state is not None
         await self._audit_state.coordinator.ensure_effect_allowed()
         try:
-            item, conversation_envelopes = token.validated_application()
+            item = token.validated_application()
         except BaseException as error:
             raise self._audit_state.coordinator.freeze(error) from None
-        # ADR 0029：accepted item 的 application（进 history + 投影）推迟到本 token 拿到
-        # root gate——transcript 顺序 = 执行顺序，在飞 turn 的 prompt 确定不含排队消息。
-        # accept 本身（durable 准入记录）已在 submit 时落盘，不受影响。
+        # ADR 0029 / 0101：accepted item 的 application（对话项落账 + 进 history + 投影）在本
+        # token 拿到 root gate 时进行——Journal 顺序 = transcript 顺序 = 执行顺序，在飞 turn 的
+        # prompt 确定不含排队消息。accept 本身（durable 准入记录）已在 submit 时落盘。
         # 排队前登记 _pending（gate token），CancelTurn 可取消排队；engine 收敛（raw
         # cancel）时对仍排队的 token「只应用不跑 turn」，满足 release 等 application 收敛。
         gate_cancel = root_cancel.child(f"sub:{token.submission_id}:gate")
@@ -1370,9 +1371,7 @@ class AgentEngine:
         if not acquired:
             # 取消（CancelTurn 或 engine 收敛）：accepted 是 durable 承诺，仍要应用
             self._pending.pop(token.submission_id, None)
-            await self._apply_accepted_item_owned(
-                token, item, conversation_envelopes, application_checkpoint,
-            )
+            await self._apply_accepted_item_owned(token, item, application_checkpoint)
             await self._emit_operation_terminal(
                 token.submission_id, None,
                 kind="engine_shutdown" if raw_cancel is not None else "cancelled",
@@ -1381,9 +1380,7 @@ class AgentEngine:
                 raise raw_cancel
             return
         try:
-            await self._apply_accepted_item(
-                token, item, conversation_envelopes, application_checkpoint,
-            )
+            await self._apply_accepted_item(token, item, application_checkpoint)
             target_cancel = self._audit_state.coordinator.register_target(
                 token.submission_id
             )
@@ -1395,14 +1392,11 @@ class AgentEngine:
         self,
         token: AcceptedUserMessage,
         item: ResponseItem,
-        conversation_envelopes: Any,
         application_checkpoint: AuditedApplicationCheckpoint | None,
     ) -> None:
         """application 作为 coordinator-owned 步骤执行：caller 的 raw cancel 只能延迟重抛。"""
         _, cancellation = await audit_await_owned(
-            self._apply_accepted_item(
-                token, item, conversation_envelopes, application_checkpoint,
-            ),
+            self._apply_accepted_item(token, item, application_checkpoint),
             name=f"apply-accepted:{token.submission_id}",
         )
         if cancellation is not None:
@@ -1412,22 +1406,29 @@ class AgentEngine:
         self,
         token: AcceptedUserMessage,
         item: ResponseItem,
-        conversation_envelopes: Any,
         application_checkpoint: AuditedApplicationCheckpoint | None,
     ) -> None:
-        """accepted user item 进 hot history + 投影（ADR 0025 application）。"""
-        assert self._audit_state is not None
+        """accepted user item 落账 → 进 hot history → 投影（ADR 0025 / 0101 application）。
+
+        落账与取消无关（raw cancel 延迟到写完再抛）；投影可以被取消。
+        """
+        state = self._audit_state
+        assert state is not None
+        (ack, envelope), cancellation = await audit_await_owned(
+            commit_accepted_application(state, token, item),
+            name=f"commit-accepted:{token.submission_id}",
+        )
+        if cancellation is not None:
+            raise cancellation
         async with self._lock:
             self._history.append(item)
         try:
-            result = await self._audit_state.projector.project(
-                conversation_envelopes, token.ack
-            )
+            result = await state.projector.project((envelope,), ack)
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001  # 普通未分类异常必须 fail closed
-            raise self._audit_state.coordinator.freeze(error) from None
-        self._audit_state.coordinator.update_projection(result)
+            raise state.coordinator.freeze(error) from None
+        state.coordinator.update_projection(result)
         if application_checkpoint is not None:
             application_checkpoint.succeed()
 

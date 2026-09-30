@@ -461,7 +461,8 @@ async def test_cancelled_full_queue_handoff_freezes_and_retires_failed_work(
         engine.submit(UserMessage(text="durable but queue full"))
     )
     await observed_queue.put_blocked.wait()
-    assert coordinator.expected_seq == 9
+    # 初始化 3 条 + 两次准入各 1 条（对话项在应用时才落账，ADR 0101）
+    assert coordinator.expected_seq == 5
     assert len(coordinator.snapshot().accepted_work_ids) == 2
 
     blocked_submit.cancel()
@@ -664,7 +665,7 @@ async def test_shutdown_serializes_with_admission_and_finish_converges_queue(
     first_id = await engine.submit(UserMessage(text="first queued"))
     second = asyncio.create_task(engine.submit(UserMessage(text="second accepted")))
     await _wait_until(
-        lambda: coordinator.expected_seq == 9
+        lambda: coordinator.expected_seq == 5
         and len(coordinator.snapshot().accepted_work_ids) == 2
     )
     shutdown = asyncio.create_task(engine.shutdown())
@@ -785,10 +786,9 @@ async def test_submit_after_actor_terminated_freezes_and_retires_acceptance(
     committed = [
         envelope async for envelope in core.load("ses_audit_submission")
     ]
+    # 准入已 durable、尚未应用：接管时由恢复补上对话项（ADR 0101）
     assert [envelope.record_type for envelope in committed[3:]] == [
         "submission_accepted",
-        "conversation_item",
-        "submission_applied",
     ]
     assert coordinator.health is AuditHealth.RECOVERY_REQUIRED
     assert coordinator.snapshot().accepted_work_ids == ()

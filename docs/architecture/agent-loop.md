@@ -738,8 +738,9 @@ Resume(thread_id, resolutions)
 [SessionJournal Business Integration 能力契约](capabilities/session-journal-business-integration.md)；此处只记模块协作。
 
 - **Submission admission（动态门）**：`AgentEngine.submit()` 在 audit 模式仅放行 UserMessage / CancelTurn /
-  Shutdown / Resume。UserMessage 的 durable acceptance（`submission_accepted` + user 会话项 + `submission_applied`
-  原子三记录）**先于**入队，actor 只应用已 ack 的 envelope 才更新 hot history/projection；非法输入落安全
+  Shutdown / Resume。UserMessage 的 durable acceptance（`submission_accepted`）**先于**入队；这条消息拿到
+  root gate 时 actor 才落应用批次（user 会话项 + `submission_applied`，落账与取消无关）、更新 hot history
+  与 projection——Journal 顺序即对话顺序（ADR 0101）；非法输入落安全
   `submission_rejected` 不入队；能力面外的 Op（CompactNow / Rewind / InjectSystemMessage 等）在执行前 durable 拒绝
   （`reject_unsupported_audited_op`，failure_class=capability），不入队、不执行。
 - **effect gate**：每个 durable 效果前 `coordinator.ensure_effect_allowed()`；首个 Journal IO / 完整性 /

@@ -139,6 +139,7 @@ Later ADRs:
 98. [ADR 0098: 审计模式放开分离式派发](decisions/0098-audit-mode-detached-spawn.md): 审计 Session 里直接调 `engine.spawn_skill()` 时子 skill 照常运行却不进 Journal。决策：发起是 `spawn_started` 与子 thread 创建、种子同批，终态是 `spawn_settled` 与 `thread_terminal`；不写锚点条目（避免两个写者打乱投影顺序）；句柄表由记录重建；接管时没有终态的派发落 `cancelled` 不续跑；子 thread 上的调用不能停下等人；等待工具的时长设上限；barrier 与 peer 消息另行立项。
 99. [ADR 0099: 审计模式放开 join-barrier](decisions/0099-audit-mode-join-barrier.md): 只有派发没有 barrier，「并行铺开、全部跑完后汇总」在审计模式下要靠模型自己轮询。决策：`barrier_registered` / `barrier_fired` / `barrier_settled` 三条记录，点火记下各成员的终态与聚合输入，聚合 turn 的终态要落账；登记了没点火的在接管后点火，被中断的聚合 turn 落 `cancelled` 不再点火；两种模式下终态顺序改为「持久化 → 句柄状态 → 事件」。
 100. [ADR 0100: 审计模式放开 peer 消息](decisions/0100-audit-mode-peer-messages.md): 消息要进别人的 thread，而那个 thread 有自己的写者，且 Journal 顺序就是接管时的对话顺序。决策：发出与进入对话是两条记录、由两个写者各写一条；进入对话的时刻是目标 runner 的迭代边界；root 的收件队列跟着 Session 走；已经结束的子 thread 不接受消息、不被唤醒；接管时未进入对话的消息回到收件队列；`SendToPeer` Op 不放开。
+101. [ADR 0101: 审计模式下用户消息的对话项在应用时落账](decisions/0101-audit-mode-application-time-conversation-item.md): 对话项在准入时落账、在拿到 root gate 时才进入对话；消息排在运行中的 turn 后面时 Journal 顺序与对话顺序不一致——投影判序号回退后停止更新，接管重建出的 history 顺序错误。决策：准入只落 `submission_accepted`，对话项与 `submission_applied` 在应用时落账；应用的落账与取消无关；接管时应用已准入未应用的消息。修正 ADR 0025 的用户入口记录语义。
 
 ### Fourth Pass: Gap Tracking
 

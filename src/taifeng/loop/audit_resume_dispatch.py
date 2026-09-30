@@ -51,6 +51,10 @@ from taifeng.loop.audit_resume_spawn import (
     interrupted_spawn_records,
     interrupted_spawns,
 )
+from taifeng.loop.audit_resume_submissions import (
+    application_recovery_records,
+    unapplied_user_messages,
+)
 from taifeng.loop.audit_resume_tools import (
     ToolCallDecision,
     UnresolvedToolCall,
@@ -129,6 +133,7 @@ class RecoveryScope:
         undispatched: 从未登记意图的调用。
         others: 其余未结算 record（仍一律 fail closed）。
         spawns: 没有终态的分离式派发（ADR 0098）。
+        unapplied: 已准入、尚未应用的用户消息（ADR 0101）。
     """
 
     root_thread_id: str
@@ -138,11 +143,15 @@ class RecoveryScope:
     undispatched: tuple[UndispatchedCall, ...]
     others: tuple[str, ...]
     spawns: tuple[InterruptedSpawn, ...] = ()
+    unapplied: tuple[JournalEnvelope, ...] = ()
 
     @property
     def empty(self) -> bool:
         """没有任何可收敛项。"""
-        return not (self.tool_calls or self.dispatches or self.undispatched or self.spawns)
+        return not (
+            self.tool_calls or self.dispatches or self.undispatched
+            or self.spawns or self.unapplied
+        )
 
     @property
     def child_threads(self) -> tuple[str, ...]:
@@ -250,6 +259,8 @@ def build_recovery_scope(
     owned: set[str] = {
         spawn.started.record_id for spawn in spawns if spawn.child_thread_id in threads
     }
+    unapplied = unapplied_user_messages(envelopes, frozenset(pending), root_thread_id)
+    owned.update(envelope.record_id for envelope in unapplied)
     for call in calls:
         is_dispatch = (
             call.intent_payload.name == CALL_SKILL_TOOL_NAME
@@ -283,6 +294,7 @@ def build_recovery_scope(
         # 已由某个悬空 call_skill 认领的 skill_selected 随派发一起结算；没有终态的派发同理
         others=tuple(record_id for record_id in leftover if record_id not in owned),
         spawns=tuple(spawn for spawn in spawns if spawn.started.record_id in owned),
+        unapplied=unapplied,
     )
 
 
@@ -544,6 +556,11 @@ async def plan_recovery(
         root.records.extend(child.records)
         root.records.extend(interrupted_spawn_records(
             spawn, session_id=session_id, recovery_operation_id=recovery_operation_id,
+        ))
+    for accepted in scope.unapplied:
+        # 已准入、尚未应用的消息落在对话末尾：其他结论先写
+        root.records.extend(application_recovery_records(
+            accepted, session_id=session_id, recovery_operation_id=recovery_operation_id,
         ))
     return RecoveryPlan(tuple(root.records), tuple(root.recovered), tuple(root.pending))
 

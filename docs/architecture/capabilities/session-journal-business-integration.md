@@ -148,8 +148,23 @@ projector 只接受 durable ack 覆盖的 `conversation_item` envelope，按 Jou
 ## 7. Submission 与 lifecycle
 
 audited `AgentEngine.submit()` 与 lifecycle 共用同一个 admission lock。UserMessage 必须先 canonicalize 并
-durable 提交 acceptance batch，再把携带 ack 的 token 入 actor queue；禁止 enqueue-first。队列内因此不
+durable 提交 `submission_accepted`，再把携带 ack 的 token 入 actor queue；禁止 enqueue-first。队列内因此不
 存在未 accepted submission。
+
+准入与应用是两个时刻、两个批次（ADR 0101）：
+
+| 批次 | 记录 | 何时 |
+| --- | --- | --- |
+| 准入 | `submission_accepted`（消息全文、附件、`turn_index`；`occurred_at` 是提交时刻） | `submit()` 返回之前 |
+| 应用 | `conversation_item` + `submission_applied` | 这条消息拿到 root gate、进入对话的时刻 |
+
+- 消息排在运行中的 turn 后面时，两个批次之间隔着那个 turn 写下的全部内容；对话项在 Journal 里的位置
+  就是它进入对话的位置。Journal 顺序、hot history、投影与接管时的重建四者一致。
+- 对话项由准入记录确定：id 为 `item_<submission_id>`，`created_at` 是提交时刻。
+- 应用的落账与取消无关；随后的投影可以被取消。
+- 准入是 durable 承诺：Engine 收敛时仍在排队的消息只应用、不运行它的 turn。
+- 进程死在两个批次之间时，接管把这些消息按准入顺序应用，对话项落在对话末尾、其他恢复结论之后
+  （§13.4）；它们的 turn 不补跑。
 
 公开 legacy `Submission` 保持可变的 `id + op` 序列化/schema。audit-required 路径在首次 await 前把
 submission id、时间、文本和附件复制为内部 frozen snapshot；随后在独立 admission sequencing lock 中分配
@@ -461,6 +476,14 @@ root thread 上的悬空 `tool_intent_committed` 与 durable 为 `unknown` 的 `
 - 全有或全无覆盖整棵树：任一层有调用仍需人裁决，整批不写。
 - 被中断的执行不写 `skill_outcome`；恢复不续跑子 skill。
 - 未结算的 LLM attempt（请求已落账、无 checkpoint）仍不在收敛范围，出现在任一 thread 上都 fail closed。
+
+### 13.4 已准入、尚未应用的用户消息（ADR 0101）
+
+`submission_accepted`（`op_kind = user_message`）没有对应的 `submission_applied` 时，恢复在同一个
+恢复批次的末尾为每条消息补上应用批次（`conversation_item` + `submission_applied`，`correlation_id`
+为本次恢复的 operation），按准入顺序。补上的对话项与运行时应用得到的逐字相同。
+
+其他 op 的准入记录没有 applied 时仍 fail closed。
 
 ## 14. 验收门槛
 

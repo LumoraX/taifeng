@@ -1,4 +1,16 @@
-"""Journal-first UserMessage admission 与 actor 消费 token。"""
+"""Journal-first UserMessage admission 与 actor 消费 token。
+
+准入与应用是两个时刻、两个批次（ADR 0101）：
+
+```text
+submission_accepted                        准入：submit() 返回之前，先于入队
+conversation_item + submission_applied     应用：这条消息拿到 root gate、进入对话的时刻
+```
+
+消息排在运行中的 turn 后面时，两个时刻之间隔着那个 turn 写下的全部内容。对话项若在准入时
+落账，它在 Journal 里的位置就早于它实际进入对话的位置：投影顺序与 Journal 顺序相反，
+接管时按 Journal 重建出的 history 也与模型实际看到的不同。
+"""
 
 from __future__ import annotations
 
@@ -20,7 +32,6 @@ from taifeng.conversation.journal.models import (
 )
 from taifeng.conversation.journal.records import (
     AttachmentV1,
-    ConversationItemV1,
     JournalIdentities,
     JournalRecordFactory,
     StableErrorV1,
@@ -28,7 +39,6 @@ from taifeng.conversation.journal.records import (
     SubmissionAppliedV1,
     SubmissionRejectedV1,
     conversation_item_record,
-    deserialize_response_item,
     record_id,
     validate_attachments,
 )
@@ -159,6 +169,71 @@ class _PreparedUserMessage:
         )
 
 
+def accepted_user_item(
+    *,
+    submission_id: str,
+    thread_id: str,
+    accepted: SubmissionAcceptedV1,
+    submitted_at: datetime,
+) -> ResponseItem:
+    """由准入记录确定性地构造这条消息的对话项（运行时应用与接管恢复共用）。"""
+    return ResponseItem(
+        kind="user_message",
+        id=f"item_{submission_id}",
+        thread_id=thread_id,
+        payload={
+            "text": accepted.text,
+            "attachments": [
+                _conversation_attachment_data(attachment)
+                for attachment in accepted.attachments or ()
+            ],
+        },
+        created_at=submitted_at,
+    )
+
+
+def application_records(
+    *,
+    session_id: str,
+    thread_id: str,
+    submission_id: str,
+    accepted_record_id: str,
+    item: ResponseItem,
+    correlation_id: str | None = None,
+) -> tuple[JournalRecord, JournalRecord]:
+    """一条已准入消息的应用批次：对话项与 ``submission_applied``。"""
+    factory = JournalRecordFactory(
+        session_id=session_id,
+        actor=ActorRef(kind="user", source="user"),
+        identities=JournalIdentities(
+            session_id=session_id, thread_id=thread_id, submission_id=submission_id,
+        ),
+    )
+    conversation = conversation_item_record(
+        factory,
+        operation_id=submission_id,
+        item=item,
+        source_record_id=accepted_record_id,
+        ordinal=0,
+        submission_id=submission_id,
+    )
+    applied = factory.build(
+        operation_id=submission_id,
+        record_type="submission_applied",
+        payload=SubmissionAppliedV1(
+            accepted_record_id=accepted_record_id,
+            result_status="applied",
+            conversation_item_ids=(conversation.record_id,),
+            terminal_record_ids=(),
+        ),
+        submission_id=submission_id,
+        thread_id=thread_id,
+        causation_id=accepted_record_id,
+        correlation_id=correlation_id,
+    )
+    return conversation, applied
+
+
 @dataclass(frozen=True, slots=True)
 class AcceptedUserMessage:
     """只携 durable receipt 的 actor queue token，不保留原始 UserMessage Op。"""
@@ -167,6 +242,7 @@ class AcceptedUserMessage:
     accepted_work: AcceptedWork
     ack: JournalAck
     envelopes: tuple[JournalEnvelope, ...]
+    submitted_at: datetime
     op: None = None
 
     @property
@@ -176,7 +252,7 @@ class AcceptedUserMessage:
 
     @property
     def accepted_record_ids(self) -> tuple[str, ...]:
-        """返回 covering ack 的完整三记录 identity。"""
+        """返回 covering ack 的 record identity（准入记录）。"""
         return self.ack.record_ids
 
     @property
@@ -187,40 +263,26 @@ class AcceptedUserMessage:
             raise _InvalidAcceptedUserMessageError
         return accepted.turn_index
 
-    @property
-    def conversation_envelopes(self) -> tuple[JournalEnvelope, ...]:
-        """返回 projector 唯一允许消费的 acknowledged conversation envelope。"""
-        return (self.envelopes[1],) if len(self.envelopes) == 3 else ()
-
-    def validated_application(
-        self,
-    ) -> tuple[ResponseItem, tuple[JournalEnvelope, ...]]:
-        """纯校验完整 token lineage 后返回 hot item 与 projector 输入。"""
+    def validated_application(self) -> ResponseItem:
+        """纯校验完整 token lineage 后返回待应用的对话项（此刻尚未落账）。"""
         ack, envelopes = self._defensive_receipt()
         if not self._receipt_shape_is_valid(ack, envelopes):
             raise _InvalidAcceptedUserMessageError
         accepted = SubmissionAcceptedV1.model_validate(envelopes[0].payload)
-        conversation = ConversationItemV1.model_validate(envelopes[1].payload)
-        applied = SubmissionAppliedV1.model_validate(envelopes[2].payload)
-        item = deserialize_response_item(conversation)
-        attachments = [
-            _conversation_attachment_data(attachment)
-            for attachment in accepted.attachments or ()
-        ]
+        thread_id = envelopes[0].thread_id
         valid = (
             accepted.op_kind == "user_message"
             and accepted.source == "user"
-            and conversation.source_record_id == envelopes[0].record_id
-            and conversation.thread_id == envelopes[0].thread_id
-            and applied.accepted_record_id == envelopes[0].record_id
-            and applied.result_status == "applied"
-            and applied.conversation_item_ids == (envelopes[1].record_id,)
-            and applied.terminal_record_ids == ()
-            and item.payload == {"text": accepted.text, "attachments": attachments}
+            and thread_id is not None
+            and envelopes[0].occurred_at == self.submitted_at
         )
         if not valid:
             raise _InvalidAcceptedUserMessageError
-        return item, (envelopes[1],)
+        assert thread_id is not None
+        return accepted_user_item(
+            submission_id=self.submission_id, thread_id=thread_id,
+            accepted=accepted, submitted_at=self.submitted_at,
+        )
 
     def _defensive_receipt(
         self,
@@ -242,28 +304,19 @@ class AcceptedUserMessage:
         ack: JournalAck,
         envelopes: tuple[JournalEnvelope, ...],
     ) -> bool:
-        """校验三记录顺序、covering ack、identity 与完整 record lineage。"""
-        if len(envelopes) != 3:
+        """校验准入记录、covering ack、identity 与完整 record lineage。"""
+        if len(envelopes) != 1:
             return False
         if not self._hash_chain_is_valid(ack, envelopes):
             return False
-        accepted_id = envelopes[0].record_id
-        expected_types = (
-            "submission_accepted",
-            "conversation_item",
-            "submission_applied",
-        )
         return (
-            tuple(envelope.record_type for envelope in envelopes) == expected_types
+            envelopes[0].record_type == "submission_accepted"
             and tuple(envelope.record_id for envelope in envelopes) == ack.record_ids
             and tuple(envelope.seq for envelope in envelopes)
             == tuple(range(ack.first_seq, ack.last_seq + 1))
             and ack.tail_hash == envelopes[-1].record_hash
-            and all(self._common_envelope_identity(envelope) for envelope in envelopes)
-            and len({envelope.thread_id for envelope in envelopes}) == 1
+            and self._common_envelope_identity(envelopes[0])
             and envelopes[0].causation_id is None
-            and envelopes[1].causation_id == accepted_id
-            and envelopes[2].causation_id == accepted_id
         )
 
     @staticmethod
@@ -271,7 +324,7 @@ class AcceptedUserMessage:
         ack: JournalAck,
         envelopes: tuple[JournalEnvelope, ...],
     ) -> bool:
-        """复用 Journal strict codec 重算三记录 payload/record/hash chain。"""
+        """复用 Journal strict codec 重算准入记录的 payload/record/hash chain。"""
         try:
             validate_envelope_chain(
                 envelopes,
@@ -284,7 +337,7 @@ class AcceptedUserMessage:
         return True
 
     def _common_envelope_identity(self, envelope: JournalEnvelope) -> bool:
-        """校验 admission 三记录共有且不可省略的 stable identity 字段。"""
+        """校验准入记录不可省略的 stable identity 字段。"""
         return (
             envelope.record_id
             == record_id(self.submission_id, envelope.record_type, ordinal=0)
@@ -519,7 +572,7 @@ def _submission_records(
     state: AuditedAdmissionState,
     submission: AuditedUserMessageSubmission,
 ) -> tuple[JournalRecord, ...]:
-    """构造 acceptance、user conversation item 与 applied 的原子三记录。"""
+    """构造准入记录；对话项与 applied 在应用时落账（``apply_accepted_user_message``）。"""
     identities = JournalIdentities(
         session_id=state.coordinator.session_id,
         thread_id=state.thread_id,
@@ -542,42 +595,10 @@ def _submission_records(
         ),
         submission_id=submission.id,
         thread_id=state.thread_id,
+        # 提交时刻随准入记录落账：接管时据此重建尚未应用的消息
+        occurred_at=submission.submitted_at,
     )
-    item = ResponseItem(
-        kind="user_message",
-        id=f"item_{submission.id}",
-        thread_id=state.thread_id,
-        payload={
-            "text": submission.text,
-            "attachments": [
-                _conversation_attachment_data(attachment)
-                for attachment in submission.attachments
-            ],
-        },
-        created_at=submission.submitted_at,
-    )
-    conversation = conversation_item_record(
-        factory,
-        operation_id=submission.id,
-        item=item,
-        source_record_id=accepted.record_id,
-        ordinal=0,
-        submission_id=submission.id,
-    )
-    applied = factory.build(
-        operation_id=submission.id,
-        record_type="submission_applied",
-        payload=SubmissionAppliedV1(
-            accepted_record_id=accepted.record_id,
-            result_status="applied",
-            conversation_item_ids=(conversation.record_id,),
-            terminal_record_ids=(),
-        ),
-        submission_id=submission.id,
-        thread_id=state.thread_id,
-        causation_id=accepted.record_id,
-    )
-    return accepted, conversation, applied
+    return (accepted,)
 
 
 async def admit_user_message(
@@ -602,6 +623,7 @@ async def admit_user_message(
             accepted_work=work,
             ack=receipt.ack,
             envelopes=envelopes,
+            submitted_at=submission.submitted_at,
         )
         token.validated_application()
     except BaseException as error:  # noqa: BLE001  # cancellation/fatal 必须先退休 ownership
@@ -623,13 +645,42 @@ async def admit_user_message(
     return token
 
 
+async def commit_accepted_application(
+    state: AuditedAdmissionState,
+    token: AcceptedUserMessage,
+    item: ResponseItem,
+) -> tuple[JournalAck, JournalEnvelope]:
+    """应用的落账部分：对话项与 ``submission_applied`` 同批提交；返回 ack 与对话项 envelope。
+
+    在这条消息拿到 root gate 的时刻调用（被取消、Engine 收敛时同样要应用：准入是 durable
+    承诺）。写入与取消无关——调用方须保证它不被 raw cancel 截断；随后的投影可以被取消。
+
+    Raises:
+        SessionAuditFrozenError: Session 已冻结，或写入结果不确定。
+    """
+    coordinator = state.coordinator
+    records = application_records(
+        session_id=coordinator.session_id,
+        thread_id=state.thread_id,
+        submission_id=token.submission_id,
+        accepted_record_id=token.envelopes[0].record_id,
+        item=item,
+    )
+    ack = await coordinator.append_batch(records)
+    envelopes = await coordinator.load_acknowledged(ack, records)
+    return ack, envelopes[0]
+
+
 __all__ = [
     "AcceptedUserMessage",
     "AuditedAdmissionState",
     "AuditedUserMessageSubmission",
     "InvalidAuditedSubmissionError",
     "ReplayedUserMessage",
+    "accepted_user_item",
     "admit_user_message",
+    "application_records",
+    "commit_accepted_application",
     "prepare_user_message",
     "reject_invalid_user_message",
     "user_message_input_descriptor_hash",
