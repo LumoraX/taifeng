@@ -144,6 +144,7 @@ Later ADRs:
 103. [ADR 0103: 接管时作废没有 checkpoint 的 LLM 请求](decisions/0103-audit-resume-abandons-interrupted-llm-requests.md): 进程死在 LLM 调用途中是最常见的崩溃时刻，而这种 Session 恰恰无法接管。决策：可收敛 thread 上没有 checkpoint 的请求落 `llm_request_abandoned` 视为已结算——回复没进过对话，作废不重复任何事情；那个 turn 到此为止不补跑；有 checkpoint 的不作废。
 104. [ADR 0104: Journal Phase 5——Timeline 投影、脱敏、旧 transcript 导入与投影重建](decisions/0104-journal-timeline-redaction-import-rebuild.md): ADR 0025 的第五阶段。决策：Timeline 直接映射领域记录、按 `after_seq` 接力；脱敏按字段名而不是按内容，三种视图，事实源不动；旧 transcript 导入成历史标 `legacy_unverified` 的新 Session，损坏的行让导入失败，不认识的条目记下来；投影重建只补不改，分叉的只报告。
 105. [ADR 0105: replay 模式——工具结果回放与整条 Session 重放](decisions/0105-replay-mode.md): ADR 0054 只回放了 LLM，工具仍要真的执行。决策：工具结果按（名字，有效参数）从 Journal 匹配、内核编排工具照常运行、派发句柄由（turn，调用 id）派生、按录制的提交序列驱动新 Engine 且分叉即停；重放不比较对话内容。
+106. [ADR 0106: 超长文件按「方法体外置、类里按原名赋值」拆分](decisions/0106-file-size-split.md): engine.py 2092 行，协作者手法已用尽而白盒寻址名不能变。决策：方法定义为模块级函数、类里按原名赋值（绑定与打桩语义不变）；事件类按主题分文件并原名再导出；Journal 记录按层分文件；零行为变更。
 
 ### Fourth Pass: Gap Tracking
 

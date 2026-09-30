@@ -22,6 +22,18 @@
 | engine | `child_resume_chain` | 协作者 | **call_skill 子链**续跑（逐层回填父 `function_call_output`） |
 | engine | `suspension_access` | 协作者 | thread 逻辑历史读取 / 活跃挂起定位 / 核销副作用 / 已批准工具执行 / 手动压缩 |
 | engine | `engine_ops` | 模块函数 | rewind / rollback / update_budget / update_instructions / refresh_snapshot |
+| engine | `engine_public` | 方法体（类里按原名赋值） | 公开只读视图：属性 / 快照 / 估算 / introspect（ADR 0106） |
+| engine | `engine_submit` | 方法体（类里按原名赋值） | submit / 审计准入提交 / subscribe / shutdown / instructions 桥 |
+| engine | `engine_loop` | 方法体（类里按原名赋值） | `run()` 主循环 / 排队消息启动 / 审计 turn 的应用与运行 |
+| engine | `engine_facade` | 方法体（类里按原名赋值） | 对 events / operations / TTL / lifecycle / gate / runner / spawn / resume / 子链 / ops 的薄委托 |
+| event | `event_base` / `event_turn` / `event_lifecycle` | 类型 | `MsgKind` 与 `_Msg` 基类；turn 内事件类；生命周期事件类。`event.py` 保留 `Msg` 联合、`EventMsg` 并原名再导出全部事件类 |
+| pool | `pool_store` | 类型 | `_HookEmittingStore`（hook 转发的 store 包装） |
+| spawn | `spawn_settle` | 方法体（类里按原名赋值） | `_finalize_spawn` / `_settle_failed` / `_settle` / `_persist_settled` / `_settle_cancelled_suspended` |
+| journal | `records_base` / `item_records` | 类型 + 模块函数 | 记录基类 / 枚举 / identity / factory；对话项 wire 形状与序列化。`records.py` 保留领域 DTO 并原名再导出 |
+
+「方法体（类里按原名赋值）」：方法定义为模块级函数（``self`` 标注宿主类），宿主类里 ``name = module.name``
+赋值——绑定语义与直接定义相同，类仍是唯一白盒寻址面（``monkeypatch.setattr(AgentEngine, ...)`` 照常生效），
+文件因此各自回到 800 行以内（ADR 0106）。
 | turn | `turn_helpers` | 模块函数 | 摘要哈希 / 孤儿 call_id / 末条用户文本 / 失败上下文 / Responses 采样项 |
 | turn | `turn_guards` | 协作者 | 延迟暴露判定 / SYSTEM_RETRY 挂起判定 / 资源守卫触顶转挂起 |
 | turn | `turn_context` | 协作者 | 记忆预取回写 / pre-evict 抢救 / pinned state 重注 / 预算提示 |

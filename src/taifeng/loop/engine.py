@@ -8,60 +8,23 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from contextlib import suppress
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.budget import ContextBudget, TokenCalibration
 from taifeng.context.cache_stats import PromptCacheStats
-from taifeng.conversation.models import (
-    ResponseItem,
-    system_injection,
-    user_message,
-)
-from taifeng.conversation.origin import InputOrigin, tag_origin
 from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.instructions.resolver import InstructionResolver
-from taifeng.instructions.types import (
-    InstructionContext,
-    InstructionLayer,
-    ResolvedInstruction,
-)
-from taifeng.llm.errors import LLMError
 from taifeng.llm.retrying import with_default_retry
-from taifeng.loop import engine_ops, engine_prewarm
-from taifeng.loop.attachment_parts import admit_user_attachments
-from taifeng.loop.audit_admission import (
-    AcceptedUserMessage,
-    AuditedUserMessageSubmission,
-    InvalidAuditedSubmissionError,
-    UnsupportedAuditedOperationError,
-    admit_user_message,
-    commit_accepted_application,
-    prepare_user_message,
-    reject_invalid_user_message,
-    reject_unsupported_audited_op,
-    user_message_input_descriptor_hash,
+from taifeng.loop import (
+    engine_facade,
+    engine_loop,
+    engine_public,
+    engine_submit,
 )
-from taifeng.loop.audit_cancel import (
-    AuditedCancelTurnSubmission,
-    apply_cancel_turn,
-    finalize_cancelled_target,
-)
-from taifeng.loop.audit_lifecycle import SessionLifecycle
-from taifeng.loop.audit_llm import AuditedTurnInput
 from taifeng.loop.audit_mailbox import (
-    AuditedApplicationCheckpoint,
     AuditedSubmissionMailbox,
-    handoff_accepted_user_message,
-    retire_started_audited_token,
 )
 from taifeng.loop.audit_peer import root_inbox
-from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shutdown
-from taifeng.loop.audit_support import AuditHealth
-from taifeng.loop.audit_support import _await_owned as audit_await_owned
-from taifeng.loop.audit_suspension import submit_audited_resume
-from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.child_resume_chain import ChildResumeChain
 from taifeng.loop.engine_events import EngineEvents
 from taifeng.loop.engine_gate import EngineGate
@@ -70,71 +33,59 @@ from taifeng.loop.engine_operations import EngineOperations
 from taifeng.loop.engine_resume import EngineResume
 from taifeng.loop.engine_runner import EngineRunner
 from taifeng.loop.event import (
-    EngineLog,
     EventMsg,
     InstructionCacheHit,
     InstructionFetched,
     InstructionFetchFailed,
     InstructionUpdated,
     InstructionUpdateRejected,
-    UserInputInjected,
 )
-from taifeng.loop.event import Shutdown as ShutdownMsg
 from taifeng.loop.rewind import RewindCheckpoint, derive_rewind_log
 from taifeng.loop.spawn_driver import SpawnDriver
-from taifeng.loop.submission import (
-    CancelTurn,
-    CompactNow,
-    InjectSystemMessage,
-    InjectUserInput,
-    Op,
-    Prewarm,
-    RefreshSnapshot,
-    Resume,
-    Rewind,
-    SendToPeer,
-    Shutdown,
-    Submission,
-    ThreadRollback,
-    UpdateBudget,
-    UpdateInstructions,
-    UserMessage,
-)
 from taifeng.loop.suspension_access import SuspensionAccess
 from taifeng.loop.suspension_ttl import SuspensionTtlScheduler
-from taifeng.loop.turn import TurnOutcome, TurnRunner
+from taifeng.loop.turn import TurnRunner
 from taifeng.loop.usage_meter import SessionUsageMeter
 from taifeng.skill.dispatch import DispatchPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable
 
     from taifeng.context.compressor import CompressionOrchestrator
+    from taifeng.conversation.models import (
+        ResponseItem,
+    )
     from taifeng.conversation.store import MessageStore
+    from taifeng.instructions.types import (
+        InstructionLayer,
+        ResolvedInstruction,
+    )
     from taifeng.llm.client import ModelClient
     from taifeng.llm.prewarm import ModelPrewarmer
     from taifeng.llm.retry import RetryConfig
+    from taifeng.loop.audit_admission import (
+        AcceptedUserMessage,
+    )
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.cancellation import CancellationToken
-    from taifeng.loop.spawn_handle import SpawnHandle, SpawnHandleRegistry
+    from taifeng.loop.submission import (
+        Submission,
+    )
     from taifeng.skill.definition import SkillDefinition
     from taifeng.skill.registry import SkillSnapshot
-    from taifeng.suspend.record import SuspensionRecord
     from taifeng.tool.runtime import ToolCallRuntime
 
 logger = logging.getLogger(__name__)
 
-
 # 进程内类型已下沉 engine_types.py（Wave 4 模块切分）。DeliveredEvent 是公共 API，
 # 此处原样再导出，`from taifeng.loop.engine import DeliveredEvent` 的既有写法不变。
 from taifeng.loop.engine_types import (  # noqa: E402
-    _TERMINAL_KINDS,
-    _PendingTurn,
-    _Subscriber,
-)
-from taifeng.loop.engine_types import (  # noqa: E402
     DeliveredEvent as DeliveredEvent,  # `as` 同名 = 显式再导出,满足 no_implicit_reexport
 )
+
+# 白盒测试按 ``from taifeng.loop.engine import _PendingTurn / _Subscriber`` 寻址，原样再导出
+from taifeng.loop.engine_types import _PendingTurn as _PendingTurn  # noqa: E402, TC001
+from taifeng.loop.engine_types import _Subscriber as _Subscriber  # noqa: E402, TC001
 
 
 class AgentEngine:
@@ -454,408 +405,6 @@ class AgentEngine:
         self._last_resolved: list[ResolvedInstruction] = []
 
     # -----------------------------------------------------------------
-    # Public API
-    # -----------------------------------------------------------------
-    @property
-    def thread_id(self) -> str:
-        return self._thread_id
-
-    @property
-    def session_id(self) -> str:
-        """本 engine 所属 session 标识（恒非空；未显式传入时退回 thread_id）。
-
-        审计可观测 层1：sink 在 attach 时捕获它，与事件 ``seq`` 复合成全局唯一
-        落库主键 ``(session_id, seq)``——故 ``session_id`` 不盖在每条事件上。
-        """
-        return self._session_id
-
-    def register_pinned_state(self, source: Any) -> None:
-        """运行时注册 pinned 状态源（生效于下一次成功压缩）。
-
-        宿主装配动作（业务持 engine 引用直调，不走 Op）。同名已注册 →
-        ``ValueError``（registry 保证，禁静默覆盖）。
-        """
-        self._pinned_states.register(source)
-
-    def unregister_pinned_state(self, name: str) -> None:
-        """运行时注销 pinned 状态源；不存在 → ``KeyError``（显式失败）。"""
-        self._pinned_states.unregister(name)
-
-    @property
-    def entry_skill(self) -> SkillDefinition:
-        return self._entry_skill
-
-    @property
-    def budget(self) -> ContextBudget:
-        """当前 ContextBudget；运行时通过 ``submit(UpdateBudget(...))`` 调整。"""
-        return self._budget
-
-    @property
-    def snapshot(self) -> SkillSnapshot:
-        return self._snapshot
-
-    @property
-    def max_iterations(self) -> int:
-        return self._max_iterations
-
-    @property
-    def max_parallel_tool_calls(self) -> int:
-        """单 turn 内一批 tool call 的最大并发数（构造期注入；默认 1=串行）。"""
-        return self._max_parallel_tool_calls
-
-    @property
-    def cache_stats(self) -> PromptCacheStats:
-        """跨 turn 累积的 prompt cache 统计（命中/失效/非预期破坏次数等）。
-
-        G-CACHE：业务侧据此观测 cache 健康度；``unexpected_cache_breaks``
-        高即说明有未归因的 cache 失效，需排查 provider/transport。
-        """
-        return self._cache_stats
-
-    def instructions_snapshot(self) -> list[ResolvedInstruction]:
-        """返回最近一次 resolve 的 ResolvedInstruction 列表（按 priority 升序）。
-
-        spec Requirement (外部读取):
-            - 返回 frozen dataclass 列表副本（业务侧修改不影响内部状态）。
-            - engine 尚未跑过任何 turn 时，仅含 engine scope 的层。
-            - 跑过 turn 后，含 engine + session + 最近一次 turn 解析结果。
-        """
-        if self._last_resolved:
-            return list(self._last_resolved)
-        # 未跑过 turn → 退回 engine scope 缓存
-        return list(self._engine_scope_resolved)
-
-    def history_snapshot(self) -> list[ResponseItem]:
-        """返回当前 in-memory history 的快照副本（业务侧只读）。"""
-        return list(self._history)
-
-    def rewind_nodes(self) -> list[RewindCheckpoint]:
-        """返回最近一次 root turn 的回访节点表（业务侧只读，供 UI 渲染可点节点）。
-
-        节点含 turn_root / iteration / dispatch 三类;业务侧据 node_id 提交
-        ``Rewind`` Op 回退到任一节点。turn 结束随状态回写,新 turn 会刷新本表。
-        """
-        return list(self._rewind_checkpoints)
-
-    async def rewind_nodes_for(self, thread_id: str) -> list[RewindCheckpoint]:
-        """按 thread_id 查询 rewind 节点表(thread-addressable rewind 的只读入口)。
-
-        - 根 thread:直接返回内存表(等价 ``rewind_nodes()``,零 IO);
-        - 其他 thread(典型为 detached spawn 子 thread):经 ``_load_thread_items``
-          取逻辑 history(已折叠压缩区间 / 重放 rewind cut_index)→
-          ``derive_rewind_log`` 派生节点表。**禁止对 raw 直接 derive**——raw 含
-          被折叠/被截断的废弃项,坐标会错位(design D3)。
-
-        Args:
-            thread_id: 目标 thread;不存在的 thread 自然得到空表(load 空)。
-
-        Returns:
-            该 thread 的可寻址节点列表(turn_root / iteration / dispatch)。
-        """
-        if thread_id == self._thread_id:
-            return list(self._rewind_checkpoints)
-        return derive_rewind_log(await self._load_thread_items(thread_id))
-
-    @property
-    def _session_tokens(self) -> int:
-        """K2 会话累计 token（共享计量器总量视图；含全部子树与续跑）。"""
-        return self._usage_meter.total_tokens
-
-    @_session_tokens.setter
-    def _session_tokens(self, value: int) -> None:
-        """白盒测试 / 宿主恢复用：直接设定会话累计基线（归因明细不变）。"""
-        self._usage_meter.total_tokens = value
-
-    def estimate_tokens(self) -> int:
-        """估算当前 history 的 token 占用 —— 业务侧可据此决定是否 CompactNow。
-
-        与 turn 内压缩判定同一口径：有实测校准锚点时走「实测 + 增量粗估」。
-        """
-        from functools import partial
-
-        from taifeng.context.budget import calibrated_history_tokens, estimate_history_tokens
-
-        return calibrated_history_tokens(
-            self._history,
-            self._token_calibration,
-            estimate=partial(
-                estimate_history_tokens,
-                image_input_policy=self._image_input_policy,
-                file_input_policy=self._file_input_policy,
-                input_cost_estimator=self._input_cost_estimator,
-                model=self._entry_skill.model or "",
-            ),
-        )
-
-    def usage_ratio(self) -> float:
-        """当前 token 用量占 context_window 的比例（0.0 ~ 1.0+）。"""
-        return self.estimate_tokens() / max(self._budget.context_window, 1)
-
-    def introspect(self) -> dict[str, Any]:
-        """K6：/proc 式只读快照 —— 在飞 turn / spawn 配额 / 资源总量一览。
-
-        供业务侧/运维做"ps"式观测：哪些 submission 在飞（含逐条取消态）、并发 spawn 用了多少、
-        会话累计 token、事件丢弃数、cache 健康度、上下文占用。纯读、无副作用。
-        """
-        return {
-            "thread_id": self._thread_id,
-            "entry_skill_id": self._entry_skill.id,
-            "running": self._running,
-            # 在飞 turn（_PendingTurn 的 submission_id 列表）——保留向后兼容的纯 ID 视图
-            "pending_submissions": [p.submission_id for p in self._pending.values()],
-            # 在飞 turn 的逐条状态：每个在飞 turn 暴露是否已被请求取消。
-            # 这是参考实现（claw-code lane_board 的存活/阻塞看板）在内核侧可纯读暴露的那一半——
-            # 「卡死/超时」的 staleness 阈值判定需要墙钟+策略，按 R1 留给宿主（宿主跨两次 introspect
-            # 采样 + 自有时钟即可判定）；内核只负责把"取消已请求但 turn 尚未收尾"这一事实暴露出来。
-            "pending": [
-                {"submission_id": p.submission_id, "cancel_requested": p.cancel.is_cancelled}
-                for p in self._pending.values()
-            ],
-            "turn_index": self._turn_index,
-            # K1 spawn 配额快照（active/total/上限）
-            "spawn": self._spawn_registry.snapshot(),
-            # K2 会话累计 token + 上限
-            "session_tokens": self._session_tokens,
-            # usage-tree-accounting：按 skill / thread 归因的会话用量明细
-            "usage": self._usage_meter.snapshot(),
-            "max_session_tokens": self._max_session_tokens,
-            # K4 出站事件丢弃计数
-            "events_dropped": self._events_dropped,
-            # 上下文占用
-            "context_tokens": self.estimate_tokens(),
-            "context_window": self._budget.context_window,
-            # G-CACHE 健康度摘要
-            "cache": {
-                "hits": self._cache_stats.completion_cache_hits,
-                "misses": self._cache_stats.completion_cache_misses,
-                "unexpected_breaks": self._cache_stats.unexpected_cache_breaks,
-            },
-        }
-
-    async def submit(self, op: Op) -> str:
-        """业务侧入队接口。返回 submission_id。"""
-        sub = Submission(op=op)
-        if self._audit_state is not None and isinstance(sub.op, UserMessage):
-            state = self._audit_state
-            state.coordinator.ensure_intake_open()
-            descriptor_hash = user_message_input_descriptor_hash(sub)
-            prepared = None
-            with suppress(TypeError, ValueError, LLMError):
-                from taifeng.llm.client import model_capabilities
-
-                prepared = prepare_user_message(
-                    state,
-                    sub,
-                    image_input_policy=self._image_input_policy,
-                    model_input_capabilities=model_capabilities(self._model_client),
-                    file_input_policy=self._file_input_policy,
-                )
-            if prepared is None:
-                async with self._audited_admission_lock:
-                    await reject_invalid_user_message(
-                        state,
-                        submission_id=sub.id,
-                        descriptor_hash=descriptor_hash,
-                    )
-                raise InvalidAuditedSubmissionError(
-                    sub.id,
-                    descriptor_hash,
-                ) from None
-            async with self._audited_admission_lock:
-                accepted = prepared.accept(self._next_audited_turn_index)
-                return await self._submit_audited_user_message_locked(accepted)
-        if self._audit_state is not None and isinstance(sub.op, CancelTurn):
-            return await self._submit_audited_cancel_turn(sub)
-        if self._audit_state is not None and isinstance(sub.op, Resume):
-            return await submit_audited_resume(self, sub)
-        if self._audit_state is not None and isinstance(sub.op, Shutdown):
-            return await submit_audited_shutdown(
-                self._audit_state, sub, self._audited_admission_lock, self._audit_finish_owner)
-        if self._audit_state is not None:
-            # audit 动态门：仅 UserMessage/CancelTurn/Shutdown 允许；能力面外的 Op
-            # 在执行前 durable 安全拒绝，不入队、不执行（spec 动态未支持操作）。
-            async with self._audited_admission_lock:
-                await reject_unsupported_audited_op(self._audit_state, sub)
-            raise UnsupportedAuditedOperationError(sub.id, str(sub.op.kind))
-        if isinstance(sub.op, UserMessage):
-            # legacy path 在 enqueue 与 durable append 前完成图片 / 文件准入。
-            admit_user_attachments(
-                sub.op.attachments,
-                image_input_policy=self._image_input_policy,
-                file_input_policy=self._file_input_policy,
-                model_client=self._model_client,
-            )
-        await self._submissions.put(sub)
-        return sub.id
-
-    async def _submit_audited_cancel_turn(self, sub: Submission) -> str:
-        """healthy 时 durable 收敛 CancelTurn；frozen 时仅安全取消。"""
-        assert self._audit_state is not None
-        assert isinstance(sub.op, CancelTurn)
-        state = self._audit_state
-        if state.coordinator.health is AuditHealth.RECOVERY_REQUIRED:
-            state.coordinator.cancel_target(sub.op.submission_id)
-            await self._emit_cancel_turn_log(
-                sub.id,
-                sub.op.submission_id,
-                result_status="safe_degraded",
-            )
-            return sub.id
-        state.coordinator.ensure_intake_open()
-        submission = AuditedCancelTurnSubmission(
-            submission_id=sub.id,
-            target_submission_id=sub.op.submission_id,
-        )
-        result = await apply_cancel_turn(
-            state,
-            submission,
-            self._audited_admission_lock,
-        )
-        await self._emit_cancel_turn_log(
-            sub.id,
-            sub.op.submission_id,
-            result_status=result.result_status,
-        )
-        return sub.id
-
-    async def _emit_cancel_turn_log(
-        self,
-        cancel_submission_id: str,
-        target_submission_id: str,
-        *,
-        result_status: str,
-    ) -> None:
-        """通过既有 EventMsg 通道投影 CancelTurn 结果。"""
-        await self._emit(
-            EventMsg(
-                submission_id=cancel_submission_id,
-                msg=EngineLog(
-                    data={
-                        "level": "info",
-                        "message": f"cancel turn result: {result_status}",
-                        "extra": {"target_submission_id": target_submission_id},
-                    }
-                ),
-            )
-        )
-
-    async def _submit_audited_user_message(
-        self,
-        sub: AuditedUserMessageSubmission,
-    ) -> str:
-        """提交审计专用 frozen submission；historical receipt 不入队。"""
-        async with self._audited_admission_lock:
-            return await self._submit_audited_user_message_locked(sub)
-
-    async def _submit_audited_user_message_locked(
-        self,
-        sub: AuditedUserMessageSubmission,
-    ) -> str:
-        """在单一 admission 顺序点 durable accept，并推进下一 index。"""
-        assert self._audit_state is not None
-        admission = await admit_user_message(self._audit_state, sub)
-        if isinstance(admission, AcceptedUserMessage):
-            self._next_audited_turn_index = max(
-                self._next_audited_turn_index,
-                sub.accepted_turn_index + 1,
-            )
-            await handoff_accepted_user_message(
-                self._audit_state,
-                self._audited_mailbox,
-                self._submissions,
-                admission,
-            )
-        return sub.id
-
-    def _new_subscriber(self) -> _Subscriber:
-        """按当前队列容量/水位配置新建一个订阅者。"""
-        return _Subscriber(
-            maxsize=self._event_queue_size,
-            high_ratio=self._event_high_water_ratio,
-            low_ratio=self._event_low_water_ratio,
-        )
-
-    async def subscribe_all_envelopes(self) -> AsyncIterator[DeliveredEvent]:
-        """订阅本 engine 的全部事件（firehose），产出带 ``delivery_seq`` 的信封。
-
-        审计可观测 层1：消费者凭 ``delivery_seq`` 从 0 起的连续性自检**自己**漏没漏
-        （含「刚订阅就被丢弃」的窗口）；凭 ``event.seq`` 做全局连续性 + 组落库键。
-        """
-        sub = self._new_subscriber()
-        self._all_subs.append(sub)
-        try:
-            while True:
-                env = await sub.queue.get()
-                yield env
-                if env.event.msg.kind == "shutdown":
-                    return
-        finally:
-            with suppress(ValueError):
-                self._all_subs.remove(sub)
-
-    async def subscribe_all(self) -> AsyncIterator[EventMsg]:
-        """订阅本 engine 的全部事件（向后兼容：产出裸 ``EventMsg``）。
-
-        需 per-subscriber 投递序号自检时改用 ``subscribe_all_envelopes``。
-        """
-        async for env in self.subscribe_all_envelopes():
-            yield env.event
-
-    async def subscribe_envelopes(
-        self, submission_id: str
-    ) -> AsyncIterator[DeliveredEvent]:
-        """订阅指定 submission 的事件，产出带 ``delivery_seq`` 的信封。
-
-        ⚠️ 过滤订阅只收一个 submission 的事件，全局 ``event.seq`` 天然跳号（=过滤，
-        非丢弃）；要自检自己的丢弃**必须**看 ``delivery_seq`` 跳号。
-        """
-        # 已终态 → 立即补投真实终结事件并收尾（ADR 0031）。必须早于订阅登记：
-        # 补投路径不占用 per-submission 订阅位，也就不会挤掉在线订阅者。
-        recorded = self._terminal_replay.get(submission_id)
-        if recorded is not None:
-            yield DeliveredEvent(event=recorded, delivery_seq=0)
-            return
-        sub = self._new_subscriber()
-        self._event_subs[submission_id] = sub
-        try:
-            if self._closed:
-                # engine 已收敛完毕、终结事件早已投完：晚到的订阅者直接拿合成终结
-                await self._emit_operation_terminal(
-                    submission_id, None, kind="engine_shutdown",
-                )
-            while True:
-                env = await sub.queue.get()
-                if env.event.submission_id != submission_id:
-                    continue
-                yield env
-                # turn_suspended 是独立终结态(turn 已结束，等待 Resume)——必须纳入自动
-                # 终止集合，否则 turn 挂起时消费者的 async for 永远拿不到终结信号、卡死，
-                # 业务也无法释放实例并提交 Resume(Task 16 回归根因)。
-                if env.event.msg.kind in _TERMINAL_KINDS:
-                    return
-        finally:
-            self._event_subs.pop(submission_id, None)
-
-    async def subscribe(self, submission_id: str) -> AsyncIterator[EventMsg]:
-        """订阅指定 submission 的事件（向后兼容：产出裸 ``EventMsg``）。完成后自动结束。
-
-        需 per-subscriber 投递序号自检时改用 ``subscribe_envelopes``。
-        """
-        async for env in self.subscribe_envelopes(submission_id):
-            yield env.event
-
-    async def shutdown(self) -> None:
-        """请求 actor 收敛；audit path 先与 admission 串行关闭 intake。"""
-        if self._audit_state is None:
-            await self.submit(Shutdown())
-            return
-        async with self._audited_admission_lock:
-            lifecycle = await self._audit_state.coordinator.close_intake()
-            if lifecycle is SessionLifecycle.CLOSED or self._audited_shutdown_enqueued:
-                return
-            await self._submissions.put(shutdown_submission(self._audit_state))
-            self._audited_shutdown_enqueued = True
-    # -----------------------------------------------------------------
     # Instructions: emit bridge + engine scope warmup
     # -----------------------------------------------------------------
     # event kind → EventMsg 子类映射（resolver 用字符串 kind 触发；engine 包成 EventMsg）
@@ -866,676 +415,6 @@ class AgentEngine:
         "instruction_updated": InstructionUpdated,
         "instruction_update_rejected": InstructionUpdateRejected,
     }
-
-    async def _instruction_emit_bridge(
-        self, kind: str, data: dict[str, Any],
-    ) -> None:
-        """resolver 用的 emit 回调：把 (kind, data) 包成 EventMsg 投递。"""
-        msg_cls = self._INSTRUCTION_KIND_TO_MSG.get(kind)
-        if msg_cls is None:
-            logger.warning("unknown instruction event kind: %s", kind)
-            return
-        ev = EventMsg(
-            submission_id=self._current_emit_submission_id,
-            msg=msg_cls(data=data),
-        )
-        await self._emit(ev)
-
-    async def warmup_engine_scope(self) -> None:
-        """启动期解析 engine scope 的层（EnginePool.create 之后业务侧调）。
-
-        无 resolver 时 no-op。失败时 fail-fast（raise InstructionFetchError）。
-        """
-        if self._instruction_resolver is None:
-            return
-        if not self._instruction_resolver.has_scope("engine"):
-            return
-        ctx = InstructionContext(
-            session_id=self._session_id,
-            thread_id=self._thread_id,
-            entry_skill_id=self._entry_skill.id,
-            turn_index=0,
-            metadata=self._request_metadata,
-            cancel=None,
-        )
-        self._engine_scope_resolved = await self._instruction_resolver.resolve(
-            "engine", ctx,
-        )
-
-    # -----------------------------------------------------------------
-    # Internal: emit
-    # -----------------------------------------------------------------
-
-    # -----------------------------------------------------------------
-    # 实现已下沉 engine_events.py（Wave 4）。以下为薄委托：engine 是唯一白盒
-    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
-    # -----------------------------------------------------------------
-
-    async def _emit(self, ev: EventMsg) -> None:
-        # suspension-ttl:借唯一事件总线做定时器簿记——所有层级 turn(根/子/spawn)的
-        # 挂起与核销事件都流经此处,单点覆盖,无需在各续跑路径埋点。
-        """_emit"""
-        await self._events.emit(ev)
-
-    def _record_terminal(self, ev: EventMsg) -> None:
-        """登记一个 submission 的终结事件，供晚到订阅者补投（有界 FIFO）。"""
-        self._events.record_terminal(ev)
-
-    def _deliver(self, sub: _Subscriber, ev: EventMsg) -> None:
-        """把事件投递给单个订阅者：分配 per-subscriber delivery_seq（含丢弃烧号）→"""
-        self._events.deliver(sub, ev)
-
-    def _maybe_warn_water(self, sub: _Subscriber) -> None:
-        """有界队列堆积告警：qsize 上穿高水位告一条 WARNING，回落到低水位以下才"""
-        self._events.maybe_warn_water(sub)
-
-
-    @property
-    def events_dropped(self) -> int:
-        """K4：累计因订阅队列满而丢弃的事件数（0 = 无丢弃）。
-
-        业务侧观测：>0 说明某订阅消费过慢、漏了事件——应加大 ``event_queue_size``
-        或更快 drain。lossy-but-accounted：内核绝不为慢 consumer 阻塞主 actor。
-        """
-        return self._events_dropped
-
-    # -----------------------------------------------------------------
-    # suspension-ttl：挂起到期自动裁决（热武装 / 到期触发 / 冷重武装）
-    # -----------------------------------------------------------------
-
-    # -----------------------------------------------------------------
-    # 实现已下沉 engine_operations.py（Wave 4）。以下为薄委托：engine 是唯一白盒
-    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
-    # -----------------------------------------------------------------
-
-    def _start_operation(
-        self,
-        coroutine: Coroutine[Any, Any, None],
-        *,
-        name: str,
-        submission_id: str | None = None,
-    ) -> asyncio.Task[None]:
-        """创建并登记 Engine-owned operation，终态总会检索异常。"""
-        return self._ops.start_operation(coroutine, name=name, submission_id=submission_id)
-
-    async def _guarded_operation(
-        self, submission_id: str, coroutine: Coroutine[Any, Any, None],
-    ) -> None:
-        """operation 崩溃 → 终结事件 + 清 _pending，再原样上抛（日志由 _forget_operation 记）。"""
-        await self._ops.guarded_operation(submission_id, coroutine)
-
-    async def _emit_operation_terminal(
-        self, submission_id: str, exc: BaseException | None, *, kind: str | None = None,
-    ) -> None:
-        """给一个 submission 发 engine 层面的 ``turn_failed`` 终结事件。"""
-        await self._ops.emit_operation_terminal(submission_id, exc, kind=kind)
-
-    def _forget_operation(self, task: asyncio.Task[None]) -> None:
-        """检索 operation 终态并释放 Engine 显式 ownership。"""
-        self._ops.forget_operation(task)
-
-    async def _converge_operations(self) -> asyncio.CancelledError | None:
-        """取消并等待所有 operation；actor 自身取消也不得截断收敛。"""
-        return await self._ops.converge_operations()
-
-    def _arm_ttl_timer(self, data: dict[str, Any]) -> None:
-        """按 turn_suspended 事件武装到期定时器（实现见 SuspensionTtlScheduler.arm）。"""
-        self._ttl.arm(data)
-
-    async def _ttl_expire_after(
-        self, delay: float, thread_id: str, record_id: str
-    ) -> None:
-        """到期触发裁决（实现见 SuspensionTtlScheduler.expire_after）。"""
-        await self._ttl.expire_after(delay, thread_id, record_id)
-
-    async def _rearm_ttl_timers_cold(self) -> None:
-        """冷恢复后重武装根 thread 的到期定时器。"""
-        await self._ttl.rearm_cold()
-
-    async def _rearm_spawn_ttl_timers_cold(self) -> None:
-        """冷恢复后重武装 spawn 子 thread 的到期定时器（句柄表重建之后）。"""
-        await self._ttl.rearm_spawn_cold()
-
-    async def _ttl_record_active(
-        self, thread_id: str, record_id: str
-    ) -> SuspensionRecord | None:
-        """按 (thread_id, record_id) 取仍活跃的挂起记录。"""
-        return await self._ttl.record_active(thread_id, record_id)
-
-    async def _resolve_expiry_route(
-        self, thread_id: str, record_id: str
-    ) -> str | None:
-        """解析到期裁决应投递到哪个 thread（不可解析返回 None）。"""
-        return await self._ttl.resolve_expiry_route(thread_id, record_id)
-
-    async def _chain_contains_thread(
-        self, root_tid: str, target_tid: str, depth: int,
-    ) -> bool:
-        """自 root_tid 沿活跃挂起的 CHILD_SKILL pending DFS，判定子链是否含 target。"""
-        return await self._ttl.chain_contains_thread(root_tid, target_tid, depth)
-
-    def _cancel_ttl_timers(self) -> None:
-        """shutdown：取消全部到期定时器（R4，不阻塞主 actor）。"""
-        self._ttl.cancel_all()
-
-
-    # -----------------------------------------------------------------
-    # 实现已下沉 engine_lifecycle.py（Wave 4）。以下为薄委托：engine 是唯一白盒
-    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
-    # -----------------------------------------------------------------
-
-    async def _memory_session_end(self) -> None:
-        """K3 teardown：shutdown 时调 memory_store.on_session_end。best-effort。"""
-        await self._lifecycle.memory_session_end()
-
-    async def _finalize_run_lifecycle(
-        self,
-        cancel: CancellationToken,
-        *,
-        shutdown_requested: bool,
-    ) -> None:
-        """按原顺序收敛 actor、operation、持久化 flush 与订阅者终态。"""
-        await self._lifecycle.finalize_run_lifecycle(cancel, shutdown_requested=shutdown_requested)
-
-    async def _terminate_orphan_submissions(self) -> None:
-        """Shutdown 收尾：对仍在订阅的与队列残留的 submission 投 engine_shutdown 终结。"""
-        await self._lifecycle.terminate_orphan_submissions()
-
-    # -----------------------------------------------------------------
-    # Main loop
-    # -----------------------------------------------------------------
-
-    async def run(self, cancel: CancellationToken) -> None:
-        self._running = True
-        shutdown_requested = False
-        # detached-spawn：记下根取消 token，供 spawn 的分离 task 派生子 token（R4 可取消）。
-        self._root_cancel = cancel
-        # suspension-ttl 冷重武装(R5,根段):装载的历史里有带 ttl 的活跃挂起 →
-        # 已过期立即裁决、未过期按剩余时长武装。此刻 spawn 句柄表尚未重建
-        # (rebuild 要等本方法赋值 _root_cancel 后才跑),挂起态 spawn 子 thread
-        # 的重武装由 _rebuild_spawn_state_from_history 收尾时完成。
-        try:
-            await self._rearm_ttl_timers_cold()
-            while self._running:
-                if cancel.is_cancelled:
-                    break
-                try:
-                    sub = await asyncio.wait_for(self._submissions.get(), timeout=1.0)
-                except TimeoutError:
-                    continue
-                if isinstance(sub.op, Shutdown):
-                    self._running = False
-                    shutdown_requested = True
-                    # suspension-ttl:取消全部到期定时器(R4,定时器挂 engine 生命周期)
-                    self._cancel_ttl_timers()
-                    await self._emit(
-                        EventMsg(submission_id=sub.id, msg=ShutdownMsg())
-                    )
-                    break
-                if isinstance(sub.op, CancelTurn):
-                    target = self._pending.get(sub.op.submission_id)
-                    if target is not None:
-                        target.cancel.cancel(CancelReason.REQUESTED, "cancel_turn")
-                        await self._emit(
-                            EventMsg(
-                                submission_id=sub.id,
-                                msg=EngineLog(
-                                    data={
-                                        "level": "info",
-                                        "message": f"cancelled turn {sub.op.submission_id}",
-                                        "extra": {},
-                                    }
-                                ),
-                            )
-                        )
-                    else:
-                        # R4：挂起态没有 live pending（turn 已退栈），CancelTurn 需
-                        # 按 submission_id 匹配并清除活跃挂起 record（闭环可取消）。
-                        await self._cancel_active_suspension(
-                            sub.id, sub.op.submission_id
-                        )
-                    continue
-                if isinstance(sub.op, InjectSystemMessage):
-                    item = tag_origin(system_injection(
-                        sub.op.text, thread_id=self._thread_id, source=sub.op.source
-                    ), sub.op.origin)
-                    active = self._active_root_pending()
-                    if active is not None:
-                        # 在飞期间 root history 只有 runner 一个写者（ADR 0029）：
-                        # 走与 InjectUserInput 同一 pending 队列，runner 迭代边界落
-                        # buffer + store；否则 engine 直写会被 turn 结束的回写覆盖。
-                        active.pending_input.append(item)
-                    else:
-                        self._history.append(item)
-                        await self._store.append(item)
-                    continue
-                if isinstance(sub.op, SendToPeer):
-                    # peer-mailbox：与 send_message 工具收敛到同一投递路径。
-                    # 寻址失败 / TriggerTurn 打 root → EngineLog 告警（显式，不静默）。
-                    try:
-                        await self.deliver_peer_message(
-                            target=sub.op.target_thread_id,
-                            text=sub.op.text,
-                            mode=sub.op.mode,
-                            from_thread_id=sub.op.from_thread_id, origin=sub.op.origin,
-                            submission_id=sub.id,
-                        )
-                    except ValueError as e:
-                        await self._emit(
-                            EventMsg(
-                                submission_id=sub.id,
-                                msg=EngineLog(data={
-                                    "level": "warning",
-                                    "message": f"send_to_peer 投递失败: {e}",
-                                    "extra": {
-                                        "target": sub.op.target_thread_id,
-                                        "mode": sub.op.mode,
-                                    },
-                                }),
-                            )
-                        )
-                    continue
-                if isinstance(sub.op, InjectUserInput):
-                    # B1 midturn-input-steering：投进活跃 turn 的 pending 队列（下一
-                    # 迭代边界 drain 并入）；无活跃 turn → 落历史不起新 turn。
-                    target = self._pending.get(sub.op.submission_id)
-                    item = tag_origin(
-                        user_message(sub.op.text, thread_id=self._thread_id), sub.op.origin)
-                    if target is not None:
-                        # 活跃 turn：入共享队列，由 runner drain 时落 store + emit
-                        target.pending_input.append(item)
-                        delivered = True
-                    else:
-                        # 无活跃 turn：engine 落历史 + 持久化，不创建 TurnRunner
-                        self._history.append(item)
-                        await self._store.append(item)
-                        delivered = False
-                    await self._emit(
-                        EventMsg(
-                            submission_id=sub.id,
-                            msg=UserInputInjected(
-                                data={
-                                    "submission_id": sub.op.submission_id,
-                                    "delivered": delivered,
-                                    "text_preview": sub.op.text[:80],
-                                }
-                            ),
-                        )
-                    )
-                    continue
-                if isinstance(sub.op, CompactNow):
-                    # manual 压缩 = 一次 LLM 调用：不能内联在 actor 循环里（会饿死
-                    # CancelTurn / Shutdown），且改写 root history 须持 root gate
-                    op_compact = sub.op
-                    self._start_operation(
-                        self._run_gated_op(
-                            sub.id, cancel,
-                            partial(self._run_compact_now, sub.id, op_compact),
-                        ),
-                        name=f"compact:{sub.id}",
-                        submission_id=sub.id,
-                    )
-                    continue
-                if isinstance(sub.op, ThreadRollback):
-                    num_turns = sub.op.num_turns
-                    self._start_operation(
-                        self._run_gated_op(
-                            sub.id, cancel,
-                            # 这条不能用 partial:handle_rollback 不接收 token,
-                            # 而 run 的签名必带一个 —— lambda 在此是"丢弃末位参数"的
-                            # 适配器。默认参数绑定会让 mypy 推不出 lambda 类型,故 ignore。
-                            lambda _tok, sid=sub.id, n=num_turns: (  # type: ignore[misc]
-                                engine_ops.handle_rollback(self, sid, n)
-                            ),
-                        ),
-                        name=f"rollback:{sub.id}",
-                        submission_id=sub.id,
-                    )
-                    continue
-                if isinstance(sub.op, Prewarm):
-                    self._start_operation(
-                        engine_prewarm.run_prewarm(self, sub.id, sub.op, cancel),
-                        name=f"prewarm:{sub.id}", submission_id=sub.id,
-                    )
-                    continue
-                if isinstance(sub.op, UpdateBudget):
-                    engine_ops.handle_update_budget(self, sub.id, sub.op)
-                    continue
-                if isinstance(sub.op, RefreshSnapshot):
-                    engine_ops.handle_refresh_snapshot(self, sub.id)
-                    continue
-                if isinstance(sub.op, UpdateInstructions):
-                    await engine_ops.handle_update_instructions(self, sub.id, sub.op)
-                    continue
-                if isinstance(sub.op, Rewind):
-                    # 与 Resume 同理用 create_task：重推会跑完整 turn(采样 + 派发),
-                    # 不阻塞主 run 循环,且给 subscribe(submission_id) 留注册窗口。
-                    # 根 thread 的 rewind 改写 root history → 持 root gate；子 thread
-                    # rewind 作用于 child thread，不排队（其一致性归 wave2b）。
-                    is_root_rewind = (
-                        sub.op.thread_id is None or sub.op.thread_id == self._thread_id
-                    )
-                    rewind_sub = sub
-                    body = (
-                        self._run_gated_op(
-                            sub.id, cancel,
-                            partial(engine_ops.handle_rewind, self, rewind_sub),
-                        )
-                        if is_root_rewind
-                        else engine_ops.handle_rewind(self, sub, cancel)
-                    )
-                    self._start_operation(
-                        body, name=f"rewind:{sub.id}", submission_id=sub.id,
-                    )
-                    continue
-                if isinstance(sub.op, Resume):
-                    # detached spawn 续跑优先判定：Resume.thread_id 命中某个【挂起】的
-                    # spawn 句柄 child_thread_id → 走 _resume_spawn（在该 child thread
-                    # 自己的线上独立续跑，与父 turn 完全解耦；父 turn 早已结束）。
-                    # 不命中（根 thread / call_skill 子链）→ 维持既有 _handle_resume。
-                    spawn_handle = self._match_suspended_spawn(sub.op.thread_id)
-                    if spawn_handle is not None:
-                        self._start_operation(
-                            self._resume_spawn(sub, spawn_handle),
-                            name=f"resume-spawn:{sub.id}",
-                            submission_id=sub.id,
-                        )
-                        continue
-                    # 与 UserMessage 一致用 create_task 异步派发：让续跑链（可能跨子/根
-                    # 多个 turn）不阻塞主 run 循环，且给 subscribe(submission_id) 留出在
-                    # 事件流出前注册队列的窗口（子 thread resume 续跑链 emit 多个事件，
-                    # 内联执行会与"submit 后再 subscribe"的消费者抢跑导致丢首批事件→挂死）。
-                    # 根 / call_skill 子链续跑最终都回写 root history → 持 root gate
-                    resume_sub = sub
-                    self._start_operation(
-                        self._run_gated_op(
-                            sub.id, cancel,
-                            partial(self._handle_resume, resume_sub),
-                        ),
-                        name=f"resume:{sub.id}",
-                        submission_id=sub.id,
-                    )
-                    continue
-                if self._is_queued_user_message(sub):
-                    await self._start_queued_user_message(sub, cancel)
-                    continue
-        finally:
-            await self._finalize_run_lifecycle(
-                cancel,
-                shutdown_requested=shutdown_requested,
-            )
-
-    @staticmethod
-    def _is_queued_user_message(
-        sub: Submission | AcceptedUserMessage,
-    ) -> bool:
-        """统一识别 legacy UserMessage 与 durable accepted token。"""
-        return isinstance(sub, AcceptedUserMessage) or isinstance(sub.op, UserMessage)
-
-    async def _start_queued_user_message(
-        self,
-        sub: Submission | AcceptedUserMessage,
-        root_cancel: CancellationToken,
-    ) -> None:
-        """按 queue item 类型选择 durable 或 legacy turn 入口。"""
-        if not isinstance(sub, AcceptedUserMessage):
-            self._start_operation(
-                self._run_turn_for(sub, root_cancel),
-                name=f"turn:{sub.id}",
-                submission_id=sub.id,
-            )
-            return
-        if not await self._audited_mailbox.claim(sub):
-            return
-        application_checkpoint = AuditedApplicationCheckpoint()
-        self._start_operation(
-            self._run_claimed_audited_turn(
-                sub,
-                root_cancel,
-                application_checkpoint=application_checkpoint,
-            ),
-            name=f"turn:{sub.id}",
-            submission_id=sub.id,
-        )
-        await application_checkpoint.wait()
-
-    async def _run_claimed_audited_turn(
-        self,
-        token: AcceptedUserMessage,
-        root_cancel: CancellationToken,
-        *,
-        application_checkpoint: AuditedApplicationCheckpoint | None = None,
-    ) -> None:
-        """handshake 后收敛 application；失败由 actor checkpoint 单点传播。"""
-        failure: BaseException | None = None
-        try:
-            if not await self._audited_mailbox.start_claimed(token):
-                return
-            try:
-                await self._run_audited_turn_for(
-                    token,
-                    root_cancel,
-                    application_checkpoint=application_checkpoint,
-                )
-            except BaseException as error:  # noqa: BLE001
-                failure = error
-        finally:
-            await retire_started_audited_token(
-                self._audited_mailbox,
-                token,
-            )
-        if failure is None:
-            return
-        if (
-            application_checkpoint is not None
-            and application_checkpoint.fail(failure)
-        ):
-            return
-        raise failure
-
-    async def _run_audited_turn_for(
-        self,
-        token: AcceptedUserMessage,
-        root_cancel: CancellationToken,
-        *,
-        application_checkpoint: AuditedApplicationCheckpoint | None = None,
-    ) -> None:
-        """应用 ack conversation envelope；ownership 由外层 handshake/finally 管理。"""
-        assert self._audit_state is not None
-        await self._audit_state.coordinator.ensure_effect_allowed()
-        try:
-            item = token.validated_application()
-        except BaseException as error:
-            raise self._audit_state.coordinator.freeze(error) from None
-        # ADR 0029 / 0101：accepted item 的 application（对话项落账 + 进 history + 投影）在本
-        # token 拿到 root gate 时进行——Journal 顺序 = transcript 顺序 = 执行顺序，在飞 turn 的
-        # prompt 确定不含排队消息。accept 本身（durable 准入记录）已在 submit 时落盘。
-        # 排队前登记 _pending（gate token），CancelTurn 可取消排队；engine 收敛（raw
-        # cancel）时对仍排队的 token「只应用不跑 turn」，满足 release 等 application 收敛。
-        gate_cancel = root_cancel.child(f"sub:{token.submission_id}:gate")
-        self._pending[token.submission_id] = _PendingTurn(
-            token.submission_id, gate_cancel, token.accepted_turn_index,
-        )
-        # actor 握手语义 = 「交接完成」：gate 空闲时等 application 收敛（原语义）；
-        # gate 被占时登记排队即交接完成，actor 可出队下一个 token——否则 actor 会
-        # 永远等在排队 token 的 application 上（它要等 gate）。排队 token 之后的
-        # application 失败走 operation 自己的 freeze / 终结路径。
-        if self._root_gate.locked() and application_checkpoint is not None:
-            application_checkpoint.succeed()
-        raw_cancel: asyncio.CancelledError | None = None
-        try:
-            acquired = await self._acquire_root_gate(token.submission_id, gate_cancel)
-        except asyncio.CancelledError as error:
-            acquired = False
-            raw_cancel = error
-        if not acquired:
-            # 取消（CancelTurn 或 engine 收敛）：accepted 是 durable 承诺，仍要应用
-            self._pending.pop(token.submission_id, None)
-            await self._apply_accepted_item_owned(token, item, application_checkpoint)
-            await self._emit_operation_terminal(
-                token.submission_id, None,
-                kind="engine_shutdown" if raw_cancel is not None else "cancelled",
-            )
-            if raw_cancel is not None:
-                raise raw_cancel
-            return
-        try:
-            await self._apply_accepted_item(token, item, application_checkpoint)
-            target_cancel = self._audit_state.coordinator.register_target(
-                token.submission_id
-            )
-            await self._run_audited_target(token, item, target_cancel)
-        finally:
-            self._release_root_gate()
-
-    async def _apply_accepted_item_owned(
-        self,
-        token: AcceptedUserMessage,
-        item: ResponseItem,
-        application_checkpoint: AuditedApplicationCheckpoint | None,
-    ) -> None:
-        """application 作为 coordinator-owned 步骤执行：caller 的 raw cancel 只能延迟重抛。"""
-        _, cancellation = await audit_await_owned(
-            self._apply_accepted_item(token, item, application_checkpoint),
-            name=f"apply-accepted:{token.submission_id}",
-        )
-        if cancellation is not None:
-            raise cancellation
-
-    async def _apply_accepted_item(
-        self,
-        token: AcceptedUserMessage,
-        item: ResponseItem,
-        application_checkpoint: AuditedApplicationCheckpoint | None,
-    ) -> None:
-        """accepted user item 落账 → 进 hot history → 投影（ADR 0025 / 0101 application）。
-
-        落账与取消无关（raw cancel 延迟到写完再抛）；投影可以被取消。
-        """
-        state = self._audit_state
-        assert state is not None
-        (ack, envelope), cancellation = await audit_await_owned(
-            commit_accepted_application(state, token, item),
-            name=f"commit-accepted:{token.submission_id}",
-        )
-        if cancellation is not None:
-            raise cancellation
-        async with self._lock:
-            self._history.append(item)
-        try:
-            result = await state.projector.project((envelope,), ack)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:  # noqa: BLE001  # 普通未分类异常必须 fail closed
-            raise state.coordinator.freeze(error) from None
-        state.coordinator.update_projection(result)
-        if application_checkpoint is not None:
-            application_checkpoint.succeed()
-
-    async def _run_audited_target(
-        self,
-        token: AcceptedUserMessage,
-        item: ResponseItem,
-        target_cancel: CancellationToken,
-    ) -> None:
-        """已持 root gate：跑 audited 根 turn 并收敛 target 终态。"""
-        assert self._audit_state is not None
-        try:
-            await self._run_turn_for(
-                AuditedTurnInput(
-                    id=token.submission_id,
-                    text=str(item.payload["text"]),
-                    accepted_turn_index=token.accepted_turn_index,
-                ),
-                target_cancel,
-                gate_held=True,
-            )
-            end_reason = self._audit_state.coordinator.target_outcome(
-                token.submission_id,
-                target_cancel,
-            )
-            if (
-                end_reason == "cancelled"
-                and self._audit_state.coordinator.target_cancel_requested(
-                    token.submission_id,
-                    target_cancel,
-                )
-            ):
-                await finalize_cancelled_target(
-                    self._audit_state,
-                    submission_id=token.submission_id,
-                    turn_index=token.accepted_turn_index,
-                    target_token=target_cancel,
-                )
-        finally:
-            self._audit_state.coordinator.unregister_target(
-                token.submission_id,
-                target_cancel,
-            )
-
-    # -----------------------------------------------------------------
-    # 实现已下沉 engine_gate.py（Wave 4）。以下为薄委托：engine 是唯一白盒
-    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
-    # -----------------------------------------------------------------
-
-    async def _acquire_root_gate(
-        self, submission_id: str, cancel: CancellationToken,
-    ) -> bool:
-        """排队获取 root gate；gate 被占时 emit submission_queued，排队中被取消返回 False。"""
-        return await self._gate.acquire_root_gate(submission_id, cancel)
-
-    async def _abandon_acquire(self, acquire: asyncio.Future[bool]) -> None:
-        """撤回一次 gate acquire；若它已经（或在撤回瞬间）拿到锁，立刻归还。"""
-        await self._gate.abandon_acquire(acquire)
-
-    def _resume_tool_cancel(self, call_id: str) -> CancellationToken:
-        """resume 执行已批准工具的 token 必须派生自 engine 根 token（R4）。"""
-        return self._gate.resume_tool_cancel(call_id)
-
-    def _release_root_gate(self) -> None:
-        """释放 root gate（持有者退出真终态之后调用）。"""
-        self._gate.release_root_gate()
-
-    async def _run_gated_op(
-        self,
-        submission_id: str,
-        root_cancel: CancellationToken,
-        run: Callable[[CancellationToken], Coroutine[Any, Any, None]],
-    ) -> None:
-        """非 UserMessage 的 gated Op（CompactNow / Rollback / 根 Rewind / 根 Resume）。"""
-        await self._gate.run_gated_op(submission_id, root_cancel, run)
-
-    async def _run_turn_for(
-        self,
-        sub: Submission | AuditedTurnInput,
-        root_cancel: CancellationToken,
-        *,
-        gate_held: bool = False,
-    ) -> None:
-        """根 turn 入口：登记 _pending → 排队取 root gate → 跑 turn → 释放。"""
-        await self._gate.run_turn_for(sub, root_cancel, gate_held=gate_held)
-
-    async def _run_turn_for_gated(
-        self,
-        sub: Submission | AuditedTurnInput,
-        turn_cancel: CancellationToken,
-    ) -> None:
-        """持有 root gate 后的根 turn 主体（挂起守卫 → 落 user → 指令 → hook → runner）。"""
-        await self._gate.run_turn_for_gated(sub, turn_cancel)
-
-    async def _gate_session_tokens(self, submission_id: str) -> bool:
-        """K2 引擎级闸门:触顶时按 policy 裁决终态 / 挂起。"""
-        return await self._gate.gate_session_tokens(submission_id)
-
-    async def _suspend_engine_gate(self, submission_id: str) -> None:
-        """落 engine 级 K2 挂起记录(turn 未开跑,record 直接挂根 history)。"""
-        await self._gate.suspend_engine_gate(submission_id)
-
-
-    # -----------------------------------------------------------------
-    # 实现已下沉 engine_runner.py（Wave 4）。以下为薄委托：engine 是唯一白盒
-    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
-    # -----------------------------------------------------------------
 
     # 注：本方法**刻意留在 engine.py**——TurnRunner 的构造点是 engine 模块的白盒
     # 注入面，test_audit_history_merge 按 monkeypatch.setattr(engine_module,
@@ -1609,484 +488,123 @@ class AgentEngine:
             spawn_coordinator=self,
         )
 
-    def _active_root_pending(self) -> _PendingTurn | None:
-        """返回当前根 thread 在飞 turn 的 pending 记录（无则 None）。"""
-        return self._runner.active_root_pending()
-
-    async def _drain_residual_injections(
-        self, runner: TurnRunner, submission_id: str,
-    ) -> None:
-        """turn 退出后把 runner 未消费的 pending 注入并入 buffer + store（R5）。"""
-        await self._runner.drain_residual_injections(runner, submission_id)
-
-    async def _writeback_turn_runner(self, runner: TurnRunner) -> None:
-        """完整验证 audited history 后原子回写 runner 派生状态。"""
-        await self._runner.writeback_turn_runner(runner)
-
-    async def _build_and_run_runner(
-        self,
-        submission_id: str,
-        turn_cancel: CancellationToken,
-        resolved_for_turn: list[ResolvedInstruction],
-        *,
-        seed_pending_call_id: str | None = None,
-        cache_break_expected_reason: str | None = None,
-        auto_retry_count: int = 0,
-        extra_seed_call_ids: tuple[str, ...] = (),
-    ) -> None:
-        """构造并运行一轮，最后一次性回写 Engine 状态。"""
-        await self._runner.build_and_run_runner(
-            submission_id, turn_cancel, resolved_for_turn,
-            seed_pending_call_id=seed_pending_call_id,
-            cache_break_expected_reason=cache_break_expected_reason,
-            auto_retry_count=auto_retry_count, extra_seed_call_ids=extra_seed_call_ids,
-        )
-
-    async def _fire_post_turn_hook(
-        self,
-        submission_id: str,
-        outcome: TurnOutcome,
-        turn_cancel: CancellationToken,
-        iteration: int,
-    ) -> None:
-        """root turn 真终态时同步触发 post_turn 钩子(审计型,不可否决)。"""
-        await self._runner.fire_post_turn_hook(submission_id, outcome, turn_cancel, iteration)
-
-    # detached-spawn：分离式发起子 skill（立即返回句柄，后台独立跑完）
     # -----------------------------------------------------------------
-
-    @property
-    def _spawn_handles(self) -> SpawnHandleRegistry:
-        """detached spawn 句柄表（白盒访问转发到 SpawnDriver）。
-
-        逻辑已抽到 SpawnDriver；保留本 property 是为白盒断言 / 旧调用点提供等价访问，
-        语义与抽取前一致（同一个 SpawnHandleRegistry 实例）。
-        """
-        return self._spawn._spawn_handles  # noqa: SLF001
-
-    @property
-    def _fired_barriers(self) -> set[str]:
-        """join-barrier 进程内幂等守卫集（白盒访问转发到 SpawnDriver）。"""
-        return self._spawn._fired_barriers  # noqa: SLF001
-
-    async def spawn_skill(
-        self, *, skill_id: str, args: dict[str, Any], reason: str,
-        deadline_seconds: float | None = None, handle_id: str | None = None,
-    ) -> dict[str, str]:
-        """转发到 SpawnDriver.spawn_skill —— 公共 API + tools 的 spawn_coordinator 入口。
-
-        分离式发起子 skill：立即返回句柄，子 skill 在后台分离 task 跑完。门控 / K1
-        配额 / detached task 启动均由 SpawnDriver 负责。详见 spawn_driver.py。
-
-        Args:
-            skill_id: 要分离发起的子 skill id（须在 entry skill 的 child_skills 白名单内）。
-            args: 子 skill 的种子输入（序列化为子 thread 首条 user_message）。
-            reason: LLM / 业务自陈的发起理由（透传到事件 / 审计，taifeng 不解析语义）。
-            deadline_seconds: 可选墙钟上限（秒），到点以 ``DEADLINE_EXCEEDED`` 取消整棵
-                spawn 子树（cancel-reason-deadline）；None = 不限。
-
-        Returns:
-            ``{"handle_id": ..., "child_thread_id": ...}`` —— 立即可用于 ``spawn_status``。
-        """
-        return await self._spawn.spawn_skill(
-            skill_id=skill_id, args=args, reason=reason, deadline_seconds=deadline_seconds,
-            handle_id=handle_id,
-        )
-
-    def _build_child_runner(
-        self,
-        target: SkillDefinition,
-        child_thread_id: str,
-        seed: ResponseItem,
-        cancel: CancellationToken,
-        *,
-        history: list[ResponseItem] | None = None,
-        auto_retry_count: int = 0,
-        sample_scope_id: str | None = None,
-        audit_state: AuditedSessionState | None = None,
-    ) -> TurnRunner:
-        """构造 detached spawn 的子 TurnRunner（镜像 turn.py::_spawn_sub_runner 的 kwargs）。
-
-        ``auto_retry_count``:TTL 到期自动 retry 的谱系计数(suspend-review-fixes:
-        spawn 重跑透传 → failure_suspend_max_auto_retries 对 spawn 拓扑生效)。
-
-        与阻塞式 call_skill 子 runner 的差异：``cancel`` 由 engine 根取消派生（而非
-        父 turn 的 ctx.cancel），其余依赖（snapshot / model / runtime / store /
-        compressors / dispatch_policy / budget / hooks / permission / 资源配额）一致。
-        ``call_stack`` 留空 → 子 runner 自判为独立根 turn（detached 即独立上下文）。
-
-        Args:
-            history: 续跑场景传入【已补齐 gap 的子 thread 完整历史】（从 store load_thread
-                读回）；首发场景为 None → 用 ``[seed]`` 起跑。两种场景都保持 call_stack 空，
-                即 detached 子 turn 永远是独立根 turn（resume 后仍是独立根，不依附父）。
-            sample_scope_id: 本次 Responses 逻辑采样作用域；事件仍按 child thread 分轨。
-        """
-        buffer = list(history) if history is not None else [seed]
-        return TurnRunner(
-            entry_skill=target,
-            snapshot=self._snapshot,
-            model_client=self._model_client,
-            tool_runtime=self._tool_runtime,
-            store=self._store,
-            compressors=self._compressors,
-            dispatch_policy=self._dispatch_policy,
-            outcome_judge=self._outcome_judge,
-            budget=self._budget,
-            thread_id=child_thread_id,
-            submission_id=child_thread_id,
-            emit=self._emit,
-            cancel=cancel,
-            image_input_policy=self._image_input_policy,
-            input_cost_estimator=self._input_cost_estimator,
-            file_input_policy=self._file_input_policy,
-            hooks=self._hooks,
-            permission_policy=self._permission_policy,
-            request_metadata=self._request_metadata,
-            # 审计：子 thread 自己的 turn 从 0 编号，效果记在子 thread 名下（ADR 0098）
-            turn_index=self._turn_index if audit_state is None else 0,
-            audit_state=audit_state,
-            script_executors=self._script_executors,
-            max_iterations=self._max_iterations,
-            denial_breaker_config=self._denial_breaker_config,
-            doom_loop_config=self._doom_loop_config,
-            failure_policy=self._failure_policy,
-            failure_suspend_ttl_seconds=self._failure_suspend_ttl_seconds,
-            failure_suspend_on_expire=self._failure_suspend_on_expire,
-            auto_retry_count=auto_retry_count,
-            max_parallel_tool_calls=self._max_parallel_tool_calls,
-            sample_scope_id=sample_scope_id,
-            reasoning_passback=self._reasoning_passback,
-            enable_request_capture=self._enable_request_capture,
-            capabilities=self._capabilities,
-            # T6: deferred 暴露阈值（驱动 child 列表 inline/deferred + 工具裁剪）
-            recall_threshold=self._recall_threshold,
-            # 召回后端存在性：无后端恒 inline（与阈值同口径透传）
-            has_recall_backend=self._has_recall_backend,
-            spawn_registry=self._spawn_registry,
-            session_tokens_used=self._session_tokens,
-            max_session_tokens=self._max_session_tokens,
-            usage_meter=self._usage_meter,
-            memory_store=self._memory_store,
-            memory_query_builder=self._memory_query_builder,
-            pinned_states=self._pinned_states,
-            history_buffer=buffer,
-            # detached-spawn：spawned 子 runner 也注入协调器 → 子 skill 可继续 spawn
-            spawn_coordinator=self,
-        )
-
-    async def _resume_spawn(self, sub: Submission, handle: SpawnHandle) -> None:
-        """转发到 SpawnDriver.resume_spawn —— 续跑挂起的 detached spawn 子 thread。
-
-        调用点：主 run 循环的 Resume 分支（命中挂起 spawn 句柄时）。
-        """
-        await self._spawn.resume_spawn(sub, handle)
-
-    def _match_suspended_spawn(self, thread_id: str) -> SpawnHandle | None:
-        """转发到 SpawnDriver.match_suspended_spawn —— Resume 路由判定。
-
-        调用点：主 run 循环的 Resume 分支（判 thread_id 是否命中挂起 spawn）。
-        """
-        return self._spawn.match_suspended_spawn(thread_id)
-
-    def spawn_status(self, handle_ids: list[str]) -> dict[str, dict[str, Any]]:
-        """转发到 SpawnDriver.spawn_status —— 公共 API（业务侧轮询 / join 检查）。"""
-        return self._spawn.spawn_status(handle_ids)
-
-    def is_spawn_thread(self, thread_id: str) -> bool:
-        """``thread_id`` 是否本 engine 登记过的 detached spawn 子 thread（可被 peer 寻址）。"""
-        return any(h.child_thread_id == thread_id
-                   for h in self._spawn_handles.handles.values())
-
-    async def deliver_peer_message(
-        self,
-        *,
-        target: str,
-        text: str,
-        mode: str = "queue_only",
-        from_thread_id: str | None = None,
-        submission_id: str | None = None,
-        origin: InputOrigin | None = None,
-    ) -> dict[str, Any]:
-        """转发到 SpawnDriver.deliver_peer_message —— peer-mailbox 唯一投递路径。
-
-        ``send_message`` 工具（经 spawn_coordinator 协议）与 ``SendToPeer`` Op
-        都收敛到此。详见 spawn_driver.py 同名方法。
-        """
-        return await self._spawn.deliver_peer_message(
-            target=target, text=text, mode=mode, origin=origin,
-            from_thread_id=from_thread_id, submission_id=submission_id)
-
-    async def wait_spawn_terminal(
-        self,
-        *,
-        handle_id: str,
-        timeout_seconds: float,
-        cancel: CancellationToken,
-    ) -> dict[str, Any]:
-        """转发到 SpawnDriver.wait_spawn_terminal —— ``wait_peer`` 工具实现体。"""
-        return await self._spawn.wait_spawn_terminal(
-            handle_id=handle_id, timeout_seconds=timeout_seconds, cancel=cancel)
-
-    async def wait_spawn_any(
-        self,
-        *,
-        handle_ids: list[str],
-        timeout_seconds: float,
-        cancel: CancellationToken,
-    ) -> dict[str, Any]:
-        """转发到 SpawnDriver.wait_spawn_any —— ``wait_any`` 工具实现体（any-of-N）。"""
-        return await self._spawn.wait_spawn_any(
-            handle_ids=handle_ids, timeout_seconds=timeout_seconds, cancel=cancel)
-
-    async def kill_spawn(self, handle_id: str) -> None:
-        """转发到 SpawnDriver.kill_spawn —— 公共 API（主动终止单个 spawn 子树）。"""
-        await self._spawn.kill_spawn(handle_id)
-
-    def has_live_spawns(self) -> bool:
-        """转发到 SpawnDriver.has_live_spawns —— 公共 API（pool 释放前的引用计数保活）。"""
-        return self._spawn.has_live_spawns()
-
-    async def set_join_barrier(
-        self,
-        handle_ids: list[str],
-        then_skill_id: str,
-        then_args_template: dict[str, Any] | None = None,
-    ) -> dict[str, str]:
-        """转发到 SpawnDriver.set_join_barrier —— 公共 API（登记 join-barrier）。"""
-        return await self._spawn.set_join_barrier(
-            handle_ids, then_skill_id, then_args_template
-        )
-
-    async def _rebuild_spawn_state_from_history(self) -> None:
-        """转发到 SpawnDriver.rebuild_from_history —— 冷恢复重建句柄表 / barrier / 守卫集。
-
-        调用点：pool 重载 engine 时（engine 持有 prior history 的 resume 场景）。
-        """
-        await self._spawn.rebuild_from_history()
-        # suspension-ttl 冷重武装(spawn 段):句柄表就绪后才枚举得到挂起态 spawn
-        await self._rearm_spawn_ttl_timers_cold()
-
-
+    # 方法体按区段放在兄弟模块（W7.1 拆文件，零行为变更）；此处按原名赋值，
+    # engine 仍是唯一白盒寻址面，签名逐字保留。
     # -----------------------------------------------------------------
-    # Resume：续跑挂起的 turn（配对 resolutions → 补齐 history gap → 续采样）
-    # -----------------------------------------------------------------
-
-    # -----------------------------------------------------------------
-    # 实现已下沉 engine_resume.py（Wave 4）。以下为薄委托：engine 是唯一白盒
-    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
-    # -----------------------------------------------------------------
-
-    async def _handle_resume(self, sub: Submission, root_cancel: CancellationToken) -> None:
-        """续跑一个挂起的 thread：配对 resolutions → 补齐 history gap → 续采样。"""
-        await self._resume.handle_resume(sub, root_cancel)
-
-    async def _handle_resume_resolved(
-        self, sub: Submission, op: Resume,
-        record: SuspensionRecord, root_cancel: CancellationToken,
-    ) -> None:
-        """_handle_resume 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
-        await self._resume.handle_resume_resolved(sub, op, record, root_cancel)
-
-    # -----------------------------------------------------------------
-    # 子 thread resume 续跑链 —— 实现已下沉 child_resume_chain.py（Wave 4）。
-    # 以下全部是薄委托：engine 是唯一白盒寻址面，spawn_* 兄弟模块与测试按这些
-    # 原名调用/打桩，签名逐字保留。
-    # -----------------------------------------------------------------
-
-    async def _handle_child_resume(
-        self, sub: Submission, op: Resume, root_cancel: CancellationToken
-    ) -> None:
-        """续跑一个【子 thread】的挂起，并把结果逐层回传父 call_skill 直到根完成。"""
-        await self._child_chain.handle_child_resume(sub, op, root_cancel)
-
-    async def _build_resume_chain(
-        self, leaf_thread_id: str
-    ) -> list[tuple[str, str, str | None]] | None:
-        """自根 self._thread_id 沿 CHILD_SKILL pending 向下串出到 leaf 的续跑链。"""
-        return await self._child_chain.build_resume_chain(leaf_thread_id)
-
-    def _max_total_spawns_guard(self) -> int:
-        """续跑链 DFS 下探的最大层数守卫(防坏数据成环)。"""
-        return self._child_chain.max_total_spawns_guard()
-
-    @staticmethod
-    def _next_child_link(
-        record: SuspensionRecord,
-    ) -> tuple[str, str, str | None] | None:
-        """从一个挂起 record 里取首个 CHILD_SKILL pending → (子tid, 子skill_id, 父callid)。"""
-        return ChildResumeChain.next_child_link(record)
-
-    async def _resume_leaf_thread(
-        self, sub: Submission, leaf_tid: str, leaf_skill_id: str,
-        resolutions: dict[str, Any], root_cancel: CancellationToken,
-        *, submission_id: str | None = None,
-    ) -> str | None:
-        """核销 leaf 子 thread 的用户挂起 + 续跑该子 turn，返回回传父的结果字符串。"""
-        return await self._child_chain.resume_leaf_thread(
-            sub,
-            leaf_tid,
-            leaf_skill_id,
-            resolutions,
-            root_cancel,
-            submission_id=submission_id,
-        )
-
-    async def _resume_leaf_settled(
-        self, sub: Submission, leaf_tid: str, leaf_skill_id: str,
-        resolutions: dict[str, Any], record: SuspensionRecord,
-        root_cancel: CancellationToken, *, submission_id: str | None = None,
-    ) -> str | None:
-        """_resume_leaf_thread 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
-        return await self._child_chain.resume_leaf_settled(
-            sub,
-            leaf_tid,
-            leaf_skill_id,
-            resolutions,
-            record,
-            root_cancel,
-            submission_id=submission_id,
-        )
-
-    async def _resume_parent_level(
-        self, sub: Submission, parent_tid: str, parent_skill_id: str,
-        call_id: str | None, child_result: str, root_cancel: CancellationToken,
-        *, submission_id: str | None = None,
-    ) -> str | None:
-        """回填父 thread 中 call_id 对应 call_skill 的 output，续跑父 turn。"""
-        return await self._child_chain.resume_parent_level(
-            sub,
-            parent_tid,
-            parent_skill_id,
-            call_id,
-            child_result,
-            root_cancel,
-            submission_id=submission_id,
-        )
-
-    async def _build_spawn_resume_chain(
-        self, root_tid: str, root_skill_id: str,
-        resolutions: dict[str, Any] | None = None,
-    ) -> list[tuple[str, str, str | None]] | None:
-        """自 spawn 子 thread 沿 CHILD_SKILL pending 向下串到最深 leaf 的续跑链。"""
-        return await self._child_chain.build_spawn_resume_chain(
-            root_tid,
-            root_skill_id,
-            resolutions,
-        )
-
-    async def _settle_call_skill_output(
-        self, sub: Submission, thread_id: str, call_id: str, child_result: str
-    ) -> str:
-        """在 thread 上回填 call_id 对应 call_skill 的 function_call_output + 落 resolved-marker"""
-        return await self._child_chain.settle_call_skill_output(
-            sub,
-            thread_id,
-            call_id,
-            child_result,
-        )
-
-    async def _load_thread_items(self, thread_id: str) -> list[ResponseItem]:
-        """非根 thread 的**逻辑 history 单一入口**:load_thread → reconstruct。"""
-        return await self._suspend_access.load_thread_items(thread_id)
-
-    async def _apply_plan_on_thread(
-        self, thread_id: str, entry_skill_id: str,
-        record: SuspensionRecord, plan: Any
-    ) -> None:
-        """在指定 thread 上应用 ResolvePlan 的 gap 补齐（form/data/deny/allow-execute）。"""
-        await self._child_chain.apply_plan_on_thread(thread_id, entry_skill_id, record, plan)
-
-    async def _append_resolved_marker(self, thread_id: str, record_id: str) -> None:
-        """落 record 级 resolved-marker(request 级核销全量达成时的唯一非根签发点)。"""
-        await self._child_chain.append_resolved_marker(thread_id, record_id)
-
-    async def _run_thread_turn(
-        self, sub: Submission, thread_id: str, entry_skill_id: str,
-        root_cancel: CancellationToken, *, submission_id: str | None = None,
-        auto_retry_count: int = 0,
-    ) -> Any:
-        """为指定（非根）thread 构造 TurnRunner 并续跑一轮，返回 TurnOutcome。"""
-        return await self._child_chain.run_thread_turn(
-            sub,
-            thread_id,
-            entry_skill_id,
-            root_cancel,
-            submission_id=submission_id,
-            auto_retry_count=auto_retry_count,
-        )
-
-    async def _execute_resumed_tool_on_thread(
-        self, thread_id: str, entry_skill_id: str, call_id: str
-    ) -> None:
-        """在指定 thread 上执行一个被批准的挂起 tool call，回填 function_call_output。"""
-        await self._child_chain.execute_resumed_tool_on_thread(thread_id, entry_skill_id, call_id)
-
-    async def _cancel_active_suspension(
-        self, cancel_sub_id: str, target_sub_id: str
-    ) -> None:
-        """R4：若存在 submission_id 匹配的活跃挂起，追加 resolved-marker 丢弃之。"""
-        await self._suspend_access.cancel_active_suspension(cancel_sub_id, target_sub_id)
-
-    def _find_active_suspension(self) -> SuspensionRecord | None:
-        """扫 self._history，返回最后一条尚未被 resolved-marker 消费的 suspension record。"""
-        return self._suspend_access.find_active_suspension()
-
-    @staticmethod
-    def _find_active_suspension_in(
-        items: list[ResponseItem],
-    ) -> SuspensionRecord | None:
-        """在任意 items 序列中找最后一条未被 resolved-marker 消费的 suspension record。"""
-        return SuspensionAccess.find_active_suspension_in(items)
-
-    @staticmethod
-    def _deny_output_text(
-        record: SuspensionRecord, call_id: str, reason_text: str,
-    ) -> str:
-        """按 pending reason 渲染 deny 回填文案(suspension-ttl-hardening)。"""
-        return SuspensionAccess.deny_output_text(record, call_id, reason_text)
-
-    def _apply_plan_session_effects(self, plan: Any, record: SuspensionRecord) -> int:
-        """应用 ResolvePlan 的会话级副作用,返回续跑 runner 的 auto_retry_count。"""
-        return self._suspend_access.apply_plan_session_effects(plan, record)
-
-    def _effective_resolutions(
-        self, record: SuspensionRecord, items: list[ResponseItem],
-        resolutions: dict[str, Any],
-    ) -> dict[str, Any]:
-        """到期哨兵 resolutions 与未核销 pending 求交;人工 payload 原样返回。"""
-        return self._suspend_access.effective_resolutions(record, items, resolutions)
-
-    def _settle_lock(self, record_id: str) -> asyncio.Lock:
-        """取 record 级结算锁(惰性创建;record 终结后残留的空锁可忽略不计)。"""
-        return self._suspend_access.settle_lock(record_id)
-
-    @staticmethod
-    def _unsettled_pendings(
-        record: SuspensionRecord, items: list[ResponseItem],
-    ) -> list[Any]:
-        """返回 record 中尚未核销的 pending(request 级核销的推导真相,R5)。"""
-        return SuspensionAccess.unsettled_pendings(record, items)
-
-    async def _execute_resumed_tool(self, call_id: str) -> None:
-        """resume 时对一个被批准的挂起 tool call 真正执行，回填 function_call_output。"""
-        await self._suspend_access.execute_resumed_tool(call_id)
-
-    async def _run_compact_now(
-        self,
-        submission_id: str,
-        op: CompactNow,
-        root_cancel: CancellationToken,
-    ) -> None:
-        """_run_compact_now"""
-        await self._suspend_access.run_compact_now(submission_id, op, root_cancel)
-
-    # Op handlers —— 实现已下沉 engine_ops.py（Wave 4 模块切分）
-    # -----------------------------------------------------------------
-
-    async def _emit_rewind_table_rebuilt(self) -> None:
-        """冷恢复后补发 rewind_table_rebuilt（R3 可观测）。
-
-        薄委托：pool_session 按 ``engine._emit_rewind_table_rebuilt()`` 白盒寻址，
-        故保留本方法名，实现见 ``engine_ops.emit_rewind_table_rebuilt``。
-        """
-        await engine_ops.emit_rewind_table_rebuilt(self)
+    register_pinned_state = engine_public.register_pinned_state
+    unregister_pinned_state = engine_public.unregister_pinned_state
+    instructions_snapshot = engine_public.instructions_snapshot
+    history_snapshot = engine_public.history_snapshot
+    rewind_nodes = engine_public.rewind_nodes
+    rewind_nodes_for = engine_public.rewind_nodes_for
+    estimate_tokens = engine_public.estimate_tokens
+    usage_ratio = engine_public.usage_ratio
+    introspect = engine_public.introspect
+    thread_id = property(engine_public.thread_id)
+    session_id = property(engine_public.session_id)
+    entry_skill = property(engine_public.entry_skill)
+    budget = property(engine_public.budget)
+    snapshot = property(engine_public.snapshot)
+    max_iterations = property(engine_public.max_iterations)
+    max_parallel_tool_calls = property(engine_public.max_parallel_tool_calls)
+    cache_stats = property(engine_public.cache_stats)
+    _session_tokens = property(engine_public._session_tokens, engine_public._set_session_tokens)
+    submit = engine_submit.submit
+    _submit_audited_cancel_turn = engine_submit._submit_audited_cancel_turn
+    _emit_cancel_turn_log = engine_submit._emit_cancel_turn_log
+    _submit_audited_user_message = engine_submit._submit_audited_user_message
+    _submit_audited_user_message_locked = engine_submit._submit_audited_user_message_locked
+    _new_subscriber = engine_submit._new_subscriber
+    subscribe_all_envelopes = engine_submit.subscribe_all_envelopes
+    subscribe_all = engine_submit.subscribe_all
+    subscribe_envelopes = engine_submit.subscribe_envelopes
+    subscribe = engine_submit.subscribe
+    shutdown = engine_submit.shutdown
+    _instruction_emit_bridge = engine_submit._instruction_emit_bridge
+    warmup_engine_scope = engine_submit.warmup_engine_scope
+    run = engine_loop.run
+    _is_queued_user_message = staticmethod(engine_loop._is_queued_user_message)
+    _start_queued_user_message = engine_loop._start_queued_user_message
+    _run_claimed_audited_turn = engine_loop._run_claimed_audited_turn
+    _run_audited_turn_for = engine_loop._run_audited_turn_for
+    _apply_accepted_item_owned = engine_loop._apply_accepted_item_owned
+    _apply_accepted_item = engine_loop._apply_accepted_item
+    _run_audited_target = engine_loop._run_audited_target
+    _emit = engine_facade._emit
+    _record_terminal = engine_facade._record_terminal
+    _deliver = engine_facade._deliver
+    _maybe_warn_water = engine_facade._maybe_warn_water
+    _start_operation = engine_facade._start_operation
+    _guarded_operation = engine_facade._guarded_operation
+    _emit_operation_terminal = engine_facade._emit_operation_terminal
+    _forget_operation = engine_facade._forget_operation
+    _converge_operations = engine_facade._converge_operations
+    _arm_ttl_timer = engine_facade._arm_ttl_timer
+    _ttl_expire_after = engine_facade._ttl_expire_after
+    _rearm_ttl_timers_cold = engine_facade._rearm_ttl_timers_cold
+    _rearm_spawn_ttl_timers_cold = engine_facade._rearm_spawn_ttl_timers_cold
+    _ttl_record_active = engine_facade._ttl_record_active
+    _resolve_expiry_route = engine_facade._resolve_expiry_route
+    _chain_contains_thread = engine_facade._chain_contains_thread
+    _cancel_ttl_timers = engine_facade._cancel_ttl_timers
+    _memory_session_end = engine_facade._memory_session_end
+    _finalize_run_lifecycle = engine_facade._finalize_run_lifecycle
+    _terminate_orphan_submissions = engine_facade._terminate_orphan_submissions
+    _acquire_root_gate = engine_facade._acquire_root_gate
+    _abandon_acquire = engine_facade._abandon_acquire
+    _resume_tool_cancel = engine_facade._resume_tool_cancel
+    _release_root_gate = engine_facade._release_root_gate
+    _run_gated_op = engine_facade._run_gated_op
+    _run_turn_for = engine_facade._run_turn_for
+    _run_turn_for_gated = engine_facade._run_turn_for_gated
+    _gate_session_tokens = engine_facade._gate_session_tokens
+    _suspend_engine_gate = engine_facade._suspend_engine_gate
+    _active_root_pending = engine_facade._active_root_pending
+    _drain_residual_injections = engine_facade._drain_residual_injections
+    _writeback_turn_runner = engine_facade._writeback_turn_runner
+    _build_and_run_runner = engine_facade._build_and_run_runner
+    _fire_post_turn_hook = engine_facade._fire_post_turn_hook
+    spawn_skill = engine_facade.spawn_skill
+    _build_child_runner = engine_facade._build_child_runner
+    _resume_spawn = engine_facade._resume_spawn
+    _match_suspended_spawn = engine_facade._match_suspended_spawn
+    spawn_status = engine_facade.spawn_status
+    is_spawn_thread = engine_facade.is_spawn_thread
+    deliver_peer_message = engine_facade.deliver_peer_message
+    wait_spawn_terminal = engine_facade.wait_spawn_terminal
+    wait_spawn_any = engine_facade.wait_spawn_any
+    kill_spawn = engine_facade.kill_spawn
+    has_live_spawns = engine_facade.has_live_spawns
+    set_join_barrier = engine_facade.set_join_barrier
+    _rebuild_spawn_state_from_history = engine_facade._rebuild_spawn_state_from_history
+    _handle_resume = engine_facade._handle_resume
+    _handle_resume_resolved = engine_facade._handle_resume_resolved
+    _handle_child_resume = engine_facade._handle_child_resume
+    _build_resume_chain = engine_facade._build_resume_chain
+    _max_total_spawns_guard = engine_facade._max_total_spawns_guard
+    _next_child_link = staticmethod(engine_facade._next_child_link)
+    _resume_leaf_thread = engine_facade._resume_leaf_thread
+    _resume_leaf_settled = engine_facade._resume_leaf_settled
+    _resume_parent_level = engine_facade._resume_parent_level
+    _build_spawn_resume_chain = engine_facade._build_spawn_resume_chain
+    _settle_call_skill_output = engine_facade._settle_call_skill_output
+    _load_thread_items = engine_facade._load_thread_items
+    _apply_plan_on_thread = engine_facade._apply_plan_on_thread
+    _append_resolved_marker = engine_facade._append_resolved_marker
+    _run_thread_turn = engine_facade._run_thread_turn
+    _execute_resumed_tool_on_thread = engine_facade._execute_resumed_tool_on_thread
+    _cancel_active_suspension = engine_facade._cancel_active_suspension
+    _find_active_suspension = engine_facade._find_active_suspension
+    _find_active_suspension_in = staticmethod(engine_facade._find_active_suspension_in)
+    _deny_output_text = staticmethod(engine_facade._deny_output_text)
+    _apply_plan_session_effects = engine_facade._apply_plan_session_effects
+    _effective_resolutions = engine_facade._effective_resolutions
+    _settle_lock = engine_facade._settle_lock
+    _unsettled_pendings = staticmethod(engine_facade._unsettled_pendings)
+    _execute_resumed_tool = engine_facade._execute_resumed_tool
+    _run_compact_now = engine_facade._run_compact_now
+    _emit_rewind_table_rebuilt = engine_facade._emit_rewind_table_rebuilt
+    events_dropped = property(engine_facade.events_dropped)
+    _spawn_handles = property(engine_facade._spawn_handles)
+    _fired_barriers = property(engine_facade._fired_barriers)

@@ -247,17 +247,14 @@ async def import_legacy_transcript(
         archived = archive_dir / path.name
         await anyio.to_thread.run_sync(shutil.move, str(path), str(archived))
         projector = JournalConversationProjector(store)
+        old_extra = meta.get("extra")
         await projector.bootstrap_thread(
             thread_id=thread_id,
-            cwd=(meta.get("extra") or {}).get("cwd") if isinstance(meta.get("extra"), dict) else None,
+            cwd=old_extra.get("cwd") if isinstance(old_extra, dict) else None,
             entry_skill_id=descriptor.root_thread.entry_skill_id,
             source=descriptor.root_thread.source,
-            extra={
-                "audit_required": True,
-                "journal_session_id": session_id,
-                "journal_schema_version": 1,
-                "history_status": "legacy_unverified",
-            },
+            extra={"audit_required": True, "journal_session_id": session_id,
+                   "journal_schema_version": 1, "history_status": "legacy_unverified"},
         )
         await projector.reconcile_resumed_thread(
             thread_id=thread_id,
