@@ -15,6 +15,10 @@
       遍历到的路径，被忽略的目录不下探、被忽略的路径计数并告知；规则来自沙盒根到搜索基点
       沿途各级目录与遍历中进入的子目录。搜索基点自身不受忽略规则影响（显式指定即照常搜索）。
 
+    - **文件访问经 ``search_fs``**（ADR 0113）：遍历只认 ``SearchFs`` 的同步接口，本机目录与
+      注入的 ``WorkspaceFS`` 走同一套逻辑；路径一律是 ``PurePath``（本机 ``Path``，非本机是
+      虚拟根 ``/`` 下的 ``PurePosixPath``）。
+
 参照：ripgrep ``ignore::WalkBuilder``（默认不跟随符号链接、噪声目录排除、按 .gitignore 剪枝）与
 Claude Code Glob / Grep 工具的 LLM 侧形状；差异：纯 Python 实现、只读工作区内的 .gitignore、
 结果按路径排序而非 mtime。
@@ -22,7 +26,6 @@ Claude Code Glob / Grep 工具的 LLM 侧形状；差异：纯 Python 实现、�
 
 from __future__ import annotations
 
-import os
 import threading
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -36,12 +39,13 @@ from taifeng.tool.builtins.gitignore import (
     IgnoreLevel,
     is_ignored,
     parse_gitignore,
-    read_gitignore,
 )
+from taifeng.tool.builtins.search_fs import LocalSearchFs, SearchEntry, SearchFs
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from pathlib import PurePath
 
     from taifeng.loop.cancellation import CancellationToken
 
@@ -238,14 +242,19 @@ class _Walk:
     保证 ``levels`` 始终只含「当前路径的祖先目录」的规则（``is_ignored`` 的前提）。
     """
 
-    root: Path
+    root: PurePath
     exclude_dirs: frozenset[str]
     stats: WalkStats
     gitignore: bool
-    stack: list[tuple[Iterator[os.DirEntry[str]], bool]] = field(default_factory=list)
+    fs: SearchFs
+    stack: list[tuple[Iterator[SearchEntry], bool]] = field(default_factory=list)
     levels: list[IgnoreLevel] = field(default_factory=list)
 
-    def load_ancestors(self, base: Path) -> None:
+    def _path(self, entry: SearchEntry) -> PurePath:
+        """目录项的路径，与 ``root`` 同一种 ``PurePath``。"""
+        return type(self.root)(entry.path)
+
+    def load_ancestors(self, base: PurePath) -> None:
         """载入沙盒根到 ``base`` 父目录沿途各级的 .gitignore（常驻，不随栈弹出）。"""
         parts = base.relative_to(self.root).parts
         for depth in range(len(parts)):
@@ -253,12 +262,12 @@ class _Walk:
             if level is not None:
                 self.levels.append(level)
 
-    def enter(self, directory: Path) -> None:
+    def enter(self, directory: PurePath) -> None:
         """目录压栈；启用 gitignore 且该目录有生效规则时同步压入规则层。"""
         level = self._load_level(directory) if self.gitignore else None
         if level is not None:
             self.levels.append(level)
-        self.stack.append((_sorted_entries(directory, self.stats), level is not None))
+        self.stack.append((_sorted_entries(self.fs, directory, self.stats), level is not None))
 
     def leave(self) -> None:
         """当前目录遍历完毕：弹栈，并弹出它压入的规则层。"""
@@ -266,35 +275,36 @@ class _Walk:
         if owns_level:
             self.levels.pop()
 
-    def admit(self, entry: os.DirEntry[str]) -> Path | None:
+    def admit(self, entry: SearchEntry) -> PurePath | None:
         """判定一个目录项：文件返回其路径；目录压栈后返回 None；其余跳过（计数）。"""
         is_dir = entry.is_dir(follow_symlinks=False)
         if is_dir and entry.name in self.exclude_dirs:
             return None
+        path = self._path(entry)
         if self.levels and is_ignored(
-            self.levels, Path(entry.path).relative_to(self.root).parts, is_dir=is_dir,
+            self.levels, path.relative_to(self.root).parts, is_dir=is_dir,
         ):
             # 被忽略的目录整棵子树不下探（与 git「父目录被忽略则子路径无法重新纳入」一致）
             self.stats.skipped_ignored += 1
             return None
         if entry.is_symlink():
-            if _symlink_file_inside(entry, self.root):
-                return Path(entry.path)
+            if self.fs.symlink_file_inside(entry):
+                return path
             self.stats.skipped_symlinks += 1
             return None
         if is_dir:
-            self.enter(Path(entry.path))
+            self.enter(path)
             return None
-        return Path(entry.path) if entry.is_file(follow_symlinks=False) else None
+        return path if entry.is_file(follow_symlinks=False) else None
 
-    def _load_level(self, directory: Path) -> IgnoreLevel | None:
+    def _load_level(self, directory: PurePath) -> IgnoreLevel | None:
         """读取并解析 ``directory/.gitignore``；无文件 / 无有效规则返回 None。
 
         读不了（权限 / 超大 / 非 UTF-8）计入 ``unreadable``；不支持的行计入
         ``gitignore_unsupported``——两者都会在输出尾注告知，不静默。
         """
         try:
-            text = read_gitignore(directory)
+            text = self.fs.read_gitignore(directory)
         except OSError:
             self.stats.unreadable += 1
             return None
@@ -307,15 +317,16 @@ class _Walk:
         return IgnoreLevel(base_parts=directory.relative_to(self.root).parts, rules=rules)
 
 
-def iter_files(
-    base: Path,
+def iter_files[P: PurePath](
+    base: P,
     *,
-    root: Path,
+    root: P,
     exclude_dirs: frozenset[str],
     should_stop: Callable[[], bool],
     stats: WalkStats,
     gitignore: bool = False,
-) -> Iterator[Path]:
+    fs: SearchFs | None = None,
+) -> Iterator[P]:
     """按路径逐段字典序深度优先产出 ``base`` 下的文件（``base`` 是文件时只产出它自己）。
 
     - 目录名在 ``exclude_dirs`` 内 → 不下探（``base`` 自身不受此限）；
@@ -324,13 +335,17 @@ def iter_files(
     - 符号链接：指向 root 内文件 → 以链接路径产出；指向目录 / root 外 / 悬空 → 跳过并计数；
     - 读不了的目录 → 计数后继续（不静默吞，渲染时明确告知）。
 
+    ``fs`` 不给时按本机目录访问（``root`` 须是 ``Path``）。
+
     Raises:
         SearchStopped: ``should_stop()`` 为真（每个目录项检查一次）。
     """
-    if base.is_file():
+    if fs is None:
+        fs = LocalSearchFs(Path(root))
+    if fs.is_file(base):
         yield base
         return
-    walk = _Walk(root=root, exclude_dirs=exclude_dirs, stats=stats, gitignore=gitignore)
+    walk = _Walk(root=root, exclude_dirs=exclude_dirs, stats=stats, gitignore=gitignore, fs=fs)
     if gitignore:
         walk.load_ancestors(base)
     walk.enter(base)
@@ -343,31 +358,22 @@ def iter_files(
             raise SearchStopped
         path = walk.admit(entry)
         if path is not None:
-            yield path
+            yield path  # type: ignore[misc]  # 与 root 同一种 PurePath（见 _Walk._path）
 
 
-def _sorted_entries(directory: Path, stats: WalkStats) -> Iterator[os.DirEntry[str]]:
+def _sorted_entries(
+    fs: SearchFs, directory: PurePath, stats: WalkStats,
+) -> Iterator[SearchEntry]:
     """读出目录项并按名称排序；读失败计入 ``stats.unreadable`` 并返回空迭代器。"""
     try:
-        with os.scandir(directory) as it:
-            entries = sorted(it, key=lambda e: e.name)
+        entries = sorted(fs.scandir(directory), key=lambda e: e.name)
     except OSError:
         stats.unreadable += 1
         return iter(())
     return iter(entries)
 
 
-def _symlink_file_inside(entry: os.DirEntry[str], root: Path) -> bool:
-    """符号链接解析后是否为 root 内的普通文件（与 file_read 的沙盒判定同语义）。"""
-    try:
-        target = Path(entry.path).resolve(strict=False)
-    except OSError:
-        return False
-    inside = target == root or root in target.parents
-    return inside and target.is_file()
-
-
-def rel_to_root(path: Path, root: Path) -> str:
+def rel_to_root(path: PurePath, root: PurePath) -> str:
     """相对 root 的 POSIX 风格路径——可直接作为 file_read / apply_patch 的 ``path`` 参数。"""
     return path.relative_to(root).as_posix()
 
@@ -411,14 +417,14 @@ def cancelled_result(ctx: ToolContext) -> ToolResult:
 async def check_search_permission(
     policy: PermissionPolicy | None,
     *,
-    target: Path,
+    target: PurePath | str,
     ctx: ToolContext,
     tool_name: str,
     pattern: str,
 ) -> ToolResult | None:
     """按 ``file_read`` 效果过权限策略；被拒返回错误结果，放行 / 无策略返回 None。
 
-    粒度是**一次调用一次审批**：target = 搜索基点的绝对路径（目录或文件），批准即意味着
+    粒度是**一次调用一次审批**：target = 搜索基点在工作区里的规范路径（目录或文件），批准即意味着
     允许读取该子树（排除目录除外）。不逐文件审批——一次 grep 可能触及成千上万个文件，
     ``ask`` 模式逐个弹窗不可用。需要更细的隔离请缩小 ``root_dir`` 或配置 ``exclude_dirs``。
     ``metadata.call_id`` 供 resume 时 ``preapprove`` 配对（与 file_read 一致）。

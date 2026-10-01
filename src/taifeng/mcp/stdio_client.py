@@ -8,6 +8,10 @@
     - 双向：server 也会发带 id 的请求（``elicitation/create`` / ``ping``）与通知，
       交 ``ServerMessageRouter`` 处理，应答写回 server 的 stdin
     - 本端请求超时 / 被取消而放弃时发 ``notifications/cancelled``（``CancelNotifier``）
+    - server 的 stderr 持续读走、只留尾部（``stderr_tail``）：不读的话 server 写满管道就卡死
+
+server 进程默认由本端直接拉起；给 ``executor=`` 时经 ``CommandExecutor`` 启动（ADR 0112），
+宿主可以把自己代跑的 server 放进沙盒。
 
 启动外部 server (示例)::
 
@@ -29,6 +33,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from taifeng.mcp.bridge import (
@@ -41,13 +47,20 @@ from taifeng.mcp.cancellation import CancelNotifier, cancel_reason
 from taifeng.mcp.pagination import DEFAULT_MAX_LIST_PAGES, list_all_tools, validate_max_pages
 from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
 from taifeng.mcp.server_messages import ServerMessageRouter
+from taifeng.tool.command_executor import CommandSpec, StreamingCommandProcess
+from taifeng.tool.subprocess_env import default_safe_env
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from taifeng.mcp.elicitation import ElicitationHandler
+    from taifeng.tool.command_executor import CommandExecutor
 
 logger = logging.getLogger(__name__)
+
+# server stderr 只留这么多尾部字节供排查（其余读走即丢）
+_STDERR_TAIL_BYTES = 16 * 1024
+_STDERR_CHUNK_BYTES = 8192
 
 # 兼容旧导入路径（桥接逻辑已迁到 taifeng.mcp.bridge，与传输无关）
 _extract_text_content = extract_text_content
@@ -58,7 +71,7 @@ class McpStdioClient:
 
     def __init__(
         self,
-        proc: asyncio.subprocess.Process,
+        proc: StreamingCommandProcess,
         *,
         request_timeout_seconds: float | None = 60.0,
         elicitation_handler: ElicitationHandler | None = None,
@@ -66,7 +79,8 @@ class McpStdioClient:
     ) -> None:
         """
         Args:
-            proc: 已 spawn 的 MCP server 子进程（stdin/stdout 已 PIPE）
+            proc: 已启动的 MCP server 进程（stdin / stdout 是管道）；``asyncio.subprocess.Process``
+                与执行器返回的 ``StreamingCommandProcess`` 都可以
             request_timeout_seconds: 单条 JSON-RPC 请求的超时秒数；
                 ``None`` 表示不在 client 层超时（由调用方包装控制）。
                 与 ``register_mcp_tools_async`` 的 ``timeout_seconds`` 配合使用时，
@@ -84,6 +98,10 @@ class McpStdioClient:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._reader_task: asyncio.Task[None] | None = None
+        # stderr 排空任务与尾部缓冲（按块存，超出上限从头丢）
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_chunks: deque[bytes] = deque()
+        self._stderr_bytes = 0
         self._closed = False
         # 写 server stdin 的互斥锁：本端请求 / 通知与对 server 请求的应答并发写出
         self._lock = asyncio.Lock()
@@ -108,13 +126,19 @@ class McpStdioClient:
         *,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        executor: CommandExecutor | None = None,
         request_timeout_seconds: float | None = 60.0,
         elicitation_handler: ElicitationHandler | None = None,
         max_list_pages: int = DEFAULT_MAX_LIST_PAGES,
     ) -> McpStdioClient:
-        """fork 一个 MCP server 子进程并完成 JSON-RPC handshake。
+        """启动一个 MCP server 进程并完成 JSON-RPC handshake。
 
         Args:
+            env: server 的环境变量。不给时：直接拉起的进程继承宿主环境；经 ``executor`` 启动的
+                进程只拿到最小白名单（``default_safe_env``）——执行器约定 ``CommandSpec.env`` 是
+                完整环境，宿主的凭据不会默认流进沙盒。
+            executor: 给出时经它启动（``CommandSpec(shell=False, stdin=True)``），返回的进程须满足
+                ``StreamingCommandProcess``；不给时本端直接 ``create_subprocess_exec``。
             request_timeout_seconds: 透传到 ``McpStdioClient.__init__``；
                 ``None`` 表示无 client 层 timeout
             elicitation_handler: 透传到 ``McpStdioClient.__init__``。
@@ -122,22 +146,30 @@ class McpStdioClient:
 
         Raises:
             McpProtocolVersionError: server 回的协议版本不受支持（子进程已关闭）。
+            TypeError: ``executor`` 返回的进程没有 stdin / stdout 流（进程已被终止）。
+            OSError: 进程启动失败。
         """
         if not command:
             raise ValueError("empty command")
         # 坏配置在拉起子进程之前拒绝（构造期再抛会留下孤儿进程）
         validate_max_pages(max_list_pages)
-        proc = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=cwd,
-        )
+        proc: StreamingCommandProcess
+        if executor is None:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=cwd,
+            )
+        else:
+            proc = await _start_through_executor(executor, command, env=env, cwd=cwd)
         client = cls(proc, request_timeout_seconds=request_timeout_seconds,
                      elicitation_handler=elicitation_handler, max_list_pages=max_list_pages)
         client._reader_task = asyncio.create_task(client._reader_loop())
+        if proc.stderr is not None:
+            client._stderr_task = asyncio.create_task(client._drain_stderr())
         try:
             await client._initialize()
         except Exception:
@@ -236,6 +268,28 @@ class McpStdioClient:
                 if not fut.done():
                     fut.set_exception(RuntimeError("mcp connection closed"))
             self._pending.clear()
+
+    async def _drain_stderr(self) -> None:
+        """持续读走 server 的 stderr，只留尾部。
+
+        管道缓冲有限：没人读的话，日志写得多的 server 会阻塞在写 stderr 上，再也不回应请求。
+        """
+        stream = self._proc.stderr
+        assert stream is not None
+        while True:
+            chunk = await stream.read(_STDERR_CHUNK_BYTES)
+            if not chunk:
+                return
+            self._stderr_chunks.append(chunk)
+            self._stderr_bytes += len(chunk)
+            while self._stderr_bytes - len(self._stderr_chunks[0]) >= _STDERR_TAIL_BYTES:
+                self._stderr_bytes -= len(self._stderr_chunks.popleft())
+
+    @property
+    def stderr_tail(self) -> str:
+        """server 标准错误输出的尾部（至多 16 KiB，lossy 解码）；排查 server 启动失败时用。"""
+        data = b"".join(self._stderr_chunks)[-_STDERR_TAIL_BYTES:]
+        return data.decode("utf-8", errors="replace")
 
     def _dispatch_message(self, msg: dict[str, Any]) -> None:
         """带 ``method`` 的是 server 发起的请求 / 通知（交路由器）；否则按 id 结算本端请求。
@@ -346,10 +400,44 @@ class McpStdioClient:
         except TimeoutError:
             self._proc.kill()
             await self._proc.wait()
-        if self._reader_task is not None:
-            self._reader_task.cancel()
-            # 读循环的取消 / 收尾异常属预期，收集而非外抛
-            await asyncio.gather(self._reader_task, return_exceptions=True)
+        for task in (self._reader_task, self._stderr_task):
+            if task is not None:
+                task.cancel()
+                # 读循环的取消 / 收尾异常属预期，收集而非外抛
+                await asyncio.gather(task, return_exceptions=True)
+
+
+async def _start_through_executor(
+    executor: CommandExecutor,
+    command: list[str],
+    *,
+    env: dict[str, str] | None,
+    cwd: str | None,
+) -> StreamingCommandProcess:
+    """经 ``CommandExecutor`` 启动 server，并确认拿到的是能持续对话的进程。
+
+    Raises:
+        TypeError: 执行器返回的进程没有 stdin / stdout 流；进程已被终止。
+    """
+    proc = await executor.start(CommandSpec(
+        # argv 拼成命令文本，shell=False 的执行器按 shlex 拆回同样的 argv
+        command=shlex.join(command),
+        shell=False,
+        cwd=cwd,
+        env=env if env is not None else default_safe_env(),
+        stdin=True,
+    ))
+    if (
+        not isinstance(proc, StreamingCommandProcess)
+        or proc.stdin is None
+        or proc.stdout is None
+    ):
+        proc.kill()
+        raise TypeError(
+            f"{type(executor).__name__} returned a process without stdin/stdout streams; "
+            "running an MCP stdio server needs a StreamingCommandProcess"
+        )
+    return proc
 
 
 __all__ = [

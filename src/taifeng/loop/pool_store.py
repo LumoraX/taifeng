@@ -10,13 +10,49 @@ from typing import TYPE_CHECKING, Any
 from taifeng.conversation.models import ResponseItem, ThreadInfo, ThreadMetadata
 from taifeng.conversation.store import AtomicBatchMessageStore, BatchAppendAck, MessageStore
 from taifeng.conversation.transcript import JsonlMessageStore
+from taifeng.llm.client import model_capabilities
 from taifeng.llm.errors import UnsupportedPersistenceCapabilityError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
+    from pathlib import Path
 
     from taifeng.conversation.hook_runner import HookRunner
     from taifeng.conversation.protocols import ThreadDirectory
+    from taifeng.llm.client import ModelClient
+
+
+def validate_injected_store(
+    message_store: object,
+    *,
+    storage: str | Path | None,
+    model_client: ModelClient,
+    audited: bool,
+) -> None:
+    """``EnginePool.create(message_store=)`` 的入参检查：在拉起任何资源之前拒绝坏配置（ADR 0111）。
+
+    Raises:
+        ValueError: 同时给了 ``storage_dir`` / ``threads_dir``（注入的 store 不落本机目录）。
+        TypeError: 对象不满足 ``MessageStore`` 协议。
+        UnsupportedPersistenceCapabilityError: 模型客户端走 Responses 协议而 store 没有实现
+            ``AtomicBatchMessageStore``（审计模式下这项保证由 Journal 承担，不在此检查）。
+    """
+    if storage is not None:
+        raise ValueError(
+            "message_store 与 storage_dir / threads_dir 互斥：注入的 store 自己决定数据落在哪里"
+        )
+    if not isinstance(message_store, MessageStore):
+        raise TypeError(
+            f"message_store must implement MessageStore, got {type(message_store).__name__}"
+        )
+    if (
+        not audited
+        and model_capabilities(model_client).protocol == "responses"
+        and not isinstance(message_store, AtomicBatchMessageStore)
+    ):
+        raise UnsupportedPersistenceCapabilityError(
+            "Responses requires the injected message_store to implement AtomicBatchMessageStore"
+        )
 
 class _HookEmittingStore(MessageStore):
     """MessageStore 代理 —— 所有写操作完成后 spawn IndexHook 后台 task（fire-and-forget）。
@@ -33,8 +69,11 @@ class _HookEmittingStore(MessageStore):
         directory: ThreadDirectory,
         custom_directory: object | None = None,
         index_hook: object | None = None,
+        close_inner: bool = True,
     ) -> None:
         self._inner = inner
+        # 注入的 store 在池建成之前仍归调用方：构造失败时不替调用方关（ADR 0111）
+        self._close_inner = close_inner
         self._runner = runner
         self._directory = directory
         self._audit_custom_directory = custom_directory
@@ -124,8 +163,10 @@ class _HookEmittingStore(MessageStore):
 
     async def close(self) -> None:
         # 不在此处 shutdown runner —— 由 pool.close 统一调度（先 await hook，后关 store）
-        await self._inner.close()
+        if self._close_inner:
+            await self._inner.close()
 
 __all__ = [
     "_HookEmittingStore",
+    "validate_injected_store",
 ]

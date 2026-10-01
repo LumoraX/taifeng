@@ -23,11 +23,11 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from taifeng.tool.builtins.file_io import _is_nonneg_int, _resolve_safe
+from taifeng.tool.builtins.file_io import _is_nonneg_int
 from taifeng.tool.builtins.grep_scan import GrepLimits, GrepOutputMode, GrepQuery, GrepRun
+from taifeng.tool.builtins.search_fs import search_scope
 from taifeng.tool.builtins.search_walk import (
     DEFAULT_SEARCH_EXCLUDE_DIRS,
     MAX_PATTERN_CHARS,
@@ -40,8 +40,11 @@ from taifeng.tool.builtins.search_walk import (
     skip_notes,
 )
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from taifeng.tool.workspace import WorkspaceFS, WorkspacePathError, workspace_for
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from taifeng.permission.types import PermissionPolicy
 
 GREP_OUTPUT_MODES: tuple[GrepOutputMode, ...] = ("content", "files_with_matches", "count")
@@ -234,7 +237,7 @@ _SCHEMA: dict[str, Any] = {
 }
 
 
-def _description(root: Path, limits: GrepLimits, respect_gitignore: bool) -> str:
+def _description(root: str, limits: GrepLimits, respect_gitignore: bool) -> str:
     """LLM 可见描述：写明上限、跳过口径、行号语义与上下文 / 跨行用法。"""
     ignore_note = "遵循 .gitignore（被忽略的路径跳过并告知）；" if respect_gitignore else ""
     return (
@@ -250,7 +253,8 @@ def _description(root: Path, limits: GrepLimits, respect_gitignore: bool) -> str
 
 def make_grep_tool(
     *,
-    root_dir: str | Path,
+    root_dir: str | Path | None = None,
+    workspace: WorkspaceFS | None = None,
     policy: PermissionPolicy | None = None,
     max_results: int = 200,
     max_line_chars: int = 500,
@@ -262,8 +266,10 @@ def make_grep_tool(
     """构造 grep 工具（opt-in：经 ``EnginePool.create(extra_tools=[...])`` 注册）。
 
     Args:
-        root_dir: 沙盒根；搜索基点与所有被读文件都必须落在其内（同 file_read）。
-        policy: 可选权限策略；每次调用以 ``scope="file_read"``、target=搜索基点绝对路径审批一次。
+        root_dir: 本机沙盒根；搜索基点与所有被读文件都必须落在其内（同 file_read）；与
+            ``workspace`` 二选一。
+        workspace: 注入的工作区（ADR 0113）；遍历与扫描逻辑不变，文件访问经它进行。
+        policy: 可选权限策略；每次调用以 ``scope="file_read"``、target=搜索基点的规范路径审批一次。
         max_results: 结果名额（content 按输出行——匹配行与上下文行都占名额；其余按文件）；
             超出截断并告知。
         max_line_chars: content 模式单行 / multiline 单个匹配片段的字符上限。
@@ -274,11 +280,12 @@ def make_grep_tool(
         timeout_seconds: 单次调用超时（ToolSpec 级，超时由 runtime 统一处理）。
 
     Raises:
-        ValueError: 上限参数非正。
+        ValueError: 上限参数非正；``root_dir`` 与 ``workspace`` 都给或都不给。
     """
     if min(max_results, max_line_chars, max_file_bytes) <= 0:
         raise ValueError("max_results / max_line_chars / max_file_bytes must be > 0")
-    root = Path(root_dir).expanduser().resolve()
+    workspace = workspace_for(root_dir, workspace)
+    root = workspace.root
     limits = GrepLimits(
         max_results=max_results, max_line_chars=max_line_chars, max_file_bytes=max_file_bytes,
     )
@@ -290,24 +297,29 @@ def make_grep_tool(
             return parsed
         if ctx.cancel.is_cancelled:
             return cancelled_result(ctx)
-        base = _resolve_safe(root, parsed.path)
-        if base is None:
+        try:
+            scope = search_scope(workspace, parsed.path)
+        except WorkspacePathError:
             return ToolResult.error(
                 f"path_outside_sandbox: {parsed.path} (root={root})", reason="sandbox_violation",
             )
         denied = await check_search_permission(
-            policy, target=base, ctx=ctx, tool_name="grep", pattern=parsed.regex.pattern,
+            policy, target=scope.target, ctx=ctx, tool_name="grep", pattern=parsed.regex.pattern,
         )
         if denied is not None:
             return denied
-        if not base.exists():
+        try:
+            exists = (await workspace.metadata(scope.target)).exists
+        except OSError:
+            exists = False
+        if not exists:
             return ToolResult.error(f"not_found: {parsed.path}", reason="not_found")
         run = GrepRun(
-            root=root, query=parsed, limits=limits, exclude_dirs=exclude_dirs,
-            gitignore=respect_gitignore,
+            root=scope.root, fs=scope.fs, query=parsed, limits=limits,
+            exclude_dirs=exclude_dirs, gitignore=respect_gitignore,
         )
         try:
-            await run_in_worker(lambda stop: run.run(base, stop), ctx.cancel)
+            await run_in_worker(lambda stop: run.run(scope.base, stop), ctx.cancel)
         except SearchStopped:
             if ctx.cancel.is_cancelled:
                 return cancelled_result(ctx)

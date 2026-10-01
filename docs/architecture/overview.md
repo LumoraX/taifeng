@@ -50,12 +50,14 @@ src/taifeng/
 │   ├── spec.py           # ToolSpec（含 parallel_safe 字段）
 │   ├── registry.py       # ToolRegistry
 │   ├── runtime.py        # ToolCallRuntime —— RwLock 并行 / 独占调度
+│   ├── command_executor.py  # CommandExecutor / StreamingCommandProcess —— 进程启动 seam（ADR 0051 / 0112）
+│   ├── workspace.py      # WorkspaceFS / LocalWorkspaceFS —— 文件访问 seam（ADR 0113）
 │   └── builtins/         # 可选内置工具（业务侧按需 register）
 │       │                 # core:   read_skill / call_skill（skill-as-context 范式）
 │       │                 # io:     file_io（read/write）/ shell / apply_patch
 │       │                 # net:    http_request（受 PermissionPolicy[scope=network] 审批）
 │       │                 # search: glob_search / grep_search + grep_scan（只读 pure；共用 search_walk 沙盒遍历
-│       │                 #         与 gitignore 规则匹配）
+│       │                 #         与 gitignore 规则匹配；文件访问经 search_fs，本机与注入的工作区同一套遍历）
 │       │                 # memory: memory（模型主动读写删 K3 MemoryStore 的薄封装；delete 需 ForgettableMemoryStore）
 │       │                 # bg:     background（run_in_background / wait_for_task）
 │       │                 # script: run_script（SKILL.md scripts 执行）
@@ -69,7 +71,10 @@ src/taifeng/
 │   ├── sqlite_directory.py # SqliteThreadDirectory —— stdlib sqlite3 derived 索引（可重建）
 │   ├── rebuild.py        # 索引从 JSONL 自愈重建
 │   ├── hook_runner.py    # IndexHook 触发
-│   └── errors.py         # DirectoryError / ThreadNotFoundError 等
+│   ├── errors.py         # DirectoryError / ThreadNotFoundError 等
+│   └── journal/          # SessionJournal（审计模式的事实源，🧪）：jsonl（默认 core）/ framing / records…；
+│                         # backend（后端 seam：SessionJournalCore 协议 + 存储无关的构件，ADR 0114）/
+│                         # memory（参考实现 InMemorySessionJournalCore）/ file_io + writer_lock（存储与锁适配器）
 │
 ├── context/      # §1.4
 │   ├── budget.py         # ContextBudget（含 max_request_bytes 硬护栏 / G2b）
@@ -144,7 +149,9 @@ src/taifeng/
 ├── instructions/ # §1.6 指令分层注入（InstructionResolver + InstructionSource 协议 + engine/session/turn 三档 scope）
 ├── mcp/          # MCP client（stdio / streamable HTTP，2025-06-18 版本协商；tools/list 分页；bridge 随 list_changed 同步 tools、结果投影含图片附件 / structuredContent + outputSchema 校验；放弃请求发 cancelled；HTTP 断流续传；server→client 请求路由 + elicitation 注入口）+ server（taifeng 作为 MCP server，按客户端能力门控 elicitation）+ prompter
 ├── permission/   # HITL 审批：PermissionPolicy + Rule + Decision（per-builtin 权限模型，无中央门）
-└── telemetry/    # TelemetrySink 协议 + Console / Jsonl / OTel 三 sink
+├── telemetry/    # TelemetrySink 协议 + Console / Jsonl / OTel 三 sink
+└── testing/      # 给适配包用的一致性检查（不依赖测试框架）：journal_conformance（core）/
+                  # journal_adapter_conformance（存储与锁适配器），ADR 0114
 ```
 
 ## 数据流（一次 turn 的生命周期）

@@ -15,7 +15,12 @@ from taifeng.context.budget import ContextBudget
 from taifeng.context.compressor import CompressionOrchestrator, CompressionStrategy
 from taifeng.context.strategies import HandoffCompactionStrategy, SlidingWindowStrategy
 from taifeng.conversation.hook_runner import HookRunner
-from taifeng.conversation.protocols import IndexHook, NoopIndexHook, ThreadDirectory
+from taifeng.conversation.protocols import (
+    IndexHook,
+    NoopIndexHook,
+    NullThreadDirectory,
+    ThreadDirectory,
+)
 from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
 from taifeng.conversation.store import (
     AtomicBatchMessageStore,
@@ -46,7 +51,7 @@ from taifeng.loop.pool_session import (
     prepare_pool_session,
     start_skill_watcher,
 )
-from taifeng.loop.pool_store import _HookEmittingStore
+from taifeng.loop.pool_store import _HookEmittingStore, validate_injected_store
 from taifeng.loop.tool_recovery import validate_tool_recovery_mode
 from taifeng.loop.tool_set_events import bind_tool_set_events
 from taifeng.skill.dispatch import DispatchPolicy
@@ -431,6 +436,7 @@ class EnginePool:
         skills_dir: str | Path,
         threads_dir: str | Path | None = None,
         model_client: ModelClient,
+        message_store: MessageStore | None = None,
         extra_tools: list[ToolSpec] | None = None,
         compressors: list[CompressionStrategy] | None = None,
         budget: ContextBudget | None = None,
@@ -495,20 +501,29 @@ class EnginePool:
     ) -> EnginePool:
         """便捷构造。
 
-        ``threads_dir`` (旧名) 与 ``storage_dir`` (新名) 等价，至少需提供一个：
+        会话主存二选一：
 
-        - 旧调用方式：``EnginePool.create(threads_dir=...)`` 走默认
-          JsonlMessageStore（含 SQLite 索引）
-        - 新调用方式：``EnginePool.create(storage_dir=...)`` 同上，命名更准确
-        - 显式注入：``thread_directory=`` 替换默认 SqliteThreadDirectory（Redis / PG / Null）
-        - 业务事件：``index_hook=`` 订阅 thread 生命周期（fire-and-forget）
-        - 事件总线：``sink=`` 接收 hook 失败 / 持久化层事件
+        - ``storage_dir``（旧名 ``threads_dir``，等价）：默认 JsonlMessageStore（含 SQLite 索引），
+          数据落在这个本机目录
+        - ``message_store=``：注入外部 ``MessageStore``（数据库等），不落本机目录，与上一项互斥
+          （ADR 0111）。池建成后拥有它，``close()`` 时一并关闭；配 Responses 协议的模型客户端时它
+          还须实现 ``AtomicBatchMessageStore``；审计模式（``audit=``）只支持默认 store
+
+        其余：
+
+        - ``thread_directory=`` 替换默认 SqliteThreadDirectory（Redis / PG / Null）；注入
+          ``message_store`` 时默认是 ``NullThreadDirectory``
+        - ``index_hook=`` 订阅 thread 生命周期（fire-and-forget）
+        - ``sink=`` 接收 hook 失败 / 持久化层事件
         """
         # 统一为 storage_dir
         storage = storage_dir or threads_dir
+        if message_store is not None:
+            validate_injected_store(
+                message_store, storage=storage, model_client=model_client, audited=audit is not None)
         resolved_storage = Path(storage).expanduser().resolve() if storage else None  # noqa: ASYNC240
-        if resolved_storage is None:
-            raise ValueError("必须提供 storage_dir 或 threads_dir 之一")
+        if resolved_storage is None and message_store is None:
+            raise ValueError("必须提供 storage_dir 或 threads_dir 之一，或注入 message_store")
 
         registry = await FilesystemSkillRegistry.load(skills_dir)
         # ADR 0041：在压缩器 / recall 构建之前包装，让池内所有 LLM 侧调用同享默认重试
@@ -518,19 +533,24 @@ class EnginePool:
         hook_runner: HookRunner | None = None
         owned_directory: SqliteThreadDirectory | None = None
         try:
-            # 默认 store 内部拥有 writer 与自己的 SQLite 索引。
-            store = JsonlMessageStore(resolved_storage)
             directory: ThreadDirectory
-            if thread_directory is not None:
-                directory = thread_directory
+            if message_store is not None:
+                store = message_store
+                directory = thread_directory or NullThreadDirectory()
             else:
-                # hook metadata 查询使用的额外 directory 由 pool 单独持有。
-                owned_directory = SqliteThreadDirectory(
-                    resolved_storage / "taifeng-index.db",
-                    threads_dir=resolved_storage,
-                    sink=sink,
-                )
-                directory = owned_directory
+                assert resolved_storage is not None
+                # 默认 store 内部拥有 writer 与自己的 SQLite 索引。
+                store = JsonlMessageStore(resolved_storage)
+                if thread_directory is not None:
+                    directory = thread_directory
+                else:
+                    # hook metadata 查询使用的额外 directory 由 pool 单独持有。
+                    owned_directory = SqliteThreadDirectory(
+                        resolved_storage / "taifeng-index.db",
+                        threads_dir=resolved_storage,
+                        sink=sink,
+                    )
+                    directory = owned_directory
 
             actual_hook = index_hook if index_hook is not None else NoopIndexHook()
             hook_runner = HookRunner(hook=actual_hook, sink=sink)
@@ -540,10 +560,11 @@ class EnginePool:
                 directory=directory,
                 custom_directory=thread_directory,
                 index_hook=index_hook,
+                close_inner=message_store is None,
             )
         except BaseException:
             await _cleanup_failed_factory(
-                store=store,
+                store=None if message_store is not None else store,
                 hook_runner=hook_runner,
                 owned_directory=owned_directory,
             )
@@ -635,6 +656,8 @@ class EnginePool:
                     owned_directory=owned_directory,
                 )
             raise
+        # 池已建成：注入的 store 从此归池所有，close() 时一并关闭
+        wrapped_store._close_inner = True  # type: ignore[attr-defined]  # noqa: SLF001
         return pool
 
     # ------------------------------------------------------------------

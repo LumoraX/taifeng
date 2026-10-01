@@ -13,6 +13,11 @@
 ``sh -c "a; b"`` 里 shell 会 fork 出子进程并把 stdout / stderr 留给它，shell 死了子进程还占着
 管道——输出收不完，调用方等不到结束。本机实现让命令自成一个进程组、按组终止
 （与 ``skill/scripts/shell.py`` 同一手法）。
+
+需要与进程持续对话的调用方（MCP stdio server，ADR 0112）在 ``CommandSpec`` 里要 ``stdin=True``，
+执行器返回的进程对象须满足 ``StreamingCommandProcess``：在 ``CommandProcess`` 之上提供
+``stdin`` / ``stdout`` / ``stderr`` 三个流。只会一次性收输出的执行器照旧只实现 ``CommandProcess``，
+它们不能用来跑这类进程。
 """
 
 from __future__ import annotations
@@ -35,12 +40,16 @@ class CommandSpec:
         shell: True → 交给 shell 解释（管道 / 重定向可用）；False → ``shlex.split`` 后直接 exec。
         cwd: 工作目录（None = 执行器默认）。
         env: 完整环境变量（工具已按白名单构造，执行器不得再合并宿主环境）。
+        stdin: True → 调用方要向进程的标准输入持续写入，执行器返回的进程须满足
+            ``StreamingCommandProcess``；False（默认）→ 进程的标准输入是空的（读到 EOF），
+            不继承宿主进程的标准输入。
     """
 
     command: str
     shell: bool
     cwd: str | None
     env: dict[str, str]
+    stdin: bool = False
 
 
 @runtime_checkable
@@ -62,6 +71,63 @@ class CommandProcess(Protocol):
 
     async def wait(self) -> int:
         """等待退出，返回退出码。"""
+        ...
+
+
+@runtime_checkable
+class CommandInput(Protocol):
+    """进程标准输入的写入端（``asyncio.StreamWriter`` 天然满足）。"""
+
+    def write(self, data: bytes) -> None:
+        """写入缓冲；配合 ``drain`` 施加背压。"""
+        ...
+
+    async def drain(self) -> None:
+        """等缓冲写出。"""
+        ...
+
+    def close(self) -> None:
+        """关闭写入端（进程读到 EOF）。"""
+        ...
+
+    def is_closing(self) -> bool:
+        """是否已关闭或正在关闭。"""
+        ...
+
+
+@runtime_checkable
+class CommandOutput(Protocol):
+    """进程标准输出 / 标准错误的读取端（``asyncio.StreamReader`` 天然满足）。"""
+
+    async def readline(self) -> bytes:
+        """读一行（含换行符）；流结束返回空字节串。"""
+        ...
+
+    async def read(self, n: int = -1) -> bytes:
+        """读至多 ``n`` 字节；流结束返回空字节串。"""
+        ...
+
+
+@runtime_checkable
+class StreamingCommandProcess(CommandProcess, Protocol):
+    """能持续对话的进程：在 ``CommandProcess`` 之上提供三个流。
+
+    ``CommandSpec.stdin=True`` 时执行器须返回这种对象，且 ``stdin`` / ``stdout`` 不为 None。
+    """
+
+    @property
+    def stdin(self) -> CommandInput | None:
+        """标准输入的写入端；没有接管道时为 None。"""
+        ...
+
+    @property
+    def stdout(self) -> CommandOutput | None:
+        """标准输出的读取端。"""
+        ...
+
+    @property
+    def stderr(self) -> CommandOutput | None:
+        """标准错误的读取端。"""
         ...
 
 
@@ -96,6 +162,21 @@ class _LocalProcess:
         """退出码；未结束为 None。"""
         return self._proc.returncode
 
+    @property
+    def stdin(self) -> CommandInput | None:
+        """标准输入的写入端；``CommandSpec.stdin=False`` 时为 None。"""
+        return self._proc.stdin
+
+    @property
+    def stdout(self) -> CommandOutput | None:
+        """标准输出的读取端。"""
+        return self._proc.stdout
+
+    @property
+    def stderr(self) -> CommandOutput | None:
+        """标准错误的读取端。"""
+        return self._proc.stderr
+
     async def communicate(self) -> tuple[bytes, bytes]:
         """读完 stdout / stderr 并等待退出。"""
         output = await self._proc.communicate()
@@ -125,9 +206,12 @@ class LocalCommandExecutor:
 
     async def start(self, spec: CommandSpec) -> CommandProcess:
         """``shell=True`` 走 ``create_subprocess_shell``，否则 ``shlex.split`` 后 exec。"""
+        # 不要 stdin 的命令读到 EOF：不继承宿主进程的标准输入（那是宿主自己的输入流）
+        stdin = asyncio.subprocess.PIPE if spec.stdin else asyncio.subprocess.DEVNULL
         if spec.shell:
             proc = await asyncio.create_subprocess_shell(
                 spec.command,
+                stdin=stdin,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=spec.cwd,
@@ -137,6 +221,7 @@ class LocalCommandExecutor:
         else:
             proc = await asyncio.create_subprocess_exec(
                 *shlex.split(spec.command),
+                stdin=stdin,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=spec.cwd,
@@ -146,4 +231,12 @@ class LocalCommandExecutor:
         return _LocalProcess(proc)
 
 
-__all__ = ["CommandExecutor", "CommandProcess", "CommandSpec", "LocalCommandExecutor"]
+__all__ = [
+    "CommandExecutor",
+    "CommandInput",
+    "CommandOutput",
+    "CommandProcess",
+    "CommandSpec",
+    "LocalCommandExecutor",
+    "StreamingCommandProcess",
+]

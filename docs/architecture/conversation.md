@@ -23,6 +23,12 @@ writer 互斥是跨进程的：`create_session` / `open_existing` 先取 `<sessi
 拒绝尾损、已 `session_ended` 的 Session，然后以 `writer_epoch + 1` 追加一条 `writer_takeover` 接管；strict
 verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
 
+后端可替换（ADR 0114，契约见 `capabilities/session-journal-backend.md`）：**换存储**——实现 `SyncFileAdapter`
+与 `WriterLockAdapter` 注入 `JsonlSessionJournalCore`，逻辑沿用内核；**换 core**——实现 `SessionJournalCore`
+的五个方法，`conversation/journal/backend.py` 提供存储无关的构件（`seal_batch` / `resolve_idempotent_ack` /
+`verify_envelopes`），`journal/memory.py` 的 `InMemorySessionJournalCore` 是参考实现。两条路都用
+`taifeng.testing.journal_conformance` 验收。
+
 这一能力当前**不是默认 conversation 持久化路径**（legacy 模式）：
 
 - 未注入 `AuditConfig` 时，`AgentEngine`、`EnginePool`、`MessageWriter` / `MessageStore` 和 EventMsg
@@ -196,7 +202,18 @@ report = await rebuild_index(writer, directory, *, dry_run=False, sink=None)
 | 单机 / 中小规模 | 用默认 | 0 |
 | 加速 list / 多机共享元数据 | `ThreadDirectory` (Redis/PG) | ~30-80 |
 | 审计 / 投递 ES / Kafka / 异步 metric | `IndexHook` | ~10-50 |
-| 主存必须落 PG / 合规要求 | `MessageWriter` + `ThreadDirectory` | ~150-300 |
+| 主存必须落 PG / 合规要求 | `MessageStore`（+ `ThreadDirectory`），经 `EnginePool.create(message_store=)` 注入 | ~150-300 |
+
+### 注入外部主存（ADR 0111）
+
+`EnginePool.create(message_store=)` 用外部 `MessageStore` 取代默认的 `JsonlMessageStore`：不建本机
+transcript、不建 SQLite 索引（`thread_directory` 不给时是 `NullThreadDirectory`），`index_hook` 照常经转发
+层触发。池建成后拥有这个 store。对外部实现的要求：
+
+- `load_thread` 按写入顺序、完整吐回（不去重 marker、不丢、不乱序）——冷加载的逻辑 history 重建依赖它；
+- 配 Responses 协议的模型客户端时实现 `AtomicBatchMessageStore`：一次采样的终态输出要么整批可见、
+  要么都不可见，同一 `batch_id` 重试幂等。没有实现时构造即拒绝；
+- 审计模式（`AuditConfig`）只支持默认 store：对话投影写的是 JSONL。
 
 ## reconstruct_logical_history（冷加载逻辑 history 重建）
 

@@ -321,6 +321,8 @@ class ToolCallRuntime:
 
 **出站消息归一化（ADR 0086）**：root turn 到达真终态、发 `turn_completed` 之前，若注册了 `outbound_message` hook，`loop/outbound.py::emit_outbound` 串行执行 handler（`text_override` 链式改写，不可否决）并 emit `outbound_message`。只改出站文本，history 里模型的原话不变；未注册时不发事件。
 
+**执行归属（ADR 0109）**：`ToolContext.extras` 带 `submission_id`（这次执行所在的那一轮提交）与 `session_id`（所属会话，子 turn 继承）；审批通过后在 engine 层重跑的调用同样带（`loop/resume_tool_context.py`），`run_script` 把它们连同 `thread_id`、`call_id` 写进 `ScriptInvocation`。
+
 **输入来源汇总（input-origin，ADR 0085）**：`_build_tool_context` 把 `summarize_taint(history).to_dict()` 放进 `ToolContext.extras["input_taint"]`，派发层再转给 `pre_tool_use` / `post_tool_use` hook 的 `HookContext.extras`；工具声明了 `output_trust` 时，结算出的 `function_call_output` 带来源标记。内核不依据汇总改变任何裁决。
 
 **结算可带图（tool-image-attachment）**：阶段 3 回填 `function_call_output` 的两处结算点（批量循环与 `retry_tool`）收敛在 `TurnRunner._settle_tool_output`。工具经 `ToolResult.attachments` 返回的图片在此完成 **durable append 之前**的 admission，通过后写进同一条 fco 的 payload——**不合成 `user_message`**，故 turn 边界锚点与同轮合并均不受影响。附件违反策略时该次调用判错（`tool_attachment_rejected`）而非上抛出批，以保住 fc/fco 配对。详见 `capabilities/tool-image-attachment.md`。

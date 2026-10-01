@@ -24,10 +24,10 @@ uv pip install -e ".[dev]"          # + 测试工具
 ```python
 import asyncio
 import taifeng
-from taifeng.llm.providers import SimClient, SimTurn
-from taifeng.llm.types import TokenUsage
-from taifeng.tool import ToolRegistry
-from taifeng.tool.builtins import make_read_skill_tool, make_call_skill_tool
+from taifeng import (
+    SimClient, SimTurn, TokenUsage, ToolRegistry,
+    make_call_skill_tool, make_read_skill_tool,
+)
 
 async def main():
     registry = await taifeng.FilesystemSkillRegistry.load("/data/skills")
@@ -82,7 +82,7 @@ async for ev in engine.subscribe(sub_id):
 ### C. 加 ConsoleSink 观测
 
 ```python
-from taifeng.telemetry import attach_console_sink
+from taifeng import attach_console_sink
 
 sink_task = attach_console_sink(engine, color=True)
 # 控制台自动打印 turn / tool / skill / cache / compaction 事件
@@ -522,9 +522,7 @@ SKILL.md 中 `scripts:` 声明的脚本通过内置 `run_script` 工具暴露给
 ### 最小落地
 
 ```python
-from taifeng import EnginePool
-from taifeng.skill.scripts.shell import ShellScriptExecutor
-from taifeng.skill.scripts.python import PythonScriptExecutor
+from taifeng import EnginePool, PythonScriptExecutor, ShellScriptExecutor
 
 pool = await EnginePool.create(
     skills_dir="./skills",

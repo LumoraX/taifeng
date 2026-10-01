@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from taifeng.context.engine import (
     AssembledContext,
     AssembleRequest,
@@ -25,11 +27,62 @@ from taifeng.context.strategies import (
     BackgroundCompactionStrategy,
     MultimodalEvictionStrategy,
 )
+from taifeng.conversation.journal.backend import (
+    ZERO_HASH,
+    CommittedRecord,
+    SealedBatch,
+    SessionJournalCore,
+    descriptor_fingerprint,
+    ended_record_id,
+    index_envelopes,
+    resolve_idempotent_ack,
+    seal_batch,
+    snapshot_records,
+    verify_envelopes,
+)
+from taifeng.conversation.journal.canonical import canonical_hash, record_fingerprint
+from taifeng.conversation.journal.errors import (
+    CommitNotStartedError,
+    JournalAlreadyExistsError,
+    JournalBusyError,
+    JournalConflictError,
+    JournalError,
+    JournalIntegrityError,
+    JournalLeaseError,
+    JournalLockUnsupportedError,
+    JournalRecoveryRequiredError,
+    JournalSessionEndedError,
+    JournalSessionNotFoundError,
+)
+from taifeng.conversation.journal.file_io import DefaultSyncFileAdapter, SyncFileAdapter
 from taifeng.conversation.journal.jsonl import JsonlSessionJournalCore
 from taifeng.conversation.journal.legacy_import import (
     LegacyImportError,
     LegacyImportResult,
     import_legacy_transcript,
+)
+from taifeng.conversation.journal.memory import (
+    InMemoryJournalStorage,
+    InMemorySessionJournalCore,
+)
+from taifeng.conversation.journal.models import (
+    SESSION_ENDED_RECORD_TYPE,
+    WRITER_TAKEOVER_RECORD_TYPE,
+    ActorRef,
+    Durability,
+    JournalAck,
+    JournalEnvelope,
+    JournalHealth,
+    JournalRecord,
+    JournalVerification,
+    RootThreadDescriptor,
+    SessionCreateResult,
+    SessionDescriptor,
+    SessionLease,
+    SessionOpenResult,
+    WriterTakeoverV1,
+    build_initialization_records,
+    build_takeover_record,
 )
 from taifeng.conversation.journal.projection_rebuild import (
     ProjectionRebuildResult,
@@ -42,6 +95,11 @@ from taifeng.conversation.journal.timeline import (
     TimelineItem,
     TimelinePage,
 )
+from taifeng.conversation.journal.writer_lock import (
+    FcntlWriterLockAdapter,
+    WriterLockAdapter,
+    WriterLockBusyError,
+)
 from taifeng.conversation.origin import (
     InputOrigin,
     InputTaint,
@@ -49,7 +107,6 @@ from taifeng.conversation.origin import (
     summarize_taint,
     taint_from_extras,
 )
-from taifeng.llm.file_input import FileAttachmentV1, FileInputPolicy
 from taifeng.llm.prewarm import CachePrimingPrewarmer, ModelPrewarmer, PrewarmOutcome
 from taifeng.llm.providers.replay import (
     JournalReplayClient,
@@ -59,7 +116,6 @@ from taifeng.llm.providers.replay import (
     recorded_calls,
 )
 from taifeng.llm.recovery import RecoveryRecipeBook
-from taifeng.llm.types import FilePart
 from taifeng.loop.audit_config import AuditCapabilityError, AuditConfig
 from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeRequest,
@@ -78,8 +134,6 @@ from taifeng.loop.replay_session import (
     replay_session,
 )
 from taifeng.loop.submission import Prewarm
-from taifeng.mcp.bridge import McpToolBinding, bind_mcp_tools
-from taifeng.mcp.http_client import McpHttpClient
 from taifeng.skill.authorization import (
     CallbackSkillAuthorization,
     PermissionSkillAuthorization,
@@ -139,6 +193,59 @@ __all__ = [
     "AuditCapabilityError",
     "AuditConfig",
     "JsonlSessionJournalCore",
+    # Journal 后端 seam（session-journal-backend，ADR 0114，🧪）
+    # —— core 协议与它签名里的类型
+    "SessionJournalCore",
+    "ActorRef",
+    "Durability",
+    "JournalAck",
+    "JournalEnvelope",
+    "JournalHealth",
+    "JournalRecord",
+    "JournalVerification",
+    "RootThreadDescriptor",
+    "SessionCreateResult",
+    "SessionDescriptor",
+    "SessionLease",
+    "SessionOpenResult",
+    "WriterTakeoverV1",
+    # —— 错误
+    "CommitNotStartedError",
+    "JournalAlreadyExistsError",
+    "JournalBusyError",
+    "JournalConflictError",
+    "JournalError",
+    "JournalIntegrityError",
+    "JournalLeaseError",
+    "JournalLockUnsupportedError",
+    "JournalRecoveryRequiredError",
+    "JournalSessionEndedError",
+    "JournalSessionNotFoundError",
+    # —— 换存储：注入 JsonlSessionJournalCore 的两个适配器
+    "DefaultSyncFileAdapter",
+    "FcntlWriterLockAdapter",
+    "SyncFileAdapter",
+    "WriterLockAdapter",
+    "WriterLockBusyError",
+    # —— 换 core：存储无关的构件与参考实现
+    "SESSION_ENDED_RECORD_TYPE",
+    "WRITER_TAKEOVER_RECORD_TYPE",
+    "ZERO_HASH",
+    "CommittedRecord",
+    "InMemoryJournalStorage",
+    "InMemorySessionJournalCore",
+    "SealedBatch",
+    "build_initialization_records",
+    "build_takeover_record",
+    "canonical_hash",
+    "descriptor_fingerprint",
+    "ended_record_id",
+    "index_envelopes",
+    "record_fingerprint",
+    "resolve_idempotent_ack",
+    "seal_batch",
+    "snapshot_records",
+    "verify_envelopes",
     # Journal Phase 5：Timeline 投影、脱敏、旧 transcript 导入、投影重建（ADR 0104，🧪）
     "JournalTimelineProjector",
     "TimelineFilter",
@@ -174,10 +281,6 @@ __all__ = [
     "recorded_calls",
     # 工具崩溃对账的回查结果（tool-crash-reconciliation，🧪）
     "ReconcileVerdict",
-    # 工具集动态增删 + MCP streamable HTTP（dynamic-tool-set，🧪）
-    "McpHttpClient",
-    "McpToolBinding",
-    "bind_mcp_tools",
     # skill 战绩聚合（skill-fitness，🧪：只沉淀不决策）
     "InMemorySkillFitnessStore",
     "SkillFitness",
@@ -243,8 +346,33 @@ __all__ = [
     "BackgroundCompactionStrategy",
     # 多模态重载荷驱逐（compaction-multimodal-eviction，🧪）
     "MultimodalEvictionStrategy",
-    # 用户文件（PDF）输入（llm-file-input，🧪）
-    "FileAttachmentV1",
-    "FileInputPolicy",
-    "FilePart",
 ]
+
+# 已晋升到稳定层的名字：在本模块保留至少一个发布版本（ADR 0066 决策 5），访问时提示新位置。
+_PROMOTED: dict[str, str] = {
+    # ADR 0110（2026.9.30 之后的第一个发布）：MCP HTTP 与工具集绑定
+    "McpHttpClient": "taifeng.mcp.http_client",
+    "McpToolBinding": "taifeng.mcp.bridge",
+    "bind_mcp_tools": "taifeng.mcp.bridge",
+    # ADR 0116：用户文件（PDF）输入
+    "FileAttachmentV1": "taifeng.llm.file_input",
+    "FileInputPolicy": "taifeng.llm.file_input",
+    "FilePart": "taifeng.llm.types",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """已晋升的名字照常可用，但发 ``DeprecationWarning`` 指向 ``taifeng`` 顶层。"""
+    module_path = _PROMOTED.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    import warnings
+
+    warnings.warn(
+        f"taifeng.experimental.{name} has been promoted to the stable layer; "
+        f"import it from taifeng instead (the experimental alias will be removed in a later release)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return getattr(importlib.import_module(module_path), name)

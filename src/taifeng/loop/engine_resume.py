@@ -154,7 +154,7 @@ class EngineResume:
                 if self._engine._permission_policy is not None:
                     self._engine._permission_policy.preapprove(call_id)
                 continue
-            await self._engine._execute_resumed_tool(call_id)
+            await self._engine._execute_resumed_tool(call_id, submission_id=sub.id)
 
         # 3.5 + 4. record 级结算判定(per-record 锁串行化并发 Resume)+ 落 marker:
         # 仍有未核销 pending → 部分核销,不落 marker、不续跑(record 级 barrier)

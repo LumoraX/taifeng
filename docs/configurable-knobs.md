@@ -72,6 +72,7 @@
 | --- | --- | --- | --- |
 | `outcome_judge` | `None` | skill 战绩判定器（`skill-outcome-record`）；`None` 则不记战绩 | — |
 | `storage_dir` | `None` | 通用存储根目录（战绩 / 索引等）；`None` 则退回 `threads_dir` 同级 | — |
+| **`message_store`** | `None` | **外部会话主存（ADR 0111）**：注入 `MessageStore` 实现（数据库等）后不再建默认的 `JsonlMessageStore`、不碰本机目录；与 `storage_dir` / `threads_dir` 互斥。池建成后拥有它（`close()` 时关闭）。配 Responses 协议的模型客户端时须同时实现 `AtomicBatchMessageStore`，否则构造即抛 `UnsupportedPersistenceCapabilityError`；审计模式（`audit=`）只支持默认 store。不给 `thread_directory` 时用 `NullThreadDirectory` | — |
 | `thread_directory` | `None` | `ThreadDirectory` 实现；`None` 用默认 JSONL 目录 | — |
 | `index_hook` | `None` | `IndexHook` —— 落盘后建索引的旁路钩子（`index-hook` 契约） | — |
 | `sink` | `None` | `TelemetrySink` —— 事件外发后端；`None` 不外发（R3 仍在总线上） | codex telemetry |
@@ -534,6 +535,25 @@ pool = await EnginePool.create(
 
 业务侧只实现 4 个 `ThreadDirectory` async 方法（`list_threads / get_metadata / update_metadata / upsert_metadata`），约 30-80 行；taifeng 内部自动透传调用。
 
+### 替换主存（会话不落本机）
+
+```python
+from taifeng import EnginePool
+
+pool = await EnginePool.create(
+    skills_dir=...,
+    message_store=MyDatabaseMessageStore(dsn),   # 实现 MessageStore；不再给 storage_dir
+    thread_directory=MyThreadDirectory(dsn),     # 可选；不给用 NullThreadDirectory
+    model_client=...,
+)
+```
+
+- 池建成后拥有这个 store，`pool.close()` 时调它的 `close()`；
+- 模型客户端走 Responses 协议时，store 还须实现 `AtomicBatchMessageStore.append_atomic_batch`
+  （同一 `batch_id` + 同样内容重试必须幂等，内容不同抛 `BatchConflictError`）；
+- `load_thread` 必须按写入顺序、完整吐回全部条目（resume 依赖它）；
+- 审计模式只支持默认 store。
+
 ### 订阅 IndexHook（业务事件投递）
 
 ```python
@@ -684,8 +704,9 @@ LiteLLMClient(
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `command` | (必填) | 启动 server 的 argv（如 `["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]`） |
-| `env` | `None` | 子进程环境变量；`None` = 继承当前进程 |
+| `env` | `None` | 子进程环境变量；`None` = 继承当前进程（经 `executor` 启动时为最小白名单 `PATH` / `HOME` / `LANG`） |
 | `cwd` | `None` | 子进程工作目录 |
+| **`executor`** | `None` | `CommandExecutor`；给出时 server 经它启动（可放进容器 / 沙盒，ADR 0112），执行器须返回 `StreamingCommandProcess`；`None` = 本端直接拉起子进程 |
 | **`request_timeout_seconds`** | `60.0` | 单条 JSON-RPC 请求超时；`None` = 关闭 client 层超时，完全由调用方控制。`tools/call` 途中 server 发起的 elicitation 等用户的时间也计入 |
 | **`elicitation_handler`** | `None` | 可选 `ElicitationHandler`；注入则 initialize 声明 `elicitation` 能力并处理 server 的 `elicitation/create`；`None` 不声明，server 仍发时回 `-32601`（见 §4.2） |
 | **`max_list_pages`** | `100` | `tools/list` 跟 `nextCursor` 翻页的页数上限；超限 / 游标重复 / 游标非字符串抛 `McpPaginationError`（不静默截断）；< 1 在拉起子进程前 `ValueError` |
@@ -858,7 +879,7 @@ fail-closed 判 deny（`reason="elicitation_unsupported: …"`），并经 `McpS
 from taifeng import make_apply_patch_tool
 
 tool = make_apply_patch_tool(
-    root_dir="./workspace",          # 沙盒根
+    root_dir="./workspace",          # 本机沙盒根；或 workspace=<WorkspaceFS>（§6.9），二选一
     policy=my_permission_policy,     # 可选；每个被改动的路径一条 file_write 审批
     max_bytes=1024 * 1024,           # 单 patch new_text 上限
 )
@@ -1045,8 +1066,9 @@ pool = await EnginePool.create(
 
 | 工厂参数 | glob | grep | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `root_dir` | ✓ | ✓ | 必填 | 沙盒根；基点与被读文件都必须在内（同 `file_read`，拒绝 `..` 与符号链接逃逸） |
-| `policy` | ✓ | ✓ | `None` | 每次调用审批一次：`scope="file_read"`、target=基点绝对路径（整棵子树粒度） |
+| `root_dir` | ✓ | ✓ | 与 `workspace` 二选一 | 本机沙盒根；基点与被读文件都必须在内（同 `file_read`，拒绝 `..` 与符号链接逃逸） |
+| `workspace` | ✓ | ✓ | 与 `root_dir` 二选一 | 注入的 `WorkspaceFS`（§6.9）；遍历逻辑不变，符号链接一律不跟随并在尾注计数 |
+| `policy` | ✓ | ✓ | `None` | 每次调用审批一次：`scope="file_read"`、target=基点在工作区里的规范路径（整棵子树粒度） |
 | `max_results` | ✓ | ✓ | `200` | 超出截断并在输出尾告知，遍历提前停止 |
 | `max_line_chars` | — | ✓ | `500` | 单行截断并注明原长度 |
 | `max_file_bytes` | — | ✓ | `2MB` | 超大文件跳过并列出名字 |
@@ -1086,6 +1108,35 @@ make_memory_tool(store, actions=("search", "save"))
 | `timeout_seconds` | `30.0` | ToolSpec 级超时 |
 
 `save` 写入一条 `assistant_message`，`metadata={"source": "memory_tool", "call_id": ...}`——后端据此区分模型主动记忆与 turn 结束的脏页写回、或按 call_id 去重。`delete` 的 `target` 是后端在 search 结果里展示的记忆标识或该条记忆原文（`prefetch` 只返回文本，模型能表达的只有文本），`forget` 返回实际删除条数，0 是正常结果。`NullMemoryStore` 不实现 `forget`；`CompositeMemoryStore` 有可遗忘子时才可遗忘。后端异常以 `reason="memory_error"` 显式返回给模型（不同于被动钩子的 best-effort）。
+
+### 6.9 `WorkspaceFS` —— 文件类工具读写哪里（ADR 0113）
+
+`file_read` / `file_write` / `apply_patch` / `glob` / `grep` 五个工厂都接受 `root_dir=`（本机目录）或
+`workspace=`（注入的工作区），恰好一个。命令经 `CommandExecutor` 放进容器 / 远端沙盒时，把同一处文件系统
+以 `WorkspaceFS` 注入，模型读到的就是命令改动的那些文件。契约见
+[workspace-fs](architecture/capabilities/workspace-fs.md)。
+
+```python
+from taifeng import LocalWorkspaceFS, make_file_read_tool, make_file_write_tool, make_grep_tool
+
+workspace = MySandboxWorkspace(...)     # 实现 WorkspaceFS 的 7 个成员；本机目录用 LocalWorkspaceFS(path)
+extra_tools = [
+    make_file_read_tool(workspace=workspace, policy=my_policy),
+    make_file_write_tool(workspace=workspace, policy=my_policy),
+    make_grep_tool(workspace=workspace, policy=my_policy),
+]
+```
+
+| 成员 | 约定 |
+| --- | --- |
+| `root` | 工作区根的标识；出现在工具描述与权限 target 里 |
+| `resolve(path)` | 规范成以 `root` 为前缀的规范路径；越界抛 `WorkspacePathError` |
+| `read_bytes` / `write_bytes(create_parents=True)` | 整读 / 覆盖写（应当原子） |
+| `metadata` | 不存在返回 `exists=False`，不抛异常 |
+| `list_directory` | 不递归，顺序不限 |
+| `remove(recursive=False)` | 目录非递归时须为空 |
+
+每个方法自己校验边界；失败用标准 `OSError` 子类（`FileNotFoundError` / `PermissionError` / 其余）。
 
 ## 7. LLM 强类型输出（structured_output / P1）
 

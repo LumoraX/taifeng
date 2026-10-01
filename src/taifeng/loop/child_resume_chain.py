@@ -254,7 +254,8 @@ class ChildResumeChain:
             return None
 
         # 补 gap（在子 thread 上）：form/data 直填、permission deny 填 error、allow 执行 tool
-        await self._engine._apply_plan_on_thread(leaf_tid, leaf_skill_id, record, plan)
+        await self._engine._apply_plan_on_thread(
+            leaf_tid, leaf_skill_id, record, plan, submission_id=sub.id)
         # request 级核销:leaf record 仍有未核销 pending → 部分核销,不落 marker、
         # 不续跑 leaf(链中止,句柄/父层保持挂起等后续 Resume)
         items_after = await self._engine._load_thread_items(leaf_tid)
@@ -498,13 +499,14 @@ class ChildResumeChain:
 
     async def apply_plan_on_thread(
         self, thread_id: str, entry_skill_id: str,
-        record: SuspensionRecord, plan: Any
+        record: SuspensionRecord, plan: Any, *, submission_id: str | None = None,
     ) -> None:
         """在指定 thread 上应用 ResolvePlan 的 gap 补齐（form/data/deny/allow-execute）。
 
         与根路径 _handle_resume 第 3 步同语义，但作用在子 thread（落 store；子 turn
         续跑时由 load_thread 读回）。permission allow 走 _execute_resumed_tool_on_thread。
-        entry_skill_id 用于该 thread 内执行被批准 tool 时构造 ToolContext 的 skill 上下文。
+        entry_skill_id 用于该 thread 内执行被批准 tool 时构造 ToolContext 的 skill 上下文；
+        submission_id 是触发这次核销的 ``Resume`` 的 submission id，交给重跑的工具作归属。
         """
         for call_id, payload in plan.direct_outputs.items():
             out = function_call_output(
@@ -524,7 +526,7 @@ class ChildResumeChain:
             await self._engine._store.append(out)
         for call_id in plan.execute_tool_call_ids:
             await self._engine._execute_resumed_tool_on_thread(
-                thread_id, entry_skill_id, call_id)
+                thread_id, entry_skill_id, call_id, submission_id=submission_id)
         # resolved-marker 不在此签发:request 级核销下由调用方在
         # 全部 pending 核销后经 _append_resolved_marker 落定(单一签发点)。
 
@@ -576,6 +578,7 @@ class ChildResumeChain:
             budget=self._engine._budget,
             thread_id=thread_id,
             submission_id=submission_id or sub.id,
+            session_id=self._engine._session_id,
             emit=self._engine._emit,
             cancel=turn_cancel,
             image_input_policy=self._engine._image_input_policy,
@@ -631,7 +634,8 @@ class ChildResumeChain:
                 self._engine._pending.pop(pending_key, None)
 
     async def execute_resumed_tool_on_thread(
-        self, thread_id: str, entry_skill_id: str, call_id: str
+        self, thread_id: str, entry_skill_id: str, call_id: str,
+        *, submission_id: str | None = None,
     ) -> None:
         """在指定 thread 上执行一个被批准的挂起 tool call，回填 function_call_output。
 
@@ -639,7 +643,7 @@ class ChildResumeChain:
         从 load_thread 找原 function_call，落 output 到 store（子 turn 续跑时读回）。
         entry_skill_id 由续跑链携带（不依赖 store.get_metadata）。
         """
-        from taifeng.tool.spec import ToolContext
+        from taifeng.loop.resume_tool_context import resumed_tool_context
 
         items = await self._engine._load_thread_items(thread_id)
         fc: ResponseItem | None = None
@@ -652,22 +656,9 @@ class ChildResumeChain:
         # 与派发层同一解析入口:坏参数不退化为 {} 执行(下方按 args_error 结算)
         args, args_error = parse_tool_arguments(fc.payload.get("arguments") or "{}")
         entry = self._engine._snapshot.get(entry_skill_id) or self._engine._entry_skill
-        cancel = self._engine._resume_tool_cancel(call_id)
-        ctx = ToolContext(
-            call_id=call_id, cancel=cancel, thread_id=thread_id,
-            extras={
-                "skill_snapshot": self._engine._snapshot,
-                "visible_skills": self._engine._snapshot.reachable_from(entry.id),
-                "dispatch_policy": self._engine._dispatch_policy,
-                "outcome_judge": self._engine._outcome_judge,
-                "current_skill": entry,
-                "entry_skill_id": entry.id,
-                "permission_policy": self._engine._permission_policy,
-                "hook_runner": self._engine._hooks,
-                "request_metadata": self._engine._request_metadata,
-                "turn_index": self._engine._turn_index,
-                "script_executors": self._engine._script_executors,
-            },
+        ctx = resumed_tool_context(
+            self._engine, call_id=call_id, thread_id=thread_id, entry=entry,
+            cancel=self._engine._resume_tool_cancel(call_id), submission_id=submission_id,
         )
         rejection = arguments_rejection(
             self._engine._tool_runtime._registry, name, args, args_error)  # noqa: SLF001

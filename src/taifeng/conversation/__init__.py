@@ -32,7 +32,12 @@ from taifeng.conversation.protocols import (
 from taifeng.conversation.rebuild import rebuild_index
 from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.conversation.sqlite_directory import SqliteThreadDirectory
-from taifeng.conversation.store import MessageStore
+from taifeng.conversation.store import (
+    AtomicBatchMessageStore,
+    BatchAppendAck,
+    BatchConflictError,
+    MessageStore,
+)
 from taifeng.conversation.transcript import (
     JsonlMessageStore,
     JsonlMessageWriter,
@@ -56,6 +61,9 @@ __all__ = [
     "ThreadDirectory",
     "ThreadFilter",
     "ThreadInfo",
+    "AtomicBatchMessageStore",
+    "BatchAppendAck",
+    "BatchConflictError",
     "ThreadMetadata",
     "ThreadNotFoundError",
     "ThreadPage",

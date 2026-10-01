@@ -5,72 +5,24 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 from types import MemberDescriptorType
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal
 
+from taifeng.conversation.journal.backend import SessionJournalCore
 from taifeng.llm.audit import (
     AttemptObservableClientAdapter,
     AttemptObservableModelClient,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
 
-    from taifeng.conversation.journal.models import (
-        JournalAck,
-        JournalEnvelope,
-        JournalRecord,
-        SessionCreateResult,
-        SessionDescriptor,
-        SessionLease,
-        SessionOpenResult,
-    )
     from taifeng.llm.client import ModelClient
     from taifeng.loop.audit_resume_resolution import AuditToolOutcomeResolver
     from taifeng.skill.registry import SkillSnapshot
 
 
-class AuditJournalCore(Protocol):
-    """strict bootstrap 与 coordinator 所需的最小 Journal core 边界。"""
-
-    async def create_session(
-        self,
-        descriptor: SessionDescriptor,
-    ) -> SessionCreateResult:
-        """原子创建一个新 Session Journal。"""
-        ...
-
-    async def open_existing(
-        self,
-        session_id: str,
-        *,
-        writer_id: str,
-        operation_id: str,
-    ) -> SessionOpenResult:
-        """以更高 writer epoch 接管已有 Session（resume 用）。"""
-        ...
-
-    async def append_batch(
-        self,
-        records: tuple[JournalRecord, ...],
-        *,
-        lease: SessionLease,
-        expected_seq: int,
-    ) -> JournalAck:
-        """按 expected seq 追加一个 durable batch。"""
-        ...
-
-    async def close_session(self, lease: SessionLease) -> None:
-        """只释放指定 Session 的 writer lease。"""
-        ...
-
-    def load(
-        self,
-        session_id: str,
-        *,
-        after_seq: int = 0,
-    ) -> AsyncIterator[JournalEnvelope]:
-        """strict 读取 durable committed envelopes。"""
-        ...
+# 协议的定义在 journal 包里（后端 seam，ADR 0114）；这里保留旧名
+AuditJournalCore = SessionJournalCore
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +33,7 @@ class AuditConfig:
     （ADR 0070）。None = 不问人，这类调用令 resume 以 ``audit_resume_recovery_required`` 拒绝。
     """
 
-    journal_core: AuditJournalCore
+    journal_core: SessionJournalCore
     writer_id: str
     max_attachment_bytes: int
     max_total_attachment_bytes: int

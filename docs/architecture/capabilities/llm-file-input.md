@@ -1,4 +1,4 @@
-# Capability: llm-file-input（用户消息文件输入）🧪
+# Capability: llm-file-input（用户消息文件输入）
 
 ## Purpose
 
@@ -6,7 +6,7 @@
 canonical 内联正文、业务显式开闸、client 显式声明能力、durable append 前 admission、prompt 重建时复核、
 审计脱敏、保守成本估算、压缩只留描述占位。
 
-状态：🧪 实验（入口在 `taifeng.experimental`，ADR 0066 分层）。决策记录：[ADR 0068](../../decisions/0068-user-file-input.md)
+状态：✅（入口在稳定层 `taifeng.FileAttachmentV1` / `FileInputPolicy` / `FilePart`，ADR 0116）。决策记录：[ADR 0068](../../decisions/0068-user-file-input.md)
 （落地 [ADR 0067](../../decisions/0067-reserved-protocols-fitness-file-input-routing.md) 的预留契约）。
 
 **入口限于 user 消息。** 工具经 `function_call_output` 回传文件不在本契约内（工具附件契约
@@ -83,7 +83,7 @@ Data URL 只在网络边界临时构造；`filename` 缺省时 OpenAI 系用确�
 ## 业务接入
 
 ```python
-from taifeng.experimental import FileAttachmentV1, FileInputPolicy
+from taifeng import FileAttachmentV1, FileInputPolicy
 
 pool = await EnginePool.create(
     model_client=CodexResponsesClient(api_key=key, base_url=root),
@@ -106,4 +106,7 @@ await engine.submit(UserMessage(
 - `examples/real_llm/selfcheck.py` 含零消耗的 PDF 结构 / codex `input_file` wire / 脱敏预检。
 - 真实 LLM：`examples/real_llm/test_codex_file_input.py`（`capability_matrix.py --provider codex` 的 provider 专属场景
   `codex_file_input`）——纯标准库生成只含唯一随机核对码的 PDF，断言模型经工具参数与最终回复逐字读出该码，且 capture /
-  事件日志不含正文。OpenAI Chat / Responses、Anthropic、Gemini 的文件 wire 目前只有单测覆盖，未做真实验证。
+  事件日志不含正文。
+- 其余 provider：`examples/real_llm/file_input_verify.py` 把同一个场景交给 `.env` 指定的、声明了 `"file"` 能力的
+  provider。Gemini（`gemini-3.1-pro-preview`，`inlineData`）2026-09-30 验证通过（5 项）。OpenAI Chat / Responses 与
+  Anthropic 的文件 wire 仍只有单测覆盖，没有可用的 key。

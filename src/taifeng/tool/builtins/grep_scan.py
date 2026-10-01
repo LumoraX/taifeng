@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 from bisect import bisect_right
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from taifeng.tool.builtins.search_fs import LocalSearchFs
 from taifeng.tool.builtins.search_walk import (
     GlobMatcher,
     SearchStopped,
@@ -32,7 +34,9 @@ from taifeng.tool.builtins.search_walk import (
 if TYPE_CHECKING:
     import re
     from collections.abc import Callable
-    from pathlib import Path
+    from pathlib import PurePath
+
+    from taifeng.tool.builtins.search_fs import SearchFs
 
 GrepOutputMode = Literal["content", "files_with_matches", "count"]
 
@@ -107,11 +111,13 @@ class GrepRun:
         context_lines: 输出的上下文行数。
     """
 
-    root: Path
+    root: PurePath
     query: GrepQuery
     limits: GrepLimits
     exclude_dirs: frozenset[str]
     gitignore: bool
+    fs: SearchFs | None = None
+    """文件访问面；None = 按本机目录访问 ``root``。"""
     hits: list[str] = field(default_factory=list)
     used: int = 0
     count: int = 0
@@ -120,15 +126,17 @@ class GrepRun:
     files_scanned: int = 0
     stats: WalkStats = field(default_factory=WalkStats)
 
-    def run(self, base: Path, should_stop: Callable[[], bool]) -> None:
+    def run(self, base: PurePath, should_stop: Callable[[], bool]) -> None:
         """遍历 ``base``（文件或目录）并扫描；结果名额用尽即停。
 
         Raises:
             SearchStopped: 取消 / 超时的停止信号。
         """
+        if self.fs is None:
+            self.fs = LocalSearchFs(Path(self.root))
         files = iter_files(
             base, root=self.root, exclude_dirs=self.exclude_dirs,
-            should_stop=should_stop, stats=self.stats, gitignore=self.gitignore,
+            should_stop=should_stop, stats=self.stats, gitignore=self.gitignore, fs=self.fs,
         )
         for path in files:
             # include 过滤：相对搜索基点比对（基点是文件时只剩文件名一段）
@@ -138,7 +146,7 @@ class GrepRun:
             if self._scan(path, should_stop):
                 return
 
-    def _scan(self, path: Path, should_stop: Callable[[], bool]) -> bool:
+    def _scan(self, path: PurePath, should_stop: Callable[[], bool]) -> bool:
         """扫描单个文件；返回 True 表示名额已满、应停止整次搜索。"""
         rel = rel_to_root(path, self.root)
         text = self._read_text(path, rel)
@@ -221,17 +229,15 @@ class GrepRun:
             return self._emit(f"{rel}:{matches}")
         return False
 
-    def _read_text(self, path: Path, rel: str) -> str | None:
+    def _read_text(self, path: PurePath, rel: str) -> str | None:
         """读文件为文本；超大 / 二进制 / 非 UTF-8 / 读失败返回 None 并计入跳过统计。"""
-        limit = self.limits.max_file_bytes
+        assert self.fs is not None  # run() 已解析
         try:
-            with path.open("rb") as fh:
-                # 多读 1 字节判断是否超限，避免先 stat 再读的竞态
-                data = fh.read(limit + 1)
+            data = self.fs.read_limited(path, self.limits.max_file_bytes)
         except OSError:
             self.stats.unreadable += 1
             return None
-        if len(data) > limit:
+        if data is None:
             self.stats.skipped_large.append(rel)
             return None
         if b"\x00" in data[:_BINARY_SNIFF_BYTES]:

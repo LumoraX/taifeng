@@ -23,6 +23,7 @@ from taifeng.llm.errors import (
     InvalidHistoryError,
     InvalidRequestError,
     InvalidResponseError,
+    LLMError,
     UnsupportedModalityError,
 )
 from taifeng.llm.events import (
@@ -49,6 +50,7 @@ from taifeng.llm.providers._shared import (
     transport_error,
 )
 from taifeng.llm.providers._tool_args import replay_tool_arguments
+from taifeng.llm.providers.gemini_schema import to_gemini_schema
 from taifeng.llm.types import ApiRequest, FilePart, ImagePart, TextPart, TokenUsage
 
 if TYPE_CHECKING:
@@ -249,11 +251,34 @@ def _to_gemini_tools(req: ApiRequest) -> list[dict[str, Any]] | None:
             {
                 "name": t.name,
                 "description": t.description,
-                "parameters": t.input_schema,
+                # Gemini 只认 OpenAPI 子集：不认的关键字（additionalProperties 等）会让请求 400
+                "parameters": to_gemini_schema(t.input_schema),
             }
             for t in req.tools
         ],
     }]
+
+
+def classify_gemini_http_error(status: int, body: str) -> LLMError:
+    """按 Google 错误体的 ``error.status`` + ``error.message`` 分类，错误文本保留完整 body。
+
+    Google 把结构化细节放在 ``error.details``，其中参数错误的标准字段叫 ``fieldViolations``——
+    对整个 body 做关键字匹配会把它当成安全拦截（``violat``）。分类只看 status 与 message；
+    body 不是这个形状时退回通用规则。
+    """
+    classified = classify_http_error(status, body, provider="gemini")
+    try:
+        detail = json.loads(body).get("error")
+    except (json.JSONDecodeError, AttributeError):
+        return classified
+    if not isinstance(detail, dict) or not isinstance(detail.get("message"), str):
+        return classified
+    summary = f"{detail.get('status') or ''} {detail['message']}"
+    by_summary = classify_http_error(status, summary, provider="gemini")
+    if type(by_summary) is type(classified):
+        return classified
+    # 两者只会在 4xx 的关键字分支上分歧，那一支的错误类都只收 message
+    return type(by_summary)(body)
 
 
 class GeminiSession:
@@ -380,10 +405,8 @@ class GeminiSession:
                     request_id = extract_request_id(resp.headers)
                     if resp.status_code != 200:
                         body = await resp.aread()
-                        classified = classify_http_error(
-                            resp.status_code,
-                            body.decode("utf-8", errors="replace"),
-                            provider="gemini",
+                        classified = classify_gemini_http_error(
+                            resp.status_code, body.decode("utf-8", errors="replace"),
                         )
                         classified.request_id = request_id
                         yield error(

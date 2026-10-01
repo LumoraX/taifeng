@@ -340,6 +340,7 @@ def _build_child_runner(self: AgentEngine,
         budget=self._budget,
         thread_id=child_thread_id,
         submission_id=child_thread_id,
+        session_id=self._session_id,
         emit=self._emit,
         cancel=cancel,
         image_input_policy=self._image_input_policy,
@@ -591,10 +592,11 @@ async def _load_thread_items(self: AgentEngine, thread_id: str) -> list[Response
 
 
 async def _apply_plan_on_thread(self: AgentEngine, thread_id: str, entry_skill_id: str,
-    record: SuspensionRecord, plan: Any
+    record: SuspensionRecord, plan: Any, *, submission_id: str | None = None,
 ) -> None:
     """在指定 thread 上应用 ResolvePlan 的 gap 补齐（form/data/deny/allow-execute）。"""
-    await self._child_chain.apply_plan_on_thread(thread_id, entry_skill_id, record, plan)
+    await self._child_chain.apply_plan_on_thread(
+        thread_id, entry_skill_id, record, plan, submission_id=submission_id)
 
 
 async def _append_resolved_marker(self: AgentEngine, thread_id: str, record_id: str) -> None:
@@ -617,10 +619,13 @@ async def _run_thread_turn(self: AgentEngine, sub: Submission, thread_id: str, e
     )
 
 
-async def _execute_resumed_tool_on_thread(self: AgentEngine, thread_id: str, entry_skill_id: str, call_id: str
+async def _execute_resumed_tool_on_thread(
+    self: AgentEngine, thread_id: str, entry_skill_id: str, call_id: str,
+    *, submission_id: str | None = None,
 ) -> None:
     """在指定 thread 上执行一个被批准的挂起 tool call，回填 function_call_output。"""
-    await self._child_chain.execute_resumed_tool_on_thread(thread_id, entry_skill_id, call_id)
+    await self._child_chain.execute_resumed_tool_on_thread(
+        thread_id, entry_skill_id, call_id, submission_id=submission_id)
 
 
 async def _cancel_active_suspension(self: AgentEngine, cancel_sub_id: str, target_sub_id: str
@@ -672,9 +677,11 @@ def _unsettled_pendings(
     return SuspensionAccess.unsettled_pendings(record, items)
 
 
-async def _execute_resumed_tool(self: AgentEngine, call_id: str) -> None:
+async def _execute_resumed_tool(
+    self: AgentEngine, call_id: str, *, submission_id: str | None = None,
+) -> None:
     """resume 时对一个被批准的挂起 tool call 真正执行，回填 function_call_output。"""
-    await self._suspend_access.execute_resumed_tool(call_id)
+    await self._suspend_access.execute_resumed_tool(call_id, submission_id=submission_id)
 
 
 async def _run_compact_now(self: AgentEngine,

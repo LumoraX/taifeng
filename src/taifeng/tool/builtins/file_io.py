@@ -1,33 +1,28 @@
 """file_read / file_write —— 受 PermissionPolicy 约束的文件 IO 工具。
 
 设计：
-    - 根目录沙盒（root_dir）：所有路径必须落在 root_dir 之下，否则拒绝
+    - 工作区（``root_dir`` 本机目录，或注入的 ``WorkspaceFS``，ADR 0113）：所有路径必须落在
+      工作区之内，否则拒绝；文件访问全部经 ``WorkspaceFS``
     - PermissionPolicy（可选）：业务侧可注入审批策略
     - file_read 默认 ``parallel_safe=True``；file_write ``parallel_safe=False``
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from taifeng.permission.types import (
     PermissionPolicy,
     PermissionRequest,
 )
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+from taifeng.tool.workspace import WorkspaceFS, WorkspacePathError, resolve_local, workspace_for
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def _resolve_safe(root: Path, requested: str) -> Path | None:
-    """解析路径；落在 root 外返回 None。"""
-    try:
-        p = (root / requested).resolve(strict=False)
-        if root not in p.parents and p != root:
-            return None
-        return p
-    except OSError:
-        return None
+# 本机路径解析的旧名（搜索工具与既有测试沿用）
+_resolve_safe = resolve_local
 
 
 def _is_nonneg_int(value: Any) -> bool:
@@ -49,25 +44,32 @@ def _paginate_lines(raw: str, offset: int | None, limit: int | None) -> str:
 
 def make_file_read_tool(
     *,
-    root_dir: str | Path,
+    root_dir: str | Path | None = None,
+    workspace: WorkspaceFS | None = None,
     policy: PermissionPolicy | None = None,
     max_bytes: int = 1024 * 1024,
 ) -> ToolSpec:
     """文件读取工具。
 
     Args:
-        root_dir: 沙盒根。路径只能在该目录下
+        root_dir: 本机沙盒根。路径只能在该目录下；与 ``workspace`` 二选一
+        workspace: 注入的工作区（容器 / 远端沙盒里的文件系统，ADR 0113）
         policy: 可选权限策略（拒绝时 LLM 收到 error）
         max_bytes: 单次读取上限（默认 1MB）
+
+    Raises:
+        ValueError: ``root_dir`` 与 ``workspace`` 都给或都不给。
     """
-    root = Path(root_dir).expanduser().resolve()
+    fs = workspace_for(root_dir, workspace)
+    root = fs.root
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         rel = args.get("path")
         if not rel or not isinstance(rel, str):
             return ToolResult.error("bad_args: path required", reason="bad_args")
-        resolved = _resolve_safe(root, rel)
-        if resolved is None:
+        try:
+            resolved = fs.resolve(rel)
+        except WorkspacePathError:
             return ToolResult.error(
                 f"path_outside_sandbox: {rel} (root={root})",
                 reason="sandbox_violation",
@@ -75,7 +77,7 @@ def make_file_read_tool(
         if policy is not None:
             req = PermissionRequest(
                 scope="file_read",
-                target=str(resolved),
+                target=resolved,
                 reason="LLM 请求读取文件",
                 metadata={
                     "thread_id": ctx.thread_id,
@@ -88,7 +90,11 @@ def make_file_read_tool(
                 return ToolResult.error(
                     f"permission_denied: {decision.reason}", reason="permission_denied",
                 )
-        if not resolved.is_file():
+        try:
+            info = await fs.metadata(resolved)
+        except OSError as e:
+            return ToolResult.error(f"read_error: {e}", reason="read_error")
+        if not info.is_file:
             return ToolResult.error(f"not_a_file: {resolved}", reason="not_found")
         # 分页参数校验：offset/limit 可选，给定则必须为非负整数
         offset = args.get("offset")
@@ -99,7 +105,7 @@ def make_file_read_tool(
             return ToolResult.error("bad_args: limit must be int >= 0", reason="bad_args")
         paging = offset is not None or limit is not None
         try:
-            raw = resolved.read_text(encoding="utf-8")
+            raw = (await fs.read_bytes(resolved)).decode("utf-8")
         except (OSError, UnicodeDecodeError) as e:
             return ToolResult.error(f"read_error: {e}", reason="read_error")
         if paging:
@@ -114,7 +120,7 @@ def make_file_read_tool(
             truncated = len(raw.encode("utf-8")) > max_bytes
             content = raw[:max_bytes] if truncated else raw
         suffix = f"\n\n[truncated to {max_bytes} bytes]" if truncated else ""
-        return ToolResult.ok(content + suffix, path=str(resolved), bytes=len(content))
+        return ToolResult.ok(content + suffix, path=resolved, bytes=len(content))
 
     return ToolSpec(
         name="file_read",
@@ -149,13 +155,21 @@ def make_file_read_tool(
 
 def make_file_write_tool(
     *,
-    root_dir: str | Path,
+    root_dir: str | Path | None = None,
+    workspace: WorkspaceFS | None = None,
     policy: PermissionPolicy | None = None,
     max_bytes: int = 1024 * 1024,
     create_dirs: bool = True,
 ) -> ToolSpec:
-    """文件写入工具（默认 atomic：写临时文件 + 原子 rename）。"""
-    root = Path(root_dir).expanduser().resolve()
+    """文件写入工具（本机工作区是原子写：写临时文件 + 原子 rename）。
+
+    ``root_dir`` 与 ``workspace`` 二选一（ADR 0113）；注入的工作区是否原子写由其实现决定。
+
+    Raises:
+        ValueError: ``root_dir`` 与 ``workspace`` 都给或都不给。
+    """
+    fs = workspace_for(root_dir, workspace)
+    root = fs.root
 
     async def handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         rel = args.get("path")
@@ -168,15 +182,16 @@ def make_file_write_tool(
             return ToolResult.error(
                 f"too_large: max {max_bytes} bytes", reason="too_large",
             )
-        resolved = _resolve_safe(root, rel)
-        if resolved is None:
+        try:
+            resolved = fs.resolve(rel)
+        except WorkspacePathError:
             return ToolResult.error(
                 f"path_outside_sandbox: {rel}", reason="sandbox_violation",
             )
         if policy is not None:
             req = PermissionRequest(
                 scope="file_write",
-                target=str(resolved),
+                target=resolved,
                 reason="LLM 请求写入文件",
                 metadata={"bytes": len(content), "thread_id": ctx.thread_id},
             )
@@ -185,15 +200,11 @@ def make_file_write_tool(
                 return ToolResult.error(
                     f"permission_denied: {decision.reason}", reason="permission_denied",
                 )
-        if create_dirs:
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-        tmp = resolved.with_suffix(resolved.suffix + ".tmp")
         try:
-            tmp.write_text(content, encoding="utf-8")
-            os.replace(tmp, resolved)
+            await fs.write_bytes(resolved, content.encode("utf-8"), create_parents=create_dirs)
         except OSError as e:
             return ToolResult.error(f"write_error: {e}", reason="write_error")
-        return ToolResult.ok(f"wrote {len(content)} chars to {resolved}", path=str(resolved))
+        return ToolResult.ok(f"wrote {len(content)} chars to {resolved}", path=resolved)
 
     return ToolSpec(
         name="file_write",
