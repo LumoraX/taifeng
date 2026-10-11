@@ -81,9 +81,11 @@ def make_wait_peer_tool() -> ToolSpec:
                 f"(当前 {out['status']})",
                 reason="timeout",
             )
-        return ToolResult.ok(json.dumps(
+        origin_query = ctx.extras.get("spawn_result_origin")
+        origin = origin_query([handle_id]) if origin_query is not None else None
+        return ToolResult(output=json.dumps(
             {"status": out["status"], "result": out["result"]},
-            ensure_ascii=False))
+            ensure_ascii=False), origin=origin)
 
     return ToolSpec(
         name="wait_peer",
@@ -148,9 +150,11 @@ def make_wait_any_tool() -> ToolSpec:
                 f"无一到终态({', '.join(out['pending'])})",
                 reason="timeout",
             )
-        return ToolResult.ok(json.dumps(
+        origin_query = ctx.extras.get("spawn_result_origin")
+        origin = origin_query(list(out["settled"])) if origin_query is not None else None
+        return ToolResult(output=json.dumps(
             {"settled": out["settled"], "pending": out["pending"]},
-            ensure_ascii=False))
+            ensure_ascii=False), origin=origin)
 
     return ToolSpec(
         name="wait_any",

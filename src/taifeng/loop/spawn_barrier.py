@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from taifeng.conversation.origin import InputOrigin, derive_origins
 from taifeng.loop.audit_spawn import take_detached
 from taifeng.loop.event import (
     EventMsg,
@@ -52,11 +53,22 @@ class JoinBarrierCoordinator:
         """
         self._driver = driver
 
+    def _creation_origin(
+        self, source_thread_id: str | None, origin: InputOrigin | None,
+    ) -> InputOrigin | None:
+        """冻结调用者的累计来源，避免点火时混入其他会话的后续输入。"""
+        engine = self._driver._engine
+        source = source_thread_id or engine._thread_id
+        if source == engine._thread_id:
+            engine._taint_registry.observe(source, engine._history)
+        return derive_origins([engine._taint_registry.snapshot(source).derived_origin(), origin])
+
     async def set_join_barrier(
         self,
         handle_ids: list[str],
         then_skill_id: str,
         then_args_template: dict[str, Any] | None = None,
+        *, origin: InputOrigin | None = None, source_thread_id: str | None = None,
     ) -> dict[str, str]:
         """登记一个 join-barrier:等 handle_ids 全终态后自动起 then_skill_id 聚合 turn。
 
@@ -105,12 +117,13 @@ class JoinBarrierCoordinator:
         if then_skill_id != entry.id and then_skill_id not in entry.child_skills:
             raise ValueError(f"then_skill_not_in_whitelist: {then_skill_id}")
 
+        origin = self._creation_origin(source_thread_id, origin)
         barrier_id = f"jb_{secrets.token_hex(4)}"
         barrier = JoinBarrier(
             barrier_id=barrier_id,
             handle_ids=tuple(handle_ids),
             then_skill_id=then_skill_id,
-            then_args_template=then_args_template,
+            then_args_template=then_args_template, origin=origin,
         )
         # 4. 登记持久化(冷恢复可重建 barrier;失败则不登记)+ emit 登记事件
         await register_barrier(eng, barrier)
@@ -259,7 +272,10 @@ class JoinBarrierCoordinator:
         # 不依赖偶然的 await 时序（与 spawn_skill 同一就绪保障）。
         await drv._await_root_cancel_ready()  # noqa: SLF001
         if eng._audit_state is not None:  # noqa: SLF001
-            self._rebuild_from_journal(take_detached(eng._audit_state))  # noqa: SLF001
+            detached = take_detached(eng._audit_state)
+            self._rebuild_from_journal(detached)
+            for spawn in detached.spawns:
+                await eng._load_thread_items(spawn.child_thread_id)
             await drv._check_barriers()  # noqa: SLF001
             return
         # 扫一遍 parent history,按 kind 分类处理三类锚
@@ -283,6 +299,7 @@ class JoinBarrierCoordinator:
                     handle_ids=tuple(item.payload["handle_ids"]),
                     then_skill_id=item.payload["then_skill_id"],
                     then_args_template=item.payload.get("then_args_template"),
+                    origin=self._barrier_origin(item),
                 )
                 drv._spawn_handles.barriers[barrier.barrier_id] = barrier  # noqa: SLF001
             elif item.kind == "join_barrier_fired":
@@ -293,6 +310,11 @@ class JoinBarrierCoordinator:
         # 已 fired 的因守卫集存在被 _check_barriers 跳过(幂等 no-op)。
         # 经 driver 转发器走:保持 monkeypatch 注入点单一。
         await drv._check_barriers()  # noqa: SLF001
+
+    def _barrier_origin(self, item: Any) -> InputOrigin | None:
+        """读取控制锚的来源快照；控制 metadata 不充当正文输入。"""
+        raw = item.metadata.get("barrier_origin")
+        return InputOrigin.model_validate(raw) if raw is not None else None
 
     def _rebuild_from_journal(self, detached: JournaledDetached) -> None:
         """审计模式:运行态由 Journal 的记录重建,不看对话项(ADR 0098 / 0099)。"""
@@ -312,7 +334,7 @@ class JoinBarrierCoordinator:
             drv._spawn_handles.barriers[known.barrier_id] = JoinBarrier(  # noqa: SLF001
                 barrier_id=known.barrier_id, handle_ids=known.handle_ids,
                 then_skill_id=known.then_skill_id,
-                then_args_template=known.then_args_template,
+                then_args_template=known.then_args_template, origin=known.origin,
             )
             if known.fired:
                 drv._fired_barriers.add(known.barrier_id)  # noqa: SLF001

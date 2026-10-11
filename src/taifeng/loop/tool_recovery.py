@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.conversation.models import ResponseItem, function_call
+from taifeng.conversation.origin import tag_origin, tool_output_origin
 from taifeng.loop.tool_batch import parse_tool_arguments
 from taifeng.suspend.reason import PendingRequest, SuspendReason
 from taifeng.suspend.record import SuspensionRecord
@@ -363,11 +364,16 @@ async def recover_dangling_tool_calls(
             plain_items.append(fc)
         if text is None:
             operator.append(_operator_pending(call, spec))
-        elif call.llm_sample_id is not None:
-            outputs_by_sample.setdefault(call.llm_sample_id, []).append(
-                _recovery_output(call, text, is_error))
         else:
-            plain_items.append(_recovery_output(call, text, is_error))
+            item = _recovery_output(call, text, is_error)
+            if disposition == "reconciled":
+                item = tag_origin(item, tool_output_origin(
+                    None, spec.output_trust if spec is not None else None, call.name,
+                ))
+            if call.llm_sample_id is not None:
+                outputs_by_sample.setdefault(call.llm_sample_id, []).append(item)
+            else:
+                plain_items.append(item)
     await _persist_recovery(store, plain_items, outputs_by_sample)
     if operator:
         record = SuspensionRecord(

@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
+from taifeng.conversation.origin import tag_origin, tool_output_origin
 from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.loop.event import EngineLog, EventMsg, SuspensionCancelled
 from taifeng.loop.rewind import derive_rewind_log
@@ -56,6 +57,7 @@ class SuspensionAccess:
         history 是恒等映射,调用方不必也不应再次 reconstruct。
         """
         raw = [it async for it in await self._engine._store.load_thread(thread_id)]
+        self._engine._taint_registry.observe(thread_id, raw)
         return reconstruct_logical_history(raw)
 
     async def cancel_active_suspension(
@@ -293,6 +295,11 @@ class SuspensionAccess:
         out = function_call_output(
             call_id=call_id, output=result.output,
             thread_id=self._engine._thread_id, is_error=result.is_error)
+        spec = self._engine._tool_runtime.spec_for(name)
+        out = tag_origin(out, tool_output_origin(
+            result.origin, spec.output_trust if spec is not None else None, name,
+        ))
+        self._engine._taint_registry.observe(out.thread_id, [out])
         async with self._engine._lock:
             self._engine._history.append(out)
         await self._engine._store.append(out)
@@ -377,6 +384,7 @@ class SuspensionAccess:
             reasoning_passback=self._engine._reasoning_passback,
             enable_request_capture=self._engine._enable_request_capture,
             history_buffer=list(self._engine._history),
+            taint_registry=self._engine._taint_registry,
             cache_anchor_index=self._engine._cache_anchor_index,
             token_calibration=self._engine._token_calibration,
             compaction_count=self._engine._compaction_count,

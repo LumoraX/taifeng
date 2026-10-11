@@ -42,8 +42,11 @@ def test_every_exported_name_resolves(module: object) -> None:
 
 
 def test_experimental_names_are_not_in_stable_layer() -> None:
-    """同一符号不能同时处在两层（晋升时从实验层移到顶层）。"""
-    assert not set(taifeng.experimental.__all__) & set(taifeng.__all__)
+    """仅 ADR 0130 具名兼容别名可以同时出现在两层。"""
+    compatible = {"InputOrigin", "InputTaint", "origin_of", "summarize_taint", "taint_from_extras"}
+    assert set(taifeng.experimental.__all__) & set(taifeng.__all__) == compatible
+    for name in compatible:
+        assert getattr(taifeng.experimental, name) is getattr(taifeng, name)
 
 
 def test_deprecated_alias_warns_and_resolves(monkeypatch: pytest.MonkeyPatch) -> None:

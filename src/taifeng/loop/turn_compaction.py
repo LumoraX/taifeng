@@ -60,7 +60,6 @@ class TurnCompaction:
         allow_head: bool = False,
     ) -> bool:
         """触发压缩判断。
-
         Args:
             phase: pre_turn / mid_turn / manual / overflow
             force: 跳过 budget 阈值预检（manual / overflow 路径为 True）
@@ -70,11 +69,12 @@ class TurnCompaction:
             allow_head: 把注入语义切到 BEFORE_LAST_USER_MESSAGE（允许动 anchor 之前的
                 head）。overflow 自愈第二档专用；pre_turn / manual 本就允许，mid_turn
                 不该传 True。
-
         Returns:
             本轮是否**应用**了压缩结果（history 已改写）。无压缩器 / 阈值未达 / hook
             拒绝 / 策略失败 / 完整性回滚均为 False——overflow 自愈据此决定是否进第二档。
         """
+        owner = self.__compaction_owner
+        owner.taint_registry.observe(owner.thread_id, owner.history_buffer)
         compressors = self.__compaction_owner.compressors
         if compressors is None or not compressors.strategies:
             return False

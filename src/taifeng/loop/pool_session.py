@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from taifeng.conversation.models import ResponseItem
     from taifeng.conversation.store import MessageStore
+    from taifeng.conversation.taint import ThreadTaintRegistry
     from taifeng.conversation.transcript import JsonlMessageStore
     from taifeng.loop.audit_config import AuditConfig
     from taifeng.loop.engine import AgentEngine
@@ -42,6 +43,7 @@ class PreparedPoolSession:
     initial_history: tuple[ResponseItem, ...]
     audit_state: AuditedSessionState | None
     recovered_tool_calls: tuple[RecoveredCall, ...] = ()
+    taint_registry: ThreadTaintRegistry | None = None
 
     @property
     def recovered_unknown_call_ids(self) -> tuple[str, ...]:
@@ -102,7 +104,7 @@ async def prepare_pool_session(
         )
         return PreparedPoolSession(
             resumed.state.thread_id, resumed.history, resumed.state,
-            resumed.recovered_tool_calls,
+            resumed.recovered_tool_calls, resumed.taint_registry,
         )
     if audit is not None:
         state = await bootstrap_audited_session(
@@ -199,6 +201,8 @@ async def create_started_pool_engine(
                 or pool._enable_auto_discovery  # noqa: SLF001
             ),
         )
+        if prepared.taint_registry is not None:
+            engine._taint_registry = prepared.taint_registry
         _bind_audited_finish_owner(pool, engine, state, session_id)
         engine._model_prewarmer = pool._model_prewarmer  # noqa: SLF001
         # 让 engine 能在收到 RefreshSnapshot 时拉最新快照。

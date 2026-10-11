@@ -180,12 +180,19 @@ def _of(envelopes: list[JournalEnvelope], record_type: str) -> list[JournalEnvel
     return [e for e in envelopes if e.record_type == record_type]
 
 
-async def _talk_until_compacted(run: _Run, compressors: list[Any]) -> list[Any]:
+async def _talk_until_compacted(
+    run: _Run, compressors: list[Any], *, peer_origin: taifeng.InputOrigin | None = None,
+) -> list[Any]:
     """跑四轮把 history 撑过硬阈值，第五轮采样前触发压缩；返回第五轮的事件。"""
     await run.start(
         [_say("回答一"), _say("回答二"), _say("回答三"), _say("回答四", _HEAVY), _say("回答五")],
         compressors,
     )
+    if peer_origin is not None:
+        await run.engine.deliver_peer_message(
+            target=run.engine.thread_id, text="外部报告", mode="queue_only",
+            from_thread_id=run.engine.thread_id, origin=peer_origin,
+        )
     for index in ("一", "二", "三", "四"):
         await run.ask(f"问题{index}")
     return await run.ask("问题五")
@@ -314,8 +321,10 @@ async def test_journal_verifies_after_compaction(tmp_path: Path) -> None:
 
 async def test_resume_rebuilds_the_folded_history(tmp_path: Path) -> None:
     run = _Run(tmp_path)
-    await _talk_until_compacted(run, [SlidingWindowStrategy(keep_tail=2)])
+    origin = taifeng.InputOrigin(kind="peer", trust="untrusted", label="external-report")
+    await _talk_until_compacted(run, [SlidingWindowStrategy(keep_tail=2)], peer_origin=origin)
     before = list(run.engine.history_snapshot())
+    before_taint = run.engine.introspect()["input_taint"]
     thread_id = await run.crash()
 
     resumed = _Run(tmp_path)
@@ -324,6 +333,7 @@ async def test_resume_rebuilds_the_folded_history(tmp_path: Path) -> None:
     )
 
     assert list(resumed.engine.history_snapshot()) == before
+    assert resumed.engine.introspect()["input_taint"] == before_taint
     await resumed.ask("问题六")
     sent = resumed.sim.ledger.requests()[-1].request
     assert any("已省略" in str(message.content) for message in sent.messages)

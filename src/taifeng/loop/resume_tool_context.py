@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from taifeng.conversation.origin import INPUT_TAINT_EXTRAS_KEY
 from taifeng.tool.spec import ToolContext
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ def resumed_tool_context(
         "request_metadata": engine._request_metadata,  # noqa: SLF001
         "turn_index": engine._turn_index,  # noqa: SLF001
         "script_executors": engine._script_executors,  # noqa: SLF001
+        INPUT_TAINT_EXTRAS_KEY: engine._taint_registry.snapshot(thread_id).to_dict(),
         "session_id": engine._session_id,  # noqa: SLF001
     }
     if submission_id is not None:

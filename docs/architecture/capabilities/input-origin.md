@@ -1,8 +1,8 @@
 # Capability: input-origin
 
-> 状态：Experimental。关联 ADR 0017（规则①/③）/ 0085。
+> 状态：Stable。关联 ADR 0017（规则①/③）/ 0085 / 0130。
 > 实现：`src/taifeng/conversation/origin.py`（数据契约与汇总）；接线见下文「打标点」。
-> 经 `taifeng.experimental` 导出 `InputOrigin` / `InputTaint` / `origin_of` / `summarize_taint` / `taint_from_extras`。
+> 经 `taifeng` 稳定导出，`taifeng.experimental` 保留兼容别名： `InputOrigin` / `InputTaint` / `origin_of` / `summarize_taint` / `taint_from_extras`。
 
 ## Purpose
 
@@ -42,8 +42,9 @@ label=<标签以逗号拼接，超过 128 字符截断>)`；没有不可信内�
 | 输入 | 标记来自 |
 | --- | --- |
 | `UserMessage` / `InjectUserInput` / `InjectSystemMessage` / `SendToPeer` | Op 的 `origin` 字段（业务声明；缺省 None = 不打标，Op 序列化形状不变） |
-| 工具结果 | `ToolSpec.output_trust`（缺省 None = 不打标）；声明后标记为 `{kind: "tool", trust, label: <工具名>}` |
-| `call_skill` 子 thread 的种子消息 | 父上下文汇总的 `derived_origin()` |
+| 工具结果 | `ToolResult.origin` 的单次声明与 `ToolSpec.output_trust` 合并；任一不可信声明不可降级。静态声明标签为工具名。`ToolResult.ok/error` 的额外关键字仍是 data；单次来源使用构造字段或 dataclasses.replace。 |
+| `call_skill` / detached spawn 的种子与返回 | 累计父来源派生种子；实际返回结果继承子 thread 累计来源 |
+| join / barrier | 返回结果与聚合种子继承对应成员来源；状态 JSON 正文不变 |
 | `send_message` 工具发出的 peer 消息 | 发送方上下文汇总的 `derived_origin()` |
 | 压缩产生的 `compacted` 条目 | 被折叠条目汇总的 `derived_origin()`；随条目落 transcript |
 
@@ -54,7 +55,8 @@ label=<标签以逗号拼接，超过 128 字符截断>)`；没有不可信内�
 ### Requirement: 向工具与 hook 透出汇总
 
 每次工具派发，`ToolContext.extras["input_taint"]` 与 `pre_tool_use` / `post_tool_use` hook 的
-`HookContext.extras["input_taint"]` SHALL 为当前 thread history 的 `summarize_taint(...).to_dict()`。
+`HookContext.extras["input_taint"]` SHALL 为当前 thread 已观察的不可信事实累计汇总。
+回滚、压缩、rewind 后仍保留；resume 直接重跑工具使用相同查询。
 `taint_from_extras(extras)` 把它还原为 `InputTaint`（键缺失视为干净；形状不合法抛 `ValueError`）。
 
 内核 SHALL NOT 依据汇总改变任何派发、权限或可见性裁决。
@@ -77,14 +79,14 @@ label=<标签以逗号拼接，超过 128 字符截断>)`；没有不可信内�
 
 strict Journal 的 `submission_accepted` 尚无来源标记字段。audit 会话收到带 `origin` 的 `UserMessage` 时 SHALL 以
 `InvalidAuditedSubmissionError` 拒绝并落 `submission_rejected`，SHALL NOT 丢掉标记后照常接受。不带标记的输入不受影响。
-其余带 `origin` 的 Op 本就在 audit 能力面之外。audit 路径的工具结果不打标。
+其余带 `origin` 的 Op 本就在 audit 能力面之外。audit 工具结果和子会话种子在既有自由 metadata 中落账，冷恢复从原始记录重建。
 
 ## R1–R5 影响
 
 - R1：标签不透明；是否拦截由业务 hook 决定。
 - R2：标记不进 prompt；不影响缓存前缀。
 - R3：汇总随每次工具派发透出；标记随条目落 transcript。
-- R4：汇总是对 history 的一次线性扫描。
+- R4：按条目 id 幂等观察，不保留正文；累计集合随已观察条目增长。
 - R5：标记在条目 metadata 里，冷加载后汇总结果不变。
 
 ## 显式边界
@@ -94,4 +96,24 @@ strict Journal 的 `submission_accepted` 尚无来源标记字段。audit 会话
 | 内核内置的拦截 / 降权策略 | 业务经 hook 或权限策略实现 |
 | 判断内容是否包含注入 | 内核不解析内容语义 |
 | 就地改写类压缩策略的标记传播 | 它们不删条目，条目上的标记原样保留 |
-| detached spawn 的种子消息 | 由业务经 `engine.spawn_skill` 发起时 `args` 来自业务；经 `spawn_skill` 工具发起的继承留待需要时补 |
+| 标记的真实性认证 | 来源声明由宿主提供；内核不验证渠道身份 |
+
+## 累计来源契约（ADR 0130）
+
+- 每个 thread 的累计输入汇总 SHALL 只增不减；rollback、rewind、压缩不能抹去已观察的不可信事实。
+  冷恢复先观察原始 append-only 记录，再重建逻辑 history。该状态不参与模型正文与缓存指纹。
+- `ToolResult.origin` 是可选的单次来源声明；未声明保持既有行为。单次不可信声明与静态不可信声明
+  均不能被可信声明覆盖。输出清洗保留该来源；内部产生的拒绝结果不冒充读取成功。
+- 子会话返回内容进入父会话时 SHALL 带派生来源；call_skill、spawn、peer 与 join/barrier 种子继承。
+  spawn 状态 JSON 中不加入来源，来源只放 ToolResult / 会话条目的 metadata。
+- `introspect()["input_taint"]` SHALL 返回 root thread 累计汇总；`item_count` 是去重后的历史条目数。
+  `summarize_taint(history)` 保持给定序列的当前条目计数语义。
+- audit 工具结果与派生种子使用既有自由 metadata 落账；strict audit 标记 UserMessage 继续明确拒绝。
+- 运行示例：`examples/input_origin/demo.py`（SimClient）；稳定导出保留 experimental 兼容别名。
+- `engine.spawn_skill(origin=...)` 可声明派生来源；来自会话的累计不可信声明不能被 trusted 降级。
+
+`source_thread_id` 缺省为 root；内核 spawn / await_skills 工具传实际调用者 thread。派生来源与该 thread
+累计来源合并，trusted 不能降级。barrier 冻结登记时的来源，点火合并实际成员的来源；legacy 控制锚的
+`barrier_origin` 是派生上下文快照，控制锚本身不作为父 thread 的正文输入计数。audit 登记记录没有
+自由 metadata，因此 `BarrierRegisteredV1` 增加可选 `origin`；未声明时编码省略，旧记录缺省为空。
+这是本次唯一的版本化 DTO 字段扩展，按 ADR 0025 保留 V1；旧 reader 拒绝包含该字段的新记录。

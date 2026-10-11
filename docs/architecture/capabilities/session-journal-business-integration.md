@@ -859,7 +859,7 @@ hook 与权限裁决按本契约落账，记在聚合 thread 名下。
 
 | record type | 何时 | 要点 |
 | --- | --- | --- |
-| `barrier_registered` | 登记 | `handle_ids`（按登记顺序，不得重复）、`then_skill_id`、`then_args_template`（没有为空） |
+| `barrier_registered` | 登记 | `handle_ids`（按登记顺序，不得重复）、`then_skill_id`、`then_args_template`（没有为空）、可选 `origin`（ADR 0130：创建者来源快照；无声明时省略，旧记录可读；旧 reader 拒绝带新字段的记录） |
 | `barrier_fired` | 成员全部结束之后 | `registered_record_id`、`then_thread_id`、`members`（各成员点火时的终态）、`arguments`（交给聚合 skill 的输入）、聚合 skill 定义与正文的摘要 |
 | `barrier_settled` | 聚合 turn 结束 | `fired_record_id`、`status`（`done` / `error` / `cancelled`）、`end_reason`、`result` |
 

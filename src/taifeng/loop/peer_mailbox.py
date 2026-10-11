@@ -127,10 +127,8 @@ class PeerMailbox:
         origin: InputOrigin | None = None,
     ) -> dict[str, Any]:
         """谱系内点对点投递（``send_message`` 工具与 ``SendToPeer`` Op 的唯一路径）。
-
         ``origin``：消息的来源标记。``SendToPeer`` 由业务声明；``send_message`` 工具传入
         发送方上下文的派生标记——不可信内容不能经转发变干净（ADR 0085）。
-
         分支（spec「双模式投递」）：
           - 目标运行中（live runner 在册）→ 投其 ``pending_input``（B1 steering
             同一队列，下迭代边界 drain 并入）；TriggerTurn 此时降级 QueueOnly，
@@ -175,6 +173,7 @@ class PeerMailbox:
                 delivered_via = "pending_input"
             else:
                 async with eng._lock:  # noqa: SLF001
+                    eng._taint_registry.observe(target_tid, [item])
                     eng._history.append(item)  # noqa: SLF001
                 await eng._store.append(item)  # noqa: SLF001
         else:
@@ -195,6 +194,7 @@ class PeerMailbox:
                 else:
                     # 空闲 / 挂起：即时落子 thread 历史（R5）
                     await eng._store.append(item)  # noqa: SLF001
+                    eng._taint_registry.observe(target_tid, [item])
                     if mode == "trigger_turn" and handle.status != "suspended":
                         # 空闲（终态）spawn child → 续跑范式唤醒；suspended 只落史。
                         woken = await self._wake_peer_turn(handle, submission_id)
@@ -309,6 +309,7 @@ class PeerMailbox:
         late = list(runner.pending_input)
         if late and state.coordinator.effect_gate_open:
             runner.pending_input.clear()
+            drv._engine._taint_registry.observe(child_thread_id, late)
             await deliver_peer_items(
                 state, late, submission_id=runner.submission_id,
                 turn_index=runner.turn_index)

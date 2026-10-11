@@ -600,7 +600,9 @@ async def rerun_awaited_calls(runner: Any, call_ids: list[str]) -> None:
         registry=runner.tool_runtime._registry,  # noqa: SLF001
         result_cap_bytes=tool_result_cap(runner.budget, runner.compressors),
     )
-    runner.history_buffer.extend(await convergence.converge(outcomes))
+    items = await convergence.converge(outcomes)
+    runner.history_buffer.extend(items)
+    runner.taint_registry.observe(runner.thread_id, items)
     if not convergence.awaited:
         return
     awaited: list[AwaitedCall] = list(convergence.awaited)

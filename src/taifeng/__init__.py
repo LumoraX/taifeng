@@ -8,6 +8,8 @@
 契约仍在演进的入口见 ``taifeng.experimental``；其余子模块符号属内部实现。
 """
 
+from __future__ import annotations
+
 __version__ = "2026.10.1.10"
 
 # 公共 API ——————————————————————————————————————
@@ -64,6 +66,13 @@ from taifeng.conversation import (
     rebuild_index,
     suspension_item,
     user_message,
+)
+from taifeng.conversation.origin import (
+    InputOrigin,
+    InputTaint,
+    origin_of,
+    summarize_taint,
+    taint_from_extras,
 )
 from taifeng.hooks import (
     HookContext,
@@ -273,6 +282,7 @@ from taifeng.tool.workspace import (
 )
 
 __all__ = [
+    "InputOrigin", "InputTaint", "origin_of", "summarize_taint", "taint_from_extras",
     "AgentEngine",
     "ApiMessage",
     "ApiRequest",

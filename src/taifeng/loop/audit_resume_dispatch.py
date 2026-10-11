@@ -45,6 +45,7 @@ from taifeng.conversation.journal.records import (
     StableErrorV1,
     ThreadTerminalV1,
 )
+from taifeng.conversation.origin import tool_output_origin
 from taifeng.loop.audit_resume_llm import abandoned_request_record, unsettled_llm_requests
 from taifeng.loop.audit_resume_scan import find_undispatched_calls
 from taifeng.loop.audit_resume_spawn import (
@@ -442,11 +443,14 @@ class _Planner:
         result: _ThreadResult,
     ) -> None:
         """落一个调用的结论记录与处置。"""
+        spec = self._registry.get(call.intent_payload.name)
+        origin = (tool_output_origin(None, spec.output_trust, call.intent_payload.name)
+                  if spec is not None and decision.disposition == "reconciled" else None)
         result.records.extend(recovery_records(
             call,
             decision,
             session_id=self._session_id,
-            recovery_operation_id=self._recovery_operation_id,
+            recovery_operation_id=self._recovery_operation_id, origin=origin,
         ))
         result.recovered.append(RecoveredCall(
             call.intent_payload.call_id, call.intent_payload.name, decision.disposition

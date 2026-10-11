@@ -208,7 +208,6 @@ class EngineGate:
         else:
             user_text = sub.text
             attachments = None
-
         # 挂起态守卫(suspend-review-fixes):根 thread 有活跃挂起 → 在落史**之前**
         # 显式拒绝新 UserMessage。挂起 = turn 停在待裁决,裁决(Resume retry/abort)
         # 是继续会话的唯一出口;放行会让新 turn 的同名编排 call_id fco 污染
@@ -250,6 +249,7 @@ class EngineGate:
                 model_capabilities=model_capabilities(self._engine._model_client),
             )
             async with self._engine._lock:
+                self._engine._taint_registry.observe(item.thread_id, [item])
                 self._engine._history.append(item)
             await self._engine._store.append(item)
 
@@ -444,6 +444,7 @@ class EngineGate:
         )
         item = record.to_item()
         async with self._engine._lock:
+            self._engine._taint_registry.observe(item.thread_id, [item])
             self._engine._history.append(item)
         await self._engine._store.append(item)
         await self._engine._emit(EventMsg(submission_id=submission_id, msg=TurnSuspended(

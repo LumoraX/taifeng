@@ -202,6 +202,7 @@ async def _apply_rewind(
         if isinstance(planned, str):
             return planned
         plan, kept = planned
+        engine._taint_registry.observe(engine._thread_id, engine._history)
         engine._history = kept
         if engine._cache_anchor_index >= plan.first_changed_index:
             engine._cache_anchor_index = plan.first_changed_index - 1
@@ -341,6 +342,7 @@ async def handle_rollback(engine: AgentEngine, submission_id: str, num_turns: in
     if num_turns < 1:
         return
     async with engine._lock:
+        engine._taint_registry.observe(engine._thread_id, engine._history)
         new_history = list(engine._history)
         removed = 0
         user_count = 0

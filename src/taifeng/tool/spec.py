@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from taifeng.llm.types import ToolSpecRef
 
 if TYPE_CHECKING:
+    from taifeng.conversation.origin import InputOrigin
     from taifeng.llm.image_input import ImageAttachmentV1
     from taifeng.loop.cancellation import CancellationToken
 
@@ -41,6 +42,9 @@ class ToolResult:
     union —— 全仓数十处 ``result.output`` 的 str 消费者（doom-loop 记账、
     denial breaker、审计 ``ToolOutcomeCommittedV1``、编排回填）因此一行不用改。
     """
+
+    origin: InputOrigin | None = None
+    """本次调用结果的来源声明；静态不可信声明不能被降级。"""
 
     @classmethod
     def ok(

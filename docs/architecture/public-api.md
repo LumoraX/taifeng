@@ -25,7 +25,7 @@ Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools
 `ReplayReport` / `ReplayStep`）、工具崩溃对账回查结果（`ReconcileVerdict`）、skill 战绩聚合（`SkillFitnessStore`、`SkillFitnessCatalog`、`SkillFitnessLedger`、`SkillFitness`、
 `SkillFitnessRecorder`、`InMemorySkillFitnessStore`）、按战绩算分与影子评估（`FitnessScorer`、`WilsonFitnessScorer`、
 `SkillFitnessScore`、`WorkingSetPolicy`、`WorkingSetPlan`、`plan_working_set`、`SkillFitnessShadow`、
-`ShadowEvaluation`、`ShadowObserver`）、工作集生效与来源信任分层（`SkillWorkingSet`、`WorkingSetView`、`WorkingSetChange`、`TierRule`、`SkillTrustPolicy`、`SourceTrustPolicy`）、上下文引擎（`ContextEngine`、`AssembleRequest`、`AssembledContext`、`TurnUpdate`、`ContextEngineError`、`TailWindowContextEngine`）、预热（`Prewarm`、`ModelPrewarmer`、`PrewarmOutcome`、`CachePrimingPrewarmer`）、白名单外 skill 授权（`SkillAuthorizationPolicy`、`SkillAuthorizationRequest`、`SkillAuthorizationDecision`、`CallbackSkillAuthorization`、`PermissionSkillAuthorization`）、按选择置信度分流（`SkillSelectionGate`、`SelectionConfidencePolicy`、`ThresholdSelectionPolicy`、`SelectionCandidate`、`RoutedCandidate`、`TrialJudge`、`TrialVerdict`、`VerifierTrialJudge`）、输入来源标记（`InputOrigin`、`InputTaint`、`origin_of`、`summarize_taint`、`taint_from_extras`）、可声明的失败恢复配方（`RecoveryRecipeBook`、`RecipeDeclaringPolicy`、`RecoveryRecipeProvider`）、后台延迟压缩（`BackgroundCompactionStrategy`）、多模态重载荷驱逐（`MultimodalEvictionStrategy`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
+`ShadowEvaluation`、`ShadowObserver`）、工作集生效与来源信任分层（`SkillWorkingSet`、`WorkingSetView`、`WorkingSetChange`、`TierRule`、`SkillTrustPolicy`、`SourceTrustPolicy`）、上下文引擎（`ContextEngine`、`AssembleRequest`、`AssembledContext`、`TurnUpdate`、`ContextEngineError`、`TailWindowContextEngine`）、预热（`Prewarm`、`ModelPrewarmer`、`PrewarmOutcome`、`CachePrimingPrewarmer`）、白名单外 skill 授权（`SkillAuthorizationPolicy`、`SkillAuthorizationRequest`、`SkillAuthorizationDecision`、`CallbackSkillAuthorization`、`PermissionSkillAuthorization`）、按选择置信度分流（`SkillSelectionGate`、`SelectionConfidencePolicy`、`ThresholdSelectionPolicy`、`SelectionCandidate`、`RoutedCandidate`、`TrialJudge`、`TrialVerdict`、`VerifierTrialJudge`）、可声明的失败恢复配方（`RecoveryRecipeBook`、`RecipeDeclaringPolicy`、`RecoveryRecipeProvider`）、后台延迟压缩（`BackgroundCompactionStrategy`）、多模态重载荷驱逐（`MultimodalEvictionStrategy`）、用户文件输入（`FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
 
 ## 稳定层里有什么
 
@@ -73,3 +73,5 @@ Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools
 4. 每次弃用 / 移除在对应 ADR 或发布说明中记录。
 
 `tests/test_public_api.py` 守护：快照一致、两层导出都可解析、实验层与稳定层不重叠、弃用别名告警且指向真实对象。
+
+输入来源类型与查询 helper（`InputOrigin`、`InputTaint`、`origin_of`、`summarize_taint`、`taint_from_extras`）为稳定根入口（ADR 0130），experimental 保留兼容别名。累计来源通过 `AgentEngine.introspect()["input_taint"]` 查询。

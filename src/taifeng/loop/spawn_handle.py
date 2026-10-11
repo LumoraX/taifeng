@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from taifeng.conversation.origin import InputOrigin
 
 SpawnStatus = Literal["running", "suspended", "done", "error", "cancelled"]
 _TERMINAL: frozenset[str] = frozenset({"done", "error", "cancelled"})
@@ -55,6 +58,7 @@ class JoinBarrier:
     handle_ids: tuple[str, ...]
     then_skill_id: str
     then_args_template: dict[str, Any] | None = None
+    origin: InputOrigin | None = None
 
 
 @dataclass

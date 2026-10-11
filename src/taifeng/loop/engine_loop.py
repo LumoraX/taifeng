@@ -106,6 +106,7 @@ async def run(self: AgentEngine, cancel: CancellationToken) -> None:
                     # buffer + store；否则 engine 直写会被 turn 结束的回写覆盖。
                     active.pending_input.append(item)
                 else:
+                    self._taint_registry.observe(self._thread_id, [item])
                     self._history.append(item)
                     await self._store.append(item)
                 continue
@@ -147,6 +148,7 @@ async def run(self: AgentEngine, cancel: CancellationToken) -> None:
                     delivered = True
                 else:
                     # 无活跃 turn：engine 落历史 + 持久化，不创建 TurnRunner
+                    self._taint_registry.observe(self._thread_id, [item])
                     self._history.append(item)
                     await self._store.append(item)
                     delivered = False
@@ -421,6 +423,7 @@ async def _apply_accepted_item(self: AgentEngine,
     if cancellation is not None:
         raise cancellation
     async with self._lock:
+        self._taint_registry.observe(self._thread_id, [item])
         self._history.append(item)
     try:
         result = await state.projector.project((envelope,), ack)

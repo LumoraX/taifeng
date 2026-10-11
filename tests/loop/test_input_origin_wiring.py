@@ -389,3 +389,283 @@ def test_builtin_external_tools_declare_untrusted_output() -> None:
     assert http.output_trust == "untrusted"
     # 本地文件读取不预设：内容可信与否取决于部署，由业务声明
     assert make_file_read_tool(root_dir=".").output_trust is None
+
+
+async def test_rollback_keeps_taint_in_query_and_future_tools(tmp_path: Path) -> None:
+    """回滚清掉正文后，查询和下一轮工具仍看到历史不可信事实。"""
+    from taifeng.loop.engine_ops import handle_rollback
+
+    probe = _Probe()
+    client = SimClient(turns=[SimTurn(text="first"),
+                             SimTurn(tool_calls=[_call("a2", "act")]), SimTurn(text="done")])
+    pool, engine = await _pool(tmp_path, client, probe)
+    try:
+        await _turn(engine, taifeng.UserMessage(text="external", origin=_MAIL))
+        await handle_rollback(engine, "rollback-test", 1)
+        assert engine.history_snapshot() == []
+        assert engine.introspect()["input_taint"]["untrusted"]
+        await _turn(engine, taifeng.UserMessage(text="next"))
+        assert probe.seen[0]["untrusted"]
+        assert probe.seen[0]["labels"] == ["email"]
+    finally:
+        await pool.close()
+
+
+async def test_cold_rebuild_keeps_origin_removed_by_rollback(tmp_path: Path) -> None:
+    """从原始转录冷重建来源事实，不只检查逻辑 history。"""
+    from taifeng.loop.engine_ops import handle_rollback
+
+    probe = _Probe()
+    pool, engine = await _pool(tmp_path, SimClient(turns=[SimTurn(text="done")]), probe)
+    try:
+        await _turn(engine, taifeng.UserMessage(text="external", origin=_MAIL))
+        await handle_rollback(engine, "rollback-test", 1)
+        raw = [item async for item in await pool.store.load_thread(engine.thread_id)]
+        from taifeng.loop.engine import AgentEngine
+
+        cold = AgentEngine(entry_skill=engine._entry_skill, skill_snapshot=engine._snapshot,
+                           model_client=engine._model_client, tool_runtime=engine._tool_runtime,
+                           store=pool.store, thread_id=engine.thread_id, initial_history=raw)
+        assert cold.history_snapshot() == []
+        assert cold.introspect()["input_taint"]["untrusted"]
+    finally:
+        await pool.close()
+
+
+async def test_per_call_origin_marks_only_successful_external_reads(tmp_path: Path) -> None:
+    """工具未预设可信度，只有读成功的那次结果声明来源。"""
+    class PerCallProbe(_Probe):
+        """单次结果提供来源。"""
+
+        def tools(self) -> list[ToolSpec]:
+            """先失败再成功，探针检查两次事实差异。"""
+            async def fetch(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+                """读取失败不产生外部正文，成功才声明来源。"""
+                if ctx.call_id == "f1":
+                    return ToolResult.error("read failed")
+                return ToolResult(output="external", origin=InputOrigin(
+                    kind="tool", trust="untrusted", label="per-call"))
+
+            original = super().tools()
+            return [ToolSpec(name="fetch", description="read", input_schema={"type": "object"},
+                             handler=fetch), original[1]]
+
+    probe = PerCallProbe()
+    client = SimClient(turns=[SimTurn(tool_calls=[_call("f1", "fetch")]),
+                             SimTurn(tool_calls=[_call("a1", "act")]),
+                             SimTurn(tool_calls=[_call("f2", "fetch")]),
+                             SimTurn(tool_calls=[_call("a2", "act")]), SimTurn(text="done")])
+    pool, engine = await _pool(tmp_path, client, probe)
+    try:
+        await _turn(engine, taifeng.UserMessage(text="go"))
+        assert not probe.seen[0]["untrusted"]
+        assert probe.seen[1]["untrusted"]
+        assert probe.seen[1]["labels"] == ["per-call"]
+    finally:
+        await pool.close()
+
+
+def test_input_origin_is_exported_from_stable_api() -> None:
+    """稳定接口的 ToolResult.origin 所需类型有稳定出口。"""
+    assert taifeng.InputOrigin is InputOrigin
+    assert "InputTaint" in taifeng.__all__
+    assert "taint_from_extras" in taifeng.__all__
+
+
+async def test_child_external_read_marks_the_parent_result(tmp_path: Path) -> None:
+    """父会话原本干净，子会话读取外部内容后返回也应保留来源。"""
+    from taifeng.llm.providers.sim import RoutingSimClient
+
+    probe = _Probe()
+    _skills(tmp_path)
+    child = tmp_path / "skills" / "clerk" / "SKILL.md"
+    child.write_text(_CHILD.replace("tool_names: [act]", "tool_names: [fetch]"))
+    client = RoutingSimClient(routes={
+        "DESK_MARK": [SimTurn(tool_calls=[_call("s1", "call_skill",
+            json.dumps({"skill_id": "clerk", "reason": "读取"}))]),
+            SimTurn(tool_calls=[_call("a1", "act")]), SimTurn(text="好了")],
+        "CLERK_MARK": [SimTurn(tool_calls=[_call("f1", "fetch")]), SimTurn(text="摘要")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=tmp_path / "skills", threads_dir=tmp_path / "threads",
+        model_client=client, extra_tools=probe.tools(), compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s", entry_skill_id="desk")
+    await _turn(engine, taifeng.UserMessage(text="处理"))
+    assert probe.seen[-1]["untrusted"] is True
+    assert probe.seen[-1]["labels"] == ["fetch"]
+    await pool.close()
+
+
+async def test_idle_injection_is_immediately_visible_in_query(tmp_path: Path) -> None:
+    """输入已正式落史后，查询无需等待下一轮采样。"""
+    probe = _Probe()
+    pool, engine = await _pool(tmp_path, SimClient(turns=[]), probe)
+    await engine.submit(InjectUserInput(submission_id="ended", text="外部", origin=_MAIL))
+    await wait_for_condition(lambda: bool(engine.history_snapshot()), message="注入未落史")
+    assert engine.introspect()["input_taint"]["untrusted"] is True
+    assert engine.introspect()["input_taint"]["item_count"] == 1
+    await pool.close()
+
+
+async def test_wait_results_inherit_only_returned_handles() -> None:
+    """等待一个或任一子会话时，未返回的兄弟不会污染结果。"""
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.tool.builtins.wait_peer import make_wait_any_tool, make_wait_peer_tool
+
+    class Coordinator:
+        """仅返回已完成的子结果。"""
+
+        async def wait_spawn_terminal(self, **kwargs: Any) -> dict[str, Any]:
+            """返回单个完成结果。"""
+            return {"outcome": "settled", "status": "done", "result": "摘要"}
+
+        async def wait_spawn_any(self, **kwargs: Any) -> dict[str, Any]:
+            """返回已完成的 clean，保留未完成的 dirty。"""
+            return {"outcome": "settled", "settled": {"clean": {
+                "status": "done", "result": "摘要"}}, "pending": ["dirty"]}
+
+    queried: list[list[str]] = []
+
+    def origin_query(handles: list[str]) -> InputOrigin | None:
+        """记录实际查询的结果句柄。"""
+        queried.append(handles)
+        return _MAIL if "dirty" in handles else None
+
+    ctx = ToolContext(call_id="wait", cancel=CancellationToken(), thread_id="root",
+                      extras={"spawn_coordinator": Coordinator(),
+                              "spawn_result_origin": origin_query})
+    peer = await make_wait_peer_tool().handler({"handle_id": "dirty", "timeout_seconds": 1}, ctx)
+    any_result = await make_wait_any_tool().handler(
+        {"handle_ids": ["clean", "dirty"], "timeout_seconds": 1}, ctx)
+    assert peer.origin == _MAIL
+    assert any_result.origin is None
+    assert queried == [["dirty"], ["clean"]]
+
+
+async def test_detached_result_marks_parent_only_when_joined(tmp_path: Path) -> None:
+    """子会话单独读外部内容，只有返回父会话后才传播来源。"""
+    from taifeng.llm.providers.sim import RoutingSimClient
+    from taifeng.loop.cancellation import CancellationToken
+    from taifeng.tool.builtins.spawn_skill import make_join_skill_tool
+
+    probe = _Probe()
+    _skills(tmp_path)
+    entry = tmp_path / "skills" / "desk" / "SKILL.md"
+    entry.write_text(_ENTRY.replace("tool_names: [fetch, act]", "tool_names: [join_skill, act]"))
+    child = tmp_path / "skills" / "clerk" / "SKILL.md"
+    child.write_text(_CHILD.replace("tool_names: [act]", "tool_names: [fetch]"))
+    client = RoutingSimClient(routes={
+        "DESK_MARK": [SimTurn(tool_calls=[_call("j1", "join_skill", '{"handle_ids":["child"]}')]),
+                      SimTurn(tool_calls=[_call("a1", "act")]), SimTurn(text="完成")],
+        "CLERK_MARK": [SimTurn(tool_calls=[_call("f1", "fetch")]), SimTurn(text="摘要")],
+    })
+    pool = await taifeng.EnginePool.create(
+        skills_dir=tmp_path / "skills", threads_dir=tmp_path / "threads", model_client=client,
+        extra_tools=[*probe.tools(), make_join_skill_tool()], compressors=[],
+    )
+    engine = await pool.get_or_create(session_id="s", entry_skill_id="desk")
+    await engine.spawn_skill(skill_id="clerk", args={}, reason="读取", handle_id="child")
+    await engine.wait_spawn_terminal(handle_id="child", timeout_seconds=GUARD_TIMEOUT_SECONDS,
+                                     cancel=CancellationToken())
+    assert engine.introspect()["input_taint"]["untrusted"] is False
+    await _turn(engine, taifeng.UserMessage(text="汇总"))
+    assert probe.seen[-1]["untrusted"] is True
+    assert probe.seen[-1]["labels"] == ["fetch"]
+    assert set(engine.spawn_status(["child"])["child"]) == {"status", "result"}
+    await pool.close()
+
+
+async def test_detached_seed_inherits_explicit_source(tmp_path: Path) -> None:
+    """宿主派生出的子会话种子可声明来源，不把来源写进模型正文。"""
+    from taifeng.llm.providers.sim import RoutingSimClient
+    from taifeng.loop.cancellation import CancellationToken
+
+    probe = _Probe()
+    client = RoutingSimClient(routes={"DESK_MARK": [], "CLERK_MARK": [
+        SimTurn(tool_calls=[_call("a1", "act")]), SimTurn(text="完成")]})
+    pool, engine = await _pool(tmp_path, client, probe)
+    opened = await engine.spawn_skill(skill_id="clerk", args={}, reason="派生", origin=_MAIL)
+    await engine.wait_spawn_terminal(handle_id=opened["handle_id"],
+        timeout_seconds=GUARD_TIMEOUT_SECONDS, cancel=CancellationToken())
+    assert probe.seen[-1]["untrusted"] is True
+    assert probe.seen[-1]["labels"] == ["email"]
+    assert engine.introspect()["input_taint"]["untrusted"] is False
+    await pool.close()
+
+
+async def test_clean_spawn_caller_does_not_inherit_later_root_origin(tmp_path: Path) -> None:
+    """子会话已有干净上下文时，根会话随后收到的外部输入与它无关。"""
+    from taifeng.llm.providers.sim import RoutingSimClient
+    from taifeng.loop.cancellation import CancellationToken
+
+    probe = _Probe()
+    client = RoutingSimClient(routes={"DESK_MARK": [], "CLERK_MARK": [
+        SimTurn(tool_calls=[_call("a1", "act")]), SimTurn(text="完成"),
+        SimTurn(tool_calls=[_call("a2", "act")]), SimTurn(text="完成"),
+        SimTurn(tool_calls=[_call("a3", "act")]), SimTurn(text="完成")]})
+    pool, engine = await _pool(tmp_path, client, probe)
+    first = await engine.spawn_skill(skill_id="clerk", args={}, reason="干净子会话")
+    await engine.wait_spawn_terminal(handle_id=first["handle_id"],
+        timeout_seconds=GUARD_TIMEOUT_SECONDS, cancel=CancellationToken())
+    await engine.submit(InjectUserInput(submission_id="ended", text="外部", origin=_MAIL))
+    await wait_for_condition(lambda: bool(engine.history_snapshot()), message="注入未落史")
+    second = await engine.spawn_skill(skill_id="clerk", args={}, reason="由子会话派生",
+                                     source_thread_id=first["child_thread_id"])
+    await engine.wait_spawn_terminal(handle_id=second["handle_id"],
+        timeout_seconds=GUARD_TIMEOUT_SECONDS, cancel=CancellationToken())
+    assert probe.seen[-1] == _CLEAN
+    trusted = InputOrigin(kind="host", trust="trusted", label="caller")
+    third = await engine.spawn_skill(skill_id="clerk", args={}, reason="由根派生", origin=trusted)
+    await engine.wait_spawn_terminal(handle_id=third["handle_id"],
+        timeout_seconds=GUARD_TIMEOUT_SECONDS, cancel=CancellationToken())
+    assert probe.seen[-1]["untrusted"] is True
+    assert probe.seen[-1]["labels"] == ["email"]
+    await pool.close()
+
+
+async def test_child_barrier_uses_creation_source_not_later_root(tmp_path: Path) -> None:
+    """聚合种子继承创建者和实际成员，根会话的无关来源不传入。"""
+    from taifeng.llm.providers.sim import RoutingSimClient
+    from taifeng.loop.cancellation import CancellationToken
+
+    probe = _Probe()
+    client = RoutingSimClient(routes={"DESK_MARK": [], "CLERK_MARK": [
+        SimTurn(text="干净成员"), SimTurn(tool_calls=[_call("a1", "act")]), SimTurn(text="聚合")]})
+    pool, engine = await _pool(tmp_path, client, probe)
+    child = await engine.spawn_skill(skill_id="clerk", args={}, reason="成员")
+    await engine.wait_spawn_terminal(handle_id=child["handle_id"],
+        timeout_seconds=GUARD_TIMEOUT_SECONDS, cancel=CancellationToken())
+    await engine.submit(InjectUserInput(submission_id="ended", text="外部", origin=_MAIL))
+    await wait_for_condition(lambda: bool(engine.history_snapshot()), message="注入未落史")
+    await engine.set_join_barrier([child["handle_id"]], "clerk",
+                                 source_thread_id=child["child_thread_id"])
+    await wait_for_condition(lambda: bool(probe.seen), message="聚合未执行")
+    assert probe.seen == [_CLEAN]
+    await pool.close()
+
+
+async def test_pending_input_is_visible_while_next_sample_is_blocked(tmp_path: Path) -> None:
+    """来源已进入 runner 历史后，查询不必等下一次工具或 turn 终态。"""
+    probe = _Probe()
+    client = SimClient(turns=[
+        SimTurn(tool_calls=[_call("a1", "act")], await_signal="first"),
+        SimTurn(text="完成", await_signal="second"),
+    ])
+    pool, engine = await _pool(tmp_path, client, probe)
+    try:
+        submission = await engine.submit(taifeng.UserMessage(text="干净"))
+        await wait_for_condition(lambda: len(client.ledger.requests()) == 1,
+                                 message="第一轮未开始")
+        await engine.submit(InjectUserInput(submission_id=submission, text="外部", origin=_MAIL))
+        await wait_for_condition(lambda: bool(engine._pending[submission].pending_input),
+                                 message="输入未排队")
+        client.coordinator.signal("first")
+        await wait_for_condition(lambda: len(client.ledger.requests()) == 2,
+                                 message="第二轮未开始")
+        assert engine.introspect()["input_taint"]["untrusted"] is True
+        assert engine.introspect()["input_taint"]["labels"] == ["email"]
+    finally:
+        client.coordinator.signal("first")
+        client.coordinator.signal("second")
+        await pool.close()

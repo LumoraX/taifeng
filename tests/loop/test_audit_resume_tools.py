@@ -182,9 +182,14 @@ async def test_resume_reconcile_completed_records_verdict_and_continues(
         seen.append((arguments, call_id))
         return ReconcileVerdict(status="completed", output="k1 已写入 rev=7")
 
+    from dataclasses import replace
+
+    from taifeng.conversation.origin import origin_of
+
     pool, sim, engine = await _resume(
         tmp_path,
-        _tool(effect_kind="reconcilable", reconciliation="query", reconcile=reconcile),
+        replace(_tool(effect_kind="reconcilable", reconciliation="query", reconcile=reconcile),
+                output_trust="untrusted"),
         turns=[SimTurn(text="已确认写入")],
     )
 
@@ -192,6 +197,8 @@ async def test_resume_reconcile_completed_records_verdict_and_continues(
     output = _last_output(engine)
     assert output.payload == {"call_id": "call-1", "output": "k1 已写入 rev=7", "is_error": False}
     assert output.metadata["recovered"] is True
+    assert origin_of(output).trust == "untrusted"
+    assert engine.introspect()["input_taint"]["untrusted"] is True
     assert await run_until_root_done_kind(engine, taifeng.UserMessage(text="继续")) == (
         "turn_completed"
     )

@@ -49,6 +49,7 @@ from taifeng.conversation.journal.spawn_records import (
     SpawnStartedV1,
 )
 from taifeng.conversation.models import user_message
+from taifeng.conversation.origin import InputOrigin, tag_origin
 from taifeng.loop.audit_bootstrap import AuditedSessionState
 from taifeng.loop.audit_skill import _stable_definition
 from taifeng.loop.spawn import SpawnRejectedError
@@ -97,6 +98,7 @@ class JournaledBarrier:
     then_skill_id: str
     then_args_template: dict[str, Any] | None
     fired: bool
+    origin: InputOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +147,7 @@ async def _open_thread(
     arguments: dict[str, Any],
     extra: dict[str, str],
     lead: Callable[[JournalRecordFactory], JournalRecord],
+    origin: InputOrigin | None = None,
 ) -> SpawnOpening:
     """起一个新 thread：领头记录 + 创建 + 绑定 + 种子，一个原子批次；ack 后推进投影。
 
@@ -183,7 +186,8 @@ async def _open_thread(
         thread_id=thread_id,
         causation_id=created.record_id,
     )
-    seed = user_message(json.dumps(arguments, ensure_ascii=False), thread_id=thread_id)
+    seed = tag_origin(user_message(json.dumps(arguments, ensure_ascii=False),
+                                   thread_id=thread_id), origin)
     seed_record = conversation_item_record(
         factory,
         operation_id=operation_id,
@@ -258,6 +262,7 @@ async def open_audited_spawn(
     arguments: dict[str, Any],
     reason: str,
     deadline_seconds: float | None,
+    origin: InputOrigin | None = None,
 ) -> SpawnOpening:
     """发起落账：记录 ack 之后子 skill 才可以开始运行。
 
@@ -293,7 +298,7 @@ async def open_audited_spawn(
     return await _open_thread(
         state, operation_id=handle_id, thread_id=child_thread_id,
         source=f"spawn:{handle_id}", target=target, arguments=arguments,
-        extra={"spawn_handle_id": handle_id}, lead=lead,
+        extra={"spawn_handle_id": handle_id}, lead=lead, origin=origin,
     )
 
 
@@ -401,18 +406,19 @@ async def register_audited_barrier(state: AuditedSessionState, barrier: JoinBarr
     if barrier.then_args_template is not None and not _canonical(barrier.then_args_template):
         raise ValueError(f"then_args_not_canonical: {barrier.barrier_id}")
     factory = _factory(state.coordinator.session_id, state.thread_id, barrier.barrier_id)
-    await state.coordinator.append(factory.build(
+    registered = factory.build(
         operation_id=barrier.barrier_id,
         record_type=BARRIER_REGISTERED_RECORD_TYPE,
         payload=BarrierRegisteredV1(
             barrier_id=barrier.barrier_id,
             handle_ids=barrier.handle_ids,
             then_skill_id=barrier.then_skill_id,
-            then_args_template=barrier.then_args_template,
+            then_args_template=barrier.then_args_template, origin=barrier.origin,
         ),
         submission_id=barrier.barrier_id,
         thread_id=state.thread_id,
-    ))
+    )
+    await state.coordinator.append(registered)
 
 
 async def open_audited_barrier(
@@ -422,6 +428,7 @@ async def open_audited_barrier(
     target: SkillDefinition,
     arguments: dict[str, Any],
     members: Sequence[tuple[str, str]],
+    origin: InputOrigin | None = None,
 ) -> SpawnOpening:
     """点火落账：记录 ack 之后聚合 turn 才可以开始运行。
 
@@ -457,7 +464,7 @@ async def open_audited_barrier(
     return await _open_thread(
         state, operation_id=barrier_id, thread_id=then_thread_id,
         source=f"join_barrier:{barrier_id}", target=target, arguments=arguments,
-        extra={"barrier_id": barrier_id}, lead=lead,
+        extra={"barrier_id": barrier_id}, lead=lead, origin=origin,
     )
 
 
@@ -579,7 +586,7 @@ def barriers_from_journal(
                 dict(payload.then_args_template)
                 if payload.then_args_template is not None else None
             ),
-            fired=payload.barrier_id in fired,
+            fired=payload.barrier_id in fired, origin=payload.origin,
         ))
     return tuple(barriers)
 

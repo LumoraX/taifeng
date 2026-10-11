@@ -13,16 +13,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.context.cache_stats import PromptCacheStats
-from taifeng.llm.errors import (
-    LLMError,
-    classify_failure,
-)
+from taifeng.conversation.taint import ThreadTaintRegistry
+from taifeng.llm.errors import LLMError, classify_failure
 from taifeng.llm.file_input import DISABLED_FILE_POLICY, FileInputPolicy
-from taifeng.llm.image_input import (
-    DISABLED_IMAGE_POLICY,
-    ImageInputPolicy,
-    InputCostEstimator,
-)
+from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, ImageInputPolicy, InputCostEstimator
 from taifeng.llm.types import TokenUsage
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
@@ -210,6 +204,7 @@ class TurnRunner:
     total_usage: TokenUsage = field(default_factory=TokenUsage)
     # 最后一次采样的 provider 原生终止原因（llm-provider-native 契约，不跨家归一）
     last_stop_reason: str | None = field(default=None)
+    taint_registry: ThreadTaintRegistry = field(default_factory=ThreadTaintRegistry)
     history_buffer: list[ResponseItem] = field(default_factory=list)
     """In-memory 视图，与 store 同步追加。"""
     # budget-awareness（ADR 0017 规则②）：是否已对当前「超 soft episode」注过预算提示。
@@ -426,7 +421,6 @@ class TurnRunner:
                 }
             )
         )
-
         # 确保栈底是 entry skill
         if not self.call_stack.frames:
             self.call_stack = self.call_stack.push(
@@ -606,6 +600,7 @@ class TurnRunner:
         # 事件之前落 buffer + store（R5 不丢），事件 delivered:false + reason=turn_ended，
         # 让停在终态的订阅者也能看到。正常路径上方已 drain 完、这里见空即返回。
         await self._drain_pending_input(residual=True)
+        self.taint_registry.observe(self.thread_id, self.history_buffer)
 
         # K3 writeback（dirty-page）：把本 turn 新增 items 异步写回长期存储。
         await self._writeback_memory(self.history_buffer[writeback_baseline:])

@@ -171,6 +171,7 @@ def introspect(self: AgentEngine) -> dict[str, Any]:
     """
     return {
         "thread_id": self._thread_id,
+        "input_taint": self._taint_registry.snapshot(self._thread_id).to_dict(),
         "entry_skill_id": self._entry_skill.id,
         "running": self._running,
         # 在飞 turn（_PendingTurn 的 submission_id 列表）——保留向后兼容的纯 ID 视图

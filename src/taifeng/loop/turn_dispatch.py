@@ -56,7 +56,6 @@ class TurnDispatch:
         mode = self.__dispatch_owner.dispatch_policy.subagent_approval_mode
         if mode != "inherit" and self.__dispatch_owner.permission_policy is not None:
             from taifeng.skill.dispatch import _SubagentAutoDecisionPolicy
-
             sub_permission_policy = _SubagentAutoDecisionPolicy(
                 inner=self.__dispatch_owner.permission_policy,
                 fallback="deny" if mode == "auto_deny" else "allow",
@@ -70,7 +69,6 @@ class TurnDispatch:
                     }
                 )
             )
-
         # 子 turn：把 sub_args 序列化为 user_message 作为种子输入。
         # audit：child thread/seed 走 Journal 原子 started 批（thread_created/bound/
         # child-seed）+ child projection；child_state 让子 turn 递归走同一审计路径。
@@ -82,6 +80,9 @@ class TurnDispatch:
                 target=target,
                 arguments=arguments,
                 call_stack_path=tuple(parent_stack.path()),
+                origin=self.__dispatch_owner.taint_registry.observe(
+                    self.__dispatch_owner.thread_id, self.__dispatch_owner.history_buffer,
+                ).derived_origin(),
             )
             sub_thread_id = child_ctx.child_thread_id
             seed = child_ctx.seed_item
@@ -98,7 +99,7 @@ class TurnDispatch:
                 },
             )
             from taifeng.conversation.models import user_message
-            from taifeng.conversation.origin import summarize_taint, tag_origin
+            from taifeng.conversation.origin import tag_origin
             # 种子由模型在父上下文里写成：父上下文有不可信内容时种子带派生标记，
             # 不可信内容不能经子 skill 变干净（input-origin，ADR 0085）
             seed = tag_origin(
@@ -106,14 +107,14 @@ class TurnDispatch:
                     json.dumps(arguments, ensure_ascii=False),
                     thread_id=sub_thread_id,
                 ),
-                summarize_taint(self.__dispatch_owner.history_buffer).derived_origin(),
+                self.__dispatch_owner.taint_registry.observe(
+                    self.__dispatch_owner.thread_id, self.__dispatch_owner.history_buffer,
+                ).derived_origin(),
             )
             await self.__dispatch_owner.store.append(seed)
-
         # 经 turn 模块惰性解析：既避开 turn ↔ turn_dispatch 的循环 import，
         # 也保住「打 turn.TurnRunner 这个模块级符号」的白盒注入点。
         from taifeng.loop import turn as _turn_mod
-
         sub_runner = _turn_mod.TurnRunner(
             entry_skill=target,
             snapshot=self.__dispatch_owner.snapshot,
@@ -177,6 +178,7 @@ class TurnDispatch:
             has_recall_backend=self.__dispatch_owner.has_recall_backend,
             call_stack=parent_stack,
             history_buffer=[seed],
+            taint_registry=self.__dispatch_owner.taint_registry,
             # audit：子 turn 携带 child audit_state（共享根 coordinator/lease、同一
             # projector 的 child thread）→ 子的 LLM/Tool/Skill 效果递归走同一审计路径。
             audit_state=child_audit_state,
@@ -203,7 +205,6 @@ class TurnDispatch:
         if outcome.end_reason == "suspended":
             from taifeng.suspend.reason import PendingRequest, SuspendReason
             from taifeng.suspend.signal import SuspendSignal as _SuspendSignal
-
             raise _SuspendSignal(
                 PendingRequest(
                     request_id=self.__dispatch_owner._suspend_id_factory(),
@@ -221,7 +222,6 @@ class TurnDispatch:
                     detail={"sub_thread_id": sub_thread_id, "skill_id": target.id},
                 )
             )
-
         await self.__dispatch_owner._emit(
             SkillReturned(
                 data={
@@ -232,7 +232,6 @@ class TurnDispatch:
                 }
             )
         )
-
         # —— 认知回路 ⑦ 沉淀：判战绩 → 落旁路记录 → emit 事件 ——
         # 注：suspended 已在上方提前 raise SuspendSignal 返回，到此 outcome 必为终态。
         from taifeng.conversation.models import skill_outcome_item
@@ -242,7 +241,6 @@ class TurnDispatch:
             SkillExecutionContext,
             SkillExecutionRecord,
         )
-
         _verdict = self.__dispatch_owner._outcome_judge.judge(
             SkillExecutionContext(
                 success=outcome.success,
@@ -328,11 +326,13 @@ class TurnDispatch:
                 self.__dispatch_owner._emit, await _working_set.observe(_record)
             )
 
+        origin = self.__dispatch_owner.taint_registry.derived_origin([sub_thread_id])
         if outcome.success:
-            return ToolResult.ok(outcome.final_text, sub_thread_id=sub_thread_id)
-        return ToolResult.error(
-            f"sub_skill_failed: {outcome.error or outcome.end_reason}",
-            sub_thread_id=sub_thread_id,
+            return ToolResult(output=outcome.final_text, origin=origin,
+                              data={"sub_thread_id": sub_thread_id})
+        return ToolResult(
+            output=f"sub_skill_failed: {outcome.error or outcome.end_reason}",
+            is_error=True, origin=origin, data={"sub_thread_id": sub_thread_id},
         )
 
     async def run_sub_skill(

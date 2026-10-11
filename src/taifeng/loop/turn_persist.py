@@ -157,6 +157,7 @@ class TurnPersist:
             self.__persist_owner.pending_input.clear()
         for item in drained:
             self.__persist_owner.history_buffer.append(item)
+            self.__persist_owner.taint_registry.observe(item.thread_id, [item])
             if state is None:
                 await self.__persist_owner.store.append(item)
             await self.__persist_owner._emit(

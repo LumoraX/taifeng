@@ -35,6 +35,7 @@ from taifeng.conversation.journal.records import (
     validate_attachments,
 )
 from taifeng.conversation.models import function_call_output
+from taifeng.conversation.origin import tag_origin, tool_output_origin
 from taifeng.llm.errors import LLMError
 from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, admit_tool_attachments
 from taifeng.loop.audit_support import SessionAuditFrozenError
@@ -344,6 +345,10 @@ class _AuditedToolConvergence:
             is_error=is_error,
             attachments=attachments or None,
         )
+        spec = self._registry.get(req.name)  # type: ignore[attr-defined]
+        fco_item = tag_origin(fco_item, tool_output_origin(
+            result.origin, spec.output_trust if spec is not None else None, req.name,
+        ))
         origin_sample_id = self._origin_sample_ids.get(req.call_id)
         if origin_sample_id:
             fco_item = fco_item.model_copy(update={"metadata": {
@@ -495,6 +500,7 @@ async def run_audited_tools(
         awaited=awaited,
     )
     runner.history_buffer.extend(items)
+    runner.taint_registry.observe(runner.thread_id, items)
     if not awaited:
         return
     # 挂起落账时要回指这些调用的意图

@@ -150,7 +150,8 @@ async def test_queue_only_idle_child_persists(peer_skills, threads_dir) -> None:
     await asyncio.sleep(0)
     out = await engine.deliver_peer_message(
         target=child_tid, text="A 的关键发现:压测连接池耗尽", mode="queue_only",
-        from_thread_id=engine.thread_id)
+        from_thread_id=engine.thread_id,
+        origin=taifeng.InputOrigin(kind="peer", trust="untrusted", label="peer-report"))
     assert out["delivered_via"] == "history"
     assert out["mode_downgraded"] is False
 
@@ -161,6 +162,12 @@ async def test_queue_only_idle_child_persists(peer_skills, threads_dir) -> None:
     assert len(peer) == 1
     assert peer[0].payload["from_thread"] == engine.thread_id
     assert "连接池耗尽" in peer[0].payload["text"]
+    assert engine._taint_registry.snapshot(child_tid).untrusted is True
+    assert engine.introspect()["input_taint"]["untrusted"] is False
+    await engine.deliver_peer_message(target=engine.thread_id, text="同一报告", mode="queue_only",
+        from_thread_id=child_tid, origin=taifeng.InputOrigin(
+            kind="peer", trust="untrusted", label="peer-report"))
+    assert engine.introspect()["input_taint"]["untrusted"] is True
 
     assert await _wait(lambda: any(
         m.kind == "peer_message_sent" for m in events))

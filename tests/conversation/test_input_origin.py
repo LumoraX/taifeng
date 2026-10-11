@@ -171,3 +171,19 @@ def test_summary_refuses_malformed_metadata() -> None:
     )
     with pytest.raises(ValueError, match="malformed origin"):
         summarize_taint([bad])
+
+
+@pytest.mark.parametrize("declared", [None, "trusted", "untrusted"])
+def test_per_call_untrusted_cannot_be_downgraded(declared: str | None) -> None:
+    """单次不可信读取声明优先于可信静态声明。"""
+    from taifeng.conversation.origin import tool_output_origin
+
+    assert tool_output_origin(_WEB, declared, "fetch") == _WEB  # type: ignore[arg-type]
+
+
+def test_static_untrusted_cannot_be_downgraded() -> None:
+    """静态不可信声明也不能被单次 trusted 覆盖。"""
+    from taifeng.conversation.origin import tool_output_origin
+
+    assert tool_output_origin(_OPERATOR, "untrusted", "fetch") == InputOrigin(
+        kind="tool", trust="untrusted", label="fetch")

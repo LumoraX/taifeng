@@ -569,7 +569,6 @@ class TurnSample:
         tools: Any,
     ) -> tuple[str, bool]:
         """采样第 3 段：audit 同批落库 → 工具批并发派发 → 结算与续圈判定。
-
         原为 ``sample_once`` 的后半段，行为逐字不变。跨段局部量由调用方按名
         传入（这 8 个是 AST 核出的真实跨界集合，不多不少）。
         """
@@ -769,6 +768,7 @@ class TurnSample:
                     }
                 )
             self.__sample_owner.history_buffer.append(fco_item)
+            self.__sample_owner.taint_registry.observe(fco_item.thread_id, [fco_item])
             # audit：function_call_output 的 durable + projection 归 §8 Tool 收敛；
             # 此处只入 hot history，不直写 projection store（避免与 projector 竞写）。
             if self.__sample_owner.audit_state is None:

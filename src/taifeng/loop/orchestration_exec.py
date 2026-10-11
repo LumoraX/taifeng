@@ -20,6 +20,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import function_call, function_call_output
+from taifeng.conversation.origin import tag_origin
 from taifeng.loop.event import (
     OrchestrationConditionMissing,
     OrchestrationPlanResolved,
@@ -168,7 +169,6 @@ async def _execute_leaf(
     build_ctx: Callable[[str, int], ToolContext],
 ) -> tuple[str, ...]:
     """把一个叶子翻译成一批合成 call_skill 请求，经 A 的 dispatch_batch 执行。
-
     - parallel 段：Semaphore(max_parallel_tool_calls)（call_skill 在 runtime 跳锁 → 真并发）
     - serial 段：强制 Semaphore(1)（即便全局 cap 高也串行）
     - ``step_idx``：顶层 step 序号，拼进 call_id 保证 thread 内全局唯一（同一 skill 跨段
@@ -178,7 +178,6 @@ async def _execute_leaf(
     - **挂起分流**：``DispatchOutcome.suspend`` 非 None 的子只追加悬空 fc（不回填占位
       fco），批内任一挂起 → 抛 ``_BatchSuspend`` 由 run() 既有路径落盘挂起（与 LLM
       路径 ``_dispatch_tools`` 混合批语义同形）。
-
     返回各 child 输出文本（按发起序），供 when 判定 / upstream 注入 / 末步汇总。
 
     Raises:
@@ -260,7 +259,9 @@ async def _execute_leaf(
             call_id=req.call_id, output=outcome.result.output,
             thread_id=runner.thread_id, is_error=outcome.result.is_error,
         )
+        fco_item = tag_origin(fco_item, outcome.result.origin)
         runner.history_buffer.append(fco_item)
+        runner.taint_registry.observe(fco_item.thread_id, [fco_item])
         await runner.store.append(fco_item)
         outputs[req.index] = outcome.result.output
 

@@ -38,6 +38,7 @@ from taifeng.conversation.journal.projector import (
     JournalConversationProjector,
     ProjectionOrderError,
 )
+from taifeng.conversation.taint import ThreadTaintRegistry
 from taifeng.loop.audit import SessionAuditCoordinator
 from taifeng.loop.audit_awaiting import mark_awaiting
 from taifeng.loop.audit_bootstrap import AuditedSessionState, _emergency_close
@@ -207,6 +208,7 @@ class AuditResumeResult:
     state: AuditedSessionState
     history: tuple[ResponseItem, ...]
     recovered_tool_calls: tuple[RecoveredCall, ...]
+    taint_registry: ThreadTaintRegistry | None = None
 
 
 async def _read_triage(
@@ -309,6 +311,8 @@ async def resume_audited_session(
             config, opened, triage, tool_registry=tool_registry, operation_id=operation_id,
             **ids,
         )
+        taint_registry = ThreadTaintRegistry()
+        taint_registry.observe_journal(envelopes)
         history = _rebuild_history(envelopes, **ids)
         children = tuple(
             (child, _rebuild_history(envelopes, session_id=journal_session_id, thread_id=child))
@@ -328,7 +332,7 @@ async def resume_audited_session(
     except BaseException:
         await _emergency_close(config, opened.lease)
         raise
-    return AuditResumeResult(state, history.items, recovered)
+    return AuditResumeResult(state, history.items, recovered, taint_registry)
 
 
 async def _recover_tool_calls(

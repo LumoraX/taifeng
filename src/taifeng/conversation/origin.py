@@ -197,3 +197,29 @@ __all__ = [
     "tag_origin",
     "taint_from_extras",
 ]
+
+
+def tool_output_origin(
+    origin: InputOrigin | None, declared_trust: Literal["trusted", "untrusted"] | None, name: str,
+) -> InputOrigin | None:
+    """合并单次调用与工具静态声明；任何不可信声明均不可被降级。"""
+    if origin is not None and origin.trust == "untrusted":
+        return origin
+    if declared_trust == "untrusted":
+        return InputOrigin(kind="tool", trust="untrusted", label=name[:128])
+    if origin is not None or declared_trust is None:
+        return origin
+    return InputOrigin(kind="tool", trust=declared_trust, label=name[:128])
+
+
+def derive_origins(origins: list[InputOrigin | None]) -> InputOrigin | None:
+    """合并派生内容的声明，不让可信来源覆盖不可信事实。"""
+    untrusted = [origin for origin in origins if origin is not None and origin.trust == "untrusted"]
+    if not untrusted:
+        return None
+    labels: set[str] = set()
+    for origin in untrusted:
+        if origin.label is not None:
+            values = origin.label.split(",") if origin.kind == "derived" else [origin.label]
+            labels.update(value for value in values if value)
+    return InputOrigin(kind="derived", trust="untrusted", label=",".join(sorted(labels))[:128] or None)

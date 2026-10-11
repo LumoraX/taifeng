@@ -23,15 +23,16 @@ barrier_settled + thread_terminal                                         聚合
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from taifeng.conversation.journal.models import (  # noqa: TC001  # Pydantic 运行期需要
     HashHex,
     NonEmptyStr,
 )
 from taifeng.conversation.journal.records import CanonicalMapping, PayloadModel
+from taifeng.conversation.origin import InputOrigin  # noqa: TC001  # Pydantic 运行期需要
 
 SPAWN_STARTED_RECORD_TYPE = "spawn_started"
 SPAWN_SETTLED_RECORD_TYPE = "spawn_settled"
@@ -105,6 +106,15 @@ class BarrierRegisteredV1(PayloadModel):
     handle_ids: tuple[NonEmptyStr, ...]
     then_skill_id: NonEmptyStr
     then_args_template: CanonicalMapping | None = None
+    origin: InputOrigin | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_origin(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """未声明来源时保持旧记录形状，旧读取者仍可接受。"""
+        result: dict[str, Any] = handler(self)
+        if self.origin is None:
+            result.pop("origin", None)
+        return result
 
     @model_validator(mode="after")
     def _require_distinct_members(self) -> BarrierRegisteredV1:

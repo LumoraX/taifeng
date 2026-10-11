@@ -599,7 +599,8 @@ async def test_barrier_fires_after_every_member_has_settled(tmp_path: Path) -> N
     await asyncio.wait_for(run.slow_entered.wait(), timeout=10)
     members = [first["handle_id"], second["handle_id"]]
 
-    out = await run.engine.set_join_barrier(members, "merge")
+    origin = taifeng.InputOrigin(kind="host", trust="untrusted", label="barrier-input")
+    out = await run.engine.set_join_barrier(members, "merge", origin=origin)
 
     assert _of(await run.journal(), "barrier_fired") == []
     run.slow_release.set()
@@ -607,8 +608,12 @@ async def test_barrier_fires_after_every_member_has_settled(tmp_path: Path) -> N
     envelopes = await run.journal()
     barrier_id = out["barrier_id"]
     then_thread = barrier_thread_id_of(_SESSION, barrier_id)
+    seeds = [e for e in _of(envelopes, "conversation_item")
+             if e.thread_id == then_thread and e.payload.get("item_kind") == "user_message"]
+    assert seeds[0].payload["metadata"]["origin"]["label"] == "barrier-input"
     (registered,) = _of(envelopes, "barrier_registered")
     assert registered.payload["handle_ids"] == members
+    assert registered.payload["origin"]["label"] == "barrier-input"
     assert registered.operation_id == barrier_id
     (fired,) = _of(envelopes, "barrier_fired")
     payload = BarrierFiredV1.model_validate(fired.payload)
@@ -730,10 +735,12 @@ async def test_a_pending_barrier_fires_after_takeover(tmp_path: Path) -> None:
     await run.ask()
     out = await run.engine.spawn_skill(skill_id="worker", args={}, reason="崩溃时还在跑")
     await asyncio.wait_for(run.slow_entered.wait(), timeout=10)
-    registered = await run.engine.set_join_barrier([out["handle_id"]], "merge")
+    origin = taifeng.InputOrigin(kind="host", trust="untrusted", label="before-takeover")
+    registered = await run.engine.set_join_barrier([out["handle_id"]], "merge", origin=origin)
     thread_id = await _crash(run)
     (barrier,) = barriers_from_journal(await run.journal())
     assert (barrier.barrier_id, barrier.fired) == (registered["barrier_id"], False)
+    assert barrier.origin.label == "before-takeover"
 
     resumed = _Run(tmp_path)
     await resumed.start(merge=[SimTurn(text="成员没跑完")], resume_thread_id=thread_id)
@@ -745,6 +752,10 @@ async def test_a_pending_barrier_fires_after_takeover(tmp_path: Path) -> None:
         {"handle_id": out["handle_id"], "status": "cancelled", "payload_version": 1},
     ]
     assert settled.payload["result"] == "成员没跑完"
+    seeds = [e for e in _of(envelopes, "conversation_item")
+             if e.thread_id == fired.payload["then_thread_id"]
+             and e.payload.get("item_kind") == "user_message"]
+    assert seeds[0].payload["metadata"]["origin"]["label"] == "before-takeover"
     await resumed.pool.close()
     verification = await JsonlSessionJournalCore(tmp_path / "journal").verify(_SESSION)
     assert verification.health is JournalHealth.HEALTHY

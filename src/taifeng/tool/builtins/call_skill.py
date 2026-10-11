@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from taifeng.hooks.types import (
@@ -343,10 +344,7 @@ async def _call_skill_handler(
     # 在 ToolResult.data 中补 duration_ms（供调用方观察）
     if not result.is_error and "duration_ms" not in result.data:
         # 重建 ToolResult 加 duration_ms
-        return ToolResult.ok(
-            result.output,
-            **{**result.data, "duration_ms": duration_ms},
-        )
+        return replace(result, data={**result.data, "duration_ms": duration_ms})
     return result
 
 

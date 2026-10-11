@@ -160,3 +160,5 @@ OpenAI 的 provider 与 protocol 是两级统一配置：`provider=openai` 选�
 ### skill 包（无独立运行脚本，被其他 demo 复用）
 
 `form_hitl/skills` —— 纯提示型 HITL 表单 skill 包，被 web_ui 复用，**只含 skills/**，无 demo 入口脚本。
+
+- `input_origin/demo.py`：SimClient 演示单次工具来源、宿主查询及回滚后的累计保留，无需 key。

@@ -198,3 +198,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - The example tier lists (which demo needs a real LLM key) are owned by `scripts/verify_examples.py`; docs must follow the script, not a hand-maintained list. `.github/workflows/ci.yml` runs the full test suite and the example smoke on every push to main and every PR; real-LLM regression stays manual (see the ledger red line in `AGENTS.md`).
 
 - [提交生命周期契约](architecture/capabilities/submission-lifecycle.md)：准入取消、挂起交接、Resume 收尾和实际用量完整性（ADR 0117–0121）。
+
+- [ADR 0130：输入来源完整性与稳定入口](decisions/0130-input-origin-completeness-and-stability.md)：累计来源、单次工具结果与子会话传播。

@@ -56,6 +56,8 @@ ImagePart
 IndexHook
 InitialContextInjection
 InputCostEstimator
+InputOrigin
+InputTaint
 InstructionContext
 InstructionFetchError
 InstructionLayer
@@ -214,7 +216,10 @@ make_todo_write_tool
 make_wait_any_tool
 make_wait_for_task_tool
 make_wait_peer_tool
+origin_of
 rebuild_index
 register_mcp_tools_async
+summarize_taint
 suspension_item
+taint_from_extras
 user_message

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from taifeng.conversation.origin import InputOrigin
 from taifeng.loop import engine_ops
 from taifeng.loop.child_resume_chain import ChildResumeChain
 from taifeng.loop.suspension_access import SuspensionAccess
@@ -278,6 +279,7 @@ def _fired_barriers(self: AgentEngine) -> set[str]:
 
 async def spawn_skill(self: AgentEngine, *, skill_id: str, args: dict[str, Any], reason: str,
     deadline_seconds: float | None = None, handle_id: str | None = None,
+    origin: InputOrigin | None = None, source_thread_id: str | None = None,
 ) -> dict[str, str]:
     """转发到 SpawnDriver.spawn_skill —— 公共 API + tools 的 spawn_coordinator 入口。
 
@@ -296,7 +298,7 @@ async def spawn_skill(self: AgentEngine, *, skill_id: str, args: dict[str, Any],
     """
     return await self._spawn.spawn_skill(
         skill_id=skill_id, args=args, reason=reason, deadline_seconds=deadline_seconds,
-        handle_id=handle_id,
+        handle_id=handle_id, origin=origin, source_thread_id=source_thread_id,
     )
 
 
@@ -376,7 +378,7 @@ def _build_child_runner(self: AgentEngine,
         memory_store=self._memory_store,
         memory_query_builder=self._memory_query_builder,
         pinned_states=self._pinned_states,
-        history_buffer=buffer,
+        history_buffer=buffer, taint_registry=self._taint_registry,
         # detached-spawn：spawned 子 runner 也注入协调器 → 子 skill 可继续 spawn
         spawn_coordinator=self,
     )
@@ -464,10 +466,12 @@ async def set_join_barrier(self: AgentEngine,
     handle_ids: list[str],
     then_skill_id: str,
     then_args_template: dict[str, Any] | None = None,
+    *, origin: InputOrigin | None = None, source_thread_id: str | None = None,
 ) -> dict[str, str]:
     """转发到 SpawnDriver.set_join_barrier —— 公共 API（登记 join-barrier）。"""
     return await self._spawn.set_join_barrier(
-        handle_ids, then_skill_id, then_args_template
+        handle_ids, then_skill_id, then_args_template,
+        origin=origin, source_thread_id=source_thread_id,
     )
 
 

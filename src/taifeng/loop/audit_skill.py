@@ -37,6 +37,7 @@ from taifeng.conversation.journal.records import (
     record_id,
 )
 from taifeng.conversation.models import skill_outcome_item, user_message
+from taifeng.conversation.origin import InputOrigin, tag_origin
 from taifeng.loop.audit_bootstrap import AuditedSessionState
 
 if TYPE_CHECKING:
@@ -249,6 +250,7 @@ class AuditedSkillDispatch:
         target: SkillDefinition,
         arguments: dict[str, Any],
         call_stack_path: tuple[str, ...],
+        origin: InputOrigin | None = None,
     ) -> ChildSkillContext:
         """原子 started+thread_created+thread_bound+child_seed，并 bootstrap child projection。"""
         assert self._skill_operation_id is not None
@@ -268,10 +270,10 @@ class AuditedSkillDispatch:
                 "parent_thread_id": self._state.thread_id,
             },
         )
-        seed_item = user_message(
+        seed_item = tag_origin(user_message(
             json.dumps(arguments, ensure_ascii=False),
             thread_id=child_thread_id,
-        )
+        ), origin)
         batch = self._build_started_batch(
             op=op,
             child_thread_id=child_thread_id,

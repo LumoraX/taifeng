@@ -201,8 +201,9 @@ async def test_reconcile_verdict_routes_recovery(
         seen.append((arguments, call_id))
         return verdict
 
-    tool = _tool("create_order", effect_kind="reconcilable",
-                 reconciliation="query", reconcile=_reconcile)
+    tool = replace(_tool("create_order", effect_kind="reconcilable",
+                         reconciliation="query", reconcile=_reconcile),
+                   output_trust="untrusted")
     setup = await _resume_pool(skills_dir, threads_dir, [])
     tid = await _crashed_thread(setup, "create_order", session_id="s0")
     await setup.close()
@@ -215,6 +216,12 @@ async def test_reconcile_verdict_routes_recovery(
     assert (engine._find_active_suspension() is not None) is expect_suspended  # noqa: SLF001
     if expect_text is not None:
         assert expect_text in _output(engine).payload["output"]
+    from taifeng.conversation.origin import origin_of
+    if verdict.status == "completed":
+        assert origin_of(_output(engine)).trust == "untrusted"
+        assert engine.introspect()["input_taint"]["untrusted"] is True
+    elif verdict.status == "not_executed":
+        assert origin_of(_output(engine)) is None
     await pool.close()
 
 

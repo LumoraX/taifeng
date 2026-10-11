@@ -26,6 +26,7 @@ from taifeng.conversation.models import (
     spawn_settled_item,
     user_message,
 )
+from taifeng.conversation.origin import InputOrigin, derive_origins, tag_origin
 from taifeng.loop.audit_spawn import (
     open_audited_barrier,
     open_audited_spawn,
@@ -61,17 +62,23 @@ async def open_spawn(
     args: dict[str, Any],
     reason: str,
     deadline_seconds: float | None,
+    origin: InputOrigin | None = None, source_thread_id: str | None = None,
 ) -> OpenedSpawn:
     """建子 thread 并落种子；返回后子 skill 才可以开始运行。
 
     种子只创建一次：runner 的 history 首项与已持久化的是同一个对象（同一个 id），
     冷恢复重建出的消息图谱才与运行时一致。
     """
+    source = source_thread_id or engine._thread_id
+    if source == engine._thread_id:
+        engine._taint_registry.observe(source, engine._history)
+    inherited = engine._taint_registry.snapshot(source).derived_origin()
+    origin = derive_origins([inherited, origin])
     state = engine._audit_state  # noqa: SLF001
     if state is not None:
         opening = await open_audited_spawn(
             state, handle_id=handle_id, target=target, arguments=args, reason=reason,
-            deadline_seconds=deadline_seconds,
+            deadline_seconds=deadline_seconds, origin=origin,
         )
         return OpenedSpawn(
             opening.child_state.thread_id, opening.seed, opening.child_state,
@@ -86,7 +93,8 @@ async def open_spawn(
             "reason": reason,
         },
     )
-    seed = user_message(json.dumps(args, ensure_ascii=False), thread_id=child_thread_id)
+    seed = tag_origin(user_message(json.dumps(args, ensure_ascii=False),
+                                   thread_id=child_thread_id), origin)
     await engine._store.append(seed)  # noqa: SLF001
     return OpenedSpawn(child_thread_id, seed)
 
@@ -138,13 +146,18 @@ async def register_barrier(engine: AgentEngine, barrier: JoinBarrier) -> None:
     if state is not None:
         await register_audited_barrier(state, barrier)
         return
-    await _anchor(engine, join_barrier_item(
+    item = join_barrier_item(
         barrier_id=barrier.barrier_id,
         handle_ids=list(barrier.handle_ids),
         then_skill_id=barrier.then_skill_id,
         then_args_template=barrier.then_args_template,
         thread_id=engine._thread_id,  # noqa: SLF001
-    ))
+    )
+    if barrier.origin is not None:
+        item = item.model_copy(update={"metadata": {
+            "barrier_origin": barrier.origin.model_dump(exclude_none=True),
+        }})
+    await _anchor(engine, item)
 
 
 async def open_barrier(
@@ -156,10 +169,16 @@ async def open_barrier(
     members: Sequence[tuple[str, str]],
 ) -> OpenedSpawn:
     """建聚合 thread 并落种子；返回后聚合 turn 才可以开始运行。"""
+    thread_ids = []
+    for handle_id, _ in members:
+        handle = engine._spawn_handles.get(handle_id)
+        if handle is not None and handle.child_thread_id is not None:
+            thread_ids.append(handle.child_thread_id)
+    origin = derive_origins([barrier.origin, engine._taint_registry.derived_origin(thread_ids)])
     state = engine._audit_state  # noqa: SLF001
     if state is not None:
         opening = await open_audited_barrier(
-            state, barrier=barrier, target=target, arguments=args, members=members,
+            state, barrier=barrier, target=target, arguments=args, members=members, origin=origin,
         )
         return OpenedSpawn(
             opening.child_state.thread_id, opening.seed, opening.child_state,
@@ -173,7 +192,8 @@ async def open_barrier(
             "barrier_id": barrier.barrier_id,
         },
     )
-    seed = user_message(json.dumps(args, ensure_ascii=False), thread_id=then_thread_id)
+    seed = tag_origin(user_message(json.dumps(args, ensure_ascii=False),
+                                   thread_id=then_thread_id), origin)
     await engine._store.append(seed)  # noqa: SLF001
     return OpenedSpawn(then_thread_id, seed)
 

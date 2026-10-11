@@ -25,10 +25,12 @@ import json
 from typing import TYPE_CHECKING, Any, Protocol
 
 from taifeng.conversation.journal.canonical import canonical_hash
+from taifeng.conversation.origin import taint_from_extras
 from taifeng.tool.builtins.selection_gate import check_selection_gate_by_id
 from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
+    from taifeng.conversation.origin import InputOrigin
     from taifeng.skill.selection import SkillSelectionGate
 
 
@@ -41,6 +43,7 @@ class SpawnCoordinator(Protocol):
     async def spawn_skill(
         self, *, skill_id: str, args: dict[str, Any], reason: str,
         handle_id: str | None = None,
+        origin: InputOrigin | None = None, source_thread_id: str | None = None,
     ) -> dict[str, str]:
         ...
 
@@ -49,6 +52,7 @@ class SpawnCoordinator(Protocol):
         handle_ids: list[str],
         then_skill_id: str,
         then_args_template: dict[str, Any] | None = None,
+        *, origin: InputOrigin | None = None, source_thread_id: str | None = None,
     ) -> dict[str, str]:
         ...
 
@@ -108,9 +112,17 @@ async def _emit_rejected(ctx: ToolContext, data: dict[str, Any]) -> None:
 # ===========================================================================
 
 
+def _origin_kwargs(ctx: ToolContext) -> dict[str, Any]:
+    """仅在来源已声明时向协调器透传，保持未声明调用的兼容。"""
+    origin = taint_from_extras(ctx.extras).derived_origin()
+    kwargs: dict[str, Any] = {"origin": origin} if origin is not None else {}
+    if ctx.extras.get("spawn_source_tracking"):
+        kwargs["source_thread_id"] = ctx.thread_id
+    return kwargs
+
+
 def make_spawn_skill_tool(*, selection_gate: SkillSelectionGate | None = None) -> ToolSpec:
     """构造 spawn_skill ToolSpec —— LLM 分离发起一个子 skill（非阻塞）。
-
     Args:
         selection_gate: 选择置信度分流门（相位 3，ADR 0088）；None = 不启用。与
             ``call_skill`` 用同一道门，模型不能靠改用分离派发绕过。
@@ -151,6 +163,7 @@ def make_spawn_skill_tool(*, selection_gate: SkillSelectionGate | None = None) -
             out = await coordinator.spawn_skill(
                 skill_id=skill_id, args=sub_args, reason=raw_reason,
                 handle_id=f"sp_{canonical_hash(seed)[:8]}",
+                **_origin_kwargs(ctx),
             )
         except SpawnRejectedError as rejected:
             return await _rejected(
@@ -239,7 +252,7 @@ def make_await_skills_tool() -> ToolSpec:
             return ToolResult.error("spawn_unavailable", reason="config_error")
         # engine 校验 handle / skill 存在性，失败抛 ValueError → 由 tool_batch 落 error
         out = await coordinator.set_join_barrier(
-            handle_ids, then_skill_id, then_args_template
+            handle_ids, then_skill_id, then_args_template, **_origin_kwargs(ctx)
         )
         return ToolResult.ok(json.dumps(out, ensure_ascii=False))
 
@@ -302,7 +315,9 @@ def make_join_skill_tool() -> ToolSpec:
         # 纯只读、非阻塞 —— 只报告当前状态 / 结果，**不**等待句柄终态（轮询由 LLM 决策）。
         # mode 仅作语义提示透传给 LLM 视野的 output，不在内核做阻塞语义区分。
         status = coordinator.spawn_status(handle_ids)
-        return ToolResult.ok(json.dumps(status, ensure_ascii=False))
+        origin_query = ctx.extras.get("spawn_result_origin")
+        origin = origin_query(handle_ids) if origin_query is not None else None
+        return ToolResult(output=json.dumps(status, ensure_ascii=False), origin=origin)
 
     return ToolSpec(
         name="join_skill",

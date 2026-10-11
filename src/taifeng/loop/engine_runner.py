@@ -71,6 +71,7 @@ class EngineRunner:
         runner.pending_input.clear()
         for item in residual:
             runner.history_buffer.append(item)
+            runner.taint_registry.observe(item.thread_id, [item])
             await self._engine._store.append(item)
             await self._engine._emit(
                 EventMsg(

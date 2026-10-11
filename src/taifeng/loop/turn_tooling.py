@@ -17,8 +17,8 @@ from taifeng.conversation.models import ResponseItem, function_call_output
 from taifeng.conversation.origin import (
     INPUT_TAINT_EXTRAS_KEY,
     InputOrigin,
-    summarize_taint,
     tag_origin,
+    tool_output_origin,
 )
 from taifeng.llm.errors import (
     AttachmentTooLargeError,
@@ -191,11 +191,13 @@ class TurnTooling:
                 "script_executors": self.__tooling_owner.script_executors,
                 # === detached-spawn 四工具据此拿到 engine 的 spawn API ===
                 "spawn_coordinator": self.__tooling_owner.spawn_coordinator,
+                "spawn_result_origin": self._spawn_result_origin,
+                "spawn_source_tracking": True,
                 # === 本 turn 的工作集快照：召回池 / 可发现范围与 prompt 同一份（ADR 0090）===
                 WORKING_SET_VIEW_EXTRAS_KEY: self.__tooling_owner._guards.working_set_view,  # noqa: SLF001
                 # === input-origin：当前上下文里不可信内容的汇总（ADR 0085）===
-                INPUT_TAINT_EXTRAS_KEY: summarize_taint(
-                    self.__tooling_owner.history_buffer
+                INPUT_TAINT_EXTRAS_KEY: self.__tooling_owner.taint_registry.observe(
+                    self.__tooling_owner.thread_id, self.__tooling_owner.history_buffer
                 ).to_dict(),
             },
         )
@@ -247,6 +249,7 @@ class TurnTooling:
                     "metadata": {**fco.metadata, "origin_llm_sample_id": sample_id},
                 })
             owner.history_buffer.append(fco)
+            owner.taint_registry.observe(fco.thread_id, [fco])
             await owner.store.append(fco)
         if suspended:
             from taifeng.loop import turn as _turn_mod
@@ -315,10 +318,10 @@ class TurnTooling:
                 is_error=result.is_error,
                 attachments=attachments,
             ),
-            self._output_origin(call_id),
+            self._output_origin(call_id, result),
         )
 
-    def _output_origin(self, call_id: str) -> InputOrigin | None:
+    def _output_origin(self, call_id: str, result: ToolResult) -> InputOrigin | None:
         """该调用结果的来源标记：工具声明了 ``output_trust`` 才有（input-origin）。"""
         name = next(
             (
@@ -330,8 +333,21 @@ class TurnTooling:
             None,
         )
         if not isinstance(name, str):
-            return None
+            return result.origin
         spec = self.__tooling_owner.tool_runtime._registry.get(name)  # noqa: SLF001
-        if spec is None or spec.output_trust is None:
+        return tool_output_origin(
+            result.origin, spec.output_trust if spec is not None else None, name,
+        )
+
+    def _spawn_result_origin(self, handle_ids: list[str]) -> InputOrigin | None:
+        """只给实际回传的 detached 结果附带来源，正文协议保持原样。"""
+        coordinator = self.__tooling_owner.spawn_coordinator
+        handles = getattr(coordinator, "_spawn_handles", None)
+        if handles is None:
             return None
-        return InputOrigin(kind="tool", trust=spec.output_trust, label=name[:128])
+        thread_ids = []
+        for handle_id in handle_ids:
+            handle = handles.get(handle_id)
+            if handle is not None and handle.result is not None and handle.child_thread_id:
+                thread_ids.append(handle.child_thread_id)
+        return self.__tooling_owner.taint_registry.derived_origin(thread_ids)

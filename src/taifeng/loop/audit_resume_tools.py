@@ -49,6 +49,7 @@ from taifeng.conversation.journal.recovery_records import (
     ToolRecoveryCommittedV1,
 )
 from taifeng.conversation.models import function_call_output
+from taifeng.conversation.origin import InputOrigin, tag_origin, tool_output_origin
 from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeRequest,
     AuditToolOutcomeResolution,
@@ -284,6 +285,8 @@ async def plan_audited_tool_recovery(
             continue
         records.extend(recovery_records(
             call, decision, session_id=session_id, recovery_operation_id=recovery_operation_id,
+            origin=(tool_output_origin(None, spec.output_trust, call.intent_payload.name)
+                    if spec is not None and decision.disposition == "reconciled" else None),
         ))
         recovered.append(RecoveredCall(
             call.intent_payload.call_id, call.intent_payload.name, decision.disposition,
@@ -386,6 +389,7 @@ def recovery_records(
     *,
     session_id: str,
     recovery_operation_id: str,
+    origin: InputOrigin | None = None,
 ) -> tuple[JournalRecord, ...]:
     """构造 ``tool_recovery_committed``（+ 需要时的 output 会话项），挂在原 tool operation 下。"""
     intent = call.intent
@@ -427,7 +431,7 @@ def recovery_records(
     )
     if decision.output is None:
         return (recovery,)
-    item = _recovery_output_item(call, decision.output, bool(decision.is_error))
+    item = tag_origin(_recovery_output_item(call, decision.output, bool(decision.is_error)), origin)
     conversation = conversation_item_record(
         factory,
         operation_id=operation_id,

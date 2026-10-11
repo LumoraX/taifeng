@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from taifeng.context.budget import ContextBudget, TokenCalibration
 from taifeng.context.cache_stats import PromptCacheStats
 from taifeng.conversation.reconstruct import reconstruct_logical_history
+from taifeng.conversation.taint import ThreadTaintRegistry
 from taifeng.instructions.resolver import InstructionResolver
 from taifeng.llm.retrying import with_default_retry
 from taifeng.loop import (
@@ -177,7 +178,6 @@ class AgentEngine:
         )
         from taifeng.llm.file_input import DISABLED_FILE_POLICY
         from taifeng.llm.image_input import DISABLED_IMAGE_POLICY
-
         self._image_input_policy = image_input_policy or DISABLED_IMAGE_POLICY
         self._file_input_policy = file_input_policy or DISABLED_FILE_POLICY
         self._input_cost_estimator = input_cost_estimator
@@ -196,7 +196,6 @@ class AgentEngine:
         self._script_executors: dict[str, Any] = dict(script_executors or {})
         # 单 turn 内最大循环；None → 用 TurnRunner 默认（32）
         from taifeng.loop.turn import DEFAULT_MAX_INNER_ITERATIONS
-
         self._max_iterations = (
             max_iterations if max_iterations is not None else DEFAULT_MAX_INNER_ITERATIONS
         )
@@ -362,6 +361,8 @@ class AgentEngine:
         # （折叠压缩区间、截断 rewind/rollback 被回滚的尾段），再推导 rewind 节点表。
         # 对无压缩/无 rewind 的干净 thread 是恒等映射（纯 CPU、不碰 IO）。
         raw_init: list[ResponseItem] = list(initial_history) if initial_history else []
+        self._taint_registry = ThreadTaintRegistry()
+        self._taint_registry.observe(thread_id, raw_init)
         self._history: list[ResponseItem] = reconstruct_logical_history(raw_init)
         # cache anchor 保持 -1：resume 场景下 provider prompt cache 跨进程
         # 不可信任，下一次 turn 的 pre_turn 压缩会重新决定 anchor 位置
@@ -465,6 +466,7 @@ class AgentEngine:
             reasoning_passback=self._reasoning_passback,
             enable_request_capture=self._enable_request_capture,
             history_buffer=list(self._history),
+            taint_registry=self._taint_registry,
             pending_input=pending_input,
             cache_anchor_index=self._cache_anchor_index,
             token_calibration=self._token_calibration,

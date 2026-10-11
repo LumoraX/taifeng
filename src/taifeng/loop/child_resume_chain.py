@@ -22,6 +22,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
+from taifeng.conversation.origin import tag_origin, tool_output_origin
 from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EventMsg,
@@ -313,7 +314,7 @@ class ChildResumeChain:
         out = function_call_output(
             call_id=call_id, output=child_result,
             thread_id=parent_tid, is_error=is_error)
-        # 1) 先回填本子的 fco(call_id 唯一,并发链各回各的,无冲突)
+        out = await self._tag_child_result(record, call_id, out)
         if is_root:
             async with self._engine._lock:
                 self._engine._history.append(out)
@@ -469,6 +470,7 @@ class ChildResumeChain:
         out = function_call_output(
             call_id=call_id, output=child_result,
             thread_id=thread_id, is_error=is_error)
+        out = await self._tag_child_result(record, call_id, out)
         await self._engine._store.append(out)
         # record 级结算判定(per-record 锁 + fresh 重读,与 _resume_parent_level 同理)
         async with self._engine._settle_lock(record.record_id):
@@ -493,6 +495,21 @@ class ChildResumeChain:
             data={"record_id": record.record_id,
                   "request_ids": sorted(record.request_ids())})))
         return "settled"
+
+    async def _tag_child_result(
+        self, record: SuspensionRecord, call_id: str, item: ResponseItem,
+    ) -> ResponseItem:
+        """续跑回填只继承对应子会话，不传播未返回的兄弟会话来源。"""
+        thread_ids = []
+        for pending in record.pending:
+            child_id = pending.detail.get("sub_thread_id")
+            if pending.related_call_id == call_id and isinstance(child_id, str):
+                await self._engine._load_thread_items(child_id)
+                thread_ids.append(child_id)
+        origin = self._engine._taint_registry.derived_origin(thread_ids)
+        item = tag_origin(item, origin)
+        self._engine._taint_registry.observe(item.thread_id, [item])
+        return item
 
     async def apply_plan_on_thread(
         self, thread_id: str, entry_skill_id: str,
@@ -599,7 +616,7 @@ class ChildResumeChain:
             sample_scope_id=sub.id,
             reasoning_passback=self._engine._reasoning_passback,
             enable_request_capture=self._engine._enable_request_capture,
-            history_buffer=list(items),
+            history_buffer=list(items), taint_registry=self._engine._taint_registry,
             permission_policy=self._engine._permission_policy,
             request_metadata=self._engine._request_metadata,
             turn_index=self._engine._turn_index,
@@ -671,4 +688,9 @@ class ChildResumeChain:
         out = function_call_output(
             call_id=call_id, output=result.output,
             thread_id=thread_id, is_error=result.is_error)
+        spec = self._engine._tool_runtime.spec_for(name)
+        out = tag_origin(out, tool_output_origin(
+            result.origin, spec.output_trust if spec is not None else None, name,
+        ))
+        self._engine._taint_registry.observe(out.thread_id, [out])
         await self._engine._store.append(out)

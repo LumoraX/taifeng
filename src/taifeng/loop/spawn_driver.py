@@ -23,6 +23,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from taifeng.conversation.origin import InputOrigin
 from taifeng.loop import spawn_settle
 from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.event import (
@@ -131,7 +132,7 @@ class SpawnDriver:
     async def spawn_skill(
         self, *, skill_id: str, args: dict[str, Any], reason: str,
         deadline_seconds: float | None = None,
-        handle_id: str | None = None,
+        handle_id: str | None = None, origin: InputOrigin | None = None, source_thread_id: str | None = None,
     ) -> dict[str, str]:
         """分离式发起一个子 skill：立即返回句柄，子 skill 在后台分离 task 跑完。
 
@@ -207,7 +208,7 @@ class SpawnDriver:
                     handle_id = f"sp_{secrets.token_hex(4)}"
             opened = await open_spawn(
                 eng, handle_id=handle_id, target=target, args=args, reason=reason,
-                deadline_seconds=deadline_seconds,
+                deadline_seconds=deadline_seconds, origin=origin, source_thread_id=source_thread_id,
             )
             child_thread_id, seed = opened.child_thread_id, opened.seed
             if opened.audit_state is not None:
@@ -644,10 +645,12 @@ class SpawnDriver:
         handle_ids: list[str],
         then_skill_id: str,
         then_args_template: dict[str, Any] | None = None,
+        *, origin: InputOrigin | None = None, source_thread_id: str | None = None,
     ) -> dict[str, str]:
         """转发到 ``JoinBarrierCoordinator.set_join_barrier``（公共入口签名不变）。"""
         return await self._barriers.set_join_barrier(
-            handle_ids, then_skill_id, then_args_template)
+            handle_ids, then_skill_id, then_args_template,
+            origin=origin, source_thread_id=source_thread_id)
 
     async def _check_barriers(self, changed_handle_id: str | None = None) -> None:
         """转发到 ``JoinBarrierCoordinator._check_barriers``。

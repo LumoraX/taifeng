@@ -218,7 +218,7 @@ running → done | error | cancelled
 
 ### Requirement: join-barrier 全终态自动触发聚合
 
-`set_join_barrier(handle_ids, then_skill_id, then_args_template=None)` 登记一道屏障：
+`set_join_barrier(handle_ids, then_skill_id, then_args_template=None, *, origin=None, source_thread_id=None)` 登记一道屏障：
 
 - 注册时校验：每个 handle_id 已知 + `then_skill_id` 在 snapshot 中存在 + `then_skill_id` ∈ `entry.child_skills ∪ {entry.id}`（**不校验** entry 资格——聚合走独立根 turn，无 entry 门）
 - 白名单一条是治理一致性所需：`spawn_skill` / `call_skill` 都要过 entry 的 `child_skills` 门，barrier 的 then 边若可指向 snapshot 内任意 skill，就成了调用图上一条**不受声明背书**的边（ADR 0006「entry skill 及其可达子图 = 一个产品包」）。聚合回 entry 自身是正当模式（「跑完回来找我」），故并入白名单
@@ -429,3 +429,12 @@ running），异常上抛。持久化的去处：非审计是子 thread 的 `spa
 | barrier 仅全终态触发 | any / 超时触发留后续 |
 | 无 model-B parked turn | 父 turn 不阻塞等待；「同 turn 内 join 结果后继续 LLM 推理」需业务侧在聚合 skill 内完成 |
 | then_skill_id 不校验 entry 资格 | 聚合 turn 通过 `_build_child_runner`（call_stack 为空）发起，无 DispatchPolicy entry 门控；then_skill_id 可为 entry:true 或 entry:false，只校验存在性 |
+
+### 来源传播（ADR 0130）
+
+`spawn_skill` 与 `set_join_barrier` 的可选 `source_thread_id` 缺省为根会话；内核工具传实际调用者
+thread，避免将根会话后来的无关来源传给干净子会话。显式 `origin` 与调用者累计不可信来源合并，
+不能降级。barrier 登记时冻结创建者快照，点火时合并实际成员返回内容的来源；不额外读取根会话
+后续来源。非审计登记锚将快照放在自由 `metadata.barrier_origin`；audit 使用 `BarrierRegisteredV1.origin`，
+冷恢复保持同一快照。未声明时 audit 编码省略字段，旧记录缺省为空。旧 reader 遇到新字段明确拒绝。
+返回结果经 join_skill / wait_peer / wait_any 的 ToolResult.origin 传播，状态 JSON 正文不变。

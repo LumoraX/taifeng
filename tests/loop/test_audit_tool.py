@@ -528,3 +528,20 @@ async def test_tool_attachment_without_image_policy_is_rejected(
         e async for e in core.load("session_1") if e.record_type == "tool_outcome_committed"
     ]
     assert outcome.payload["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_audit_tool_origin_survives_journal_projection(tmp_path: Path) -> None:
+    """单次工具来源落在会话元数据，投影与 Journal 保留同一声明。"""
+    from taifeng.conversation.origin import InputOrigin, origin_of
+
+    state, core = await _bootstrapped_state(tmp_path)
+    req = _request(0, "call_origin", "fetch")
+    registry = _Registry({"fetch": _spec("fetch", effect_kind="pure", reconciliation="none")})
+    origin = InputOrigin(kind="tool", trust="untrusted", label="read-success")
+    result = ToolResult(output="external", origin=origin)
+    items = await _run(state, [req], registry, lambda: [_outcome(req, result)])
+    assert origin_of(items[0]) == origin
+    committed = [envelope async for envelope in core.load("session_1")]
+    item = ConversationItemV1.model_validate(committed[-1].payload)
+    assert item.metadata["origin"] == origin.model_dump(exclude_none=True)

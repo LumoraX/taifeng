@@ -253,11 +253,13 @@ reasoning provider state、function call 和后续 `origin_llm_sample_id` 工具
 ## 输入来源标记（input-origin，ADR 0085）
 
 条目的 `metadata["origin"]` 记录这段内容是谁送进来的、声明的可信度：`{kind, trust, label?}`。由送入方声明
-（业务在 Op 上、工具在 `ToolSpec.output_trust` 上）；内核派生的内容（压缩摘要、`call_skill` 子 thread 的种子消息、
+（宿主在 Op 上、工具在 `ToolSpec.output_trust` 或 `ToolResult.origin` 上）；内核派生的内容（压缩摘要、`call_skill` 子 thread 的种子消息、
 `send_message` 发出的 peer 消息）继承其来源上下文的不可信标记。标记只在 metadata 里，不进 prompt。
 
-`summarize_taint(history)` 汇总上下文里的不可信内容，随每次工具派发经 `ToolContext.extras["input_taint"]` 与 hook
-上下文交给业务。内核不依据它做任何裁决。契约见 `capabilities/input-origin.md`。
+`summarize_taint(history)` 保持当前序列的汇总语义。内核按 thread 累计观察来源，冷恢复先观察原始
+append-only 记录，再折叠逻辑 history；回滚、rewind、压缩均不能清除已观察事实。累计快照随每次工具派发
+经 `ToolContext.extras["input_taint"]` 与 hook 上下文交给宿主，并可由 `introspect()["input_taint"]` 查询。
+子 skill 返回、detached spawn 与 join/barrier 派生内容保留来源，正文不额外加入标记。内核不依据它做任何裁决。契约见 `capabilities/input-origin.md`。
 
 ## 红线影响
 
