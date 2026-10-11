@@ -305,7 +305,7 @@ server 会阻塞在写 stderr 上、不再回应请求。
 - **outputSchema 只校验内核子集**：`pattern` / `format` / `oneOf` / `$ref` 等关键字不校验（放过，不误拦）；outputSchema
   也不进模型视野（ToolSpec 无对应字段），模型只从描述与结果推断结构。
 - **stdio 无续传**：子进程管道断开即连接结束（未决请求以连接关闭失败）；续传只存在于 streamable HTTP。
-- **HTTP 会话过期（404）不自动重建会话**：规范要求客户端以新 initialize 重建；当前按传输错误抛出，由宿主重连并重新绑定。
+- **会话恢复不重放效果未知的操作**：响应续传的 404 可以恢复会话，但工具可能已执行，调用以明确错误结束；宿主自行核对效果。
 - `resource_link` 只给引用，不代为 `resources/read`；blob 资源（即使是图片）只给占位。
 - audio 无内核模态，恒为占位。
 
@@ -316,3 +316,20 @@ R1：纯协议机制，UI 与用户交互全在宿主 handler；R2：附件随 f
 续传 / 推送流重连以日志记录，工具侧结果（含 `mcp_output_schema_violation`、`mcp_timeout`、cancelled）仍经
 `tool_call_completed`；R4：handler、监听、取消通知均为可取消 task，`close()` 统一收敛，桥接工具响应 `ToolContext.cancel`；
 R5：无持久化状态（续传游标只在一次请求 / 一条推送流内有效，规范禁止跨会话持久化分页游标），重启后由宿主重新建连与绑定。
+
+## 传输健壮性（ADR 0122–0128）
+
+- stdio 和本地命令执行器行上限为 16 MiB；超限、EOF 或读循环异常结束连接，
+  现有 pending 和后续请求均明确失败。断开不代替 close 的资源清理。
+- 握手取消、错误均释放进程 / HTTP pool。关闭继续执行所有步骤，保留首个异常；
+  握手错误不被清理错误覆盖。
+- stdio 与 SSE 共用 UTF-8 JSON 对象解析。日志只保留类型、长度与固定错误类别，
+  不写远端原始内容、method、事件 ID、content-type 或取消 reason。
+- 非法编码、响应形状、JSON-RPC error 形状和 tools/call 非对象结果归一为 McpToolError。
+- 按 [2025-06-18 Session Management](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#session-management)
+  恢复带会话的 404：单次重新握手与一次重试。原始 POST 的 404 明确拒绝可重试；
+  已送达且可能执行的 tools/call 在续传 404 后不重放。推送流也恢复，旧 cursor 清除；
+  工具集变化经原有 list_changed 回调通知。恢复中的新请求与推送流等待握手，旧 cursor 不跨会话；恢复失败阻止无会话调用，取消与关闭不再恢复。
+  握手流中的服务端请求应答不等待该握手持有的恢复锁；应答任务继承来源会话，旧会话应答不跨代发送。
+- SSE 严格增量 UTF-8 解码，支持跨块字符和 CR/LF/CRLF；坏编码立即抛 McpToolError，不能以替换字符伪装成功。
+- 回归覆盖：`test_client_hardening.py`、`test_session_recovery.py`、`test_message_decode.py` 与 `test_cleanup.py`。

@@ -164,7 +164,8 @@ def _classify_effect(meta: dict[str, Any], config: _BridgeConfig) -> tuple[str, 
         return (*_UNTRUSTED_EFFECT, config.parallel_safe)
     if not isinstance(annotations, dict):
         # 形状不对的提示按「未声明」处理并告警：保守分类本就是规范缺省值
-        logger.warning("mcp tool %s has non-object annotations; treated as absent", meta.get("name"))
+        logger.warning("mcp: non-object annotations type=%s; treated as absent",
+                       type(annotations).__name__)
         return (*_UNTRUSTED_EFFECT, config.parallel_safe)
     if annotations.get("readOnlyHint") is True:
         return "pure", "none", True
@@ -199,7 +200,7 @@ def _tools_from_listing(
         try:
             output_schema = parse_output_schema(meta)
         except McpOutputSchemaError as e:
-            logger.warning("mcp tool %s skipped: %s", name, e)
+            logger.warning("mcp: invalid outputSchema; tool skipped name_length=%d error_type=%s", len(name), type(e).__name__)
             continue
         local_name = f"{config.tool_prefix}{name}"
         effect_kind, reconciliation, parallel_safe = _classify_effect(meta, config)
@@ -259,7 +260,7 @@ class McpToolBinding:
                         replaced.append(name)
                     continue
                 if name in self.registry:
-                    logger.warning("mcp tool %s collides with an existing tool; skipped", name)
+                    logger.warning("mcp: tool collision name_length=%d; skipped", len(name))
                     continue
                 self.registry.register(tool.spec)
                 self.owned.add(name)
@@ -304,10 +305,11 @@ class McpToolBinding:
         """list_changed 回调：同步失败只记日志（server 抖动不应打断宿主）。"""
         try:
             added, removed, replaced = await self.sync()
-        except Exception:
-            logger.exception("mcp tools re-sync failed for %s", self.client.server_info.get("name"))
+        except Exception as error:
+            logger.warning("mcp: tools re-sync failed error_type=%s", type(error).__name__)
             return
-        logger.info("mcp tools re-synced: +%s -%s ~%s", added, removed, replaced)
+        logger.info("mcp tools re-synced: added=%d removed=%d replaced=%d",
+                    len(added), len(removed), len(replaced))
 
     def detach(self) -> None:
         """从注册表移除本绑定拥有的全部工具（server 断开 / 业务卸载时调用）。"""
@@ -375,7 +377,7 @@ async def register_mcp_tools_async(
         attach_images=attach_images)
     registered = [spec for name in sorted(binding.owned)
                   if (spec := registry.get(name)) is not None]
-    logger.info("registered %d MCP tool(s) from %s", len(registered), client.server_info.get("name"))
+    logger.info("registered %d MCP tool(s)", len(registered))
     return registered
 
 

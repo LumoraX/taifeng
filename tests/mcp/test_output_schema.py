@@ -144,7 +144,8 @@ async def test_malformed_output_schema_skips_tool(caplog: pytest.LogCaptureFixtu
     with caplog.at_level(logging.WARNING, logger="taifeng.mcp.bridge"):
         binding = await bind_mcp_tools(client, registry, watch=False)
     assert binding.owned == {"ok"}
-    assert "weather" in caplog.text and "outputSchema" in caplog.text
+    assert "weather" not in caplog.text and "outputSchema" in caplog.text
+    assert "name_length=7" in caplog.text
 
 
 # ---------------------------------------------------------------- sync 替换判定

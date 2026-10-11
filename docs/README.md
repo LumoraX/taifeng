@@ -162,6 +162,14 @@ Later ADRs:
 120. [ADR 0120：活跃核销幂等](decisions/0120-active-resolution-idempotency.md)。
 121. [ADR 0121：中断用量完整性](decisions/0121-interrupted-usage-completeness.md)。
 
+122. [ADR 0122：MCP 与本地进程的有界长行](decisions/0122-mcp-stdio-line-bound.md)。
+123. [ADR 0123：MCP 握手取消收敛](decisions/0123-mcp-handshake-cancellation.md)。
+124. [ADR 0124：MCP 帧解析共享](decisions/0124-mcp-frame-decoding.md)。
+125. [ADR 0125：MCP 日志只记录元数据](decisions/0125-mcp-log-metadata.md)。
+126. [ADR 0126：MCP 响应形状的错误归一](decisions/0126-mcp-malformed-response-errors.md)。
+127. [ADR 0127：MCP 会话失效的有限恢复](decisions/0127-mcp-session-expiry-recovery.md)。
+128. [ADR 0128：MCP 关闭的异常优先级](decisions/0128-mcp-close-error-precedence.md)。
+
 ### Fourth Pass: Gap Tracking
 
 22. [Hermes capability gap roadmap](architecture/hermes-gap-roadmap.md): feature-level progress.

@@ -83,7 +83,8 @@ class CancelNotifier:
         """
         if method == "initialize":
             return
-        logger.info("mcp: abandoning request %r (%s): %s", request_id, method, reason)
+        logger.info("mcp: abandoning request id_type=%s method_length=%d reason_length=%d",
+                    type(request_id).__name__, len(method), len(reason))
         task = asyncio.get_running_loop().create_task(
             self._deliver(cancelled_notification(request_id, reason)))
         self._tasks.add(task)
@@ -93,9 +94,9 @@ class CancelNotifier:
         """发出一条取消通知；失败只记日志（通知是 fire-and-forget，server 终会按自身超时放弃）。"""
         try:
             await self._send(notification)
-        except Exception:  # noqa: BLE001 —— 投递失败不能反噬已经在收尾的请求方
-            logger.warning("mcp: failed to send cancellation for request %r",
-                           notification["params"]["requestId"], exc_info=True)
+        except Exception as error:  # noqa: BLE001 —— 投递失败不能反噬已经在收尾的请求方
+            logger.warning("mcp: failed cancellation delivery error_type=%s id_type=%s",
+                           type(error).__name__, type(notification["params"]["requestId"]).__name__)
 
     async def aclose(self) -> None:
         """取消并等待尚未发出的通知（连接即将关闭，server 会随连接结束放弃一切）。"""

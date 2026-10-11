@@ -112,7 +112,7 @@ handler MUST NOT 以 `tool_use` 形状发请求（见 [permission-gate](permissi
 | `CommandExecutor.start(spec) -> CommandProcess` | 启动并立即返回；失败抛 `OSError` |
 | `CommandProcess` | `returncode` / `communicate()` / `kill()` / `wait()` |
 | `StreamingCommandProcess` | `CommandProcess` + `stdin` / `stdout` / `stderr` 三个流（`CommandInput`：`write` / `drain` / `close` / `is_closing`；`CommandOutput`：`readline` / `read`）；`CommandSpec.stdin=True` 时执行器须返回这种对象 |
-| `LocalCommandExecutor` | 默认：本机子进程（`shell=True` → shell，否则 `shlex.split` + exec），每条命令自成一个进程组 |
+| `LocalCommandExecutor` | stdout/stderr 的单行读取上限 16 MiB（ADR 0122）；默认：本机子进程（`shell=True` → shell，否则 `shlex.split` + exec），每条命令自成一个进程组 |
 | `make_shell_exec_tool(executor=)` / `BackgroundTaskRegistry(executor=)` / `McpStdioClient.spawn(executor=)` | 注入点；None = 本机 |
 
 权限审批、黑名单、超时、输出截断、取消仍由工具统一负责——换执行器不改变这些语义。`shell_exec` SHALL

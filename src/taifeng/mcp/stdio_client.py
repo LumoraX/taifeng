@@ -44,6 +44,13 @@ from taifeng.mcp.bridge import (
     register_mcp_tools_async,
 )
 from taifeng.mcp.cancellation import CancelNotifier, cancel_reason
+from taifeng.mcp.cleanup import cleanup_all, close_after_failure
+from taifeng.mcp.message_decode import (
+    decode_message,
+    require_object,
+    unwrap_response,
+    value_metadata,
+)
 from taifeng.mcp.pagination import DEFAULT_MAX_LIST_PAGES, list_all_tools, validate_max_pages
 from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
 from taifeng.mcp.server_messages import ServerMessageRouter
@@ -103,6 +110,7 @@ class McpStdioClient:
         self._stderr_chunks: deque[bytes] = deque()
         self._stderr_bytes = 0
         self._closed = False
+        self._disconnected = False
         # 写 server stdin 的互斥锁：本端请求 / 通知与对 server 请求的应答并发写出
         self._lock = asyncio.Lock()
         self._initialized = False
@@ -162,6 +170,7 @@ class McpStdioClient:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=cwd,
+                limit=16 * 1024 * 1024,
             )
         else:
             proc = await _start_through_executor(executor, command, env=env, cwd=cwd)
@@ -172,8 +181,8 @@ class McpStdioClient:
             client._stderr_task = asyncio.create_task(client._drain_stderr())
         try:
             await client._initialize()
-        except Exception:
-            await client.close()
+        except BaseException:
+            await close_after_failure(client.close)
             raise
         return client
 
@@ -189,6 +198,8 @@ class McpStdioClient:
         """
         if self._closed:
             raise RuntimeError("client closed")
+        if self._disconnected:
+            raise McpToolError(-32000, "mcp connection closed")
         line = json.dumps(payload, separators=(",", ":")) + "\n"
         async with self._lock:
             assert self._proc.stdin is not None
@@ -253,20 +264,18 @@ class McpStdioClient:
                 line = await self._proc.stdout.readline()
                 if not line:
                     break
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning("mcp: invalid JSON: %r", line)
-                    continue
-                if not isinstance(msg, dict):
-                    logger.warning("mcp: non-object JSON-RPC message ignored: %r", line[:200])
+                msg = decode_message(line)
+                if msg is None:
                     continue
                 self._dispatch_message(msg)
+        except (OSError, ValueError) as error:
+            logger.warning("mcp: stdio reader stopped type=%s", type(error).__name__)
         finally:
+            self._disconnected = True
             # 释放所有未决 future
             for fut in self._pending.values():
                 if not fut.done():
-                    fut.set_exception(RuntimeError("mcp connection closed"))
+                    fut.set_exception(McpToolError(-32000, "mcp connection closed"))
             self._pending.clear()
 
     async def _drain_stderr(self) -> None:
@@ -303,13 +312,12 @@ class McpStdioClient:
         msg_id = msg.get("id")
         fut = self._pending.pop(msg_id, None) if isinstance(msg_id, int) else None
         if fut is None or fut.done():
-            logger.warning("mcp: response for unknown or abandoned request id=%r", msg_id)
+            logger.warning("mcp: abandoned response id type=%s length=%d", *value_metadata(msg_id))
             return
-        if "error" in msg:
-            err = msg["error"] if isinstance(msg["error"], dict) else {}
-            fut.set_exception(McpToolError(err.get("code", -1), err.get("message", "")))
-        else:
-            fut.set_result(msg.get("result"))
+        try:
+            fut.set_result(unwrap_response(msg))
+        except McpToolError as error:
+            fut.set_exception(error)
 
     def add_tools_changed_listener(self, listener: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """登记 ``notifications/tools/list_changed`` 的异步回调（``bind_mcp_tools`` 使用）。"""
@@ -331,16 +339,11 @@ class McpStdioClient:
         result = await self._send_request("initialize", initialize_params(
             capabilities=self._router.client_capabilities(), client_version=__version__))
         self._protocol_version = negotiate_protocol_version(result)
-        self._server_info = result.get("serverInfo", {})
+        self._server_info = require_object(result.get("serverInfo", {}), "serverInfo")
         # 必须发 initialized notification
         await self._send_notification("notifications/initialized")
         self._initialized = True
-        logger.info(
-            "mcp connected: %s v%s (protocol %s)",
-            self._server_info.get("name", "?"),
-            self._server_info.get("version", "?"),
-            self._protocol_version,
-        )
+        logger.info("mcp connected: protocol %s", self._protocol_version)
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """``tools/list``：跟完 ``nextCursor`` 分页，返回全部工具元数据。
@@ -362,9 +365,7 @@ class McpStdioClient:
             "tools/call",
             {"name": name, "arguments": arguments},
         )
-        if not isinstance(result, dict):
-            return {"content": []}
-        return result
+        return require_object(result, "tools/call result")
 
     @property
     def server_info(self) -> dict[str, Any]:
@@ -388,8 +389,12 @@ class McpStdioClient:
         if self._closed:
             return
         self._closed = True
-        await self._router.aclose()
-        await self._cancels.aclose()
+        await cleanup_all((
+            self._router.aclose, self._cancels.aclose, self._close_process, self._close_readers,
+        ))
+
+    async def _close_process(self) -> None:
+        """结束 stdin 与子进程；有界等待后强制终止。"""
         if self._proc.stdin is not None and not self._proc.stdin.is_closing():
             try:
                 self._proc.stdin.close()
@@ -400,6 +405,8 @@ class McpStdioClient:
         except TimeoutError:
             self._proc.kill()
             await self._proc.wait()
+    async def _close_readers(self) -> None:
+        """即使其他清理失败，也收敛 stdout 与 stderr 排空任务。"""
         for task in (self._reader_task, self._stderr_task):
             if task is not None:
                 task.cancel()

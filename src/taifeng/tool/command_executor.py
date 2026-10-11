@@ -217,6 +217,7 @@ class LocalCommandExecutor:
                 cwd=spec.cwd,
                 env=spec.env,
                 start_new_session=True,
+                limit=16 * 1024 * 1024,
             )
         else:
             proc = await asyncio.create_subprocess_exec(
@@ -227,6 +228,7 @@ class LocalCommandExecutor:
                 cwd=spec.cwd,
                 env=spec.env,
                 start_new_session=True,
+                limit=16 * 1024 * 1024,
             )
         return _LocalProcess(proc)
 

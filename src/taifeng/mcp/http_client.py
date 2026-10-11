@@ -28,8 +28,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+from contextvars import ContextVar
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +37,13 @@ import httpx
 
 from taifeng.mcp.bridge import McpToolError
 from taifeng.mcp.cancellation import CancelNotifier, cancel_reason
+from taifeng.mcp.cleanup import cleanup_all, close_after_failure
+from taifeng.mcp.message_decode import (
+    decode_message,
+    require_object,
+    unwrap_response,
+    value_metadata,
+)
 from taifeng.mcp.pagination import DEFAULT_MAX_LIST_PAGES, list_all_tools, validate_max_pages
 from taifeng.mcp.protocol import initialize_params, negotiate_protocol_version
 from taifeng.mcp.server_messages import ServerMessageRouter
@@ -74,17 +81,17 @@ class _Stream(Enum):
     ENDED = "ended"
 
 
-def _decode_message(data: str) -> dict[str, Any] | None:
-    """SSE 事件 data → JSON-RPC 消息；非法 JSON / 非对象记告警后跳过（单条坏消息不打断流）。"""
-    try:
-        msg = json.loads(data)
-    except json.JSONDecodeError:
-        logger.warning("mcp http: invalid SSE JSON: %r", data[:200])
-        return None
-    if not isinstance(msg, dict):
-        logger.warning("mcp http: non-object SSE message ignored: %r", data[:200])
-        return None
-    return msg
+_decode_message = decode_message
+
+
+class _SessionExpired(McpToolError):
+    """会话失效信号，记录被拒请求的会话代次与执行确定性。"""
+
+    def __init__(self, generation: int, *, rejected: bool) -> None:
+        """直接 POST 拒绝可以重试，续传拒绝不能证明原请求未执行。"""
+        super().__init__(_TRANSPORT_ERROR, "MCP session expired")
+        self.generation = generation
+        self.rejected = rejected
 
 
 class McpHttpClient:
@@ -137,6 +144,13 @@ class McpHttpClient:
         self._session_id: str | None = None
         # initialize 协商出的协议版本（握手完成前为 None，此时请求不带版本头）
         self._protocol_version: str | None = None
+        self._session_generation = 0
+        self._push_generation = 0
+        self._reply_session: ContextVar[tuple[str | None] | None] = ContextVar(
+            "mcp_reply_session", default=None)
+        self._recovery_lock = asyncio.Lock()
+        self._recovery_error: McpToolError | None = None
+        self._known_tools: list[dict[str, Any]] | None = None
         self._next_id = 1
         self._server_info: dict[str, Any] = {}
         self._closed = False
@@ -179,7 +193,7 @@ class McpHttpClient:
         try:
             await client._initialize()
         except BaseException:
-            await client.close()
+            await close_after_failure(client.close)
             raise
         if listen_notifications:
             client._listener_task = asyncio.get_running_loop().create_task(
@@ -217,9 +231,18 @@ class McpHttpClient:
 
         规范：server 接受则回 202 无 body。
         """
+        scope = self._reply_session.get()
+        if "method" not in payload and scope is not None:
+            if scope[0] != self._session_id:
+                raise McpToolError(_TRANSPORT_ERROR, "server request belongs to an expired session")
+            # 当前握手流的应答不能等握手自身持有的恢复锁。
+            await self._post(payload, expect_id=None, allow_recovery=False)
+            return
         await self._post(payload, expect_id=None)
 
-    async def _post(self, payload: dict[str, Any], *, expect_id: int | None) -> Any:
+    async def _post(
+        self, payload: dict[str, Any], *, expect_id: int | None, allow_recovery: bool = True,
+    ) -> Any:
         """POST 一条 JSON-RPC 消息；``expect_id`` 为 None 表示通知 / 应答（不等响应）。
 
         请求（``expect_id`` 非 None）因超时或被取消而放弃时，登记 ``notifications/cancelled``。
@@ -231,10 +254,12 @@ class McpHttpClient:
         """
         if self._closed:
             raise RuntimeError("client closed")
+        if allow_recovery and self._recovery_error is not None:
+            raise self._recovery_error
         method = str(payload.get("method"))
         try:
             async with asyncio.timeout(self._timeout):
-                return await self._exchange(payload, expect_id)
+                return await self._exchange_with_recovery(payload, expect_id, allow_recovery)
         except TimeoutError as e:
             if expect_id is not None:
                 self._cancels.notify(expect_id, method, f"client timeout after {self._timeout:g}s")
@@ -246,40 +271,71 @@ class McpHttpClient:
         except httpx.TransportError as e:
             raise McpToolError(_TRANSPORT_ERROR, f"transport error: {type(e).__name__}") from e
 
+
+    async def _exchange_with_recovery(
+        self, payload: dict[str, Any], expect_id: int | None, allow_recovery: bool,
+    ) -> Any:
+        """普通请求等待恢复完成；会话失效仅进行一次恢复与安全重试。"""
+        if allow_recovery:
+            async with self._recovery_lock:
+                if self._recovery_error is not None:
+                    raise self._recovery_error
+                if self._closed:
+                    raise McpToolError(_TRANSPORT_ERROR, "client closed")
+        try:
+            return await self._exchange(payload, expect_id)
+        except _SessionExpired as expired:
+            if not allow_recovery:
+                raise
+            await self._recover_session(expired.generation)
+            safe = expect_id is not None and (
+                expired.rejected or payload.get("method") in {"tools/list", "ping"})
+            if not safe:
+                raise McpToolError(_TRANSPORT_ERROR,
+                                  "session expired; request may have executed; not replayed")
+            # 第二次失败直接上抛，不再握手或重放。
+            return await self._exchange(payload, expect_id)
+
     async def _exchange(self, payload: dict[str, Any], expect_id: int | None) -> Any:
         """POST 并读出响应；SSE 流在响应之前结束 → 按 ``Last-Event-ID`` 续传（先释放 POST 连接）。"""
         cursor = SseCursor()
+        generation = self._session_generation
+        headers = self._headers()
         async with self._http.stream(
-                "POST", self._url, headers=self._headers(), json=payload) as resp:
-            value = await self._read_response(resp, expect_id, cursor)
+                "POST", self._url, headers=headers, json=payload) as resp:
+            if resp.status_code == 404 and _SESSION_HEADER in headers:
+                raise _SessionExpired(generation, rejected=True)
+            value = await self._read_response(
+                resp, expect_id, cursor, accept_session=payload.get("method") == "initialize")
         if value is _Stream.ENDED and expect_id is not None:
-            return await self._resume_for_response(expect_id, cursor)
+            return await self._resume_for_response(expect_id, cursor, headers, generation)
         return value
 
     async def _read_response(
         self, resp: httpx.Response, expect_id: int | None, cursor: SseCursor,
+        *, accept_session: bool = False,
     ) -> Any:
         """解析一次 POST 的响应（JSON 或 SSE）：返回匹配 id 的 result；SSE 流提前结束返回哨兵。"""
         if resp.status_code >= 400:
             body = (await resp.aread()).decode("utf-8", errors="replace")[:200]
             raise McpToolError(_TRANSPORT_ERROR, f"http {resp.status_code}: {body}")
         session_id = resp.headers.get(_SESSION_HEADER)
-        if session_id:
+        if accept_session and session_id:
             self._session_id = session_id
         if expect_id is None:
             return None
         if is_event_stream(resp):
             return await self._consume_stream(resp, expect_id, cursor)
-        try:
-            msg = json.loads(await resp.aread())
-        except json.JSONDecodeError as e:
-            raise McpToolError(_TRANSPORT_ERROR, "response body is not valid JSON") from e
-        if not isinstance(msg, dict) or msg.get("id") != expect_id:
+        msg = decode_message(await resp.aread())
+        if msg is None:
+            raise McpToolError(_TRANSPORT_ERROR, "response body is not valid JSON")
+        if msg.get("id") != expect_id:
             raise McpToolError(_TRANSPORT_ERROR, "response id mismatch")
         return self._unwrap(msg)
 
     async def _consume_stream(
         self, resp: httpx.Response, expect_id: int | None, cursor: SseCursor,
+        *, accept_session: bool = False,
     ) -> Any:
         """读 SSE 流：server 请求 / 通知交路由器，拿到 ``expect_id`` 的响应即返回。
 
@@ -293,18 +349,29 @@ class McpHttpClient:
                     continue
                 # 先看 method：server 请求的 id 可能与本端请求撞号，不能先按 id 匹配
                 if "method" in msg:
-                    self._router.route(msg)
+                    self._route_server_message(msg, resp)
                 elif expect_id is not None and msg.get("id") == expect_id:
                     return self._unwrap(msg)
                 else:
-                    logger.warning("mcp http: unexpected response id=%r on SSE stream",
-                                   msg.get("id"))
+                    logger.warning("mcp http: unexpected response id type=%s length=%d",
+                                   *value_metadata(msg.get("id")))
         except httpx.TransportError as e:
-            logger.info("mcp http: SSE stream broken (%s), last event id %r",
-                        type(e).__name__, cursor.resume_id)
+            logger.info("mcp http: SSE stream broken type=%s cursor_type=%s length=%d",
+                        type(e).__name__, *value_metadata(cursor.resume_id))
         return _Stream.ENDED
 
-    async def _resume_for_response(self, expect_id: int, cursor: SseCursor) -> Any:
+    def _route_server_message(self, message: dict[str, Any], response: httpx.Response) -> None:
+        """服务端应答任务继承来源会话，禁止旧会话的延迟回应流入新会话。"""
+        session = response.headers.get(_SESSION_HEADER) or response.request.headers.get(_SESSION_HEADER)
+        token = self._reply_session.set((session,))
+        try:
+            self._router.route(message)
+        finally:
+            self._reply_session.reset(token)
+
+    async def _resume_for_response(
+        self, expect_id: int, cursor: SseCursor, session_headers: dict[str, str], generation: int,
+    ) -> Any:
         """POST 流在响应前断开：以 GET + ``Last-Event-ID`` 续传，直到拿到响应或次数用尽。
 
         Raises:
@@ -317,7 +384,7 @@ class McpHttpClient:
                 "SSE stream ended before the response; the server sent no event id to resume from")
         for attempt in range(1, self._max_resumptions + 1):
             await asyncio.sleep(resume_delay(cursor, attempt, self._resume_delay))
-            value = await self._resume_once(expect_id, cursor)
+            value = await self._resume_once(expect_id, cursor, session_headers, generation)
             if value is not _Stream.ENDED:
                 return value
         raise McpToolError(
@@ -325,13 +392,17 @@ class McpHttpClient:
             f"SSE stream ended before the response; gave up after "
             f"{self._max_resumptions} resumption attempt(s)")
 
-    async def _resume_once(self, expect_id: int, cursor: SseCursor) -> Any:
+    async def _resume_once(
+        self, expect_id: int, cursor: SseCursor, session_headers: dict[str, str], generation: int,
+    ) -> Any:
         """发一次续传 GET 并读流；连接失败按一次失败的尝试计（返回哨兵）。"""
         assert cursor.resume_id is not None  # 调用方已确认有可续传的事件 id
-        headers = {"Accept": EVENT_STREAM, **self._session_headers(),
+        headers = {**session_headers, "Accept": EVENT_STREAM,
                    LAST_EVENT_ID_HEADER: cursor.resume_id}
         try:
             async with self._http.stream("GET", self._url, headers=headers) as resp:
+                if resp.status_code == 404 and _SESSION_HEADER in headers:
+                    raise _SessionExpired(generation, rejected=False)
                 await require_resumed_stream(resp)
                 return await self._consume_stream(resp, expect_id, cursor)
         except httpx.TransportError as e:
@@ -341,20 +412,19 @@ class McpHttpClient:
 
     @staticmethod
     def _unwrap(msg: dict[str, Any]) -> Any:
-        """JSON-RPC 响应 → result；error → McpToolError。"""
-        if "error" in msg:
-            err = msg["error"] if isinstance(msg["error"], dict) else {}
-            raise McpToolError(int(err.get("code", -1)), str(err.get("message", "")))
-        return msg.get("result")
+        """通过共享校验解开 JSON-RPC 响应。"""
+        return unwrap_response(msg)
 
-    async def _request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    async def _request(
+        self, method: str, params: dict[str, Any] | None = None, *, allow_recovery: bool = True,
+    ) -> Any:
         """发一条带 id 的请求并等待其响应。"""
         req_id = self._next_id
         self._next_id += 1
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id, "method": method}
         if params is not None:
             payload["params"] = params
-        return await self._post(payload, expect_id=req_id)
+        return await self._post(payload, expect_id=req_id, allow_recovery=allow_recovery)
 
     async def _listen_server_stream(self) -> None:
         """GET 推送流：断开 / 被 server 关闭后带 ``Last-Event-ID`` 重连。
@@ -367,8 +437,16 @@ class McpHttpClient:
         fruitless = 0
         while True:
             seen_before = cursor.events
-            if not await self._open_push_stream(cursor):
-                return
+            try:
+                if not await self._open_push_stream(cursor):
+                    return
+            except _SessionExpired as expired:
+                try:
+                    await self._recover_session(expired.generation)
+                except McpToolError as error:
+                    logger.warning("mcp http: push recovery failed type=%s", type(error).__name__)
+                    return
+                cursor = SseCursor()
             if cursor.events > seen_before:
                 # 这次连接收到过事件：server 在正常推送，只是关了流，重连计数清零
                 fruitless = 0
@@ -386,18 +464,27 @@ class McpHttpClient:
         Returns:
             True = 流已结束 / 断开，可重连；False = 不应再尝试（405、错误状态、非 SSE、已关闭）。
         """
-        headers = {"Accept": EVENT_STREAM, **self._session_headers()}
+        async with self._recovery_lock:
+            if self._closed or self._recovery_error is not None:
+                return False
+            generation = self._session_generation
+            if self._push_generation != generation:
+                cursor.last_event_id, cursor.retry_ms, cursor.events = "", None, 0
+                self._push_generation = generation
+            headers = {"Accept": EVENT_STREAM, **self._session_headers()}
         if cursor.resume_id is not None:
             headers[LAST_EVENT_ID_HEADER] = cursor.resume_id
         try:
             async with self._http.stream(
                     "GET", self._url, headers=headers, timeout=None) as resp:
+                if resp.status_code == 404 and _SESSION_HEADER in headers:
+                    raise _SessionExpired(generation, rejected=True)
                 if resp.status_code == 405:
                     logger.debug("mcp http: server does not offer a GET notification stream")
                     return False
                 if resp.status_code >= 400 or not is_event_stream(resp):
-                    logger.warning("mcp http: notification stream rejected (%s, %r)",
-                                   resp.status_code, resp.headers.get("content-type"))
+                    logger.warning("mcp http: notification stream rejected status=%d type=%s length=%d",
+                                   resp.status_code, *value_metadata(resp.headers.get("content-type")))
                     return False
                 await self._consume_stream(resp, None, cursor)
         except httpx.TransportError as e:
@@ -417,11 +504,45 @@ class McpHttpClient:
         from taifeng import __version__
 
         result = await self._request("initialize", initialize_params(
-            capabilities=self._router.client_capabilities(), client_version=__version__))
+            capabilities=self._router.client_capabilities(), client_version=__version__),
+                                     allow_recovery=False)
         self._protocol_version = negotiate_protocol_version(result)
-        self._server_info = result.get("serverInfo", {})
+        self._server_info = require_object(result.get("serverInfo", {}), "serverInfo")
         await self._post({"jsonrpc": "2.0", "method": "notifications/initialized"},
-                         expect_id=None)
+                         expect_id=None, allow_recovery=False)
+        self._session_generation += 1
+
+    async def _recover_session(self, generation: int) -> None:
+        """串行恢复失效会话；同一代次只握手一次，失败后阻止无会话请求。"""
+        async with self._recovery_lock:
+            if self._closed:
+                raise McpToolError(_TRANSPORT_ERROR, "client closed during session recovery")
+            if self._recovery_error is not None:
+                raise self._recovery_error
+            if generation != self._session_generation:
+                return
+            old_tools = self._known_tools
+            self._session_id = None
+            self._protocol_version = None
+            try:
+                await self._initialize()
+                tools = await list_all_tools(self._recovery_tools_page,
+                                             max_pages=self._max_list_pages)
+            except BaseException as error:
+                self._session_id = None
+                self._protocol_version = None
+                self._recovery_error = McpToolError(_TRANSPORT_ERROR, "MCP session recovery failed")
+                if isinstance(error, Exception):
+                    raise self._recovery_error from error
+                raise
+            self._known_tools = tools
+            if old_tools is not None and tools != old_tools:
+                self._router.route({"method": "notifications/tools/list_changed"})
+
+    async def _recovery_tools_page(self, cursor: str | None) -> Any:
+        """恢复中的工具探测不再次触发恢复，避免递归锁与无限握手。"""
+        return await self._request("tools/list", {"cursor": cursor} if cursor else None,
+                                   allow_recovery=False)
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """``tools/list``：跟完 ``nextCursor`` 分页，返回全部工具元数据。
@@ -430,7 +551,9 @@ class McpHttpClient:
             McpPaginationError: 翻页超过 ``max_list_pages`` / 游标重复 / 游标非字符串。
             McpToolError: 某页形状非法、HTTP / JSON-RPC 错误或超时。
         """
-        return await list_all_tools(self._list_tools_page, max_pages=self._max_list_pages)
+        tools = await list_all_tools(self._list_tools_page, max_pages=self._max_list_pages)
+        self._known_tools = tools
+        return tools
 
     async def _list_tools_page(self, cursor: str | None) -> Any:
         """取一页 ``tools/list``；首页不带 ``params``（兼容不认 cursor 字段的旧 server）。"""
@@ -439,7 +562,7 @@ class McpHttpClient:
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """``tools/call``。"""
         result = await self._request("tools/call", {"name": name, "arguments": arguments})
-        return result if isinstance(result, dict) else {"content": []}
+        return require_object(result, "tools/call result")
 
     @property
     def server_info(self) -> dict[str, Any]:
@@ -463,18 +586,24 @@ class McpHttpClient:
         if self._closed:
             return
         self._closed = True
-        await self._router.aclose()
-        await self._cancels.aclose()
+        await cleanup_all((
+            self._router.aclose, self._cancels.aclose, self._close_listener,
+            self._delete_session, self._http.aclose,
+        ))
+
+    async def _close_listener(self) -> None:
+        """收敛推送流任务，不让它在关闭后重连。"""
         if self._listener_task is not None:
             self._listener_task.cancel()
             # 推送流任务的取消 / 异常属预期，由 gather 收集而非外抛
             await asyncio.gather(self._listener_task, return_exceptions=True)
+    async def _delete_session(self) -> None:
+        """尽力结束远端会话；连接池由独立清理步骤关闭。"""
         if self._session_id is not None:
             try:
                 await self._http.delete(self._url, headers=self._session_headers())
             except httpx.HTTPError:
                 logger.debug("mcp http: session DELETE failed (ignored on close)")
-        await self._http.aclose()
 
 
 __all__ = ["McpHttpClient"]

@@ -109,3 +109,16 @@ async def test_require_resumed_stream_accepts_event_stream() -> None:
     resp = httpx.Response(200, content=b"", headers={
         "content-type": "text/event-stream; charset=utf-8"})
     await require_resumed_stream(resp)
+
+
+async def test_utf8_and_crlf_across_chunk_boundaries() -> None:
+    """多字节字符、BOM、CRLF 即使跨块也保持事件与游标。"""
+    async def chunks() -> AsyncIterator[bytes]:
+        """每次只给一个字节以覆盖全部边界。"""
+        for byte in '\ufeffid: 游标\r\ndata: 汉字\r\n\r\ndata: 尾\r\r'.encode():
+            yield bytes([byte])
+
+    response = httpx.Response(200, content=chunks())
+    cursor = SseCursor()
+    assert [value async for value in iter_sse_data(response, cursor)] == ["汉字", "尾"]
+    assert cursor.resume_id == "游标"

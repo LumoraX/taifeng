@@ -31,6 +31,7 @@ import logging
 from typing import TYPE_CHECKING, Any, TypeGuard
 
 from taifeng.mcp.elicitation import answer_elicitation
+from taifeng.mcp.message_decode import value_metadata
 from taifeng.mcp.protocol import (
     JSONRPC_INVALID_REQUEST,
     JSONRPC_METHOD_NOT_FOUND,
@@ -100,7 +101,7 @@ class ServerMessageRouter:
             return
         method = msg.get("method")
         if not isinstance(method, str):
-            logger.warning("mcp: server message with non-string method ignored: %r", method)
+            logger.warning("mcp: non-string method type=%s length=%d", *value_metadata(method))
             return
         if msg.get("id") is not None:
             self._start_request(msg["id"], method, msg.get("params"))
@@ -110,7 +111,7 @@ class ServerMessageRouter:
         elif method == "notifications/cancelled":
             self._cancel_inflight(msg.get("params"))
         else:
-            logger.debug("mcp notification: %s", method)
+            logger.debug("mcp: unknown notification type=%s length=%d", *value_metadata(method))
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """把协程派成本路由器持有的任务。"""
@@ -156,19 +157,20 @@ class ServerMessageRouter:
         """写回应答；传输失败只能记日志（server 侧会按自己的超时放弃该请求）。"""
         try:
             await self._send(response)
-        except Exception:  # noqa: BLE001 —— 投递失败不能打断路由器，记日志后放弃
-            logger.warning("mcp: failed to deliver response for server request %r",
-                           response.get("id"), exc_info=True)
+        except Exception as error:  # noqa: BLE001 —— 投递失败不能打断路由器
+            logger.warning("mcp: failed response delivery error_type=%s id_type=%s length=%d",
+                           type(error).__name__, *value_metadata(response.get("id")))
 
     def _cancel_inflight(self, params: Any) -> None:
         """``notifications/cancelled``：取消对应在飞请求；未知 / 已完成的 id 按规范忽略。"""
         request_id = params.get("requestId") if isinstance(params, dict) else None
         task = self._inflight.get(request_id) if _is_request_id(request_id) else None
         if task is None:
-            logger.debug("mcp: cancellation for unknown or finished request %r", request_id)
+            logger.debug("mcp: unknown cancellation id_type=%s length=%d", *value_metadata(request_id))
             return
         # 走到这里 params 必为对象（requestId 取自它）
-        logger.info("mcp: server cancelled request %r (%s)", request_id, params.get("reason"))
+        logger.info("mcp: server cancellation id_type=%s id_length=%d reason_type=%s length=%d",
+                    *value_metadata(request_id), *value_metadata(params.get("reason")))
         task.cancel()
 
     async def aclose(self) -> None:

@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+import codecs
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -109,6 +111,29 @@ def _apply_field(buffer: _EventBuffer, cursor: SseCursor, name: str, value: str)
         buffer.touched = True
 
 
+async def _utf8_lines(response: httpx.Response) -> AsyncIterator[str]:
+    """严格 UTF-8 增量解码，支持跨块字符与 CR/LF/CRLF 换行。"""
+    decoder = codecs.getincrementaldecoder("utf-8-sig")()
+    pending = ""
+    try:
+        async for chunk in response.aiter_bytes():
+            pending += decoder.decode(chunk)
+            # 保留末尾 CR，等下一块判断它是否属于 CRLF。
+            ready = pending[:-1] if pending.endswith("\r") else pending
+            parts = re.split(r"\r\n|\r|\n", ready)
+            for line in parts[:-1]:
+                yield line
+            pending = parts[-1] + ("\r" if pending.endswith("\r") else "")
+        pending += decoder.decode(b"", final=True)
+        parts = re.split(r"\r\n|\r|\n", pending)
+        for line in parts[:-1]:
+            yield line
+        if parts[-1]:
+            yield parts[-1]
+    except UnicodeError as error:
+        raise McpToolError(_TRANSPORT_ERROR, "SSE contains invalid UTF-8") from error
+
+
 async def iter_sse_data(response: httpx.Response, cursor: SseCursor) -> AsyncIterator[str]:
     """逐事件产出 data 文本，``id`` / ``retry`` 就地写入 ``cursor``。
 
@@ -123,7 +148,7 @@ async def iter_sse_data(response: httpx.Response, cursor: SseCursor) -> AsyncIte
         httpx.TransportError: 流中途断开（由调用方决定是否续传）；此时残余事件不派发。
     """
     buffer = _EventBuffer()
-    async for line in response.aiter_lines():
+    async for line in _utf8_lines(response):
         if line == "":
             data = buffer.dispatch(cursor)
             if data is not None:
