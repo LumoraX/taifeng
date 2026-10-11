@@ -170,6 +170,8 @@ Later ADRs:
 127. [ADR 0127：MCP 会话失效的有限恢复](decisions/0127-mcp-session-expiry-recovery.md)。
 128. [ADR 0128：MCP 关闭的异常优先级](decisions/0128-mcp-close-error-precedence.md)。
 
+129. [ADR 0129：工作区原子写与一致性检查](decisions/0129-workspace-atomic-write-and-conformance.md)。
+
 ### Fourth Pass: Gap Tracking
 
 22. [Hermes capability gap roadmap](architecture/hermes-gap-roadmap.md): feature-level progress.

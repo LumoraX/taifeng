@@ -38,6 +38,14 @@ HTTP 会话 404 在原请求明确被拒时仅重试一次；丢失结果的工�
 恢复锁保护普通请求和推送流，旧 cursor 不跨会话，工具变化通知已有绑定。
 细节见 [MCP 客户端契约](capabilities/mcp-client.md)，决策见 ADR 0122–0128。
 
+## 工作区文件访问的一致性
+
+LocalWorkspaceFS 的每次写入使用目标目录中的独占随机临时文件，失败清理后原子替换，
+并发写允许最后完成的完整版本生效。remove 检查父路径而保留最终链接条目，仅删链接自身。
+容器和远端后端可以复用 taifeng.testing 的 WorkspaceHarness / workspace_fs_cases
+验证7成员协议的行为；链接和物理故障由各实现专测。
+细节见 [WorkspaceFS 契约](capabilities/workspace-fs.md)，决策见 ADR 0129。
+
 ## 核心抽象
 
 ```python

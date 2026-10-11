@@ -90,13 +90,14 @@ SHALL 接受 `root_dir=`（本机目录，等价于 `workspace=LocalWorkspaceFS(
   不建父目录、目录删除）；内存工作区上的 `file_read` / `file_write` / `apply_patch`（先校验后应用、目录删除在
   校验期拒绝、写失败落成结果）；权限 target 与被拒不触碰工作区；五个工厂的入参互斥；`glob` / `grep` 在
   非本机工作区上的遍历、`.gitignore`、排除目录、二进制与超大文件、符号链接、访问失败、取消。
+- `tests/testing/test_workspace_conformance.py`：参考实现通过通用套件，损坏读取实现被检出。
 - 既有 `tests/tool/test_apply_patch.py` / `test_builtin_tools.py` / `test_glob_search.py` / `test_grep_*.py` /
   `test_search_walk.py` 未改一行——`root_dir` 路径的行为不变。
 
 ## 能力边界（如实记录）
 
 - 协议没有按偏移读、流式读写与 `rename`：大文件整读整写；需要时再加可选能力，不改这 7 个成员。
-- `LocalWorkspaceFS` 把阻塞操作放到工作线程；同一文件的并发写由调用方（工具的 `parallel_safe=False`）串行化。
+- `LocalWorkspaceFS` 把阻塞操作放到工作线程；并发写使用各自独占的临时文件，允许最后完成的原子替换生效；不提供CAS。
 - 注入的工作区若不做原子写，`file_write` / `apply_patch` 的「要么全写要么不写」只到单次 `write_bytes` 的粒度，
   取决于实现。
 
@@ -104,3 +105,28 @@ SHALL 接受 `root_dir=`（本机目录，等价于 `workspace=LocalWorkspaceFS(
 
 - R1：无业务概念。R2、R3、R5：无影响。
 - R4：搜索工具的停止信号照常生效；`file_read` / `file_write` 的工作区访问随工具超时被放弃。
+
+## 原子写、链接删除与一致性验收（ADR 0129）
+
+- 本机写入 SHALL 在目标父目录创建独占随机临时文件；每次调用单独使用，写入或替换失败后清理。
+  并发写允许最后完成的替换生效，各次写入均成功或明确失败，读者只能看到完整旧版或新版。
+  不使用固定 `.tmp` 路径，也不覆盖宿主预先存在的同名文件或链接。
+- `remove` SHALL 检查父路径；最终条目为符号链接时只删链接自身，不删目标。
+  断链与指向工作区外的最终链接也可以删除；经过越界的中间目录链接仍拒绝。
+- `taifeng.testing.WorkspaceHarness.new_workspace()` 返回本 case 的独立工作区；
+  `workspace_fs_cases()` 返回具名 `ConformanceCase`，可与 `run_cases` 使用。
+  验收7成员协议的路径、读写、目录、错误、并发完整版本；每个 case 需要独立存储。
+  原子性检查适用于承诺原子写的实现；文档声明非原子写的后端可明确跳过该具名case。
+- 协议没有创建符号链接和注入物理故障的方法，链接/临时文件失败由实现专测。
+  本机实现不承担敌对进程并发替换父目录的强隔离，宿主需要沙盒时注入相应后端。
+
+
+### 第三方后端接入示例
+
+```python
+from taifeng.testing import workspace_fs_cases, run_cases
+
+# 每次 factory() 返回一份全新的隔离工作区；harness 实现 async new_workspace()。
+failures = await run_cases(workspace_fs_cases(), factory)
+assert failures == {}, failures
+```

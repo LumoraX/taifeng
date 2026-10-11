@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -167,14 +168,22 @@ class LocalWorkspaceFS:
 
     async def write_bytes(self, path: str, data: bytes, *, create_parents: bool = True) -> None:
         """写临时文件后原子替换。"""
-        target = self._inside(path)
-
         def write() -> None:
+            """每次调用独占一个同目录临时文件，失败后清理。"""
+            target = self._inside(path)
             if create_parents:
                 target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_suffix(target.suffix + ".tmp")
-            tmp.write_bytes(data)
-            os.replace(tmp, target)
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=target.parent, prefix=".taifeng-", suffix=".tmp", delete=False,
+                ) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(data)
+                os.replace(temporary, target)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
 
         await anyio.to_thread.run_sync(write)
 
@@ -212,11 +221,20 @@ class LocalWorkspaceFS:
 
         return await anyio.to_thread.run_sync(scan)
 
-    async def remove(self, path: str, *, recursive: bool = False) -> None:
-        """删文件；目录非递归时须为空。"""
-        target = self._inside(path)
+    def _removal_entry(self, path: str) -> Path:
+        """校验父路径边界，保留最终链接条目。"""
+        requested = self._root / path
+        if requested == self._root:
+            return self._root
+        parent = self._inside(str(requested.parent))
+        entry = parent / requested.name
+        return entry if entry.is_symlink() else self._inside(str(entry))
 
+    async def remove(self, path: str, *, recursive: bool = False) -> None:
+        """删除最终条目；链接只删自身，目录非递归时须为空。"""
         def delete() -> None:
+            """仅跟随父路径，不把最终链接规范成它的目标。"""
+            target = self._removal_entry(path)
             if target.is_dir() and not target.is_symlink():
                 if recursive:
                     shutil.rmtree(target)

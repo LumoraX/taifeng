@@ -2,6 +2,7 @@
 
 内核把可替换的部分定成协议；外部实现是否真的满足协议的**行为**约定，靠这里的检查验收：
 
+- ``workspace_fs_cases``：WorkspaceFS 的路径、字节与并发行为；
 - ``journal_conformance``：SessionJournal core（``SessionJournalCore``）的行为；
 - ``journal_adapter_conformance``：注入 ``JsonlSessionJournalCore`` 的 ``SyncFileAdapter`` /
   ``WriterLockAdapter``。
@@ -24,6 +25,7 @@ from taifeng.testing.journal_conformance import (
     JournalCoreHarness,
     journal_core_cases,
 )
+from taifeng.testing.workspace_conformance import WorkspaceHarness, workspace_fs_cases
 
 __all__ = [
     "ConformanceCase",
@@ -34,4 +36,6 @@ __all__ = [
     "journal_storage_cases",
     "run_cases",
     "writer_lock_cases",
+    "WorkspaceHarness",
+    "workspace_fs_cases",
 ]

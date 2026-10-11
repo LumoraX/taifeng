@@ -468,3 +468,112 @@ async def test_a_failing_workspace_is_reported_as_unreadable_not_raised() -> Non
     assert not result.is_error
     assert result.output.splitlines()[0] == "ok/a.py"
     assert "skipped 1 unreadable path(s)" in result.output
+
+
+async def test_write_does_not_follow_preplanted_temp_symlink(tmp_path: Path) -> None:
+    """固定临时名上的链接不能让写入触碰工作区外。"""
+    root = tmp_path / "ws"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"secret")
+    (root / "data.tmp").symlink_to(outside)
+    await LocalWorkspaceFS(root).write_bytes("data", b"new")
+    assert outside.read_bytes() == b"secret"
+    assert (root / "data.tmp").is_symlink()
+    assert (root / "data").read_bytes() == b"new"
+
+
+async def test_failed_replace_cleans_temporary_file(tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    """替换失败不留临时文件，不改变目标旧内容。"""
+    import os
+
+    (tmp_path / "data").write_bytes(b"old")
+
+    def fail(*args: object) -> None:
+        """模拟文件系统拒绝替换。"""
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail)
+    with pytest.raises(OSError, match="replace failed"):
+        await LocalWorkspaceFS(tmp_path).write_bytes("data", b"new")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["data"]
+    assert (tmp_path / "data").read_bytes() == b"old"
+
+
+async def test_concurrent_writes_have_independent_temporary_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """卡住两次替换，证明并发调用各自持有临时文件。"""
+    import asyncio
+    import os
+    import threading
+
+    replace = os.replace
+    barrier = threading.Barrier(2)
+    sources: list[str] = []
+
+    def synchronized_replace(source: str, target: str) -> None:
+        """让两个写入在替换前同时就绪。"""
+        sources.append(str(source))
+        barrier.wait(timeout=3)
+        replace(source, target)
+
+    monkeypatch.setattr(os, "replace", synchronized_replace)
+    fs = LocalWorkspaceFS(tmp_path)
+    await asyncio.gather(fs.write_bytes("data", b"a" * 10000), fs.write_bytes("data", b"b" * 10000))
+    assert len(set(sources)) == 2
+    assert await fs.read_bytes("data") in {b"a" * 10000, b"b" * 10000}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["data"]
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+async def test_remove_symlink_only_removes_link(tmp_path: Path, recursive: bool) -> None:
+    """目录链接递归删除也不能删除目标目录。"""
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "data").write_bytes(b"keep")
+    (tmp_path / "link").symlink_to(tmp_path / "target", target_is_directory=True)
+    await LocalWorkspaceFS(tmp_path).remove("link", recursive=recursive)
+    assert not (tmp_path / "link").is_symlink()
+    assert (tmp_path / "target" / "data").read_bytes() == b"keep"
+
+
+async def test_remove_outside_and_broken_links_without_following(tmp_path: Path) -> None:
+    """最终链接可以删除，但越界的中间目录链接仍拒绝。"""
+    root = tmp_path / "ws"
+    root.mkdir()
+    (tmp_path / "outside").write_bytes(b"keep")
+    (root / "outside-link").symlink_to(tmp_path / "outside")
+    (root / "broken").symlink_to(tmp_path / "missing")
+    (root / "dir-link").symlink_to(tmp_path, target_is_directory=True)
+    fs = LocalWorkspaceFS(root)
+    await fs.remove("outside-link")
+    await fs.remove("broken")
+    with pytest.raises(WorkspacePathError):
+        await fs.remove("dir-link/outside")
+    assert (tmp_path / "outside").read_bytes() == b"keep"
+
+
+async def test_failed_temporary_write_cleans_file(tmp_path: Path,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """临时文件写入阶段失败也必须清理并保留旧目标。"""
+    import tempfile
+
+    original = tempfile.NamedTemporaryFile
+    (tmp_path / "data").write_bytes(b"old")
+
+    def fail(data: bytes) -> int:
+        """模拟磁盘写入失败。"""
+        raise OSError("disk write failed")
+
+    def broken_temporary(*args: Any, **kwargs: Any) -> Any:
+        """创建真实临时文件，只注入其写入失败。"""
+        stream = original(*args, **kwargs)
+        monkeypatch.setattr(stream, "write", fail)
+        return stream
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", broken_temporary)
+    with pytest.raises(OSError, match="disk write failed"):
+        await LocalWorkspaceFS(tmp_path).write_bytes("data", b"new")
+    assert (tmp_path / "data").read_bytes() == b"old"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["data"]
