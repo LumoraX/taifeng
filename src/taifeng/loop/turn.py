@@ -348,15 +348,14 @@ class TurnRunner:
             source=f"skill {self.entry_skill.id!r} inference.max_output_tokens")
 
     async def _emit(self, msg: Any) -> None:
+        """投递 turn 事件，保留实际 usage 并标记是否完整。"""
+        if msg.kind in {"turn_completed", "turn_failed", "turn_suspended"}:
+            msg.data["usage_complete"] = self._sample.samples_started == self._sample.samples_metered
         try:
             await self.emit(EventMsg(submission_id=self.submission_id, msg=msg))
         except Exception:
             logger.exception("emit failed")
 
-    # -----------------------------------------------------------------
-    # 实现已下沉 turn_guards.py（Wave 4）。以下为薄委托：TurnRunner 是唯一白盒
-    # 寻址面，兄弟模块与测试按这些原名调用/打桩，签名逐字保留。
-    # -----------------------------------------------------------------
 
     def _deferred_exposure_active(self) -> bool:
         """本 entry 是否处于 deferred 召回模式（决定是否暴露 search_skills 工具）。"""

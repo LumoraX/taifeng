@@ -19,6 +19,7 @@ from taifeng.instructions.source import InstructionFetchError
 from taifeng.instructions.types import InstructionContext, ResolvedInstruction
 from taifeng.loop.audit_gates import engine_turn_hooks
 from taifeng.loop.audit_llm import AuditedTurnInput, audited_turn_index
+from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.engine_prewarm import yield_to_turn
 from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
@@ -55,6 +56,12 @@ class EngineGate:
             engine: 宿主 AgentEngine —— 提供运行态与共享依赖。
         """
         self._engine = engine
+
+    def inherit_admission_cancel(self, submission_id: str, cancel: CancellationToken) -> None:
+        """执行入口同步继承准入到派发之间收到的取消，避免替换登记时丢失。"""
+        pending = self._engine._pending.get(submission_id)
+        if pending is not None and pending.cancel.is_cancelled:
+            cancel.cancel(pending.cancel.reason or CancelReason.REQUESTED, pending.cancel.detail)
 
     async def acquire_root_gate(
         self, submission_id: str, cancel: CancellationToken,
@@ -142,10 +149,11 @@ class EngineGate:
         gate_cancel，取消任一都能传达）。
         """
         gate_cancel = root_cancel.child(f"sub:{submission_id}:gate")
+        self.inherit_admission_cancel(submission_id, gate_cancel)
         self._engine._pending[submission_id] = _PendingTurn(submission_id, gate_cancel)
         if not await self._engine._acquire_root_gate(submission_id, gate_cancel):
-            self._engine._pending.pop(submission_id, None)
             await self._engine._emit_operation_terminal(submission_id, None, kind="cancelled")
+            self._engine._pending.pop(submission_id, None)
             return
         try:
             await run(gate_cancel)
@@ -171,13 +179,14 @@ class EngineGate:
         # 用户消息到达：未完成的预热让路（ADR 0092）
         yield_to_turn(self._engine)
         turn_cancel = root_cancel.child(f"sub:{sub.id}", deadline_seconds=_turn_deadline(sub))
+        self.inherit_admission_cancel(sub.id, turn_cancel)
         self._engine._pending[sub.id] = _PendingTurn(sub.id, turn_cancel, audited_turn_index(sub))
         if gate_held:
             await self._engine._run_turn_for_gated(sub, turn_cancel)
             return
         if not await self._engine._acquire_root_gate(sub.id, turn_cancel):
-            self._engine._pending.pop(sub.id, None)
             await self._engine._emit_operation_terminal(sub.id, None, kind="cancelled")
+            self._engine._pending.pop(sub.id, None)
             return
         try:
             await self._engine._run_turn_for_gated(sub, turn_cancel)

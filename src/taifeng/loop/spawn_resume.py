@@ -140,13 +140,9 @@ class SpawnResumeChain:
         if eng._next_child_link(record) is not None:  # noqa: SLF001
             await self.resume_spawn_nested(sub, handle)
             return
-        # 到期哨兵与未核销 pending 求交;空 → 让位(已被并发人工核销)
-        resolutions = eng._effective_resolutions(  # noqa: SLF001
-            record, await eng._load_thread_items(child_tid),  # noqa: SLF001
-            op.resolutions)
-        if not resolutions:
-            return
         try:
+            resolutions = eng._effective_resolutions(  # noqa: SLF001
+                record, await eng._load_thread_items(child_tid), op.resolutions)  # noqa: SLF001
             plan = SuspensionResolver().plan(record, resolutions)
         except ResolveError as e:
             await eng._emit(EventMsg(  # noqa: SLF001
@@ -184,7 +180,7 @@ class SpawnResumeChain:
             submission_id=sub.id,
             msg=SuspensionResolved(data={
                 "record_id": record.record_id,
-                "request_ids": sorted(record.request_ids())}),
+                "request_ids": sorted(record.request_ids()), "resumed": not plan.abort}),
         ))
 
         if plan.abort:

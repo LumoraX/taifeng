@@ -13,7 +13,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from taifeng.loop.engine_types import _TERMINAL_KINDS, DeliveredEvent, _Subscriber
+from taifeng.loop.engine_types import DeliveredEvent, _Subscriber, is_submission_terminal
 
 if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine
@@ -38,7 +38,7 @@ class EngineEvents:
         kind = ev.msg.kind
         if kind == "turn_suspended":
             self._engine._arm_ttl_timer(ev.msg.data)
-        elif kind == "suspension_resolved":
+        elif kind in {"suspension_resolved", "suspension_cancelled"}:
             # 人工(或上一轮自动)核销 → 撤销该 record 的定时器(先核销者胜)
             timer = self._engine._ttl_timers.pop(ev.msg.data.get("record_id", ""), None)
             if timer is not None:
@@ -56,7 +56,7 @@ class EngineEvents:
         if per is not None:
             self._engine._deliver(per, ev)
         # 终态记账（ADR 0031）：放在投递之后——先保证在线订阅者拿到，再留档给晚到者。
-        if kind in _TERMINAL_KINDS:
+        if is_submission_terminal(ev):
             self._engine._record_terminal(ev)
 
     def record_terminal(self, ev: EventMsg) -> None:

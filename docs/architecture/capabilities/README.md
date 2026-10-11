@@ -68,6 +68,8 @@ Aligned with [agent-loop.md](../agent-loop.md).
 | [midturn-input-steering](midturn-input-steering.md) | `InjectUserInput`, pending input queues, iteration-boundary draining, no-active-turn fallback, delivered events, pairing protection, and cancellation guards |
 | [audit-observability](audit-observability.md) | 全局 `seq` + per-subscriber `delivery_seq`（`DeliveredEvent`）自检、事件队列有界大容量 + 高/低水位告警迟滞、`enable_request_capture` 下 `LlmRequestRecorded` 全文留痕、OtelSink 按 kind 跳过 |
 
+- [提交生命周期](submission-lifecycle.md)：准入取消、挂起交接、Resume 收尾、核销幂等与实际用量完整性。
+
 ### Persistence
 
 Aligned with [conversation.md](../conversation.md).

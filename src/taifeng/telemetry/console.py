@@ -99,6 +99,7 @@ _KIND_TAG = {
     "join_barrier_registered": ("join", _Colors.MAGENTA, "⧉"),
     "join_barrier_fired": ("join", _Colors.GREEN, "⚡"),
     # 挂起核销与资源强制（同上）
+    "suspension_cancelled": ("turn", _Colors.YELLOW, "■"),
     "suspension_resolved": ("turn", _Colors.GREEN, "▶"),
     "suspension_resolve_rejected": ("turn", _Colors.RED, "⊘"),
     "resource_limit_exceeded": ("knob", _Colors.RED, "⛔"),
@@ -329,6 +330,11 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         parts.append(
             f"end={data.get('end_reason')} iter={data.get('iteration')} "
             f"hooks={data.get('hook_count')}"
+        )
+    elif ev.msg.kind == "suspension_cancelled":
+        parts.append(
+            f"record={data.get('record_id')} target={data.get('target_submission_id')} "
+            f"reason={data.get('reason')}"
         )
     elif ev.msg.kind == "engine_log":
         parts.append(f"{data.get('level')}: {data.get('message')}")

@@ -94,9 +94,10 @@ payload 形状由对应 `PendingRequest.reason` 决定：
 | kind | 触发 | data 形状 |
 | --- | --- | --- |
 | `turn_suspended` | turn 挂起的契约事件类型（定义并导出，业务可构造 / 匹配） | `{thread_id, record_id, pending: [{request_id, reason, payload_schema, related_call_id, detail}], cache_invalidated, expires_at, usage}`；`usage` 为挂起前本段 TurnRunner 的调用用量（`TokenUsage.model_dump()`，含触发挂起的那次采样），续跑段的 `turn_completed.usage` 只含续跑部分，两段相加即全部调用、互不重复（engine 级门控在采样前直接挂起时无调用、不含 `usage`） |
-| `suspension_resolved` | record **全部** pending 核销、turn 续跑 | `{record_id, request_ids: list[str]}` |
-| `suspension_partially_resolved` | 多 pending record 的子集核销（record 仍活跃,不续跑） | `{record_id, thread_id, resolved_request_ids, remaining_request_ids}` |
+| `suspension_resolved` | record **全部** pending 核销；根/直接 spawn 的中止收尾或续跑 | `{record_id, request_ids: list[str], resumed?: bool}`；`resumed=false` 收尾本次提交，嵌套子链省略字段以保留中间事件语义 |
+| `suspension_partially_resolved` | 多 pending record 的子集核销（record 仍活跃,不续跑；本次 Resume 提交结束） | `{record_id, thread_id, resolved_request_ids, remaining_request_ids}` |
 | `suspension_resolve_rejected` | `Resume` 被拒（resolution 不全 / 多余、无活跃挂起、ResolveError 等） | `{reason: str, record_id: str \| None, detail: dict}` |
+| `suspension_cancelled` | legacy 挂起被 CancelTurn 核销 | `{record_id, thread_id, target_submission_id, reason}`；事件归属取消提交，撤销 TTL；审计挂起仍不支持 CancelTurn 丢弃 |
 
 > 当前实现：挂起结局**经独立终结态 `turn_suspended` 在事件流上被观测**（`run_turn` 终结 emit 在 `end_reason == "suspended"` 时发 `TurnSuspended` 而非 `TurnCompleted`，业务侧据此与 `completed` / `cancelled` / `error` 区分）；`TurnOutcome.end_reason` 仍为 `"suspended"`（返回值不变，供 `_handle_resume` 等内部路径判定）。`suspension_resolved` / `suspension_resolve_rejected` 由 `AgentEngine._handle_resume` 直接 emit。
 
@@ -296,3 +297,13 @@ Resume(thread_id, resolutions)
 | **R3 可观测** | 新增 `turn_suspended` / `suspension_resolved` / `suspension_resolve_rejected` EventMsg；挂起结局以独立终结态 `turn_suspended` 上事件流（携带 `thread_id` / `record_id` / `pending` / `cache_invalidated` / `usage`），与 `TurnCompleted` 区分。 |
 | **R4 可取消** | 挂起态可被 `CancelTurn` 丢弃（`_cancel_active_suspension`）；协程已退栈，不阻塞主 actor。 |
 | **R5 可 resume** | `SuspensionRecord` 走既有 JSONL 追加写；复用 `resume_thread_id` 跨进程重建。resolved-marker 同样追加写、不改写历史。 |
+
+## 提交收尾与核销幂等（ADR 0117–0121）
+
+Resume 的部分核销、拒绝与根中止是提交终态；订阅自动结束，晚到订阅重放同一领域事件。
+当前活跃 record 中已核销的 request_id 被跳过，混合请求仅执行未核销部分；全部已
+核销拒绝 `already_resolved`。先验证完整 ID 集合，空集合或未知请求仍拒绝。
+已结束 record 保留 `no_active_suspension`，不扫描历史改变拒绝原因。
+runner 的 turn 终态增加 `usage_complete`；无 provider usage 的采样或重试 attempt
+使其为 false，不改变已有实际 `usage` 和配额含义。完整交接约束见
+[提交生命周期](submission-lifecycle.md)。

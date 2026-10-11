@@ -156,6 +156,12 @@ Later ADRs:
 115. [ADR 0115: Gemini 的工具 schema 投影与 Google 错误体分类](decisions/0115-gemini-tool-schema-projection.md): 真实端点上任何带默认工具的会话都 400（内置工具的 schema 带 `additionalProperties`），且这个 400 被归成安全拦截（`fieldViolations` 命中 `violat`）。决策：送出前按白名单投影 schema，参数校验仍按原 schema；Google 错误体按 `status` + `message` 分类。
 116. [ADR 0116: 用户文件（PDF）输入晋升稳定层](decisions/0116-user-file-input-graduates.md): 图片附件在稳定层而同构的文件附件停在实验层，下游无法把 PDF 交给模型。决策：`FileAttachmentV1` / `FileInputPolicy` / `FilePart` 晋升，契约转 ✅；依据是 codex 与 Gemini 两家的真实验证；OpenAI 与 Anthropic 的文件 wire 仍只有单测，如实保留在契约里。Amends #0068。
 
+117. [ADR 0117：提交准入取消](decisions/0117-submission-admission-cancellation.md)。
+118. [ADR 0118：挂起取消交接](decisions/0118-suspension-cancel-handoff.md)。
+119. [ADR 0119：Resume 提交收尾](decisions/0119-resume-submission-terminal.md)。
+120. [ADR 0120：活跃核销幂等](decisions/0120-active-resolution-idempotency.md)。
+121. [ADR 0121：中断用量完整性](decisions/0121-interrupted-usage-completeness.md)。
+
 ### Fourth Pass: Gap Tracking
 
 22. [Hermes capability gap roadmap](architecture/hermes-gap-roadmap.md): feature-level progress.
@@ -180,3 +186,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - Capability changes must update the relevant contract and [capability matrix](capability-matrix.md).
 - Generated ledgers such as [real-llm-ledger.md](real-llm-ledger.md) should be updated by their generation scripts, not by hand.
 - The example tier lists (which demo needs a real LLM key) are owned by `scripts/verify_examples.py`; docs must follow the script, not a hand-maintained list. `.github/workflows/ci.yml` runs the full test suite and the example smoke on every push to main and every PR; real-LLM regression stays manual (see the ledger red line in `AGENTS.md`).
+
+- [提交生命周期契约](architecture/capabilities/submission-lifecycle.md)：准入取消、挂起交接、Resume 收尾和实际用量完整性（ADR 0117–0121）。

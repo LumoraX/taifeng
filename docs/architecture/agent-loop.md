@@ -18,6 +18,16 @@
 - `LangGraph` `StateGraph` —— 图调度范式
 - `AutoGen v0.4` actor —— 多 agent 拓扑，过度设计
 
+## 提交生命周期的正确性边界
+
+UserMessage 准入即登记取消可达点，排队记录不会接收运行中输入注入。
+挂起事件发布后的 pending 所有权延续到 history 回写结束；窗口内取消在回写后
+核销记录，并发出 `suspension_cancelled`。Resume 的拒绝、部分核销与中止使用
+领域事件收尾提交订阅。当前 record 的重复请求被跳过，全部核销则明确拒绝。
+runner 终态用 `usage_complete` 表达 provider 实际用量是否完整，配额继续使用实际值。
+完整数据结构与约束见 [提交生命周期契约](capabilities/submission-lifecycle.md)，
+决策见 ADR 0117–0121。
+
 ## 核心抽象
 
 ```python

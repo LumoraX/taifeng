@@ -123,6 +123,8 @@ async def test_each_network_retry_emits_provider_retry(skills_dir: Path) -> None
 
     assert outcome.success and outcome.end_reason == "completed"
     assert inner.attempts == 3
+    terminal = next(m for m in events if m.kind == "turn_completed")
+    assert terminal.data["usage_complete"] is False
     retries = [m for m in events if m.kind == "provider_retry"]
     assert [m.data["attempt"] for m in retries] == [1, 2]
     for m in retries:

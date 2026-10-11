@@ -29,10 +29,18 @@ from taifeng.loop.audit_mailbox import handoff_accepted_user_message
 from taifeng.loop.audit_shutdown import shutdown_submission, submit_audited_shutdown
 from taifeng.loop.audit_support import AuditHealth
 from taifeng.loop.audit_suspension import submit_audited_resume
-from taifeng.loop.engine_types import _TERMINAL_KINDS, _Subscriber
+from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine_types import DeliveredEvent as DeliveredEvent
+from taifeng.loop.engine_types import _PendingTurn, _Subscriber, is_submission_terminal
 from taifeng.loop.event import EngineLog, EventMsg
-from taifeng.loop.submission import CancelTurn, Op, Resume, Shutdown, Submission, UserMessage
+from taifeng.loop.submission import (
+    CancelTurn,
+    Op,
+    Resume,
+    Shutdown,
+    Submission,
+    UserMessage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +102,11 @@ async def submit(self: AgentEngine, op: Op) -> str:
             image_input_policy=self._image_input_policy,
             file_input_policy=self._file_input_policy,
             model_client=self._model_client,
+        )
+    if isinstance(sub.op, UserMessage):
+        # 在 actor 派发之前提供取消可达点；执行入口继承此处的取消状态。
+        self._pending[sub.id] = _PendingTurn(
+            sub.id, CancellationToken(name=f"queued:{sub.id}"), kind="queued",
         )
     await self._submissions.put(sub)
     return sub.id
@@ -245,7 +258,7 @@ async def subscribe_envelopes(self: AgentEngine, submission_id: str
             # turn_suspended 是独立终结态(turn 已结束，等待 Resume)——必须纳入自动
             # 终止集合，否则 turn 挂起时消费者的 async for 永远拿不到终结信号、卡死，
             # 业务也无法释放实例并提交 Resume(Task 16 回归根因)。
-            if env.event.msg.kind in _TERMINAL_KINDS:
+            if is_submission_terminal(env.event):
                 return
     finally:
         self._event_subs.pop(submission_id, None)

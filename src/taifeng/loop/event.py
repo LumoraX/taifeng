@@ -39,6 +39,7 @@ from taifeng.loop.event_lifecycle import SpawnStarted as SpawnStarted
 from taifeng.loop.event_lifecycle import SpawnSuspended as SpawnSuspended
 from taifeng.loop.event_lifecycle import SqliteDbCorruptRebuilt as SqliteDbCorruptRebuilt
 from taifeng.loop.event_lifecycle import SqliteSchemaRebuilt as SqliteSchemaRebuilt
+from taifeng.loop.event_lifecycle import SuspensionCancelled as SuspensionCancelled
 from taifeng.loop.event_lifecycle import SuspensionExpired as SuspensionExpired
 from taifeng.loop.event_lifecycle import SuspensionPartiallyResolved as SuspensionPartiallyResolved
 from taifeng.loop.event_lifecycle import SuspensionResolved as SuspensionResolved
@@ -173,6 +174,7 @@ Msg = Union[
     SkillQuarantined,
     SkillReleased,
     TurnSuspended,
+    SuspensionCancelled,
     SuspensionResolved,
     SuspensionPartiallyResolved,
     SuspensionResolveRejected,

@@ -28,10 +28,17 @@ class TurnSuspended(_Msg):
     kind: Literal["turn_suspended"] = "turn_suspended"
 
 
+class SuspensionCancelled(_Msg):
+    """legacy 挂起被取消；包含 record_id、thread_id、target_submission_id 和 reason。"""
+
+    kind: Literal["suspension_cancelled"] = "suspension_cancelled"
+
+
 class SuspensionResolved(_Msg):
     """Resume 成功配对，turn 续跑。
 
-    data = {"record_id": str, "request_ids": list[str]}
+    data = {"record_id": str, "request_ids": list[str], "resumed": bool (根/直接 spawn)}
+    resumed=false 表示中止的提交终态；嵌套子链核销仍为中间事件。
     """
 
     kind: Literal["suspension_resolved"] = "suspension_resolved"

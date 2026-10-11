@@ -94,3 +94,16 @@ def test_provider_retry_overflow_shape_still_renders() -> None:
     line = _line(ProviderRetry(data={"reason": "context_overflow", "iteration": 1}))
     assert " evt " not in line
     assert "context_overflow iter=1" in line
+
+
+def test_suspension_cancelled_has_dedicated_render() -> None:
+    """挂起取消可以按 record 与目标定位，不落未知事件兜底。"""
+    from taifeng.loop.event import SuspensionCancelled
+
+    line = _line(SuspensionCancelled(data={
+        "record_id": "record-1", "thread_id": "thread-1",
+        "target_submission_id": "target-1", "reason": "cancelled",
+    }))
+    assert " evt " not in line
+    assert "suspension_cancelled {" not in line
+    assert "record-1" in line and "target-1" in line

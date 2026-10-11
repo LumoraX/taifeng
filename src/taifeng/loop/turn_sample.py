@@ -100,6 +100,8 @@ class TurnSample:
             owner: 宿主 TurnRunner —— 提供 turn 运行态与共享依赖。
         """
         self.__sample_owner = owner
+        self.samples_started = 0
+        self.samples_metered = 0
 
     def compute_prompt_fingerprint(self, tools: list[Any]) -> dict[str, str]:
         """计算 prompt 结构指纹（G-CACHE；实现见 ``prompt_fingerprint``）。"""
@@ -290,6 +292,7 @@ class TurnSample:
 
     async def _emit_provider_retry(self, iteration: int, attempt: RetryAttempt) -> None:
         """网络层退避重试 → ``provider_retry``（组装见 resilience_events）。"""
+        self.samples_started += 1  # 前一次 attempt 未返回 provider usage，保留未知事实。
         await self.__sample_owner._emit(provider_retry_event(iteration, attempt))
 
     async def sample_once(self, iteration: int) -> tuple[str, bool]:
@@ -335,6 +338,7 @@ class TurnSample:
         # 即重试已耗尽或本就不可重试。
         # 可恢复 / 等外部介入类 → 转 SYSTEM_RETRY 挂起(等业务侧 resume 重跑同次 sample);
         # 确定性失败照旧上抛硬失败。CancelledError 走 asyncio 路径,不在此 except 内。
+        self.samples_started += 1
         try:
             async with sess as s, interrupt_on_cancel(self.__sample_owner.cancel):
                 # R4：取消 / 截止时间原地打断阻塞中的流读取（provider 卡在首字节前也能及时停）
@@ -396,6 +400,8 @@ class TurnSample:
                                 )
                             responses_completed = True
                         usage_dict = ev.data.get("usage") or {}
+                        if usage_dict:
+                            self.samples_metered += 1
                         self.__sample_owner._accumulate_usage(usage_dict)
                         sample_prompt_tokens = int(usage_dict.get("input_tokens") or 0)
                         # G3：回流的服务端 request-id（供失败 / telemetry 关联）

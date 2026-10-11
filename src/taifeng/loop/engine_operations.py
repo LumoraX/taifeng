@@ -101,11 +101,15 @@ class EngineOperations:
             suggested_action = suggested_action_for("cancelled")
             error_kind = kind or "cancelled"
             error_msg = error_kind
+        pending = self._engine._pending.get(submission_id)
+        cancel_reason = pending.cancel.reason if pending is not None else None
         await self._engine._emit(
             EventMsg(
                 submission_id=submission_id,
                 msg=TurnFailed(
                     data={
+                        "end_reason": "cancelled" if failure_class == "cancelled" else "failed",
+                        "cancel_reason": cancel_reason,
                         "error": error_msg,
                         "kind": error_kind,
                         "failure_class": failure_class,

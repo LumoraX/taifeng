@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
 from taifeng.conversation.reconstruct import reconstruct_logical_history
-from taifeng.loop.event import EngineLog, EventMsg
+from taifeng.loop.event import EngineLog, EventMsg, SuspensionCancelled
 from taifeng.loop.rewind import derive_rewind_log
 from taifeng.loop.tool_batch import parse_tool_arguments
 from taifeng.loop.turn import TurnRunner
@@ -85,6 +85,13 @@ class SuspensionAccess:
         async with self._engine._lock:
             self._engine._history.append(marker)
         await self._engine._store.append(marker)
+        await self._engine._emit(EventMsg(
+            submission_id=cancel_sub_id,
+            msg=SuspensionCancelled(data={
+                "record_id": record.record_id, "thread_id": record.thread_id,
+                "target_submission_id": target_sub_id, "reason": "cancelled",
+            }),
+        ))
         await self._engine._emit(
             EventMsg(
                 submission_id=cancel_sub_id,
@@ -182,21 +189,15 @@ class SuspensionAccess:
         self, record: SuspensionRecord, items: list[ResponseItem],
         resolutions: dict[str, Any],
     ) -> dict[str, Any]:
-        """到期哨兵 resolutions 与未核销 pending 求交;人工 payload 原样返回。
+        """校验当前 record 的请求集合，再跳过已经核销的请求。"""
+        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
 
-        fire 快照与哨兵 Resume 实际处理之间存在陈旧窗口:期间被人工部分核销的
-        pending 再收哨兵会对已配对 call_id 重复落 deny fco(suspend-review-fixes)。
-        仅对**纯哨兵**提交过滤(内核签发形态);空交集 → 调用方 no-op 让位。
-        """
-        from taifeng.suspend.resolver import EXPIRE_SENTINEL
-
-        if not resolutions or not all(
-            isinstance(v, dict) and v.get(EXPIRE_SENTINEL) is True
-            for v in resolutions.values()
-        ):
-            return dict(resolutions)
+        SuspensionResolver().validate(record, resolutions)
         unsettled = {p.request_id for p in self._engine._unsettled_pendings(record, items)}
-        return {rid: v for rid, v in resolutions.items() if rid in unsettled}
+        effective = {rid: v for rid, v in resolutions.items() if rid in unsettled}
+        if not effective:
+            raise ResolveError("already_resolved")
+        return effective
 
     def settle_lock(self, record_id: str) -> asyncio.Lock:
         """取 record 级结算锁(惰性创建;record 终结后残留的空锁可忽略不计)。"""

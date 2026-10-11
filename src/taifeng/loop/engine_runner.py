@@ -51,7 +51,7 @@ class EngineRunner:
         `_pending` 也会登记子 thread 续跑 turn，这里只认 is_root 的那一个。
         """
         for pending in self._engine._pending.values():
-            if pending.is_root:
+            if pending.is_root and pending.kind not in {"queued", "closing"}:
                 return pending
         return None
 
@@ -107,6 +107,24 @@ class EngineRunner:
             # usage-tree-accounting：会话账已由各 runner 采样时实时计入共享计量器，
             # 此处不再补加（否则根 turn 被重复计数）
 
+    async def finish_runner_writeback(self, runner: TurnRunner, submission_id: str) -> None:
+        """回写后关闭注入队列、持久化迟到输入，再核销交接窗口的取消。"""
+        await self._engine._writeback_turn_runner(runner)
+        if self._engine._audit_state is None:
+            runner.history_buffer = self._engine._history
+        pending = self._engine._pending.get(submission_id)
+        if pending is not None:
+            # 回写后 history 与 runner buffer 已共享；新增输入直接落史，关闭无人消费队列。
+            pending.kind = "closing"
+        await self._engine._drain_residual_injections(runner, submission_id)
+        if (self._engine._audit_state is None and pending is not None
+                and pending.cancel_submission_id is not None):
+            # 回写结束后由同一所有者处理挂起取消，避免旧 buffer 覆盖 resolved marker。
+            await self._engine._cancel_active_suspension(
+                pending.cancel_submission_id, submission_id,
+            )
+        self._engine._pending.pop(submission_id, None)
+
     async def build_and_run_runner(
         self,
         submission_id: str,
@@ -138,23 +156,25 @@ class EngineRunner:
         # pre_turn iteration 对齐),故在 finally 自增前先捕获。
         fired_iteration = runner.turn_index
         try:
-            outcome = await runner.run()
-            if self._engine._audit_state is not None:
-                self._engine._audit_state.coordinator.record_target_outcome(
-                    submission_id,
-                    outcome.end_reason,
-                )
-        finally:
-            # runner 因取消 / 异常退出时 pending 队列可能仍有未消费注入：
-            # 在回写之前并入 runner buffer + store，不丢（R5），事件报 delivered:false。
-            await self._engine._drain_residual_injections(runner, submission_id)
-            self._engine._pending.pop(submission_id, None)
-            self._engine._turn_index += 1
+            try:
+                outcome = await runner.run()
+                if self._engine._audit_state is not None:
+                    self._engine._audit_state.coordinator.record_target_outcome(
+                        submission_id,
+                        outcome.end_reason,
+                    )
+            finally:
+                # runner 因取消 / 异常退出时 pending 队列可能仍有未消费注入：
+                # 在回写之前并入 runner buffer + store，不丢（R5），事件报 delivered:false。
+                await self._engine._drain_residual_injections(runner, submission_id)
+                self._engine._turn_index += 1
 
-        await self._engine._writeback_turn_runner(runner)
-        await self._engine._fire_post_turn_hook(
-            submission_id, outcome, turn_cancel, fired_iteration,
-        )
+            await self.finish_runner_writeback(runner, submission_id)
+            await self._engine._fire_post_turn_hook(
+                submission_id, outcome, turn_cancel, fired_iteration,
+            )
+        finally:
+            self._engine._pending.pop(submission_id, None)
 
     async def fire_post_turn_hook(
         self,

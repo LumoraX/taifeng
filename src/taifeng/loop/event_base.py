@@ -82,6 +82,7 @@ MsgKind = Literal[
     "rebuild_skipped_corrupt",
     # suspend-resume 生命周期事件
     "turn_suspended",
+    "suspension_cancelled",
     "suspension_resolved",
     "suspension_partially_resolved",
     "suspension_resolve_rejected",

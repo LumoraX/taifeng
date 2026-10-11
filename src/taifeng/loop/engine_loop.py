@@ -74,6 +74,7 @@ async def run(self: AgentEngine, cancel: CancellationToken) -> None:
             if isinstance(sub.op, CancelTurn):
                 target = self._pending.get(sub.op.submission_id)
                 if target is not None:
+                    target.cancel_submission_id = sub.id
                     target.cancel.cancel(CancelReason.REQUESTED, "cancel_turn")
                     await self._emit(
                         EventMsg(
@@ -140,7 +141,7 @@ async def run(self: AgentEngine, cancel: CancellationToken) -> None:
                 target = self._pending.get(sub.op.submission_id)
                 item = tag_origin(
                     user_message(sub.op.text, thread_id=self._thread_id), sub.op.origin)
-                if target is not None:
+                if target is not None and target.kind not in {"queued", "closing"}:
                     # 活跃 turn：入共享队列，由 runner drain 时落 store + emit
                     target.pending_input.append(item)
                     delivered = True

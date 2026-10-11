@@ -41,6 +41,16 @@ class DeliveredEvent:
 _TERMINAL_KINDS = frozenset({"turn_completed", "turn_failed", "turn_suspended"})
 
 
+def is_submission_terminal(ev: EventMsg) -> bool:
+    """提交可以由领域事件收尾；Resume 拒绝或部分核销不虚构 turn。"""
+    kind = ev.msg.kind
+    return (
+        kind in _TERMINAL_KINDS
+        or kind in {"suspension_resolve_rejected", "suspension_partially_resolved"}
+        or (kind == "suspension_resolved" and ev.msg.data.get("resumed") is False)
+    )
+
+
 class _Subscriber:
     """单个订阅的队列 + 投递簿记（审计可观测 层1）。
 
@@ -80,3 +90,4 @@ class _PendingTurn:
     # 登记的是哪一类在飞操作：``turn``（含 gated op）或 ``prewarm``。用户消息到达时
     # 据此找到未完成的预热并取消（ADR 0092）。
     kind: str = "turn"
+    cancel_submission_id: str | None = None

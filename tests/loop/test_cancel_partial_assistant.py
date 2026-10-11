@@ -78,6 +78,7 @@ async def test_cancelled_turn_persists_partial_assistant_text(
 
         data = await asyncio.wait_for(_terminal(), timeout=GUARD_TIMEOUT_SECONDS)
         assert data.get("end_reason") == "cancelled"
+        assert data["usage_complete"] is False
         await asyncio.sleep(0.1)
 
         cold = [it async for it in await pool.store.load_thread(engine.thread_id)]
