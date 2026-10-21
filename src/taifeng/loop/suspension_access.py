@@ -182,20 +182,23 @@ class SuspensionAccess:
         self, record: SuspensionRecord, items: list[ResponseItem],
         resolutions: dict[str, Any],
     ) -> dict[str, Any]:
-        """到期哨兵 resolutions 与未核销 pending 求交;人工 payload 原样返回。
+        """到期哨兵与未核销项求交；人工重发任何已核销项时整次拒绝。
 
         fire 快照与哨兵 Resume 实际处理之间存在陈旧窗口:期间被人工部分核销的
         pending 再收哨兵会对已配对 call_id 重复落 deny fco(suspend-review-fixes)。
         仅对**纯哨兵**提交过滤(内核签发形态);空交集 → 调用方 no-op 让位。
         """
-        from taifeng.suspend.resolver import EXPIRE_SENTINEL
+        from taifeng.suspend.resolver import EXPIRE_SENTINEL, ResolveError
 
+        unsettled = {p.request_id for p in self._engine._unsettled_pendings(record, items)}
         if not resolutions or not all(
             isinstance(v, dict) and v.get(EXPIRE_SENTINEL) is True
             for v in resolutions.values()
         ):
+            settled = record.request_ids() - unsettled
+            if settled.intersection(resolutions):
+                raise ResolveError("request_already_resolved")
             return dict(resolutions)
-        unsettled = {p.request_id for p in self._engine._unsettled_pendings(record, items)}
         return {rid: v for rid, v in resolutions.items() if rid in unsettled}
 
     def settle_lock(self, record_id: str) -> asyncio.Lock:

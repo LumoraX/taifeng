@@ -87,6 +87,12 @@ async def run(self: AgentEngine, cancel: CancellationToken) -> None:
                             ),
                         )
                     )
+                elif sub.op.preserve_suspension:
+                    # 判断与取消都由 actor 执行；目标刚挂起时保留待办，不落核销 marker。
+                    await self._emit(EventMsg(submission_id=sub.id, msg=EngineLog(data={
+                        "level": "info", "message": "cancel target no longer running",
+                        "extra": {"target_submission_id": sub.op.submission_id,
+                                  "preserve_suspension": True}})))
                 else:
                     # R4：挂起态没有 live pending（turn 已退栈），CancelTurn 需
                     # 按 submission_id 匹配并清除活跃挂起 record（闭环可取消）。

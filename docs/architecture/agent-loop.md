@@ -40,6 +40,7 @@ class UserMessage:
 @dataclass(frozen=True)
 class CancelTurn:
     kind: Literal["cancel_turn"] = "cancel_turn"
+    preserve_suspension: bool = False  # True：只停止在途执行，保留挂起待办
     submission_id: str
 
 @dataclass(frozen=True)

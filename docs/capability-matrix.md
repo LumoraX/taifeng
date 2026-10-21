@@ -259,3 +259,11 @@ All exported symbols are listed in [`src/taifeng/__init__.py`](../src/taifeng/__
 - **OpenAI image regression**: `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider openai --model gpt-5.6` runs both official protocols. Without usable credentials it is **not executed**, regardless of CI results.
 - **Codex provider regression**: with unified Codex bootstrap key/base URL configured, `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py --provider codex --model gpt-5.6-luna` runs instructions, single/multi-image, image tool call, encrypted-state hot replay, and legacy JSONL cold resume. Without usable proxy credentials it is **not executed**.
 - Capability boundaries and limitations are recorded in the matching contract documents.
+
+
+### 2026-10-21 核销与停止边界补充
+
+`Resume` 拒绝已核销请求，覆盖 root / child / spawn；`CancelTurn.preserve_suspension=True`
+让停止生成保留审批。权威契约见 [suspend-resume](architecture/capabilities/suspend-resume.md)。
+模拟验收见 `tests/loop/test_resume_settlement_boundary.py` 与 `test_stop_preserves_suspension_for_resume`；
+真实模型矩阵记录在 [真实台账](real-llm-ledger.md)，确定性交错仍由上述测试负责。

@@ -241,12 +241,11 @@ class ChildResumeChain:
         """_resume_leaf_thread 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
         from taifeng.suspend.resolver import ResolveError, SuspensionResolver
 
-        # 到期哨兵与未核销 pending 求交;空 → 让位(已被并发人工核销)
-        resolutions = self._engine._effective_resolutions(
-            record, await self._engine._load_thread_items(leaf_tid), resolutions)
-        if not resolutions:
-            return None
         try:
+            resolutions = self._engine._effective_resolutions(
+                record, await self._engine._load_thread_items(leaf_tid), resolutions)
+            if not resolutions:
+                return None
             plan = SuspensionResolver().plan(record, resolutions)
         except ResolveError as e:
             await self._engine._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(

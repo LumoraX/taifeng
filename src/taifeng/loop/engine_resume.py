@@ -91,14 +91,12 @@ class EngineResume:
         record: SuspensionRecord, root_cancel: CancellationToken,
     ) -> None:
         """_handle_resume 的主体(在飞守卫占位后):配对 → 应用 → 结算 → 续跑。"""
-        # 1.6 到期哨兵与未核销 pending 求交(陈旧快照不重复回填);空 → 让位
-        resolutions = self._engine._effective_resolutions(
-            record, list(self._engine._history), op.resolutions)
-        if not resolutions:
-            return
-        # 2. 配对 + 计划（ResolveError 显式拒绝，不静默兜底）
         from taifeng.suspend.resolver import ResolveError, SuspensionResolver
         try:
+            resolutions = self._engine._effective_resolutions(
+                record, list(self._engine._history), op.resolutions)
+            if not resolutions:
+                return
             plan = SuspensionResolver().plan(record, resolutions)
         except ResolveError as e:
             await self._engine._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolveRejected(

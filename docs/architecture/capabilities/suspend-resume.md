@@ -296,3 +296,17 @@ Resume(thread_id, resolutions)
 | **R3 可观测** | 新增 `turn_suspended` / `suspension_resolved` / `suspension_resolve_rejected` EventMsg；挂起结局以独立终结态 `turn_suspended` 上事件流（携带 `thread_id` / `record_id` / `pending` / `cache_invalidated` / `usage`），与 `TurnCompleted` 区分。 |
 | **R4 可取消** | 挂起态可被 `CancelTurn` 丢弃（`_cancel_active_suspension`）；协程已退栈，不阻塞主 actor。 |
 | **R5 可 resume** | `SuspensionRecord` 走既有 JSONL 追加写；复用 `resume_thread_id` 跨进程重建。resolved-marker 同样追加写、不改写历史。 |
+
+
+## 已核销请求与停止生成边界（ADR 0117）
+
+人工 `Resume` 只要包含该活跃 record 中已经有对应工具输出的 request_id，整次提交必须在
+执行任何工具之前发出 `suspension_resolve_rejected(reason="request_already_resolved")`。
+root、call_skill 叶子与直接 spawn 使用同一核销判断；混合已核销和未核销项也整次拒绝。
+到期哨兵保留与未核销集合求交的语义，不会重复回填已核销的工具输出。
+这只能阻止已有持久输出的重复执行；外部动作后输出落盘前中断仍须按结果未知处理。
+
+`CancelTurn(preserve_suspension=True)` 由 actor 在取消当时区分在途与挂起：在途按既有规则
+取消，已挂起或已结束则发 `engine_log` 并保留待办，不追加 resolved-marker。
+默认 False 维持明确丢弃挂起的既有行为。宿主的“停止生成”应传 True；取消请求受理本身
+不能证明外部动作未执行。该字段默认不序列化，因此旧默认提交的形状保持稳定。

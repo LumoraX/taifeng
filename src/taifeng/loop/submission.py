@@ -42,6 +42,12 @@ class CancelTurn(BaseModel):
 
     kind: Literal["cancel_turn"] = "cancel_turn"
     submission_id: str
+    preserve_suspension: bool = Field(default=False, exclude_if=lambda value: value is False)
+    """只停止在途执行，保留已挂起待办；用于停止生成与审批之间的竞态保护。
+
+    默认 False 保持丢弃挂起的既有行为。True 时目标已挂起或结束即 no-op。
+    审计模式本就仅取消 active target，不会丢弃悬挂待办。
+    """
 
 
 # 别名：codex 用 Interrupt
