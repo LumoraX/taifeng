@@ -74,3 +74,34 @@ async def test_settled_permission_cannot_execute_twice(tmp_path: Path, threads_d
         reader.cancel()
         await asyncio.gather(reader, return_exceptions=True)
         await pool.close()
+
+
+async def test_root_system_abort_has_explicit_non_resuming_conclusion(tmp_path: Path, threads_dir: Path) -> None:
+    """资源挂起中止必须明确不再续跑，调用方才能结束本次事件流。"""
+    from taifeng.llm.providers.sim import SimClient
+    from taifeng.loop.failure_policy import SuspendByDefaultPolicy
+    from taifeng.tool.spec import ToolContext, ToolResult, ToolSpec
+    async def tick(args: dict, ctx: ToolContext) -> ToolResult:
+        """消耗一次工具迭代。"""
+        return ToolResult.ok("ok")
+    skills = _write_skills(tmp_path / "abort", {"worker": _skill("worker", entry=True, tools=["tick"])})
+    client = SimClient(turns=[SimTurn(tool_calls=[{"id": "tick", "name": "tick", "arguments": "{}"}])])
+    pool = await taifeng.EnginePool.create(skills_dir=skills, threads_dir=threads_dir,
+        model_client=client, compressors=[], max_iterations=1, failure_policy=SuspendByDefaultPolicy(),
+        extra_tools=[ToolSpec("tick", "一次操作", {"type": "object", "properties": {}}, tick)])
+    engine = await pool.get_or_create(session_id="abort", entry_skill_id="worker")
+    try:
+        first = await engine.submit(taifeng.UserMessage(text="go"))
+        async for event in engine.subscribe(first):
+            if event.msg.kind == "turn_suspended":
+                pending = event.msg.data["pending"]
+                break
+        assert pending[0]["reason"] == "resource_limit"
+        resumed = await engine.submit(taifeng.Resume(thread_id=engine.thread_id,
+            resolutions={pending[0]["request_id"]: {"action": "abort"}}))
+        async for event in engine.subscribe(resumed):
+            if event.msg.kind == "suspension_resolved":
+                assert event.msg.data.get("aborted") is True
+                break
+    finally:
+        await pool.close()

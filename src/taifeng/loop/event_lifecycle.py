@@ -31,7 +31,8 @@ class TurnSuspended(_Msg):
 class SuspensionResolved(_Msg):
     """Resume 成功配对，turn 续跑。
 
-    data = {"record_id": str, "request_ids": list[str]}
+    data = {"record_id": str, "request_ids": list[str], "aborted"?: True}
+    根 Resume 的系统挂起被中止时 aborted=True，本事件就是此次操作的结论，不再续跑。
     """
 
     kind: Literal["suspension_resolved"] = "suspension_resolved"

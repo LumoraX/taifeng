@@ -310,3 +310,8 @@ root、call_skill 叶子与直接 spawn 使用同一核销判断；混合已核�
 取消，已挂起或已结束则发 `engine_log` 并保留待办，不追加 resolved-marker。
 默认 False 维持明确丢弃挂起的既有行为。宿主的“停止生成”应传 True；取消请求受理本身
 不能证明外部动作未执行。该字段默认不序列化，因此旧默认提交的形状保持稳定。
+
+
+根 thread 的系统挂起以 action=abort 核销后，`suspension_resolved.data.aborted=True`；
+该事件为此次 Resume 的终结结论，不再启动模型，不伪造成功 turn。字段只在真正中止时出现。
+子 thread 的中止仍按原链路回传失败并由父任务收尾；spawn 中止仍由句柄失败事件收尾。

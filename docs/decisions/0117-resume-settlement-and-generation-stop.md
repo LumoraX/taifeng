@@ -22,3 +22,6 @@ CancelTurn 增加默认 False 的 preserve_suspension。显式 True 时 actor �
 
 已有工具输出是已核销证据；外部动作已发生但输出未持久化仍是未知结果，不能推导严格一次执行。
 宿主仍须实施持久认领、授权与未知结果策略。内核不引入租户或宿主业务概念。
+
+根 thread 的系统 abort 没有后续 turn，Resolved 事件增加可选 aborted=True，作为明确操作结论。
+不为没有采样的中止制造成功 turn，审计模式和普通模式一致。

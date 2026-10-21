@@ -186,7 +186,8 @@ class EngineResume:
 
         # 5. emit resolved
         await self._engine._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(
-            data={"record_id": record.record_id, "request_ids": sorted(record.request_ids())})))
+            data={"record_id": record.record_id, "request_ids": sorted(record.request_ids()),
+                  **({"aborted": True} if plan.abort else {})})))
 
         # 6. 续跑（abort 则不续；turn 已在挂起点终止，gap 已补齐即收尾）
         auto_retries = self._engine._apply_plan_session_effects(plan, record)
