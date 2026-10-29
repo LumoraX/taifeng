@@ -159,7 +159,9 @@ def _request_output(request: dict[str, Any], call_id: str) -> str:
                  if message.get("role") == "tool" and message.get("tool_call_id") == call_id), "")
 
 
-def _verify_stub_requests(res: Any, call_id: str, path: str, token: str) -> None:
+def _verify_stub_requests(
+    res: Any, call_id: str, path: str, token: str, read_completed_index: int,
+) -> None:
     """证明工具后的首次实际请求已是 stub，且回读成功之前没有任何请求见过口令。"""
     completed = next(index for index, event in enumerate(res.events)
                      if event.kind == "tool_call_completed" and event.data["call_id"] == call_id)
@@ -173,21 +175,17 @@ def _verify_stub_requests(res: Any, call_id: str, path: str, token: str) -> None
     assert any(event.kind == "compaction_completed" and event.data.get("success")
                and event.data.get("detail", {}).get("offloaded", 0) > 0
                for event in res.events[completed:first_index]), "采样前未完成有效 offload"
-    successful_reads = [index for index, event in enumerate(res.events)
-                        if event.kind == "tool_call_completed" and not event.data.get("is_error")
-                        and event.data["call_id"] != call_id
-                        and token in str(event.data.get("output", ""))]
-    assert successful_reads, "没有工具回传中段口令"
-    for event in res.events[:successful_reads[0]]:
+    for event in res.events[:read_completed_index]:
         if event.kind == "llm_request_recorded":
             assert token not in _blob(event.data), "分页回读前模型已见过完整口令"
 
 
-def _verify_workspace_read(res: Any, path: str, token: str) -> None:
-    """核对工具分页参数、成功输出与同一工作区的实际读写记录。"""
+def _verify_workspace_read(res: Any, path: str, token: str) -> int:
+    """核对工作区与有效分页回读，返回首次满足全部条件的完成事件索引。"""
     workspace = res.state["workspace"]
     canonical = workspace.resolve(path)
     assert canonical in workspace.writes and canonical in workspace.reads, "工作区未实际写入并回读"
+    successful_reads: list[int] = []
     for started, completed in _tool_pairs(res, "file_read"):
         args = json.loads(started.data["arguments"])
         if workspace.resolve(args.get("path", "")) != canonical:
@@ -199,8 +197,10 @@ def _verify_workspace_read(res: Any, path: str, token: str) -> None:
         if completed is not None and not completed.data["is_error"]:
             output = completed.data["output"]
             if token in output and len(output.encode("utf-8")) < 8 * 1024:
-                return
-    raise AssertionError("file_read 未通过 stub 路径分页成功回传中段口令")
+                successful_reads.append(next(index for index, event in enumerate(res.events)
+                                             if event is completed))
+    assert successful_reads, "file_read 未通过 stub 路径分页成功回传中段口令"
+    return min(successful_reads)
 
 
 def verify_offload_evidence(res: Any, thread_id: str, answer: str) -> dict[str, Any]:
@@ -214,8 +214,8 @@ def verify_offload_evidence(res: Any, thread_id: str, answer: str) -> dict[str, 
     workspace = res.state["workspace"]
     original = workspace.files.get(workspace.resolve(path), b"")
     assert len(original) > 8 * 1024 and token.encode() in original, "工作区原文不够大或缺口令"
-    _verify_stub_requests(res, started.data["call_id"], path, token)
-    _verify_workspace_read(res, path, token)
+    read_completed_index = _verify_workspace_read(res, path, token)
+    _verify_stub_requests(res, started.data["call_id"], path, token, read_completed_index)
     assert token in answer, "最终答案未复述中段口令"
     return {"thread_id": thread_id, "path": path, "answer": answer}
 
