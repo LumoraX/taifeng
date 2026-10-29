@@ -86,6 +86,8 @@ SHALL 接受 `root_dir=`（本机目录，等价于 `workspace=LocalWorkspaceFS(
 
 ## 测试接入
 
+OffloadStrategy 同样接受 `workspace=`（与本机兼容入口 `file_root=` 二选一），写入和 thread 清理均经协议，stub 由使用同一工作区的 file_read 分页回读。见 [compaction-offload-strategy.md](compaction-offload-strategy.md) 与 ADR 0131。
+
 - `tests/tool/test_workspace_fs.py` —— 本机实现（协议满足、边界、逐方法越界、读写 / 元数据 / 列目录 / 删除、
   不建父目录、目录删除）；内存工作区上的 `file_read` / `file_write` / `apply_patch`（先校验后应用、目录删除在
   校验期拒绝、写失败落成结果）；权限 target 与被拒不触碰工作区；五个工厂的入参互斥；`glob` / `grep` 在
