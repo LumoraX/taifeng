@@ -200,3 +200,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - [提交生命周期契约](architecture/capabilities/submission-lifecycle.md)：准入取消、挂起交接、Resume 收尾和实际用量完整性（ADR 0117–0121）。
 
 - [ADR 0130：输入来源完整性与稳定入口](decisions/0130-input-origin-completeness-and-stability.md)：累计来源、单次工具结果与子会话传播。
+
+- [ADR 0131：offload 存储一致性](decisions/0131-offload-workspace-consistency.md)：策略与文件工具共用 WorkspaceFS，本机入口保持兼容，成功写入后发布 stub。

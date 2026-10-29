@@ -13,7 +13,7 @@
     由此实现「有大结果就优先无损落盘,否则退化到 trim/摘要」。
 
 R1-R5(见 design):
-    - R1:仅 stdlib + anyio + 文件沙箱;无业务概念。
+    - R1:复用 WorkspaceFS 与本机默认实现;无业务概念。
     - R2:仅改写 anchor **之后**(index > cache_anchor_index)的 tail 条目,
       ``cache_invalidated`` 恒为 False,``anchor_preserved_until`` 不前移。
     - R3:offload 计数落 ``CompressionResult.detail``,由 turn 组装
@@ -21,7 +21,7 @@ R1-R5(见 design):
     - R4:CompressionContext 不携带 CancellationToken;协作式取消——每条落盘前
       ``await anyio.lowlevel.checkpoint()``,外部 task / CancelScope 取消在此生效。
     - R5:stub 落 JSONL;落盘路径按 ``_offload/{thread_id}/{call_id}`` 确定性派生,
-      offload 文件独立持久化 → replay 重建 stub 后 file_read 可回读原文。
+      offload 文件在注入的工作区持久化 → replay 重建 stub 并重新注入原工作区后可回读。
 """
 
 from __future__ import annotations

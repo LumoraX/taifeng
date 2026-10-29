@@ -245,17 +245,17 @@ class OffloadStrategy:
     priority = 30                      # 高于 surgical_trim(20)——有大结果时优先无损落盘
 ```
 
-- **落盘路径确定性派生**：`{file_root}/_offload/{thread_id}/{call_id}`，可从 stub 的 `call_id` 纯函数推导，无独立索引。业务侧应与 `file_read` 工具同 `root_dir`，stub 中相对路径方可回读。
+- **存储与回读一致**：工作区内路径固定为 `_offload/{thread_id}/{call_id}`。`OffloadStrategy(workspace=fs)` 与 `make_file_read_tool(workspace=fs)` 共享同一持久工作区，写入与清理均经 WorkspaceFS。兼容入口 `file_root=` 等价于 LocalWorkspaceFS，和 `workspace=` 恰好给一个；本机落盘位置不变（ADR 0131）。
 - **stub 结构**：以 `OFFLOAD_PREFIX`（`[offloaded:`）起头（→ `is_placeholder` 幂等识别），含 call_id + 相对路径 + head/tail 行预览 + `file_read(offset, limit)` 读法提示。
-- **选择性触发**：仅当 tail 中存在「超 `offload_bytes_threshold`、有配对 fc、非占位符」的 output 才命中；否则 `should_trigger` 返回 None，让位给有损档。orchestrator 是 first-wins，本档高 priority + 选择性触发 = 「有大结果就优先无损，否则退化 trim/摘要」。`pre_turn` 永不命中（只动 tail）。
+- **选择性触发**：仅当 tail 中存在「超 `offload_bytes_threshold`、非占位符、不带图片附件」的 output 才命中；否则 `should_trigger` 返回 None，让位给有损档。orchestrator 是 first-wins，本档高 priority + 选择性触发 = 「有大结果就优先无损，否则退化 trim/摘要」。`pre_turn` 永不命中（只动 tail）。
 - **回溯 = LLM 主动读**：系统**不**自动 rehydrate；stub 即上下文内的回溯凭证。`file_read` 新增 `offset`/`limit`（按行）分页通道，绕过整文件 byte-cap。
 - **窗口（R2）**：仅改写 `index > cache_anchor_index` 的 tail（首个可变索引 = anchor+1），`cache_invalidated` 恒为 False、`anchor_preserved_until` 不前移。
 - **孤儿 output 照常处理**：`call_id` 回溯不到配对 `function_call` 的 output 不再跳过——offload 就地替换 output 文本、不删条目，不可能产生新的配对孤儿；而压缩恰恰常吃掉 fc 留下大 output，跳过它们等于压不动最大的那条（ADR 0037）。
 - **幂等**：复用共享 `context/placeholders.py` 守卫，已落盘 stub 不被二次处理。
-- **失败回退**：单条落盘抛 OSError → 保留原始 output（不静默丢数据、不产半截 stub），继续处理其余候选。
+- **失败回退**：单条路径解析或写入抛 OSError → warning 并保留原始 output，继续处理其余候选；完整写入成功后才生成 stub。本机使用原子替换，外部后端沿用自身原子性承诺；取消向上传播。
 - **明细透出（R3）**：`detail = {"offloaded", "bytes_saved"}`，turn 透传 `compaction_completed`。
 - **取消（R4）**：每条落盘前 `await anyio.lowlevel.checkpoint()` 协作检查点。
-- **生命周期（v1）**：`cleanup_thread(thread_id)` 在 thread/conversation 删除时级联清 `_offload/{thread_id}`；不做 TTL/容量上限。
+- **生命周期（v1）**：`cleanup_thread(thread_id)` 校验安全路径段后经同一工作区删除 `_offload/{thread_id}`；最终链接只删链接自身，缺失幂等，其他 IO 错误传播；不做 TTL/容量上限。冷恢复由宿主重新注入原持久工作区。
 
 契约：[capabilities/compaction-offload-strategy.md](capabilities/compaction-offload-strategy.md)。
 
