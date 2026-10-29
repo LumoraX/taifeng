@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING
 
 import anyio
 import pytest
 
 from taifeng.context.injection import InitialContextInjection
+from taifeng.context.strategies import offload as offload_module
 from taifeng.context.strategies.offload import OffloadStrategy
 from taifeng.conversation import JsonlMessageStore
 from taifeng.loop.cancellation import CancellationToken
@@ -222,3 +224,43 @@ async def test_resolve_errors_preserve_original_output() -> None:
     """路径解析失败也属于可恢复的 IO 失败，不外抛。"""
     result = await OffloadStrategy(workspace=EscapingWorkspace()).compress(_ctx(_history()), INJECTION)
     assert not result.success
+
+
+class WindowsWorkspace(LocalWorkspaceFS):
+    """模拟 Windows 默认后端的规范路径，不依赖测试宿主平台。"""
+
+    def __init__(self, root: Path) -> None:
+        """保留本机后端身份，只模拟平台路径与写入。"""
+        super().__init__(root)
+        self.written: dict[str, bytes] = {}
+
+    def resolve(self, path: str) -> str:
+        """Windows 的本机规范路径含反斜杠。"""
+        return str(PureWindowsPath("C:/workspace") / path)
+
+    async def write_bytes(self, path: str, data: bytes, *, create_parents: bool = True) -> None:
+        """记录成功提交的内容，不在本机伪造 Windows 目录。"""
+        self.written[path] = data
+
+
+async def test_local_windows_paths_preserve_file_root_compatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本机父目录比较按当前平台语义处理，反斜杠不误判越界。"""
+    workspace = WindowsWorkspace(tmp_path)
+    monkeypatch.setattr(offload_module, "Path", PureWindowsPath)
+    result = await OffloadStrategy(workspace=workspace).compress(_ctx(_history()), INJECTION)
+    assert result.success
+    assert workspace.written == {REL_PATH: BIG.encode()}
+
+
+async def test_cleanup_final_symlink_only_removes_the_link(tmp_path: Path) -> None:
+    """清理链接条目不能先解析成目标目录，否则会删其他 thread。"""
+    other = tmp_path / "_offload" / "other"
+    other.mkdir(parents=True)
+    (other / "c1").write_text("keep", encoding="utf-8")
+    link = tmp_path / "_offload" / TID
+    link.symlink_to(other, target_is_directory=True)
+    await OffloadStrategy(file_root=tmp_path).cleanup_thread(TID)
+    assert not link.is_symlink()
+    assert (other / "c1").read_text(encoding="utf-8") == "keep"

@@ -38,7 +38,7 @@ from taifeng.context.compressor import (
     CompressionTrigger,
 )
 from taifeng.context.placeholders import OFFLOAD_PREFIX, is_placeholder
-from taifeng.tool.workspace import workspace_for
+from taifeng.tool.workspace import LocalWorkspaceFS, workspace_for
 
 if TYPE_CHECKING:
     from taifeng.context.injection import InitialContextInjection
@@ -266,8 +266,13 @@ class OffloadStrategy:
         try:
             thread_dir = self._workspace.resolve(f"{_OFFLOAD_SUBDIR}/{thread_id}")
             target = self._workspace.resolve(rel_path)
-            # 不对远端根标识做 pathlib 解析；协议规范路径以 / 分隔（ADR 0113）。
-            if target.rsplit("/", 1)[0] != thread_dir:
+            # 本机遵循平台分隔符，远端规范路径以 / 分隔且不经过 pathlib。
+            parent_matches = (
+                Path(target).parent == Path(thread_dir)
+                if isinstance(self._workspace, LocalWorkspaceFS)
+                else target.rsplit("/", 1)[0] == thread_dir
+            )
+            if not parent_matches:
                 logger.warning("offload target escaped thread dir: %s", rel_path)
                 return None
             await self._workspace.write_bytes(rel_path, output.encode("utf-8"))
