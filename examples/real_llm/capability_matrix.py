@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _drivers import DRIVERS  # noqa: E402
 from _drivers_extra import DRIVERS_EXTRA  # noqa: E402
 from _ledger import LedgerWriter, R3Audit, ScenarioRecord  # noqa: E402
+from _offload_workspace import DRIVER, setup_offload_workspace  # noqa: E402
 from _provider_bootstrap import (  # noqa: E402
     ProviderBootstrapError,
     build_model_client,
@@ -115,7 +116,7 @@ class Scenario:
 
 
 # driver 注册表：_drivers（P0 高发链路）+ _drivers_extra（ADR 0056–0065 新增能力）
-ALL_DRIVERS: dict[str, Any] = {**DRIVERS, **DRIVERS_EXTRA}
+ALL_DRIVERS: dict[str, Any] = {**DRIVERS, **DRIVERS_EXTRA, **DRIVER}
 
 # Scenario.tools → extra_tools 工厂映射
 TOOL_FACTORIES = {
@@ -148,6 +149,11 @@ def _post_turn_hook_runner() -> object:
 
 # 能力矩阵 —— skill 包与 web_ui DEMOS 同源；prompt 取代表性输入
 SCENARIOS: list[Scenario] = [
+    Scenario("offload_workspace", "real_llm/skills_extra/offload_workspace", "record-inspector",
+             "", capability="offload 与 file_read 共享非本机工作区，stub 后分页回读",
+             expect={"compaction_completed", "llm_request_recorded", "turn_completed"},
+             forbid={"compaction_integrity_rolled_back"}, ctx_window=12_000,
+             driver="offload_workspace", setup=setup_offload_workspace),
     Scenario("composite_dispatch", "code_review", "programmer",
              "请审查这段代码：\n```python\ndef login(u, p):\n"
              "    q = \"SELECT * FROM users WHERE name='\" + u + \"'\"\n"

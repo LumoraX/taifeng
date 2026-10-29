@@ -1,10 +1,11 @@
 """capability_matrix 驱动逻辑自检 —— SimClient 干跑，不花真实 key。
 
 烧 key 前的 pre-flight：用 conformance 模拟器验证 driver 编排（事件轮询 / Resume /
-Rewind 提交时序）本身无 bug。**只覆盖可静态剧本化的 driver**：
+Rewind 提交时序）本身无 bug。**覆盖静态剧本与可动态解析工具结果的 driver**：
 
 - ``suspend_resume``：HITL 挂起 → Resume 续跑；
 - ``turn_rewind``：完成 → Rewind(re_reason) → 二次完成；
+- ``offload_workspace``：从实际 stub 动态取得路径，分页回读本次随机生成的口令；
 - ADR 0056–0065 六个新场景（``skill_inference`` / ``tool_output_guard`` /
   ``pinned_periodic`` / ``file_search`` / ``read_skill_path`` / ``compaction_continuity``）：
   剧本按 driver 断言的取证点作答（token 与标记取自 ``_setups``），同时验证 driver 的
@@ -30,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _offload_workspace import OffloadWorkspaceSimClient  # noqa: E402
 from _setups import (  # noqa: E402
     COMPACT_CODE,
     COMPACT_MARK,
@@ -156,7 +158,7 @@ SIM_ROUTES = {
 
 
 async def main() -> None:
-    """对可静态化的 driver 场景逐个 sim 干跑，断言 PASS。"""
+    """对支持静态或动态剧本的 driver 场景逐个 sim 干跑，断言 PASS。"""
     failures: list[str] = []
     try:
         preflight_openai_image_matrix()
@@ -175,9 +177,12 @@ async def main() -> None:
         failures.append(f"codex_file: {type(exc).__name__}: {exc}")
     for sc in SCENARIOS:
         routes = SIM_ROUTES.get(sc.demo_id)
-        if routes is None:
+        if sc.demo_id == "offload_workspace":
+            client = OffloadWorkspaceSimClient()
+        elif routes is not None:
+            client = RoutingSimClient(routes=routes)
+        else:
             continue
-        client = RoutingSimClient(routes=routes)
         with tempfile.TemporaryDirectory() as td:
             res = await run_scenario(client, sc, Path(td) / "logs")
         tag, note = _verdict(res)
