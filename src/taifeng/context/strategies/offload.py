@@ -27,7 +27,6 @@ R1-R5(见 design):
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,10 +38,12 @@ from taifeng.context.compressor import (
     CompressionTrigger,
 )
 from taifeng.context.placeholders import OFFLOAD_PREFIX, is_placeholder
+from taifeng.tool.workspace import workspace_for
 
 if TYPE_CHECKING:
     from taifeng.context.injection import InitialContextInjection
     from taifeng.conversation.models import ResponseItem
+    from taifeng.tool.workspace import WorkspaceFS
 
 # offload 文件根下的固定子目录名 —— 与业务文件区隔离
 _OFFLOAD_SUBDIR = "_offload"
@@ -101,8 +102,8 @@ class OffloadStrategy:
     """超大 tool 结果落盘 + stub 替换的无损可回溯压缩策略。
 
     Args:
-        file_root: offload 文件沙箱根。落盘到 ``{file_root}/_offload/{thread_id}/{call_id}``;
-            业务侧应与 file_read 工具的 ``root_dir`` 同根,stub 中给出的相对路径方可回读。
+        file_root: 本机兼容入口，与 ``workspace`` 恰好给一个。
+        workspace: 与 file_read 共享的持久工作区；路径固定为 ``_offload/{thread_id}/{call_id}``。
         priority: orchestrator 排序优先级。默认 30,高于 SurgicalTrim(20)——
             有大结果时优先无损落盘而非有损剪枝。
         offload_bytes_threshold: 单条 output 字节数 ≥ 此值才落盘(独立阈值,OQ2)。
@@ -114,14 +115,16 @@ class OffloadStrategy:
     def __init__(
         self,
         *,
-        file_root: str | Path,
+        file_root: str | Path | None = None,
+        workspace: WorkspaceFS | None = None,
         priority: int = 30,
         offload_bytes_threshold: int = 8 * 1024,
         preview_head_lines: int = 5,
         preview_tail_lines: int = 5,
     ) -> None:
+        """归一化工作区入口，保持本机装配兼容（ADR 0131）。"""
         self.priority = priority
-        self._root = Path(file_root)
+        self._workspace = workspace_for(file_root, workspace)
         self._threshold = offload_bytes_threshold
         self._head_lines = preview_head_lines
         self._tail_lines = preview_tail_lines
@@ -230,10 +233,15 @@ class OffloadStrategy:
         v1 仅做 thread 级联清理,不做 TTL / 容量上限。目标目录不存在时为 noop(幂等)。
         业务侧在销毁 thread 的钩子里调用本方法,与 history 删除对齐。
         """
-        tdir = anyio.Path(self._root) / _OFFLOAD_SUBDIR / thread_id
-        if await tdir.exists():
-            # 递归删除该 thread 目录下全部 offload 文件(阻塞 IO 下沉线程池)
-            await anyio.to_thread.run_sync(shutil.rmtree, Path(tdir))
+        if not _is_safe_segment(thread_id):
+            logger.warning("offload cleanup rejected unsafe thread_id=%r", thread_id)
+            return
+        await anyio.lowlevel.checkpoint()
+        try:
+            # 保留相对路径，让后端按最终链接条目删除，不能先 resolve 到链接目标。
+            await self._workspace.remove(f"{_OFFLOAD_SUBDIR}/{thread_id}", recursive=True)
+        except FileNotFoundError:
+            pass  # 已清理或从未产生 offload 文件，视为幂等成功。
 
     # ---- 落盘单条 ----
 
@@ -255,18 +263,17 @@ class OffloadStrategy:
             )
             return None
         rel_path = f"{_OFFLOAD_SUBDIR}/{thread_id}/{call_id}"
-        thread_dir = Path(self._root) / _OFFLOAD_SUBDIR / thread_id
-        target_path = thread_dir / call_id
-        # 二次证明：resolve 后的父目录必须仍是 thread 目录（防 symlink 等绕过）
-        if target_path.resolve().parent != thread_dir.resolve():
-            logger.warning("offload target escaped thread dir: %s", target_path)
-            return None
-        target = anyio.Path(target_path)
         try:
-            await target.parent.mkdir(parents=True, exist_ok=True)
-            await target.write_text(output, encoding="utf-8")
-        except OSError:
-            # 系统级落盘失败 —— 不静默丢数据,交由调用方保留原始条目
+            thread_dir = self._workspace.resolve(f"{_OFFLOAD_SUBDIR}/{thread_id}")
+            target = self._workspace.resolve(rel_path)
+            # 不对远端根标识做 pathlib 解析；协议规范路径以 / 分隔（ADR 0113）。
+            if target.rsplit("/", 1)[0] != thread_dir:
+                logger.warning("offload target escaped thread dir: %s", rel_path)
+                return None
+            await self._workspace.write_bytes(rel_path, output.encode("utf-8"))
+        except OSError as exc:
+            # 解析与写入失败都保留原始条目；取消异常不在此捕获。
+            logger.warning("offload write failed for %s: %s", rel_path, exc)
             return None
         preview = _build_preview(output, self._head_lines, self._tail_lines)
         # stub 必须以 OFFLOAD_PREFIX 起头,使 is_placeholder 识别(幂等守卫)
