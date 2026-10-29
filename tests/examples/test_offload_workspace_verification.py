@@ -131,3 +131,44 @@ def test_assembly_generates_new_secret_each_time(tmp_path: Path, monkeypatch: py
     second = module.setup_offload_workspace(tmp_path, None)
     assert first.state["token"] != second.state["token"]
     assert first.state["workspace"] is not second.state["workspace"]
+
+
+@pytest.mark.parametrize("decoy", ["second_fetch", "wrong_path_read", "unpaged_read"])
+async def test_unrelated_output_cannot_end_secret_leak_check(
+    verified_run: tuple[Any, Any], decoy: str,
+) -> None:
+    """其他取全文或无效回读之后泄露口令，不能由后续正常分页回读洗成通过。"""
+    module, result = verified_run
+    proof = result.state["evidence"]
+    token = result.state["token"]
+    workspace = result.state["workspace"]
+    raw = workspace.files[workspace.resolve(proof["path"])].decode()
+    request = next(event for event in result.events if event.kind == "llm_request_recorded"
+                   and "[offloaded" in json.dumps(event.data))
+    leaked_request = json.loads(json.dumps(request.data))
+    leaked_request["messages"].append({
+        "role": "tool", "tool_call_id": "decoy-call", "content": raw,
+    })
+    name = module.FETCH_TOOL if decoy == "second_fetch" else "file_read"
+    arguments = {"path": proof["path"], "offset": module.MIDDLE_LINE, "limit": 3}
+    if decoy == "wrong_path_read":
+        arguments["path"] = "other/file"
+    elif decoy == "unpaged_read":
+        arguments.pop("offset")
+        arguments.pop("limit")
+    decoy_events = [
+        SimpleNamespace(kind="tool_call_started", data={
+            "name": name, "call_id": "decoy-call",
+            "arguments": json.dumps({} if decoy == "second_fetch" else arguments),
+        }),
+        SimpleNamespace(kind="tool_call_completed", data={
+            "name": name, "call_id": "decoy-call", "is_error": False,
+            "output": raw if decoy == "second_fetch" else f"MIDDLE-TOKEN: {token}",
+        }),
+        SimpleNamespace(kind="llm_request_recorded", data=leaked_request),
+    ]
+    read_index = next(index for index, event in enumerate(result.events)
+                      if event.kind == "tool_call_started" and event.data["name"] == "file_read")
+    result.events[read_index:read_index] = decoy_events
+    with pytest.raises(AssertionError, match="分页回读前模型已见过完整口令"):
+        module.verify_offload_evidence(result, proof["thread_id"], proof["answer"])
