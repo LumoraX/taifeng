@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 MsgKind = Literal[
+    "execution_updated",
     "turn_started",
     "assistant_text",
     "assistant_reasoning",

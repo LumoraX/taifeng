@@ -48,6 +48,7 @@ from taifeng.loop.event import (
     ToolBatchDispatched,
     ToolCallStarted,
 )
+from taifeng.loop.execution_observer import emit_sample_observation
 from taifeng.loop.failure_policy import DEFAULT_FAILURE_POLICY, FailureDisposition
 from taifeng.loop.prompt import build_api_request
 from taifeng.loop.prompt_fingerprint import (
@@ -300,6 +301,7 @@ class TurnSample:
 
         # 第 1 段（请求构建 + 预检）已抽出；下面逐字还原跨段局部量，
         # 使其后约 400 行保持与切分前完全相同的文本与语义。
+        await emit_sample_observation(self.__sample_owner, iteration)
         prep = await self._prepare_request(iteration)
         request = prep.request
         tools = prep.tools
@@ -404,6 +406,7 @@ class TurnSample:
                             self.samples_metered += 1
                         self.__sample_owner._accumulate_usage(usage_dict)
                         sample_prompt_tokens = int(usage_dict.get("input_tokens") or 0)
+                        await emit_sample_observation(self.__sample_owner, iteration, usage=usage_dict)
                         # G3：回流的服务端 request-id（供失败 / telemetry 关联）
                         rid = ev.data.get("request_id")
                         if rid:

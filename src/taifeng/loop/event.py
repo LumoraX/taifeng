@@ -68,6 +68,7 @@ from taifeng.loop.event_turn import ContextBudgetExceeded as ContextBudgetExceed
 from taifeng.loop.event_turn import DenialCircuitOpen as DenialCircuitOpen
 from taifeng.loop.event_turn import DoomLoopCircuitOpen as DoomLoopCircuitOpen
 from taifeng.loop.event_turn import DoomLoopWarned as DoomLoopWarned
+from taifeng.loop.event_turn import ExecutionUpdated as ExecutionUpdated
 from taifeng.loop.event_turn import LlmRequestRecorded as LlmRequestRecorded
 from taifeng.loop.event_turn import OrchestrationConditionMissing as OrchestrationConditionMissing
 from taifeng.loop.event_turn import OrchestrationPlanResolved as OrchestrationPlanResolved
@@ -116,12 +117,14 @@ from taifeng.loop.event_turn import ToolCallStarted as ToolCallStarted
 from taifeng.loop.event_turn import ToolSetChanged as ToolSetChanged
 from taifeng.loop.event_turn import TurnStarted as TurnStarted
 from taifeng.loop.event_turn import UserInputInjected as UserInputInjected
+from taifeng.loop.execution_identity import ExecutionIdentity
 
 # ── turn-rewind：回访节点生命周期事件（R3 可观测）─────────────────────
 
 # ── detached-spawn：分离式 skill spawn + join-barrier 生命周期事件（R3 可观测）──
 
 Msg = Union[
+    ExecutionUpdated,
     TurnStarted,
     AssistantText,
     AssistantReasoning,
@@ -233,3 +236,6 @@ class EventMsg(BaseModel):
     # ⚠️ 全局 seq 连续性自检只对 ``subscribe_all`` 全量流成立；过滤订阅看
     # ``DeliveredEvent.delivery_seq``（per-subscriber 投递序号）。
     seq: int = 0
+
+    # 可选增量元数据；旧事件缺省 None，不改变 submission 的路由语义。
+    execution: ExecutionIdentity | None = None

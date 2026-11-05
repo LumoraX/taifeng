@@ -34,6 +34,7 @@ class _Colors:
 
 
 _KIND_TAG = {
+    "execution_updated": ("exec", _Colors.GRAY, "·"),
     "turn_started": ("turn", _Colors.BLUE, "→"),
     "assistant_text": ("llm ", _Colors.CYAN, "←"),
     "assistant_reasoning": ("llm ", _Colors.MAGENTA, "·"),
@@ -127,7 +128,9 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
     data: dict[str, Any] = ev.msg.data
     parts: list[str] = []
 
-    if ev.msg.kind == "turn_started":
+    if ev.msg.kind == "execution_updated":
+        parts.append(f"phase={data.get('phase')} iter={data.get('iteration')} tokens={(data.get('usage') or {}).get('total_tokens', 0)}")
+    elif ev.msg.kind == "turn_started":
         parts.append(f"sub={ev.submission_id[:12]}")
         if eid := data.get("entry_skill_id"):
             parts.append(f"entry={eid}")

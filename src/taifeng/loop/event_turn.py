@@ -11,6 +11,12 @@ from typing import Literal
 from taifeng.loop.event_base import _Msg
 
 
+class ExecutionUpdated(_Msg):
+    """执行阶段、当前 attempt 自身用量和上下文总量，不含正文。"""
+
+    kind: Literal["execution_updated"] = "execution_updated"
+
+
 class TurnStarted(_Msg):
     kind: Literal["turn_started"] = "turn_started"
 
@@ -644,6 +650,7 @@ class SubagentPolicyOverridden(_Msg):
 
 
 __all__ = [
+    "ExecutionUpdated",
     "AssistantReasoning",
     "AssistantText",
     "BackgroundTaskCompleted",

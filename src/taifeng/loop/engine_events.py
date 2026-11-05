@@ -14,6 +14,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from taifeng.loop.engine_types import DeliveredEvent, _Subscriber, is_submission_terminal
+from taifeng.loop.execution_observer import current_execution
 
 if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine
@@ -35,6 +36,8 @@ class EngineEvents:
     async def emit(self, ev: EventMsg) -> None:
         # suspension-ttl:借唯一事件总线做定时器簿记——所有层级 turn(根/子/spawn)的
         # 挂起与核销事件都流经此处,单点覆盖,无需在各续跑路径埋点。
+        if ev.execution is None:
+            ev.execution = current_execution(getattr(self._engine, "session_id", None))
         kind = ev.msg.kind
         if kind == "turn_suspended":
             self._engine._arm_ttl_timer(ev.msg.data)

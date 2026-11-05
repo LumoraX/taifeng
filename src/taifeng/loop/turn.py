@@ -21,13 +21,13 @@ from taifeng.llm.types import TokenUsage
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
 from taifeng.loop.event import (
-    EventMsg,
     ResourceLimitExceeded,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
     TurnSuspended,
 )
+from taifeng.loop.execution_observer import emit_turn_event, observe_run
 from taifeng.loop.failure_policy import resolve_recovery
 from taifeng.loop.iteration_budget import IterationBudget
 from taifeng.loop.outbound import emit_outbound
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.audit_skill import AuditedSkillDispatch
     from taifeng.loop.cancellation import CancellationToken
+    from taifeng.loop.execution_identity import ExecutionIdentity
     from taifeng.loop.failure_policy import (
         FailureDispositionPolicy,
     )
@@ -295,6 +296,9 @@ class TurnRunner:
     # 与 recall_threshold 同走 pool→engine→TurnRunner 透传路径。
     has_recall_backend: bool = False
 
+    _execution_identity: ExecutionIdentity | None = field(default=None, init=False, repr=False)
+    _execution_usage_complete: bool = field(default=True, init=False, repr=False)
+
     def __post_init__(self) -> None:
         """兜底注入挂起 id / 时间戳工厂，并初始化当前迭代序号。
 
@@ -343,14 +347,8 @@ class TurnRunner:
             source=f"skill {self.entry_skill.id!r} inference.max_output_tokens")
 
     async def _emit(self, msg: Any) -> None:
-        """投递 turn 事件，保留实际 usage 并标记是否完整。"""
-        if msg.kind in {"turn_completed", "turn_failed", "turn_suspended"}:
-            msg.data["usage_complete"] = self._sample.samples_started == self._sample.samples_metered
-        try:
-            await self.emit(EventMsg(submission_id=self.submission_id, msg=msg))
-        except Exception:
-            logger.exception("emit failed")
-
+        """投递带执行身份的事件，保持终态用量完整性。"""
+        await emit_turn_event(self, msg)
 
     def _deferred_exposure_active(self) -> bool:
         """本 entry 是否处于 deferred 召回模式（决定是否暴露 search_skills 工具）。"""
@@ -403,6 +401,7 @@ class TurnRunner:
         await self._ctxload.maybe_inject_budget_hint()
 
 
+    @observe_run
     async def run(self) -> TurnOutcome:
         start = time.monotonic()
         # 判定是否为根 turn —— 关键事实：根 turn 由 Engine 直接派发，构造时
