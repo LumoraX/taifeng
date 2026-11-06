@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _drivers import DRIVERS  # noqa: E402
 from _drivers_extra import DRIVERS_EXTRA  # noqa: E402
+from _execution_tree import DRIVER as EXECUTION_DRIVER  # noqa: E402
+from _execution_tree import setup_execution_tree  # noqa: E402
 from _ledger import LedgerWriter, R3Audit, ScenarioRecord  # noqa: E402
 from _offload_workspace import DRIVER, setup_offload_workspace  # noqa: E402
 from _provider_bootstrap import (  # noqa: E402
@@ -116,7 +118,7 @@ class Scenario:
 
 
 # driver 注册表：_drivers（P0 高发链路）+ _drivers_extra（ADR 0056–0065 新增能力）
-ALL_DRIVERS: dict[str, Any] = {**DRIVERS, **DRIVERS_EXTRA, **DRIVER}
+ALL_DRIVERS: dict[str, Any] = {**DRIVERS, **DRIVERS_EXTRA, **DRIVER, **EXECUTION_DRIVER}
 
 # Scenario.tools → extra_tools 工厂映射
 TOOL_FACTORIES = {
@@ -149,6 +151,10 @@ def _post_turn_hook_runner() -> object:
 
 # 能力矩阵 —— skill 包与 web_ui DEMOS 同源；prompt 取代表性输入
 SCENARIOS: list[Scenario] = [
+    Scenario("execution_observability", "real_llm/skills_extra/execution_tree", "observation-root",
+             "", capability="同 skill 并行执行身份、上下文与自身用量取证",
+             expect={"execution_updated", "skill_dispatched", "tool_call_completed", "turn_completed"},
+             forbid={"turn_failed"}, driver="execution_observability", setup=setup_execution_tree),
     Scenario("offload_workspace", "real_llm/skills_extra/offload_workspace", "record-inspector",
              "", capability="offload 与 file_read 共享非本机工作区，stub 后分页回读",
              expect={"compaction_completed", "llm_request_recorded", "turn_completed"},
@@ -337,6 +343,7 @@ class Result:
     grants: int = 0
     duration_s: float = 0.0
     events: list = field(default_factory=list)  # driver 模式的全量 EventMsg（轮询用）
+    envelopes: list = field(default_factory=list)  # 完整 EventMsg，保留执行身份与 submission
     state: dict[str, Any] = field(default_factory=dict)  # ScenarioSetup.state（driver 取证用）
 
 
@@ -383,6 +390,7 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
             async for ev in engine.subscribe_all():
                 res.kinds[ev.msg.kind] += 1
                 res.events.append(ev.msg)
+                res.envelopes.append(ev)
                 if ev.msg.kind == "turn_failed" and not res.error:
                     res.error = str(ev.msg.data.get("error", ""))[:140]
 
