@@ -63,3 +63,10 @@
 
 模拟验证：同 Skill 并行 call_skill / spawn、工具归属、父子嵌套、跨 session 隔离、取消/异常、挂起续跑、重复事件、seq 跳号、空输入、超长/控制字符、缺失父级、环和深度上限、TTY/非TTY。
 真实验证：全量 capability_matrix；新增场景由模型自主 spawn 两个同 Skill 后台执行，再查询真实结果，检查工具实际交叠、父子身份、独立用量和完整终端投影。同步 call_skill 共享 submission 的并行归属由 Sim 场景单独覆盖；不将模型是否选择单响应多工具作为观测能力的前提。
+
+### 2026-11-06 验收
+
+- 实现版本 `e1bd927`；Python 3.12 / 3.13 全量各4198 passed、17 skipped；examples 40/40；ruff F/S108/I/TC、mypy strict（316文件）、新模块复杂度与大小约束通过。
+- codex / gpt-5.6-luna 档全量真实矩阵：36/36 PASS；事件渲染映射与经典事件覆盖审计通过，生成记录见[真实台账](../../real-llm-ledger.md)。台账保留其他provider未执行项，不等同全部provider验证。
+- 新场景由模型启动两个同Skill后台执行并读取真实结果；三个节点独立显示，handler时序证明交叠，投影自身用量之和与会话meter一致。同步共享submission并行归属由Sim验证。
+- 独立契约和代码审查通过；覆盖已创建thread的peer唤醒父级保持、挂起后迟到事件、后台失败收敛、窄TTY宽字符与慢输出取消。
