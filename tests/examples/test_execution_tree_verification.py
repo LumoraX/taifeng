@@ -52,7 +52,9 @@ def _damage_metadata(envelope: Any, damage: str, root_identity: Any) -> Any:
     identity, message = envelope.execution, envelope.msg
     child = identity is not None and identity.execution_id != root_identity.execution_id
     changes: dict[str, Any] = {}
-    if damage == "identity" and child:
+    if damage == "sequence" and child:
+        changes["seq"] = envelope.seq + 1
+    elif damage == "identity" and child:
         changes["execution"] = None
     elif damage == "parent" and child:
         changes["execution"] = identity.model_copy(update={"parent_execution_id": "wrong"})
@@ -82,7 +84,7 @@ def _damage_content(message: Any, damage: str, root: str) -> Any:
 
 
 @pytest.mark.parametrize("damage", [
-    "identity", "parent", "tool_owner", "text_owner", "usage", "context", "overlap",
+    "sequence", "identity", "parent", "tool_owner", "text_owner", "usage", "context", "overlap",
     "batch", "submission", "request_leak", "root_terminal", "failure", "context_value",
 ])
 async def test_execution_verifier_rejects_damaged_evidence(

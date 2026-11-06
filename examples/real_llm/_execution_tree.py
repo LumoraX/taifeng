@@ -12,6 +12,7 @@ from _drivers import _wait_for
 from _setups import ScenarioSetup
 
 from taifeng import ToolResult, ToolSpec, UserMessage
+from taifeng.experimental import ExecutionProjection, TerminalTreeSink
 from taifeng.llm.providers import SimClient, SimTurn
 
 if TYPE_CHECKING:
@@ -163,6 +164,24 @@ def _verify_requests(res: Any, nodes: dict[str, Any]) -> None:
         assert all(value not in blob for value in hidden), "执行元数据泄露到模型请求"
 
 
+def _verify_projection(res: Any, nodes: dict[str, Any], totals: dict[str, int]) -> str:
+    """同一真实信封流必须生成完整终端树，且投影计量与独立证据一致。"""
+    projection = ExecutionProjection()
+    for envelope in res.envelopes:
+        projection.handle(envelope)
+    snapshots = projection.snapshot()
+    assert not projection.incomplete, "终端投影发现事件缺口"
+    assert {node.execution_id for node in snapshots} == nodes.keys(), "终端节点缺失或多计"
+    for node in snapshots:
+        assert node.state == "completed" and node.usage_complete, "终端节点未完整收敛"
+        assert node.total_tokens == totals[node.execution_id], "终端投影重复或漏计自身用量"
+        assert node.parent_execution_id == nodes[node.execution_id].parent_execution_id
+        assert node.context_measured and node.context_tokens is not None
+    frame = TerminalTreeSink(projection=projection, interactive=False).render()
+    assert frame.count(WORKER_SKILL) == 2 and ROOT_SKILL in frame, "终端显示合并了同名子节点"
+    return frame
+
+
 def verify_execution_evidence(res: Any) -> dict[str, Any]:
     """纯函数核对完整 envelope 与探针事实，不能靠事件出现或模型答案碰巧正确通过。"""
     assert not any(ev.msg.kind == "turn_failed" for ev in res.envelopes), "执行树出现失败"
@@ -178,6 +197,7 @@ def verify_execution_evidence(res: Any) -> dict[str, Any]:
     _verify_probes(res, nodes)
     totals = _verify_usage(res, nodes)
     _verify_requests(res, nodes)
+    terminal = _verify_projection(res, nodes, totals)
     completed = [msg.data for msg in own if msg.kind == "turn_completed"]
     assert len(completed) == 1 and completed[0]["is_root"] is True, "根未真正完成"
     total = sum(totals.values())
@@ -185,7 +205,7 @@ def verify_execution_evidence(res: Any) -> dict[str, Any]:
     root_text = "".join(msg.data["delta"] for msg in own if msg.kind == "assistant_text")
     assert all(f"OBSERVED[{label}]" in root_text for label in ("left", "right")), "根未汇总两个结果"
     return {"root": root, "children": sorted(nodes.keys() - {root}),
-            "own_tokens": totals[root], "session_tokens": total}
+            "own_tokens": totals[root], "session_tokens": total, "terminal_snapshot": terminal}
 
 
 async def drive_execution_tree(engine: Any, res: Any) -> None:
@@ -206,15 +226,16 @@ async def drive_execution_tree(engine: Any, res: Any) -> None:
         assert all(p["exited"] is None for p in res.state["probes"]), "释放前探针已退出"
     finally:
         res.state["release"].set()
-    async def consume() -> None:
-        """消费到根 submission 的真实自然终态，避免只见子节点完成就提前通过。"""
-        async for _ in engine.subscribe(submission):
-            pass
-    await asyncio.wait_for(consume(), timeout=240.0)
-    await _wait_for(res, lambda msg: msg.kind == "turn_completed" and msg.data.get("is_root"),
-                    wait_seconds=5.0, what="采集根完整终态")
+    # 同步子调用共享 submission；过滤订阅可能在首个子终态结束，必须盯全量流的根终态。
+    terminal = await _wait_for(
+        res, lambda msg: msg.kind == "turn_failed" or (
+            msg.kind == "turn_completed" and msg.data.get("is_root")),
+        wait_seconds=240.0, what="采集根完整终态",
+    )
+    assert terminal.kind == "turn_completed", "执行树未正常完成"
     res.state["introspection"] = engine.introspect()
     res.state["evidence"] = verify_execution_evidence(res)
+    print(res.state["evidence"]["terminal_snapshot"])
     print(f"  [execution] 同 skill 双子节点实际重叠；自身用量相加={res.state['evidence']['session_tokens']}")
 
 
