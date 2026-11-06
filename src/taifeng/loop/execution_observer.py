@@ -35,20 +35,28 @@ def current_execution(session_id: str | None) -> ExecutionIdentity | None:
 @contextmanager
 def execution_scope(
     *, session_id: str, thread_id: str, skill_id: str, model: str = 'auto',
+    parent_thread_id: str | None = None, parent_known: bool = False,
 ) -> Iterator[ExecutionIdentity]:
     """建立任务本地作用域，异常与取消都在 finally 恢复原上下文。"""
     parent = current_execution(session_id)
+    parent_id = parent_thread_id if parent_known else (parent.thread_id if parent else None)
     identity = ExecutionIdentity(
         execution_id=thread_id, attempt_id=f'run_{secrets.token_hex(12)}',
         thread_id=thread_id, skill_id=skill_id, model=model,
-        parent_execution_id=parent.execution_id if parent is not None else None,
-        parent_thread_id=parent.thread_id if parent is not None else None,
+        parent_execution_id=parent_id, parent_thread_id=parent_id,
     )
     token = _ACTIVE.set((session_id, identity))
     try:
         yield identity
     finally:
         _ACTIVE.reset(token)
+
+
+def remember_execution_parent(engine: object, child: str, parent: str) -> None:
+    """只在创建子 thread 时记住逻辑父级，唤醒与续跑不重写关系。"""
+    parents = getattr(engine, '_execution_parents', None)
+    if isinstance(parents, dict) and child != parent:
+        parents.setdefault(child, parent)
 
 
 def observe_run(
@@ -58,7 +66,10 @@ def observe_run(
     @wraps(method)
     async def observed(owner: TurnRunner) -> TurnOutcome:
         """把父身份传播到子任务，并在逃逸异常时补充观察终态。"""
+        parents = getattr(owner.spawn_coordinator, '_execution_parents', None)
         with execution_scope(
+            parent_known=isinstance(parents, dict),
+            parent_thread_id=parents.get(owner.thread_id) if isinstance(parents, dict) else None,
             session_id=owner.session_id or owner.thread_id, thread_id=owner.thread_id,
             skill_id=owner.entry_skill.id, model=owner.entry_skill.model or 'auto',
         ) as identity:

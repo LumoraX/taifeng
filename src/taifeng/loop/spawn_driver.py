@@ -30,6 +30,7 @@ from taifeng.loop.event import (
     EventMsg,
     SpawnStarted,
 )
+from taifeng.loop.execution_observer import remember_execution_parent
 from taifeng.loop.peer_mailbox import PeerMailbox
 from taifeng.loop.spawn import SpawnRejectedError
 from taifeng.loop.spawn_barrier import JoinBarrierCoordinator
@@ -229,6 +230,7 @@ class SpawnDriver:
                 eng, handle_id=handle_id, skill_id=skill_id,
                 child_thread_id=child_thread_id,
             )
+            remember_execution_parent(eng, child_thread_id, source_thread_id or eng.thread_id)
             await eng._emit(EventMsg(  # noqa: SLF001
                 submission_id=handle_id,
                 msg=SpawnStarted(data={

@@ -183,6 +183,8 @@ class AgentEngine:
         self._input_cost_estimator = input_cost_estimator
         self._store = store
         self._thread_id = thread_id
+        # 进程内观测谱系：只记录创建关系，peer 唤醒不改变逻辑父级。
+        self._execution_parents: dict[str, str | None] = {thread_id: None}
         # session_id 主要用于 InstructionContext.session_id 缓存键；若未传，
         # 退回到 thread_id（保持单 engine 单 session 的一对一）
         self._session_id = session_id or thread_id

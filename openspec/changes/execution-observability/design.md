@@ -10,7 +10,7 @@
 
 1. 复用EventMsg而非另一条总线；execution为可选冻结结构，旧事件缺省None。身份不进入LLM请求。
 2. 节点execution_id采用thread_id以自然跨Resume更新，attempt_id在每次run新建；同步与detached子线程本就隔离，同Skill并发不共用节点。
-3. 使用按session隔离的ContextVar传播父身份。run装饰器建立/清理作用域；TurnRunner._emit显式使用owner身份，EngineEvents补齐处于作用域内的协调事件。无需扩展spawn工具的参数或Journal。
+3. engine在同步/分离子thread创建时记录逻辑父级，peer唤醒与Resume保留创建关系；冷恢复未知父级不猜测。使用按session隔离的ContextVar传播运行身份。run装饰器建立/清理作用域；TurnRunner._emit显式使用owner身份，EngineEvents补齐处于作用域内的协调事件。无需扩展spawn工具的参数或Journal。
 4. 仅在采样开始和usage入账后发execution_updated，前者标估算上下文，后者仅在provider明确返回有效input_tokens时标实测，缺失时保持估算。工具与挂起/终态由原事件驱动，既有调度路径不改。
 5. spawn协调事件按handle映射更新目标子节点（含尚未起跑/挂起后被取消）；状态投影与终端显示置telemetry，单流seq去重/跳号检测、节点容量上限、不可变快照，终端防控制字符并有界遍历。projection是观察结果，不成为内核真相。
 6. 不采用逐条解析Console文本；不强依赖Rich/Textual，TTY原地重绘，非TTY追加输出，write/flush在线程执行并允许取消等待。宿主可以直接取snapshot复用到SSE/UI。

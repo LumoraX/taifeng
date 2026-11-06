@@ -18,7 +18,7 @@
 
 ### Requirement: 每个执行的事件有统一身份
 - WHEN root、同步 call_skill（含并行编排）、detached spawn 在 run 中发出事件，THEN SHALL 附带所属执行的身份；工具和文本不得仅按 submission_id 分组。
-- WHEN 同一 session 的子 runner 在父异步任务上下文中启动，THEN SHALL 继承父 execution_id/thread_id；通过上下文作用域隔离兄弟节点，finally 恢复作用域。
+- WHEN 同一 session 创建子 thread，THEN SHALL 在 engine 内记住其逻辑父级；已有 thread 的 peer 唤醒与 Resume SHALL 保持该父级，不将唤醒者当成创建者。ContextVar 只隔离运行作用域，finally 恢复；裸 runner 可继承同 session 的当前作用域。
 - WHEN 跨 session 启动另一个 engine，THEN SHALL 不继承其他 session 的父级。
 - WHEN engine 在活跃执行作用域中发出协调事件（如 spawn_started），THEN execution 标识发出方，事件 data 仍标识目标 child/handle；投影 SHALL 区分发出方与目标。
 

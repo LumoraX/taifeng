@@ -19,6 +19,7 @@ from taifeng.loop.event import (
     SkillSpawnRejected,
     SubagentPolicyOverridden,
 )
+from taifeng.loop.execution_observer import remember_execution_parent
 from taifeng.loop.working_set_events import emit_working_set_changes
 from taifeng.skill.trust import tier_of
 from taifeng.tool.spec import ToolContext, ToolResult
@@ -112,6 +113,10 @@ class TurnDispatch:
                 ).derived_origin(),
             )
             await self.__dispatch_owner.store.append(seed)
+        remember_execution_parent(
+            self.__dispatch_owner.spawn_coordinator, sub_thread_id,
+            self.__dispatch_owner.thread_id,
+        )
         # 经 turn 模块惰性解析：既避开 turn ↔ turn_dispatch 的循环 import，
         # 也保住「打 turn.TurnRunner 这个模块级符号」的白盒注入点。
         from taifeng.loop import turn as _turn_mod

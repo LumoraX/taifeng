@@ -127,3 +127,57 @@ async def test_real_runner_events_have_child_identity(skills_dir: Path, threads_
     finally:
         task.cancel()
         await pool.close()
+
+
+async def test_peer_wake_keeps_original_parent(skills_dir: Path, threads_dir: Path) -> None:
+    """兄弟唤醒已存在节点，只产生新attempt，不能改变其创建父级。"""
+    from taifeng.llm.providers import RoutingSimClient, SimTurn
+    from tests.conftest import wait_for_condition
+
+    observer = _observer()
+    pool = await taifeng.EnginePool.create(
+        skills_dir=skills_dir, threads_dir=threads_dir, compressors=[],
+        model_client=RoutingSimClient(routes={'style-checker': [
+            SimTurn(text='first'), SimTurn(text='awake'),
+        ]}),
+    )
+    engine = await pool.get_or_create(session_id='peer-obs', entry_skill_id='code-reviewer')
+    events = []
+
+    async def collect() -> None:
+        """捕获目标执行的两次启动，保留身份信封。"""
+        async for event in engine.subscribe_all():
+            events.append(event)
+
+    collector = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+    try:
+        with observer.execution_scope(session_id='peer-obs', thread_id=engine.thread_id, skill_id='root'):
+            target = await engine.spawn_skill(skill_id='style-checker', args={}, reason='first')
+        handle = target['handle_id']
+        await wait_for_condition(lambda: engine.spawn_status([handle])[handle]['status'] == 'done')
+        with observer.execution_scope(session_id='peer-obs', thread_id='sibling', skill_id='worker'):
+            await engine.deliver_peer_message(
+                target=target['child_thread_id'], text='continue', mode='trigger_turn',
+                from_thread_id=engine.thread_id,
+            )
+        await wait_for_condition(lambda: len([event for event in events
+            if event.msg.kind == 'turn_completed'
+            and event.msg.data.get('thread_id') == target['child_thread_id']]) == 2)
+        starts = [event.execution for event in events if event.msg.kind == 'turn_started'
+                  and event.msg.data['thread_id'] == target['child_thread_id']]
+        assert len(starts) == 2 and starts[0].attempt_id != starts[1].attempt_id
+        assert starts[0].parent_execution_id == engine.thread_id
+        assert starts[1].parent_execution_id == starts[0].parent_execution_id
+    finally:
+        collector.cancel()
+        await pool.close()
+
+
+def test_sampling_function_stays_within_named_limit() -> None:
+    """ADR0121为最热采样函数规定259行上限，观测不能突破。"""
+    import inspect
+
+    from taifeng.loop.turn_sample import TurnSample
+
+    assert len(inspect.getsource(TurnSample.sample_once).splitlines()) <= 259

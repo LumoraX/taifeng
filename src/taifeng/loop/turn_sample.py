@@ -299,8 +299,6 @@ class TurnSample:
     async def sample_once(self, iteration: int) -> tuple[str, bool]:
         """一次 LLM 采样 + 工具调度，返回 (本轮 assistant text, 是否有 tool call)。"""
 
-        # 第 1 段（请求构建 + 预检）已抽出；下面逐字还原跨段局部量，
-        # 使其后约 400 行保持与切分前完全相同的文本与语义。
         await emit_sample_observation(self.__sample_owner, iteration)
         prep = await self._prepare_request(iteration)
         request = prep.request
