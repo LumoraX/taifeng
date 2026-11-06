@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _execution_tree import ExecutionTreeSimClient  # noqa: E402
 from _offload_workspace import OffloadWorkspaceSimClient  # noqa: E402
 from _setups import (  # noqa: E402
     COMPACT_CODE,
@@ -177,8 +178,12 @@ async def main() -> None:
         failures.append(f"codex_file: {type(exc).__name__}: {exc}")
     for sc in SCENARIOS:
         routes = SIM_ROUTES.get(sc.demo_id)
-        if sc.demo_id == "offload_workspace":
-            client = OffloadWorkspaceSimClient()
+        dynamic_client = {
+            "execution_observability": ExecutionTreeSimClient,
+            "offload_workspace": OffloadWorkspaceSimClient,
+        }.get(sc.demo_id)
+        if dynamic_client is not None:
+            client = dynamic_client()
         elif routes is not None:
             client = RoutingSimClient(routes=routes)
         else:
