@@ -160,3 +160,22 @@ async def test_attach_cancellation_does_not_request_another_envelope() -> None:
         assert read == [0]
     finally:
         release.set()
+
+
+async def test_narrow_tty_frames_use_bounded_display_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """中文宽字符也计入TTY列宽，避免自动折行破坏游标回退。"""
+    import os
+    import unicodedata
+
+    monkeypatch.setattr(os, 'get_terminal_size', lambda *args: os.terminal_size((60, 8)))
+    out = io.StringIO()
+    sink = TerminalTreeSink(out=out, interactive=True)
+    await sink.handle(event('turn_started', node='中文' * 20))
+    frame = out.getvalue()
+    widths = [sum(0 if unicodedata.combining(c) else
+                  2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in row)
+              for row in frame.splitlines()]
+    assert max(widths) < 60
+    assert len(widths) < 8
+    await sink.handle(event('turn_completed', 1, node='中文' * 20))
+    assert f'\x1b[{len(widths)}A' in out.getvalue()

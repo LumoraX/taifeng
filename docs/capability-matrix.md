@@ -145,6 +145,7 @@ As of this branch, every capability below has landed as ✅ or 🧪. Feature-gap
 | **EventMsg bus** | Critical runtime paths emit events; callers can subscribe per submission or globally | `engine.subscribe` / `subscribe_all` | [web_ui/](../examples/web_ui/) | [agent-loop.md](architecture/agent-loop.md) | [`composite_dispatch`](real-llm-ledger.md) |
 | **Audit observability (层1)** | 全局 `seq` + per-subscriber `delivery_seq`（`DeliveredEvent`）丢失自检、事件队列有界大容量（默认 65536，不 OOM）+ 高/低水位告警迟滞、`enable_request_capture` 下 `LlmRequestRecorded` 全文留痕（OtelSink 按 kind 跳过） | `enable_request_capture=` / `event_queue_size=` / `subscribe_all_envelopes` / `engine.session_id` | [audit_observability/](../examples/audit_observability/demo.py) | [audit-observability.md](architecture/capabilities/audit-observability.md) ✅ | — |
 | **Console / JSONL sinks** | Human-readable and machine-readable telemetry sinks are available out of the box | `attach_console_sink` / `attach_jsonl_sink` | [observability/](../examples/observability/) | [agent-loop.md](architecture/agent-loop.md) | [`composite_dispatch`](real-llm-ledger.md) |
+| **Execution tree（实验）** | 父子执行身份、阶段、工具、自身用量及实测/估算上下文；有界纯投影与可选终端树 | `taifeng.experimental.ExecutionProjection` / `attach_terminal_tree_sink` | [execution_tree/](../examples/execution_tree/demo.py) | [execution-observability.md](architecture/capabilities/execution-observability.md) 🧪 | `execution_observability`：真实模型全量回归待本次台账生成确认 |
 | **OpenTelemetry sink** | EventMsg to OTLP export, PII filtering, nested spans, and prebuilt counters | `OtelTelemetrySink` / `OtelSinkConfig` (`[telemetry-otel]` extra) | — | [telemetry-otel.md](architecture/capabilities/telemetry-otel.md) ✅ | — |
 | **Taifeng as MCP server** | Exposes skill turns as MCP tools for Claude Code / Cursor, negotiates the protocol version (echoes 2025-06-18 / 2025-03-26 / 2024-11-05, otherwise answers 2025-06-18) and supports bidirectional elicitation (accepts the final `decline` action); records client capabilities at initialize and sends `elicitation/create` only to clients that declared `elicitation` — otherwise the request is not sent, `McpPrompter` denies fail-closed at once (`elicitation_unsupported: …`) and the server emits `elicitation_unsupported` | `McpStdioServer` (`client_capabilities`) / CLI `mcp serve` | [mcp_basic/](../examples/mcp_basic/) · [mcp_showcase/](../examples/mcp_showcase/) · [capability gate tests](../tests/mcp/test_server_capabilities.py) | [mcp-server.md](architecture/capabilities/mcp-server.md) ✅ | — (protocol mechanism; HITL path run once against a real model through an equivalent codex-backed server, see ADR 0069 §验证) |
 | **Taifeng as MCP client** | Connects to external MCP servers over stdio or streamable HTTP and auto-registers their tools; negotiates protocol version 2025-06-18 (accepts 2025-03-26 / 2024-11-05, otherwise disconnects with `McpProtocolVersionError`; HTTP sends the negotiated `MCP-Protocol-Version`); follows `tools/list` pagination (`nextCursor`, page cap / repeated cursor → `McpPaginationError`, never truncated); projects `tools/call` results losslessly (`structuredContent` → `ToolResult.data["structured_content"]` plus JSON text when missing; images as explicit placeholders by default, or `ToolResult.attachments` through tool-image admission with `attach_images=True`; resource / audio / resource_link as explicit placeholders) and validates `structuredContent` against a declared `outputSchema` (`mcp_output_schema_violation`); sends `notifications/cancelled` when a request is abandoned (client / bridge timeout, turn cancellation, caller cancel); resumes broken streamable-HTTP SSE streams with `Last-Event-ID` (bounded, explicit failure otherwise) and reconnects the GET push stream; recovers expired HTTP sessions with one retry only for explicitly rejected requests (never replays a possibly executed tool call), serializes recovery, clears old cursors and reports changed tools; validates malformed responses as `McpToolError`, cleans up cancelled handshakes and logs only metadata; answers server→client requests (`ping`, `elicitation/create` via an injected `ElicitationHandler`, `-32601` otherwise; `notifications/cancelled` cancels the in-flight handler) | `McpStdioClient` / `McpHttpClient` (`elicitation_handler=`, `max_list_pages=`, `max_stream_resumptions=`, `stream_resume_delay_seconds=`) / `bind_mcp_tools(attach_images=)` | [mcp_showcase/](../examples/mcp_showcase/) · [elicitation](../tests/mcp/test_elicitation.py) · [pagination](../tests/mcp/test_pagination.py) · [cancellation](../tests/mcp/test_cancellation.py) · [resumption](../tests/mcp/test_http_resumption.py) · [hardening](../tests/mcp/test_client_hardening.py) · [session recovery](../tests/mcp/test_session_recovery.py) | [mcp-client.md](architecture/capabilities/mcp-client.md) ✅ | — (protocol mechanism, no LLM strategy). Interop-verified 2026-09-30 against the official MCP Python SDK 2.2.0 server over real stdio (spawned directly and through a `CommandExecutor`, ADR 0112) and real streamable HTTP ([examples/mcp_interop](../examples/mcp_interop/verify.py), 33/33): version negotiation down to 2025-06-18, `tools/list`, text and structured results, server-side argument rejection |
@@ -167,41 +168,37 @@ The mechanisms live in the kernel; policy values and external backends are injec
 
 Typical case: a multi-expert consultation skill spawns several experts in one turn. Each expert runs independently, can suspend for HITL at a different time, and is aggregated through a join barrier. Frontends need separate tracks for each expert's streamed output, tool calls, and HITL state.
 
-The kernel already emits everything required. The track key is **`EventMsg.submission_id`**.
+每条 runner 事件通过 **`EventMsg.execution.execution_id`** 标识逻辑执行，
+`parent_execution_id` 表示创建关系，`attempt_id` 区分新 turn / Resume。
+同步 `call_skill` 的父子共享 `submission_id`，因此显示调用树不能只按提交分组；
+detached 子执行仍以 child_thread_id 作为 submission_id，既有过滤订阅保持原语义。
+`spawn_started` 等协调事件的 execution 是发出方，data 中的 handle/child 才是目标。
 
-| Track | Event `submission_id` | Mapping Source |
-| --- | --- | --- |
-| Orchestration entry turn | The `sub_id` returned by the initial user submission | `engine.submit(UserMessage)` |
-| Each concurrent expert child | The expert's `child_thread_id` | `spawn_started.data = {handle_id, skill_id, child_thread_id}` |
-| Final consultation aggregation turn | The `then_thread_id` | `join_barrier_fired.data = {barrier_id, then_thread_id}` |
-
-Why this works:
-
-- `_build_child_runner` constructs each child runner with `submission_id=child_thread_id` ([`src/taifeng/loop/engine.py`](../src/taifeng/loop/engine.py)).
-- Every event is wrapped as `EventMsg(submission_id=self.submission_id, ...)` ([`src/taifeng/loop/turn.py`](../src/taifeng/loop/turn.py)).
-- Therefore `turn_started`, `assistant_text`, `tool_call_started`, `tool_call_completed`, and `skill_dispatched` events naturally belong to the correct concurrent track.
-- **Ordering is contractual**: `join_barrier_fired` is emitted *before* the aggregation turn starts, so it always precedes any event carrying `submission_id == then_thread_id`. A subscriber can therefore open the consultation track before its first token arrives; it never has to attribute aggregation output to an unknown track. See [detached-spawn.md](architecture/capabilities/detached-spawn.md) §顺序保证.
-
-Frontend projection sketch:
+最小终端接入（在已有 engine 的异步上下文中）：
 
 ```python
-tracks = {}
-async for ev in engine.subscribe_all():
-    m, sid = ev.msg, ev.submission_id
-    if m.kind == "spawn_started":
-        tracks[m.data["child_thread_id"]] = {"skill": m.data["skill_id"], "state": "running"}
-    elif m.kind == "spawn_suspended":
-        tracks[m.data["thread_id"]]["state"] = "hitl_waiting"
-    elif m.kind == "join_barrier_fired":
-        tracks[m.data["then_thread_id"]] = {"skill": "consultation", "state": "running"}
-    elif m.kind in ("assistant_text", "tool_call_started", "tool_call_completed"):
-        tracks.setdefault(sid, {"skill": "?", "state": "running"})
-        render_into_track(sid, m)
+import asyncio
+from contextlib import suppress
+from taifeng.experimental import attach_terminal_tree_sink
+
+viewer = attach_terminal_tree_sink(engine)  # 默认自动检测 TTY
+await asyncio.sleep(0)  # 先登记完整流订阅，再提交任务
+try:
+    await run_work(engine)  # 宿主提交并等待自己的根任务
+finally:
+    viewer.cancel()
+    with suppress(asyncio.CancelledError):
+        await viewer
 ```
+
+需要自定义界面时，`ExecutionProjection.handle(ev)` 消费 `subscribe_all_envelopes()`
+的完整流；显示 `snapshot()`，并检查全局 seq 和 delivery_seq 的缺口。
+用量按自身计数累计，不叠加 subtree_usage；上下文始终区分实测与估算。
+晚订阅、冷恢复、容量超限时允许视图不完整，不从模型文字推测任务进度。
 
 Spawn/join lifecycle events are `spawn_started`, `spawn_suspended`, `spawn_completed`, `spawn_failed`, `spawn_cancelled`, `join_barrier_registered`, and `join_barrier_fired`. See [multi_expert_consult/](../examples/multi_expert_consult/), [web_ui/](../examples/web_ui/), and [detached-spawn.md](architecture/capabilities/detached-spawn.md).
 
-Host SSE layers may rename `submission_id` to `track_id`; the kernel stays unaware of host UI semantics.
+Host SSE layers may expose execution identity for tracks; the kernel stays unaware of host UI semantics.
 
 ---
 

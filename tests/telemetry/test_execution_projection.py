@@ -186,3 +186,26 @@ def test_zero_usage_and_context_estimate_are_distinct() -> None:
     assert p.snapshot()[0].usage_complete
     assert p.snapshot()[0].total_tokens == 0
     assert not p.snapshot()[0].context_measured
+
+
+def test_detached_failure_overrides_provisional_turn_completion() -> None:
+    """子runner迭代耗尽后，协调器的明确失败必须显示为失败。"""
+    p = ExecutionProjection()
+    p.handle(event('spawn_started', handle_id='h', child_thread_id='child', skill_id='same'))
+    p.handle(event('turn_started', 1, node='child', parent='root'))
+    p.handle(event('turn_completed', 2, node='child', end_reason='max_iterations'))
+    p.handle(event('spawn_failed', 3, handle_id='h'))
+    assert p.snapshot()[0].state == 'failed'
+
+
+def test_suspended_attempt_ignores_late_progress_until_new_attempt() -> None:
+    """挂起后旧attempt的采样和工具事件不能复活节点。"""
+    p = ExecutionProjection()
+    p.handle(event('turn_started'))
+    p.handle(event('turn_suspended', 1))
+    p.handle(event('execution_updated', 2, phase='model'))
+    p.handle(event('tool_call_started', 3, call_id='late', name='read_skill'))
+    assert p.snapshot()[0].state == 'waiting_input'
+    assert p.snapshot()[0].active_tools == ()
+    p.handle(event('turn_started', 4, attempt='resumed'))
+    assert p.snapshot()[0].state == 'running'

@@ -8,6 +8,14 @@
 
 ## Requirements
 
+### Requirement: 执行身份元数据
+
+`EventMsg.execution` 可选附带执行身份，旧记录缺省 None。全局 seq、delivery_seq 与按
+submission 的订阅语义不变；同步子调用共享 submission，按执行归属分流应读取 execution。
+采样边界新增 `execution_updated`，只含阶段、用量与上下文计数，不含正文。
+该字段和事件属于可丢的观测事实，不改变 Journal 真相和持久恢复流程。
+详见[执行树观测](execution-observability.md)。
+
 ### Requirement: 事件全局序号 seq
 
 系统 SHALL 在每条 `EventMsg` 上提供单调递增的全局序号 `seq: int`（默认 `0`，旧序列化数据冷读兼容）。

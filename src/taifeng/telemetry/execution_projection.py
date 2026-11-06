@@ -172,6 +172,9 @@ class ExecutionProjection:
         self._usage(node, data)
         if node.view.state in _TERMINAL:
             return
+        if node.view.state == 'waiting_input' and kind != 'turn_failed':
+            if kind != 'execution_updated' or data.get('phase') not in ('failed', 'cancelled'):
+                return
         state = node.view.state
         if kind == 'execution_updated':
             phase = data.get('phase')
@@ -249,7 +252,8 @@ class ExecutionProjection:
             'spawn_failed': 'failed', 'spawn_cancelled': 'cancelled',
             'spawn_suspended': 'waiting_input'}
         state = states.get(kind)
-        if state is not None and node.view.state not in _TERMINAL:
+        authoritative_failure = state in ('failed', 'cancelled') and node.view.state == 'completed'
+        if state is not None and (node.view.state not in _TERMINAL or authoritative_failure):
             node.tools.clear()
             node.view = replace(node.view, state=state, active_tools=(),
                 updated_at=ev.timestamp, finished_at=ev.timestamp if state in _TERMINAL else None)

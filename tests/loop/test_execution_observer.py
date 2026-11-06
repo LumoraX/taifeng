@@ -181,3 +181,16 @@ def test_sampling_function_stays_within_named_limit() -> None:
     from taifeng.loop.turn_sample import TurnSample
 
     assert len(inspect.getsource(TurnSample.sample_once).splitlines()) <= 259
+
+
+def test_parent_registry_is_bounded_without_reparenting_unknown_threads() -> None:
+    """长期engine的观测登记有界，超限不伪造已有thread的关系。"""
+    from types import SimpleNamespace
+
+    observer = _observer()
+    engine = SimpleNamespace(_execution_parents={'root': None})
+    for i in range(2200):
+        observer.remember_execution_parent(engine, str(i), 'root')
+    assert len(engine._execution_parents) <= 2048
+    observer.remember_execution_parent(engine, '0', 'other')
+    assert engine._execution_parents['0'] == 'root'

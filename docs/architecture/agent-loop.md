@@ -28,6 +28,20 @@ runner 终态用 `usage_complete` 表达 provider 实际用量是否完整，配
 完整数据结构与约束见 [提交生命周期契约](capabilities/submission-lifecycle.md)，
 决策见 ADR 0117–0121。
 
+## 执行树观测
+
+`EventMsg.execution` 可选携带不可变执行身份：`execution_id=thread_id` 表示逻辑节点，
+`attempt_id` 区分新 turn / Resume。同步 `call_skill` 沿用提交标识，但工具、文本与采样
+事件都有各自 runner 身份；detached 协调事件的身份属于发出方，目标仍由 child/handle 定位。
+engine 创建子 thread 时在有界观测表记录父级；peer 唤醒不改变创建关系，冷恢复父级允许未知。
+
+采样边界的 `execution_updated` 提供自身累计用量、当前轮次及实测/估算上下文。
+这些元数据不进入 prompt 或 Journal。`ExecutionProjection` 消费单 engine 的全量事件，
+按 attempt 去重累计自身用量，不重复相加父 subtree。`TerminalTreeSink` 是可取消的独立订阅，
+慢终端写入在线程中执行，默认 TTY 重绘、非 TTY 追加。
+实验入口、完整数据与约束见[执行树契约](capabilities/execution-observability.md)；
+可运行示例见[execution_tree/demo.py](../../examples/execution_tree/demo.py)。
+
 ## MCP 传输的失败边界
 
 MCP 客户端共用 JSON 帧与响应验证。stdio 及本机执行器允许 16 MiB 单行，

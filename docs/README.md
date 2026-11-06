@@ -202,3 +202,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - [ADR 0130：输入来源完整性与稳定入口](decisions/0130-input-origin-completeness-and-stability.md)：累计来源、单次工具结果与子会话传播。
 
 - [ADR 0131：offload 存储一致性](decisions/0131-offload-workspace-consistency.md)：策略与文件工具共用 WorkspaceFS，本机入口保持兼容，成功写入后发布 stub。
+
+- [ADR 0132：执行树观测](decisions/0132-execution-observability.md)：执行身份与采样元数据；[能力契约](architecture/capabilities/execution-observability.md)和[终端演示](../examples/execution_tree/demo.py)。

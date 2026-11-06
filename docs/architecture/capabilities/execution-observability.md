@@ -18,7 +18,7 @@
 
 ### Requirement: 每个执行的事件有统一身份
 - WHEN root、同步 call_skill（含并行编排）、detached spawn 在 run 中发出事件，THEN SHALL 附带所属执行的身份；工具和文本不得仅按 submission_id 分组。
-- WHEN 同一 session 创建子 thread，THEN SHALL 在 engine 内记住其逻辑父级；已有 thread 的 peer 唤醒与 Resume SHALL 保持该父级，不将唤醒者当成创建者。ContextVar 只隔离运行作用域，finally 恢复；裸 runner 可继承同 session 的当前作用域。
+- WHEN 同一 session 创建子 thread，THEN SHALL 在 engine 内记住其逻辑父级；已有 thread 的 peer 唤醒与 Resume SHALL 保持该父级，不将唤醒者当成创建者。父级登记至多保留2048个thread，超限退化为未知；ContextVar 只隔离运行作用域，finally 恢复；裸 runner 可继承同 session 的当前作用域。
 - WHEN 跨 session 启动另一个 engine，THEN SHALL 不继承其他 session 的父级。
 - WHEN engine 在活跃执行作用域中发出协调事件（如 spawn_started），THEN execution 标识发出方，事件 data 仍标识目标 child/handle；投影 SHALL 区分发出方与目标。
 
@@ -34,7 +34,7 @@
 - WHEN tool_call_started/completed 到达，THEN SHALL 按 call_id 维护并发活动工具；call_skill、await_skills、wait_peer、wait_any 表示 waiting_children，其余为 tool。单个工具错误不直接宣告整个执行失败。
 - WHEN turn_suspended 到达，THEN SHALL 显示 waiting_input；恢复的新 attempt 进入运行态。取消请求本身不能显示已取消，只有真实退出事实才进入 cancelled。
 - WHEN spawn_started 到达，THEN SHALL 记录 handle_id→child_execution_id 映射；spawn_completed/failed/cancelled/suspended SHALL 更新该目标子节点，而非 execution 字段指向的发出方。即使子节点尚无 attempt 或已挂起，也必须能据 handle 收敛。
-- WHEN turn_completed/turn_failed 或作用域异常退出到达，THEN SHALL 收敛终态。终态后的同 attempt 遗留事件不得复活节点，新 attempt 可以重新运行。
+- WHEN turn_completed/turn_failed 或作用域异常退出到达，THEN SHALL 收敛终态。挂起和终态后的同 attempt 遗留进度事件不得复活节点；detached 协调器的明确失败/取消可以修正先前 runner 的 completed 结果，新 attempt 可以重新运行。
 
 ### Requirement: 用量不能重复累计或冒充进度
 - WHEN 单次采样完成或 turn 收尾，THEN SHALL 使用本 attempt 自身 usage 绝对值更新，重复快照不得重复记账；不得将父 subtree_usage 与子 usage 再相加。
@@ -45,6 +45,7 @@
 
 ## 终端与接口约束
 
+- TTY按输出设备显示列与高度裁剪（含中文宽字符），避免自动折行破坏重绘；窄终端省略右侧字段，非TTY保留完整快照。
 - 渲染 SHALL 使用有限行数，过滤所有控制字符（包括 ESC / C1）并限制字段宽度；非 TTY 不发重绘控制序列。
 - 活动树环或缺失父节点 SHALL 有界处理，不能递归挂死；仅显示已知事实。
 - sink 是独立订阅任务，TextIO.write/flush SHALL 在线程中执行，不能因慢输出阻塞共享事件循环；取消 attach task SHALL 放弃等待正在进行的写入，不再安排新写入（已开始的底层写入可能稍后结束），不向 engine 发控制动作。

@@ -122,6 +122,7 @@ from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeResolution,
 )
 from taifeng.loop.audit_suspension import AuditedResumeRejectedError
+from taifeng.loop.execution_identity import ExecutionIdentity
 from taifeng.loop.failure_policy import (
     RecipeDeclaringPolicy,
     RecoveryRecipeProvider,
@@ -179,6 +180,8 @@ from taifeng.skill.working_set_runtime import (
     WorkingSetChange,
     WorkingSetView,
 )
+from taifeng.telemetry.execution_projection import ExecutionProjection, ExecutionSnapshot
+from taifeng.telemetry.terminal_tree import TerminalTreeSink, attach_terminal_tree_sink
 from taifeng.tool.replay import (
     KERNEL_TOOLS,
     RecordedToolCall,
@@ -189,6 +192,12 @@ from taifeng.tool.replay import (
 from taifeng.tool.spec import ReconcileVerdict
 
 __all__ = [
+    # 执行树观测（execution-observability，🧪）
+    "ExecutionIdentity",
+    "ExecutionProjection",
+    "ExecutionSnapshot",
+    "TerminalTreeSink",
+    "attach_terminal_tree_sink",
     # strict audit Session + durable Journal（session-journal，🧪）
     "AuditCapabilityError",
     "AuditConfig",

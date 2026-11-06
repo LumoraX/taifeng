@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 import unicodedata
@@ -24,6 +25,17 @@ def _safe(value: str, width: int = 64) -> str:
     """过滤终端控制码与格式控制符，并限定扫描与显示长度。"""
     text = ''.join(c for c in value[: width * 4] if not unicodedata.category(c).startswith('C'))
     return text[:width] + ('…' if len(text) > width or len(value) > width * 4 else '')
+
+
+def _clip_columns(text: str, columns: int) -> str:
+    """按显示列裁剪，宽字符占两列、组合符零列并预留省略号。"""
+    used = 0
+    for index, char in enumerate(text):
+        width = 0 if unicodedata.combining(char) else (2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1)
+        if used + width > max(0, columns - 1):
+            return text[:index] + '…'
+        used += width
+    return text
 
 
 class TerminalTreeSink:
@@ -79,7 +91,25 @@ class TerminalTreeSink:
             stack.extend((child, depth + 1) for child in reversed(children.get(node.execution_id, [])))
         if len(visited) < len(snapshots):
             lines[-1] = f'… 显示截断，已观察节点共 {len(snapshots)}'
+        if self._interactive:
+            columns, rows = self._terminal_size()
+            limit = max(1, rows - 1)
+            if len(lines) > limit:
+                lines = lines[:limit]
+                lines[-1] = '… 终端高度限制，显示截断'
+            lines = [_clip_columns(line, max(1, columns - 1)) for line in lines]
         return '\n'.join(lines)
+
+    def _terminal_size(self) -> os.terminal_size:
+        """查询输出设备尺寸；无文件描述符时使用标准终端或保守回退。"""
+        try:
+            descriptor = self._out.fileno()
+        except (AttributeError, OSError, ValueError):
+            descriptor = 1
+        try:
+            return os.get_terminal_size(descriptor)
+        except OSError:
+            return os.terminal_size((80, 24))
 
     @staticmethod
     def _row(node: ExecutionSnapshot, depth: int) -> str:

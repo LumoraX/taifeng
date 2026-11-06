@@ -55,7 +55,7 @@ def execution_scope(
 def remember_execution_parent(engine: object, child: str, parent: str) -> None:
     """只在创建子 thread 时记住逻辑父级，唤醒与续跑不重写关系。"""
     parents = getattr(engine, '_execution_parents', None)
-    if isinstance(parents, dict) and child != parent:
+    if isinstance(parents, dict) and child != parent and (child in parents or len(parents) < 2048):
         parents.setdefault(child, parent)
 
 
