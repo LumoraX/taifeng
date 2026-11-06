@@ -153,8 +153,9 @@ def _post_turn_hook_runner() -> object:
 SCENARIOS: list[Scenario] = [
     Scenario("execution_observability", "real_llm/skills_extra/execution_tree", "observation-root",
              "", capability="同 skill 并行执行身份、上下文与自身用量取证",
-             expect={"execution_updated", "skill_dispatched", "tool_call_completed", "turn_completed"},
-             forbid={"turn_failed"}, driver="execution_observability", setup=setup_execution_tree),
+             expect={"execution_updated", "spawn_started", "spawn_completed", "tool_call_completed", "turn_completed"},
+             forbid={"turn_failed", "spawn_failed"}, tools=("spawn_skill", "join_skill"),
+             driver="execution_observability", setup=setup_execution_tree),
     Scenario("offload_workspace", "real_llm/skills_extra/offload_workspace", "record-inspector",
              "", capability="offload 与 file_read 共享非本机工作区，stub 后分页回读",
              expect={"compaction_completed", "llm_request_recorded", "turn_completed"},

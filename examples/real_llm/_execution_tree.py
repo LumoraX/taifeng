@@ -1,4 +1,4 @@
-"""执行树真实取证：模型自主双路派发，同 skill 的子执行保持独立身份与用量。"""
+"""执行树真实取证：模型自主分离双路派发，同 skill 的子执行保持独立身份与用量。"""
 
 from __future__ import annotations
 
@@ -57,18 +57,21 @@ def setup_execution_tree(root: Path, client: Any) -> ScenarioSetup:
 
 
 def _nodes(res: Any) -> dict[str, Any]:
-    """逐条验证身份稳定、父子谱系与同 submission，返回三个执行节点。"""
+    """逐条验证身份稳定、父子谱系与分离 submission，返回三个执行节点。"""
     root = res.state["root_thread_id"]
     nodes: dict[str, Any] = {}
     required = {"turn_started", "execution_updated", "assistant_text", "tool_call_started",
                 "tool_call_completed", "tool_batch_dispatched", "turn_completed",
-                "llm_request_recorded", "skill_dispatched"}
+                "llm_request_recorded", "spawn_started"}
     for envelope in res.envelopes:
         if envelope.msg.kind not in required:
             continue
         identity = envelope.execution
         assert identity is not None, "执行事实缺少 identity"
-        assert envelope.submission_id == res.state["submission_id"], "同步子执行串了 submission"
+        expected_submission = res.state["submission_id"] if identity.execution_id == root else identity.thread_id
+        if envelope.msg.kind == "spawn_started":
+            expected_submission = envelope.msg.data["handle_id"]
+        assert envelope.submission_id == expected_submission, "分离执行串了 submission"
         assert identity.execution_id == identity.thread_id, "节点与 thread 不一致"
         previous = nodes.setdefault(identity.execution_id, identity)
         assert previous == identity, "同一节点执行身份发生变化"
@@ -156,8 +159,8 @@ def _verify_requests(res: Any, nodes: dict[str, Any]) -> None:
     """观测身份字段及其值不得出现在任何实际模型请求中。"""
     requests = [ev.msg.data for ev in res.envelopes if ev.msg.kind == "llm_request_recorded"]
     assert len(requests) >= 6, "没有捕获父子实际请求"
+    # spawn工具的child_thread_id/handle是业务控制参数，本来就在工具结果中；只禁止新增观测字段与attempt。
     hidden = {"execution_id", "attempt_id", "parent_execution_id", "parent_thread_id",
-              *(node.execution_id for node in nodes.values()),
               *(node.attempt_id for node in nodes.values())}
     for request in requests:
         blob = json.dumps(request, ensure_ascii=False)
@@ -189,11 +192,11 @@ def verify_execution_evidence(res: Any) -> dict[str, Any]:
     root = res.state["root_thread_id"]
     own = [ev.msg for ev in res.envelopes if ev.execution is not None
            and ev.execution.execution_id == root]
-    assert any(msg.kind == "tool_batch_dispatched" and msg.data["count"] == 2
-               and msg.data["max_parallel"] >= 2 for msg in own), "根未自主双路并行派发"
-    dispatched = [msg for msg in own if msg.kind == "skill_dispatched"]
+    assert any(msg.kind == "tool_batch_dispatched" and msg.data["count"] >= 1
+               and msg.data["max_parallel"] >= 2 for msg in own), "根未启用并发工具调度"
+    dispatched = [msg for msg in own if msg.kind == "spawn_started"]
     assert len(dispatched) == 2 and all(msg.data["skill_id"] == WORKER_SKILL
-                                      for msg in dispatched), "不是同 skill 两次派发"
+                                      for msg in dispatched), "不是同 skill 两次分离派发"
     _verify_probes(res, nodes)
     totals = _verify_usage(res, nodes)
     _verify_requests(res, nodes)
@@ -201,7 +204,7 @@ def verify_execution_evidence(res: Any) -> dict[str, Any]:
     completed = [msg.data for msg in own if msg.kind == "turn_completed"]
     assert len(completed) == 1 and completed[0]["is_root"] is True, "根未真正完成"
     total = sum(totals.values())
-    assert _token_count(completed[0]["subtree_usage"]) == total > totals[root], "根自身用量与子树混淆"
+    assert _token_count(completed[0]["subtree_usage"]) == totals[root] < total, "分离子执行不应重复计入根同步子树"
     root_text = "".join(msg.data["delta"] for msg in own if msg.kind == "assistant_text")
     assert all(f"OBSERVED[{label}]" in root_text for label in ("left", "right")), "根未汇总两个结果"
     return {"root": root, "children": sorted(nodes.keys() - {root}),
@@ -212,10 +215,10 @@ async def drive_execution_tree(engine: Any, res: Any) -> None:
     """先确认两个探针同时在飞，再释放；以根完整 submission 收尾作为取证边界。"""
     res.state["root_thread_id"] = engine.thread_id
     submission = await engine.submit(UserMessage(text=(
-        "请在第一条响应中同时调用两次 call_skill，skill_id 都为 observation-worker，"
-        "args 分别是 {\"label\":\"left\"} 与 {\"label\":\"right\"}。"
-        "必须在同一次响应里派发两次，不能等待第一个结束后再发第二个。"
-        "收到后原样汇总两项 OBSERVED[...]。")))
+        "用 spawn_skill 启动两个后台 observation-worker，args 分别为 label=left 和 label=right。"
+        "可以分两次响应启动，但不要在两个任务都启动之前等待第一个完成。"
+        "两个句柄都返回后，用 join_skill 反复查询，直到两项都是done；"
+        "再原样汇总两项 OBSERVED[...]，不能只报告已启动。")))
     res.state["submission_id"] = submission
     try:
         await _wait_for(res, lambda msg: len(res.state["probes"]) >= 2
@@ -261,14 +264,25 @@ class ExecutionTreeSimClient(SimClient):
             return SimTurn(tool_calls=[{"id": f"probe-{label}", "name": PROBE_TOOL,
                                         "arguments": json.dumps({"label": label})}])
         assert ROOT_MARK in system, "请求未归属执行树的已知 skill"
-        if outputs:
-            markers = re.findall(r"OBSERVED\[(?:left|right)\]", "\n".join(outputs))
+        decoded = [json.loads(output) for output in outputs]
+        spawns = [output for output in decoded if isinstance(output, dict) and "handle_id" in output]
+        if len(spawns) < 2:
+            label = ("left", "right")[len(spawns)]
+            return SimTurn(tool_calls=[{
+                "id": f"dispatch-{label}", "name": "spawn_skill", "arguments": json.dumps({
+                    "skill_id": WORKER_SKILL, "args": {"label": label}, "reason": "独立取证"}),
+            }])
+        latest = decoded[-1]
+        if "handle_id" not in latest and all(status.get("status") == "done" for status in latest.values()):
+            markers = re.findall(r"OBSERVED\[(?:left|right)\]", json.dumps(latest))
             assert set(markers) == {"OBSERVED[left]", "OBSERVED[right]"}, "根模型未见到两个结果"
             return SimTurn(text="；".join(markers))
-        return SimTurn(tool_calls=[{
-            "id": f"dispatch-{label}", "name": "call_skill", "arguments": json.dumps({
-                "skill_id": WORKER_SKILL, "args": {"label": label}, "reason": "独立取证"}),
-        } for label in ("left", "right")])
+        return SimTurn(delay_seconds=0.04, tool_calls=[{
+            "id": f"join-{len(outputs)}", "name": "join_skill", "arguments": json.dumps({
+                "handle_ids": [spawn["handle_id"] for spawn in spawns],
+            }),
+        }])
+
 
 
 DRIVER = {"execution_observability": drive_execution_tree}

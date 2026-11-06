@@ -27,3 +27,5 @@
 ## Migration Plan
 
 原订阅者继续读取原字段；新宿主用experimental.attach_terminal_tree_sink(engine)，也可直接维护ExecutionProjection。回滚删除新增sink接线即可，不涉及数据迁移。
+
+真实取证使用模型自主spawn两个同Skill后台执行，再join查询结果，保留handler重叠与逐节点计量的强断言。首轮同步双call_skill要求被真实模型串行执行，取证正确拒绝；此记录保留在本地验证日志。同步共享submission并行路径继续由实际内核+Sim覆盖，避免把模型是否发出单响应多工具与观测机制正确性混为一项。
