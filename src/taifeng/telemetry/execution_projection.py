@@ -65,6 +65,14 @@ def _count(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _blocks_progress(node: _Node, kind: str, data: dict[str, Any]) -> bool:
+    """已结束或挂起的attempt仅接收明确的失败/取消收敛，不能被进度复活。"""
+    return node.view.state in _TERMINAL or (
+        node.view.state == 'waiting_input' and kind != 'turn_failed'
+        and not (kind == 'execution_updated' and data.get('phase') in ('failed', 'cancelled'))
+    )
+
+
 class ExecutionProjection:
     """消费单 engine 全量事件，内存受节点、句柄与活动工具上限约束。"""
 
@@ -170,11 +178,8 @@ class ExecutionProjection:
         """按生命周期与工具事实更新阶段，工具失败本身不结束执行。"""
         data, kind = ev.msg.data, ev.msg.kind
         self._usage(node, data)
-        if node.view.state in _TERMINAL:
+        if _blocks_progress(node, kind, data):
             return
-        if node.view.state == 'waiting_input' and kind != 'turn_failed':
-            if kind != 'execution_updated' or data.get('phase') not in ('failed', 'cancelled'):
-                return
         state = node.view.state
         if kind == 'execution_updated':
             phase = data.get('phase')

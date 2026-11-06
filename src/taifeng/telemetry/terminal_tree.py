@@ -91,6 +91,10 @@ class TerminalTreeSink:
             stack.extend((child, depth + 1) for child in reversed(children.get(node.execution_id, [])))
         if len(visited) < len(snapshots):
             lines[-1] = f'… 显示截断，已观察节点共 {len(snapshots)}'
+        return self._fit_frame(lines)
+
+    def _fit_frame(self, lines: list[str]) -> str:
+        """交互输出按物理终端尺寸裁剪，非交互输出保留完整字段。"""
         if self._interactive:
             columns, rows = self._terminal_size()
             limit = max(1, rows - 1)
