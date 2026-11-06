@@ -223,16 +223,16 @@ async def drive_execution_tree(engine: Any, res: Any) -> None:
     try:
         await _wait_for(res, lambda msg: len(res.state["probes"]) >= 2
                         or msg.kind == "turn_failed"
-                        or (msg.kind == "turn_completed" and msg.data.get("is_root")),
+                        or (msg.kind == "turn_completed" and msg.data.get("thread_id") == engine.thread_id),
                         wait_seconds=120.0, what="两个实际探针同时进入")
         assert len(res.state["probes"]) == 2, "模型未自主派发两条探针"
         assert all(p["exited"] is None for p in res.state["probes"]), "释放前探针已退出"
     finally:
         res.state["release"].set()
-    # 同步子调用共享 submission；过滤订阅可能在首个子终态结束，必须盯全量流的根终态。
+    # detached 子runner也可标is_root；只按根thread定位，不能按is_root或提交订阅提前收尾。
     terminal = await _wait_for(
         res, lambda msg: msg.kind == "turn_failed" or (
-            msg.kind == "turn_completed" and msg.data.get("is_root")),
+            msg.kind == "turn_completed" and msg.data.get("thread_id") == engine.thread_id),
         wait_seconds=240.0, what="采集根完整终态",
     )
     assert terminal.kind == "turn_completed", "执行树未正常完成"
