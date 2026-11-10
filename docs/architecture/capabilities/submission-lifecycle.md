@@ -11,7 +11,8 @@ legacy UserMessage 在 `submit()` 返回之前进入 pending 登记，排队也�
 ## 挂起交接
 
 runner 发出 `turn_suspended` 后，pending 所有权保持到 history 回写完成。
-窗口内的 CancelTurn 由该所有者在回写后处理，避免旧 buffer 覆盖核销 marker。
+窗口内的默认 CancelTurn 由该所有者在回写后处理，避免旧 buffer 覆盖核销 marker。
+`preserve_suspension=True` 仍取消在途执行，但不登记回写后的挂起丢弃。
 回写期间排入的残余输入再次持久化；回写后关闭输入队列，新输入直接进入共享历史。
 取消登记保持到这一收尾过程完成，随后释放，不丢用户或系统注入。
 legacy 挂起取消成功发出 `suspension_cancelled`，归属于 CancelTurn 提交，包含
@@ -21,13 +22,15 @@ legacy 挂起取消成功发出 `suspension_cancelled`，归属于 CancelTurn �
 
 `suspension_partially_resolved` 与 `suspension_resolve_rejected` 是本次 Resume 的终态。
 根 Resume 或直接 spawn Resume 中止时，`suspension_resolved.resumed=false` 为终态；
+根 Resume 同时保留已发布的 `aborted=True` 字段（非中止时不出现）。
 续跑时为 true，等待后续 turn 事件。嵌套子链的核销仍是中间事件，不提前结束父链。
 终态供在线订阅自动结束与晚到订阅重放共同使用，不虚构 turn。
 
 ## 核销幂等
 
-先验证 resolutions 为当前活跃 record 的非空已知请求集合，再过滤已核销请求。
-混合新旧请求只执行未核销部分；全部已核销拒绝为 `already_resolved`。
+先验证 resolutions 为当前活跃 record 的非空已知请求集合。人工请求含任一已核销项时，
+整次拒绝 `request_already_resolved`，混合新旧项也不执行工具。纯到期哨兵只处理未核销项；
+全部已核销则以 `already_resolved` 收尾当前提交。该集成决策见 ADR 0133。
 空集合与未知 ID 仍拒绝。已完整结束的 record 不扫描历史来改变 `no_active_suspension`。
 
 ## 实际用量与完整性

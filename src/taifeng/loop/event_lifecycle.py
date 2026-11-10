@@ -39,6 +39,7 @@ class SuspensionResolved(_Msg):
 
     data = {"record_id": str, "request_ids": list[str], "resumed": bool (根/直接 spawn)}
     resumed=false 表示中止的提交终态；嵌套子链核销仍为中间事件。
+    根中止同时带 aborted=True，兼容已发布结论；非中止不出现该字段。
     """
 
     kind: Literal["suspension_resolved"] = "suspension_resolved"

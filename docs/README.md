@@ -204,3 +204,6 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - [ADR 0131：offload 存储一致性](decisions/0131-offload-workspace-consistency.md)：策略与文件工具共用 WorkspaceFS，本机入口保持兼容，成功写入后发布 stub。
 
 - [ADR 0132：执行树观测](decisions/0132-execution-observability.md)：执行身份与采样元数据；[能力契约](architecture/capabilities/execution-observability.md)和[终端演示](../examples/execution_tree/demo.py)。
+
+- [ADR 0133：发行线恢复契约的合流](decisions/0133-release-resume-contract-reconciliation.md)：保留已发布的核销拒绝与停止生成边界，兼容本地提交终态。
+- [远端 ADR 0117：部分核销防重与保留挂起的停止生成](decisions/0117-resume-settlement-and-generation-stop.md)：历史并行编号，集成关系见 ADR 0133。

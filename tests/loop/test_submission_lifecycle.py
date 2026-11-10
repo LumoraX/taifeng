@@ -64,14 +64,14 @@ async def test_back_to_back_cancel_never_starts_turn(
         await pool.close()
 
 
-async def test_resolutions_skip_settled_requests(
+async def test_resolutions_reject_settled_requests(
     skills_dir: Path, threads_dir: Path,
 ) -> None:
-    """只在当前 record 内跳过已核销请求，未知请求仍整体拒绝。"""
+    """当前 record 内已核销请求整体拒绝，未知请求仍优先校验。"""
     from taifeng.conversation.models import function_call_output
     from taifeng.suspend.reason import PendingRequest, SuspendReason
     from taifeng.suspend.record import SuspensionRecord
-    from taifeng.suspend.resolver import ResolveError
+    from taifeng.suspend.resolver import EXPIRE_SENTINEL, ResolveError
 
     pool = await _pool(skills_dir, threads_dir, SimClient(turns=[]))
     try:
@@ -84,23 +84,30 @@ async def test_resolutions_skip_settled_requests(
             ),
         )
         items = [record.to_item(), function_call_output("a", "done", thread_id=engine.thread_id)]
-        assert engine._effective_resolutions(record, items, {"a": "changed", "b": "new"}) == {
-            "b": "new",
-        }
-        with pytest.raises(ResolveError, match="already_resolved"):
+        with pytest.raises(ResolveError, match="request_already_resolved"):
+            engine._effective_resolutions(record, items, {"a": "changed", "b": "new"})
+        assert engine._effective_resolutions(record, items, {"b": "new"}) == {"b": "new"}
+        with pytest.raises(ResolveError, match="request_already_resolved"):
             engine._effective_resolutions(record, items, {"a": "repeat"})
         with pytest.raises(ResolveError, match="unknown_request_ids"):
             engine._effective_resolutions(record, items, {"a": "repeat", "other": "unknown"})
         with pytest.raises(ResolveError, match="empty_resolutions"):
             engine._effective_resolutions(record, items, {})
+        expired = {EXPIRE_SENTINEL: True}
+        assert engine._effective_resolutions(record, items, {"a": expired, "b": expired}) == {
+            "b": expired,
+        }
+        with pytest.raises(ResolveError, match="^already_resolved$"):
+            engine._effective_resolutions(record, items, {"a": expired})
     finally:
         await pool.close()
 
 
+@pytest.mark.parametrize("preserve", [False, True])
 async def test_cancel_after_suspension_event_survives_writeback(
-    skills_dir: Path, threads_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    skills_dir: Path, threads_dir: Path, monkeypatch: pytest.MonkeyPatch, preserve: bool,
 ) -> None:
-    """挂起事件发出后、runner 回写前取消，不能被迟到的 history 回写覆盖。"""
+    """挂起回写窗口同时尊重默认丢弃与显式保留挂起。"""
     from taifeng.tool.builtins.request_user_input import make_request_user_input_tool
     from tests.loop.test_turn_terminal_usage import _write_entry_skill
 
@@ -129,14 +136,20 @@ async def test_cancel_after_suspension_event_survives_writeback(
         target = await engine.submit(taifeng.UserMessage(text="ask"))
         await asyncio.wait_for(entered.wait(), GUARD_TIMEOUT_SECONDS)
         suspended = await recorder.wait_kind(target, "turn_suspended")
-        cancel_id = await engine.submit(CancelTurn(submission_id=target))
+        cancel_id = await engine.submit(CancelTurn(
+            submission_id=target, preserve_suspension=preserve,
+        ))
         await recorder.wait_kind(cancel_id, "engine_log")
         release.set()
         await wait_for_condition(lambda: target not in engine._pending)
-        assert engine._find_active_suspension() is None
-        cancelled = await recorder.wait_kind(cancel_id, "suspension_cancelled")
-        assert cancelled.msg.data["record_id"] == suspended.msg.data["record_id"]
-        assert cancelled.msg.data["target_submission_id"] == target
+        if preserve:
+            assert engine._find_active_suspension() is not None
+            assert not any(e.msg.kind == "suspension_cancelled" for e in recorder.events)
+        else:
+            assert engine._find_active_suspension() is None
+            cancelled = await recorder.wait_kind(cancel_id, "suspension_cancelled")
+            assert cancelled.msg.data["record_id"] == suspended.msg.data["record_id"]
+            assert cancelled.msg.data["target_submission_id"] == target
         cold = [item async for item in await pool.store.load_thread(engine.thread_id)]
         assert [item.id for item in engine.history_snapshot()] == [item.id for item in cold]
     finally:

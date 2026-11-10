@@ -191,12 +191,18 @@ class SuspensionAccess:
         self, record: SuspensionRecord, items: list[ResponseItem],
         resolutions: dict[str, Any],
     ) -> dict[str, Any]:
-        """校验当前 record 的请求集合，再跳过已经核销的请求。"""
-        from taifeng.suspend.resolver import ResolveError, SuspensionResolver
+        """校验完整请求集合；人工重复整次拒绝，纯到期哨兵只核销未决项。"""
+        from taifeng.suspend.resolver import EXPIRE_SENTINEL, ResolveError, SuspensionResolver
 
         SuspensionResolver().validate(record, resolutions)
         unsettled = {p.request_id for p in self._engine._unsettled_pendings(record, items)}
-        effective = {rid: v for rid, v in resolutions.items() if rid in unsettled}
+        expiry_only = all(
+            isinstance(value, dict) and value.get(EXPIRE_SENTINEL) is True
+            for value in resolutions.values()
+        )
+        if not expiry_only and (record.request_ids() - unsettled).intersection(resolutions):
+            raise ResolveError("request_already_resolved")
+        effective = {rid: value for rid, value in resolutions.items() if rid in unsettled}
         if not effective:
             raise ResolveError("already_resolved")
         return effective

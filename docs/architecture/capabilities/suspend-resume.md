@@ -301,9 +301,17 @@ Resume(thread_id, resolutions)
 ## 提交收尾与核销幂等（ADR 0117–0121）
 
 Resume 的部分核销、拒绝与根中止是提交终态；订阅自动结束，晚到订阅重放同一领域事件。
-当前活跃 record 中已核销的 request_id 被跳过，混合请求仅执行未核销部分；全部已
-核销拒绝 `already_resolved`。先验证完整 ID 集合，空集合或未知请求仍拒绝。
+人工 Resume 含已核销的 request_id 时整次拒绝 `request_already_resolved`，混合请求
+也不执行工具。先验证完整 ID 集合，空集合或未知请求仍拒绝（ADR 0133）。
 已结束 record 保留 `no_active_suspension`，不扫描历史改变拒绝原因。
 runner 的 turn 终态增加 `usage_complete`；无 provider usage 的采样或重试 attempt
 使其为 false，不改变已有实际 `usage` 和配额含义。完整交接约束见
 [提交生命周期](submission-lifecycle.md)。
+
+## 已发布恢复边界的集成（ADR 0133）
+
+`CancelTurn(preserve_suspension=True)` 取消在途操作，保留已经挂起的待办；
+这一约束也覆盖挂起事件发出至 runner 回写结束的窗口。默认 False 仍明确丢弃挂起。
+根系统挂起中止的 `suspension_resolved` 同时带 `resumed=False` 与 `aborted=True`，
+不启动模型；非中止事件不出现 aborted。已有工具输出用于判定已核销，外部动作后、
+输出落盘前的中断仍属于结果未知，不提供严格一次外部执行承诺。

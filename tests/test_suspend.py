@@ -1312,6 +1312,63 @@ async def test_cancel_clears_suspension_then_resume_rejected(skills_dir, threads
     assert not fco_d1, "被 cancel 丢弃的挂起不得回填 function_call_output"
 
 
+async def test_stop_preserves_suspension_for_resume(skills_dir, threads_dir):
+    """显式停止生成保留已挂起审批，随后 Resume 正常执行一次工具。"""
+    import taifeng
+    from taifeng.loop.submission import CancelTurn
+    from taifeng.permission.types import PermissionPolicy, SuspendingPrompter
+
+    gated_tool = await _gated_tool_with_call_id_factory()
+    policy = PermissionPolicy(default_mode="ask", prompter=SuspendingPrompter())
+    pool, engine = await _suspend_pool_and_engine(
+        skills_dir, threads_dir, session_id="cancel-suspend",
+        client=_suspend_client(), gated_tool=gated_tool, policy=policy,
+    )
+
+    # 1. 触发挂起，捕获挂起 turn 的 submission id 与持久化 record 的 request_id
+    sub_id = await engine.submit(taifeng.UserMessage(text="go"))
+    events1 = await _drain_until_terminal(engine, sub_id)
+    # 挂起阶段以独立终结态 turn_suspended 收尾（R3）
+    assert events1[-1].msg.kind == "turn_suspended"
+
+    items = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    rec = SuspensionRecord.from_item(
+        next(it for it in items if it.kind == "suspension")
+    )
+    req_id = rec.pending[0].request_id
+    # 挂起 record 的 submission_id 应等于触发挂起的 UserMessage 的 sub_id
+    assert rec.submission_id == sub_id
+
+    # 目标已挂起时停止生成不能落 resolved-marker。
+    cancel_sub = await engine.submit(CancelTurn(submission_id=sub_id, preserve_suspension=True))
+    # CancelTurn 无终态事件流，仅 emit EngineLog；以排空一次确保已被主循环处理
+    async for ev in engine.subscribe(cancel_sub):
+        if ev.msg.kind == "engine_log":
+            break
+
+    # 原审批仍可正常批准。
+    resume_sub = await engine.submit(taifeng.Resume(
+        thread_id=engine.thread_id, resolutions={req_id: {"granted": True}},
+    ))
+    events2 = []
+    async for ev in engine.subscribe(resume_sub):
+        events2.append(ev)
+        if ev.msg.kind in (
+            "suspension_resolve_rejected", "turn_completed", "turn_failed",
+        ):
+            break
+
+    items2 = [it async for it in await pool.store.load_thread(engine.thread_id)]
+    await pool.close()
+
+    kinds2 = [ev.msg.kind for ev in events2]
+    assert "suspension_resolve_rejected" not in kinds2
+    assert "suspension_resolved" in kinds2
+    fco_d1 = [it for it in items2 if it.kind == "function_call_output"
+              and it.payload.get("call_id") == "call_d1"]
+    assert len(fco_d1) == 1
+
+
 async def test_tier2_rebuild_resume(skills_dir, threads_dir):
     """R5（头条）：进程退出 + 重建后跨实例 resume。
 

@@ -529,7 +529,7 @@ async def _drive_resume(
     )
     await engine._emit(EventMsg(submission_id=sub.id, msg=SuspensionResolved(  # noqa: SLF001
         data={"record_id": record.record_id, "request_ids": sorted(record.request_ids()),
-                  "resumed": not plan.abort})))
+                  "resumed": not plan.abort, **({"aborted": True} if plan.abort else {})})))
     if plan.abort:
         return
     seeds = tuple(plan.execute_tool_call_ids)

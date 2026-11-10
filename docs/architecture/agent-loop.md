@@ -23,7 +23,8 @@
 UserMessage 准入即登记取消可达点，尚未派发的准入记录不会接收运行中输入注入。
 挂起事件发布后的 pending 所有权延续到 history 回写结束；窗口内取消在回写后
 核销记录，并发出 `suspension_cancelled`。Resume 的拒绝、部分核销与中止使用
-领域事件收尾提交订阅。当前 record 的重复请求被跳过，全部核销则明确拒绝。
+领域事件收尾提交订阅。人工 Resume 含当前 record 的已核销项时整次明确拒绝；
+保留挂起的取消也覆盖回写交接窗口，根中止同时保留 resumed 与 aborted 结论（ADR 0133）。
 runner 终态用 `usage_complete` 表达 provider 实际用量是否完整，配额继续使用实际值。
 完整数据结构与约束见 [提交生命周期契约](capabilities/submission-lifecycle.md)，
 决策见 ADR 0117–0121。
@@ -82,6 +83,7 @@ class UserMessage:
 @dataclass(frozen=True)
 class CancelTurn:
     kind: Literal["cancel_turn"] = "cancel_turn"
+    preserve_suspension: bool = False  # True：只停止在途执行，保留挂起待办
     submission_id: str
 
 @dataclass(frozen=True)
