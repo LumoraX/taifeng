@@ -58,6 +58,23 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/taifeng"]
 
+[tool.hatch.build]
+# 执行观测的实现属于运行时内核，随 wheel 发布；取证脚本、测试、OpenSpec
+# 和专属架构材料只服务于源码仓库，不进入 PyPI sdist。
+exclude = [
+    "/docs/architecture/capabilities/execution-observability.md",
+    "/docs/decisions/0132-execution-observability.md",
+    "/examples/execution_tree/",
+    "/examples/real_llm/_execution_tree.py",
+    "/examples/real_llm/skills_extra/execution_tree/",
+    "/tests/examples/test_execution_tree_verification.py",
+    "/tests/loop/test_execution_observation_identity.py",
+    "/tests/loop/test_execution_observer.py",
+    "/tests/telemetry/test_execution_projection.py",
+    "/tests/telemetry/test_terminal_tree.py",
+    "/openspec/changes/execution-observability/",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
