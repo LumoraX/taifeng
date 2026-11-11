@@ -84,6 +84,7 @@ Aligned with [conversation.md](../conversation.md).
 | [jsonl-transcript](jsonl-transcript.md) | `MessageWriter`, metadata line, POSIX atomic append, corrupt-line tolerance, `resume_thread_id`, `initial_history`, and `thread_resumed` events |
 | [thread-directory](thread-directory.md) | `ThreadMetadata`, `ThreadFilter`, `ThreadPage`, SQLite self-healing, `NullThreadDirectory`, and directory error classes |
 | [index-hook](index-hook.md) | `IndexHook`, fire-and-forget timing, exception isolation, shutdown grace period, and index hook failure/abandon events |
+| [ephemeral-message-store](ephemeral-message-store.md) | Explicit process-lifetime Responses store: in-memory atomic batches, idempotent retry/conflict handling, and close-time erasure |
 
 ### LLM Client
 

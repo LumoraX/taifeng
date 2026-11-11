@@ -36,6 +36,9 @@ from taifeng.conversation.store import (
     AtomicBatchMessageStore,
     BatchAppendAck,
     BatchConflictError,
+    EphemeralAtomicBatchMessageStore,
+    EphemeralMessageStore,
+    EphemeralStoreClosedError,
     MessageStore,
 )
 from taifeng.conversation.transcript import (
@@ -64,6 +67,9 @@ __all__ = [
     "AtomicBatchMessageStore",
     "BatchAppendAck",
     "BatchConflictError",
+    "EphemeralAtomicBatchMessageStore",
+    "EphemeralMessageStore",
+    "EphemeralStoreClosedError",
     "ThreadMetadata",
     "ThreadNotFoundError",
     "ThreadPage",

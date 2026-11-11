@@ -215,6 +215,14 @@ transcript、不建 SQLite 索引（`thread_directory` 不给时是 `NullThreadD
   要么都不可见，同一 `batch_id` 重试幂等。没有实现时构造即拒绝；
 - 审计模式（`AuditConfig`）只支持默认 store：对话投影写的是 JSONL。
 
+### 显式短命 Responses 存储
+
+`EphemeralMessageStore` 是独立的进程内实现，适用于明确不可恢复的短命 Responses 执行。
+它同时满足 `MessageStore` 与 `AtomicBatchMessageStore`，在当前实例内提供整批可见、幂等重试和
+冲突拒绝；`close()` 清空全部状态，崩溃、重启和关闭后均不承诺恢复或审计。默认仍使用
+`JsonlMessageStore`，审计模式不接受短命实现；宿主必须显式选择该类并把执行限制在允许的
+无外部副作用范围。
+
 ## reconstruct_logical_history（冷加载逻辑 history 重建）
 
 图片 user item 把完整 `ImageAttachmentV1` 作为 canonical JSON 保存（MIME、decoded size、SHA-256、裸 base64、detail）；文件 user item 同样保存完整 `FileAttachmentV1`（MIME、decoded size、SHA-256、裸 base64、可选 filename），两者同在 `payload.attachments`、以 `kind` 区分并保持提交顺序。都不保存 provider Data URL。冷加载后 prompt 层按当前策略与 client 能力重新执行 admission，因此磁盘内容被篡改、策略收紧或换到不支持该模态的 client 时都会在网络前 fail closed。

@@ -36,6 +36,9 @@ ElicitationHandler
 ElicitationRequest
 ElicitationResult
 EnginePool
+EphemeralAtomicBatchMessageStore
+EphemeralMessageStore
+EphemeralStoreClosedError
 EventMsg
 FailureContext
 FailureDisposition

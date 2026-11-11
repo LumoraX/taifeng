@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-__version__ = "2026.11.8.0"
+__version__ = "2026.11.9.0"
 
 # 公共 API ——————————————————————————————————————
 
@@ -44,6 +44,9 @@ from taifeng.conversation import (
     BatchAppendAck,
     BatchConflictError,
     DirectoryError,
+    EphemeralAtomicBatchMessageStore,
+    EphemeralMessageStore,
+    EphemeralStoreClosedError,
     IndexHook,
     JsonlMessageStore,
     JsonlMessageWriter,
@@ -450,6 +453,9 @@ __all__ = [
     "AtomicBatchMessageStore",
     "BatchAppendAck",
     "BatchConflictError",
+    "EphemeralAtomicBatchMessageStore",
+    "EphemeralMessageStore",
+    "EphemeralStoreClosedError",
     "CancelTurn",
     "CompressionTrigger",
     "ConsoleSink",
