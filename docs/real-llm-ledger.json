@@ -1,7 +1,7 @@
 {
   "run": {
     "timestamp_utc": "2026-11-11 07:11:55 UTC",
-    "commit": "b94a50e",
+    "commit": "600aaaf",
     "provider": "codex",
     "model": "gpt-5.6-luna",
     "scenarios_run": [
@@ -41,7 +41,8 @@
       "codex_encrypted_state_hot_replay",
       "codex_legacy_jsonl_cold_resume",
       "codex_file_input"
-    ]
+    ],
+    "retry_note": "travel_planner rerun PASS; execution_observability remains FAIL own usage incomplete; provider image tool scenarios remained unavailable in selective mode and initial run recorded server_overloaded."
   },
   "scenarios": {
     "budget_awareness": {
@@ -418,7 +419,7 @@
       "scenario_id": "execution_observability",
       "capability": "同 skill 并行执行身份、上下文与自身用量取证",
       "verdict": "FAIL",
-      "note": "turn_failed: AssertionError: 自身用量不完整",
+      "note": "Targeted retry still reports own usage incomplete; retained FAIL.",
       "expect": [
         "execution_updated",
         "spawn_completed",
@@ -959,8 +960,8 @@
     "travel_planner": {
       "scenario_id": "travel_planner",
       "capability": "三路 fan-out（航班/酒店/活动）+ 综合",
-      "verdict": "FAIL",
-      "note": "未 turn_completed",
+      "verdict": "PASS",
+      "note": "Targeted real Codex retry after initial no-turn-completed; passed on retry.",
       "expect": [
         "skill_dispatched",
         "turn_completed"
