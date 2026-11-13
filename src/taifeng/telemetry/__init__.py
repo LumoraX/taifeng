@@ -15,6 +15,9 @@ from taifeng.telemetry.console import ConsoleSink, attach_console_sink
 from taifeng.telemetry.jsonl_sink import JsonlSink, attach_jsonl_sink
 from taifeng.telemetry.sink import TelemetrySink
 from taifeng.telemetry.trace_history import (
+    TraceWaterfallRow,
+    execution_tree_mermaid,
+    execution_waterfall,
     load_event_jsonl,
     mermaid_timeline,
     timeline_events,
@@ -33,11 +36,14 @@ __all__ = [
     "TraceEvent",
     "TraceProjection",
     "TraceSnapshot",
+    "TraceWaterfallRow",
     "attach_console_sink",
     "attach_jsonl_sink",
     "load_event_jsonl",
     "mermaid_timeline",
     "timeline_events",
+    "execution_tree_mermaid",
+    "execution_waterfall",
 ]
 
 

@@ -190,7 +190,14 @@ from taifeng.telemetry.execution_projection import (
     OrchestrationPlanSnapshot,
 )
 from taifeng.telemetry.terminal_tree import TerminalTreeSink, attach_terminal_tree_sink
-from taifeng.telemetry.trace_history import load_event_jsonl, mermaid_timeline, timeline_events
+from taifeng.telemetry.trace_history import (
+    TraceWaterfallRow,
+    execution_tree_mermaid,
+    execution_waterfall,
+    load_event_jsonl,
+    mermaid_timeline,
+    timeline_events,
+)
 from taifeng.telemetry.trace_projection import TraceEvent, TraceProjection, TraceSnapshot
 from taifeng.tool.replay import (
     KERNEL_TOOLS,
@@ -214,9 +221,12 @@ __all__ = [
     "TraceEvent",
     "TraceProjection",
     "TraceSnapshot",
+    "TraceWaterfallRow",
     "load_event_jsonl",
     "mermaid_timeline",
     "timeline_events",
+    "execution_tree_mermaid",
+    "execution_waterfall",
     "TerminalTreeSink",
     "attach_terminal_tree_sink",
     # strict audit Session + durable Journal（session-journal，🧪）
