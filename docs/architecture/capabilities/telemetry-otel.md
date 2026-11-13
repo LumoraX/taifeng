@@ -84,6 +84,35 @@ OtelTelemetrySink(
 
 ### Requirement: EventMsg → OTel 映射
 
+#### 执行关联契约
+
+OTel span 的生命周期键 SHALL 优先使用 `EventMsg.execution` 的
+`(execution_id, attempt_id)`，而不是 `submission_id`。`submission_id` 仍 SHALL
+作为 `taifeng.submission_id` attribute 保留，供跨信号检索；它不能单独决定 span
+的开始、结束或父子关系。这样同一 submission 中的 root、同步 `call_skill` 子执行和
+detached child 可以各自拥有独立 span。
+
+- `turn_started` / `turn_completed` / `turn_failed` SHALL 以同一执行尝试键配对。
+- tool / skill span 的键 SHALL 是 `(执行尝试键, call_id)`，允许不同执行复用相同的
+  provider call id 而不互相结束。
+- tool / skill span 的 parent SHALL 从发出事件的执行尝试对应 turn 查找；找不到时
+  SHALL 降级为无 parent，不能错误挂到同 submission 的其他 turn。
+- 有 `execution` 的 span SHALL 注入 `taifeng.execution_id`、`taifeng.attempt_id`、
+  `taifeng.thread_id`、`taifeng.skill_id`、`taifeng.execution_model`，以及存在时的
+  `taifeng.parent_execution_id` / `taifeng.parent_thread_id`。
+- 旧事件没有 `execution` 时，允许退化使用 `submission_id`，保持向后兼容。
+
+#### Scenario: 同 submission 的两个执行各自收敛
+- **WHEN** 两个不同 `execution_id` 的 `turn_started` 共享同一 `submission_id`
+- **AND** 分别收到自己的 `turn_completed`
+- **THEN** SHALL 产生两个独立的 `taifeng.turn` span
+- **AND** 每个 span 的 `taifeng.execution_id` SHALL 对应各自的执行
+
+#### Scenario: 相同 call_id 不跨执行覆盖
+- **WHEN** 两个共享 submission 的执行分别启动同名 tool、并复用相同 `call_id`
+- **THEN** 两个 tool span SHALL 都能完成
+- **AND** 每个 tool span SHALL 挂在自己执行的 turn 下
+
 系统 SHALL 实现以下 `EventMsg` 类型到 OTel 信号的映射（其余 [src/taifeng/loop/event.py](../../../../../src/taifeng/loop/event.py) 中定义但本表未列的类型走通用 fallback：`event` 名 `taifeng.event.<kind>`，data dict 转 attribute）。**EventMsg 结构**：`EventMsg` 是 wrapper `{submission_id: str, msg: Msg (discriminated union), timestamp: datetime}`，业务字段在 `event.msg.data: dict[str, Any]` 里，按各事件类 docstring 约定（如 `ToolCallStarted.data = {"call_id", "name", "arguments"}`）。本规格映射表中的 attribute 取值路径以此结构为准。
 
 | EventMsg 类（kind） | OTel 信号 | Attribute / Label 取值（从 `event.msg.data` 与 `event.submission_id`） |

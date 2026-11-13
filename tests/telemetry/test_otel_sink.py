@@ -35,6 +35,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 
 import taifeng
 from taifeng.loop.event import EventMsg
+from taifeng.loop.execution_identity import ExecutionIdentity
 from taifeng.telemetry.otel_sink import (
     OtelSinkConfig,
     OtelTelemetrySink,
@@ -88,9 +89,29 @@ def clean_otel_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
-def _event(submission_id: str, kind: str, data: dict[str, object] | None = None) -> EventMsg:
+def _event(
+    submission_id: str,
+    kind: str,
+    data: dict[str, object] | None = None,
+    *,
+    execution: ExecutionIdentity | None = None,
+) -> EventMsg:
     return EventMsg.model_validate(
-        {"submission_id": submission_id, "msg": {"kind": kind, "data": data or {}}}
+        {
+            "submission_id": submission_id,
+            "msg": {"kind": kind, "data": data or {}},
+            "execution": execution,
+        }
+    )
+
+
+def _identity(execution_id: str, attempt_id: str = "attempt-1") -> ExecutionIdentity:
+    return ExecutionIdentity(
+        execution_id=execution_id,
+        attempt_id=attempt_id,
+        thread_id=execution_id,
+        skill_id=execution_id,
+        model="sim",
     )
 
 
@@ -151,6 +172,86 @@ class TestSinkConstruction:
 
 
 class TestEventMapping:
+    async def test_shared_submission_uses_execution_identity_for_turn_spans(
+        self,
+        sink: OtelTelemetrySink,
+        memory_tracer_provider: tuple[TracerProvider, InMemorySpanExporter],
+    ) -> None:
+        _, exporter = memory_tracer_provider
+        root = _identity("root")
+        child = _identity("child")
+        await sink.handle(_event("shared", "turn_started", execution=root))
+        await sink.handle(_event("shared", "turn_started", execution=child))
+        await sink.handle(_event("shared", "turn_completed", {"iterations": 1}, execution=child))
+        await sink.handle(_event("shared", "turn_completed", {"iterations": 2}, execution=root))
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 2
+        assert {span.attributes["taifeng.execution_id"] for span in spans} == {
+            "root",
+            "child",
+        }
+        assert {span.attributes["taifeng.attempt_id"] for span in spans} == {"attempt-1"}
+
+    async def test_tool_and_skill_spans_keep_their_execution_parent(
+        self,
+        sink: OtelTelemetrySink,
+        memory_tracer_provider: tuple[TracerProvider, InMemorySpanExporter],
+    ) -> None:
+        _, exporter = memory_tracer_provider
+        root = _identity("root")
+        child = _identity("child")
+        await sink.handle(_event("shared", "turn_started", execution=root))
+        await sink.handle(
+            _event(
+                "shared",
+                "tool_call_started",
+                {"call_id": "same", "name": "read"},
+                execution=root,
+            )
+        )
+        await sink.handle(_event("shared", "turn_started", execution=child))
+        await sink.handle(
+            _event(
+                "shared",
+                "tool_call_started",
+                {"call_id": "same", "name": "write"},
+                execution=child,
+            )
+        )
+        await sink.handle(
+            _event(
+                "shared",
+                "tool_call_completed",
+                {"call_id": "same", "name": "write"},
+                execution=child,
+            )
+        )
+        await sink.handle(
+            _event(
+                "shared",
+                "tool_call_completed",
+                {"call_id": "same", "name": "read"},
+                execution=root,
+            )
+        )
+        await sink.handle(_event("shared", "turn_completed", execution=child))
+        await sink.handle(_event("shared", "turn_completed", execution=root))
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 4
+        for name in ("taifeng.tool.read", "taifeng.tool.write"):
+            tool_span = next(span for span in spans if span.name == name)
+            turn_id = "root" if name.endswith("read") else "child"
+            turn_span = next(
+                span
+                for span in spans
+                if span.name == "taifeng.turn"
+                and span.attributes["taifeng.execution_id"] == turn_id
+            )
+            assert tool_span.parent is not None
+            assert tool_span.parent.span_id == turn_span.context.span_id
+
     async def test_turn_started_creates_span_with_submission_id(
         self,
         sink: OtelTelemetrySink,
