@@ -38,6 +38,10 @@ def test_trace_projection_preserves_global_sequence_and_redacts_body() -> None:
     assert [item.seq for item in snapshot.events] == [0, 1]
     assert "arguments" not in snapshot.events[0].metadata
     assert "output" not in snapshot.events[1].metadata
+    projection.handle(event(
+        "user_input_injected", 2, user_text_preview="secret preview",
+    ))
+    assert "user_text_preview" not in dict(projection.snapshot().events[2].metadata)
     assert dict(snapshot.events[1].metadata)["duration_ms"] == 12
 
 
