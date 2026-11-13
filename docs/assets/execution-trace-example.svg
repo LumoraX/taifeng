@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
+  <title id="title">Taifeng execution tree, plan, and span waterfall</title>
+  <desc id="desc">A root execution creates a parallel plan and two observation workers. The lower panel shows nested execution spans and their overlap.</desc>
+  <style>
+    .text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #182230; }
+    .muted { fill: #627184; }
+    .small { font-size: 15px; }
+    .label { font-size: 18px; font-weight: 600; }
+    .title { font-size: 26px; font-weight: 700; }
+    .card { fill: #fff; stroke: #d7dee8; stroke-width: 2; }
+    .root { fill: #eef5ff; stroke: #4e87e8; stroke-width: 2; }
+    .child { fill: #f2fbf5; stroke: #35a66a; stroke-width: 2; }
+    .plan { fill: #fff8e7; stroke: #e5a72a; stroke-width: 2; stroke-dasharray: 8 6; }
+    .line { stroke: #6d7c90; stroke-width: 2.5; fill: none; }
+    .dashed { stroke-dasharray: 8 7; }
+  </style>
+  <rect width="1280" height="760" fill="#f7f9fc"/>
+  <text x="54" y="54" class="text title">Taifeng trace + span projection</text>
+  <text x="54" y="82" class="text muted small">真实事件流保留计划、执行身份、父子关系与并行重叠；业务层可自行布局</text>
+
+  <rect x="54" y="116" width="1172" height="280" rx="18" class="card"/>
+  <text x="82" y="154" class="text label">Execution tree / dynamic plan</text>
+  <rect x="464" y="182" width="352" height="72" rx="14" class="root"/>
+  <circle cx="490" cy="218" r="8" fill="#2f78df"/>
+  <text x="510" y="214" class="text label">observation-root</text>
+  <text x="510" y="238" class="text muted small">execution=thr_root · completed · 5 turns</text>
+
+  <path d="M640 254 C640 278 640 278 640 296" class="line"/>
+  <rect x="500" y="296" width="280" height="58" rx="12" class="plan"/>
+  <text x="522" y="321" class="text label" fill="#9b6a00">PLAN #8 · parallel</text>
+  <text x="522" y="342" class="text muted small">observation-worker × 2</text>
+  <path d="M580 354 C580 382 330 382 330 410" class="line dashed"/>
+  <path d="M700 354 C700 382 950 382 950 410" class="line dashed"/>
+
+  <rect x="150" y="410" width="360" height="76" rx="14" class="child"/>
+  <circle cx="176" cy="447" r="8" fill="#35a66a"/>
+  <text x="196" y="443" class="text label">observation-worker · left</text>
+  <text x="196" y="467" class="text muted small">execution=thr_left · completed · 2 turns</text>
+  <rect x="770" y="410" width="360" height="76" rx="14" class="child"/>
+  <circle cx="796" cy="447" r="8" fill="#35a66a"/>
+  <text x="816" y="443" class="text label">observation-worker · right</text>
+  <text x="816" y="467" class="text muted small">execution=thr_right · completed · 2 turns</text>
+
+  <rect x="54" y="500" width="1172" height="230" rx="18" class="card"/>
+  <text x="82" y="536" class="text label">Span waterfall</text>
+  <text x="82" y="560" class="text muted small">global seq → nested execution identity → actual overlap</text>
+  <line x1="300" y1="584" x2="1150" y2="584" stroke="#cbd4df" stroke-width="2"/>
+  <g class="text muted small">
+    <text x="300" y="606">09:21:00</text><text x="520" y="606">09:21:02</text><text x="740" y="606">09:21:04</text><text x="960" y="606">09:21:06</text>
+  </g>
+  <text x="82" y="635" class="text small">root / turn a</text>
+  <rect x="300" y="616" width="690" height="24" rx="8" fill="#4e87e8"/>
+  <text x="1010" y="635" class="text muted small">12.7s · completed</text>
+  <text x="82" y="668" class="text small">worker / left</text>
+  <rect x="430" y="649" width="220" height="24" rx="8" fill="#35a66a"/>
+  <text x="670" y="668" class="text muted small">4.1s</text>
+  <text x="82" y="701" class="text small">worker / right</text>
+  <rect x="430" y="682" width="270" height="24" rx="8" fill="#35a66a"/>
+  <text x="720" y="701" class="text muted small">5.0s</text>
+  <text x="970" y="701" class="text muted small">← overlap is visible</text>
+</svg>
