@@ -9,7 +9,9 @@ if TYPE_CHECKING:
 
     from taifeng.loop.event import EventMsg
 
-_SENSITIVE_KEYS = frozenset({"arguments", "output", "delta", "summary", "prompt"})
+_SENSITIVE_KEYS = frozenset(
+    {"arguments", "output", "delta", "summary", "prompt", "user_text_preview"}
+)
 
 
 @dataclass(frozen=True, slots=True)
