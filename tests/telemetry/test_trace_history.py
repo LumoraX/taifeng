@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 from taifeng.loop.event import EventMsg
 from taifeng.loop.execution_identity import ExecutionIdentity
-from taifeng.telemetry.trace_history import load_event_jsonl, mermaid_timeline, timeline_events
+from taifeng.telemetry.trace_history import (
+    execution_tree_mermaid,
+    execution_waterfall,
+    load_event_jsonl,
+    mermaid_timeline,
+    timeline_events,
+)
 from taifeng.telemetry.trace_projection import TraceEvent
 
 
@@ -49,6 +55,42 @@ def test_timeline_events_and_mermaid_keep_seq_and_causation() -> None:
     assert "flowchart LR" in graph
     assert "tool_intent" in graph
     assert "3" in graph
+
+
+def _trace_event(seq: int, kind: str, execution: ExecutionIdentity) -> TraceEvent:
+    """构造历史渲染用的轻量轨迹事件。"""
+    return TraceEvent(
+        seq=seq, timestamp=datetime(2026, 1, 1, seq, tzinfo=UTC), kind=kind,
+        submission_id="s", execution_id=execution.execution_id,
+        attempt_id=execution.attempt_id, thread_id=execution.thread_id,
+        skill_id=execution.skill_id,
+        parent_execution_id=execution.parent_execution_id,
+        parent_thread_id=execution.parent_thread_id,
+        call_id=None, metadata=(),
+    )
+
+
+def test_execution_tree_and_waterfall_are_historical_and_bounded() -> None:
+    """历史渲染按身份建树并按 turn 生命周期生成瀑布行。"""
+    root = ExecutionIdentity(
+        execution_id="root", attempt_id="a", thread_id="root",
+        skill_id="entry", model="sim",
+    )
+    child = ExecutionIdentity(
+        execution_id="child", attempt_id="a", thread_id="child",
+        skill_id="worker", model="sim", parent_execution_id="root",
+    )
+    events = (
+        _trace_event(0, "turn_started", root),
+        _trace_event(1, "turn_started", child),
+        _trace_event(2, "turn_completed", child),
+        _trace_event(3, "turn_completed", root),
+    )
+    rows = execution_waterfall(events)
+    assert next(row for row in rows if row.execution_id == "child").status == "completed"
+    graph = execution_tree_mermaid(events)
+    assert "worker [child]" in graph
+    assert "n0 --> n1" in graph
 
 
 def test_load_event_jsonl_marks_bad_lines_and_capacity(tmp_path) -> None:

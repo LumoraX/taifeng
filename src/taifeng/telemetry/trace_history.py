@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,19 @@ from taifeng.telemetry.trace_projection import TraceEvent, TraceProjection, Trac
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from datetime import datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TraceWaterfallRow:
+    """一个 execution/attempt 的 turn 生命周期摘要。"""
+
+    execution_id: str
+    attempt_id: str | None
+    skill_id: str | None
+    started_at: datetime
+    finished_at: datetime | None
+    status: str
 
 
 def load_event_jsonl(path: str | Path, *, max_events: int = 8192) -> TraceSnapshot:
@@ -93,4 +107,74 @@ def mermaid_timeline(events: Iterable[TraceEvent], *, max_nodes: int = 512) -> s
     return "\n".join(lines)
 
 
-__all__ = ["load_event_jsonl", "mermaid_timeline", "timeline_events"]
+def execution_waterfall(
+    events: Iterable[TraceEvent], *, max_rows: int = 512,
+) -> tuple[TraceWaterfallRow, ...]:
+    """从历史事件聚合 bounded waterfall 行。"""
+    if not isinstance(max_rows, int) or isinstance(max_rows, bool) or max_rows <= 0:
+        raise ValueError("max_rows must be positive")
+    states: dict[tuple[str, str | None], list[object]] = {}
+    for event in events:
+        if event.execution_id is None:
+            continue
+        key = (event.execution_id, event.attempt_id)
+        state = states.setdefault(key, [event, None, "running"])
+        if event.kind == "turn_started":
+            state[0] = event
+        elif event.kind in {"turn_completed", "turn_failed", "turn_suspended"}:
+            state[1] = event
+            state[2] = {
+                "turn_completed": "completed",
+                "turn_failed": "failed",
+                "turn_suspended": "waiting_input",
+            }[event.kind]
+    rows: list[TraceWaterfallRow] = []
+    for start, end, status in states.values():
+        assert isinstance(start, TraceEvent)
+        assert end is None or isinstance(end, TraceEvent)
+        rows.append(TraceWaterfallRow(
+            execution_id=start.execution_id or "",
+            attempt_id=start.attempt_id,
+            skill_id=start.skill_id,
+            started_at=start.timestamp,
+            finished_at=end.timestamp if end is not None else None,
+            status=str(status),
+        ))
+    return tuple(rows[:max_rows])
+
+
+def execution_tree_mermaid(
+    events: Iterable[TraceEvent], *, max_nodes: int = 512,
+) -> str:
+    """从历史 execution identity 生成有界父子 Mermaid 树。"""
+    if not isinstance(max_nodes, int) or isinstance(max_nodes, bool) or max_nodes <= 0:
+        raise ValueError("max_nodes must be positive")
+    latest: dict[str, TraceEvent] = {}
+    parents: dict[str, str | None] = {}
+    for event in events:
+        if event.execution_id is None:
+            continue
+        latest[event.execution_id] = event
+        parents[event.execution_id] = event.parent_execution_id
+        if len(latest) >= max_nodes:
+            break
+    lines = ["flowchart TD"]
+    indexes = {execution_id: index for index, execution_id in enumerate(latest)}
+    for execution_id, event in latest.items():
+        index = indexes[execution_id]
+        label = f"{event.skill_id or execution_id} [{execution_id}]"[:180]
+        lines.append(f'  n{index}["{label.replace(chr(34), chr(39))}"]')
+    for execution_id, parent_id in parents.items():
+        if parent_id in indexes:
+            lines.append(f"  n{indexes[parent_id]} --> n{indexes[execution_id]}")
+    return "\n".join(lines)
+
+
+__all__ = [
+    "TraceWaterfallRow",
+    "execution_tree_mermaid",
+    "execution_waterfall",
+    "load_event_jsonl",
+    "mermaid_timeline",
+    "timeline_events",
+]
