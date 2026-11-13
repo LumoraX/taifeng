@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -96,6 +97,36 @@ class OrchestrationPlanSnapshot:
     updated_at: datetime
 
 
+@dataclass(frozen=True)
+class ExecutionTimelineFact:
+    """供增量视图消费的脱正文调用事实。"""
+
+    seq: int
+    kind: str
+    timestamp: datetime
+    submission_id: str
+    execution_id: str | None
+    attempt_id: str | None
+    parent_execution_id: str | None
+    call_id: str | None = None
+    name: str | None = None
+    skill_id: str | None = None
+    phase: str | None = None
+    end_reason: str | None = None
+    handle_id: str | None = None
+    child_thread_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ExecutionTimelinePage:
+    """一次 cursor 查询的不可变结果。"""
+
+    items: tuple[ExecutionTimelineFact, ...]
+    next_seq: int
+    cursor_expired: bool
+    incomplete: bool
+
+
 class _Node:
     """每节点只保留当前 attempt 与前序用量基数，不保存 attempt 历史。"""
 
@@ -181,15 +212,24 @@ class ExecutionProjection:
         max_nodes: int = 2048,
         *,
         plan_limits: OrchestrationPlanLimits | None = None,
+        timeline_capacity: int = 8192,
     ) -> None:
         """容量必须为正；截断、迟到和序号缺口均公开标记。"""
         if max_nodes <= 0:
             raise ValueError('max_nodes must be positive')
+        if (
+            not isinstance(timeline_capacity, int)
+            or isinstance(timeline_capacity, bool)
+            or timeline_capacity <= 0
+        ):
+            raise ValueError('timeline_capacity must be a positive integer')
         self.max_nodes = max_nodes
         self.plan_limits = plan_limits or OrchestrationPlanLimits()
+        self.timeline_capacity = timeline_capacity
         self.incomplete = False
         self._nodes: dict[str, _Node] = {}
         self._plans: list[OrchestrationPlanSnapshot] = []
+        self._timeline: deque[ExecutionTimelineFact] = deque(maxlen=timeline_capacity)
         self._handles: dict[str, str] = {}
         self._seq = -1
 
@@ -201,6 +241,29 @@ class ExecutionProjection:
         """按事件顺序返回全部计划事件，不覆盖重规划历史。"""
         return tuple(self._plans)
 
+    def timeline_after(
+        self, after_seq: int, *, limit: int | None = None
+    ) -> ExecutionTimelinePage:
+        """返回 ``after_seq`` 之后的有界调用事实与下一个 cursor。"""
+        if not isinstance(after_seq, int) or isinstance(after_seq, bool):
+            raise ValueError('after_seq must be an integer')
+        if limit is not None and (
+            not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0
+        ):
+            raise ValueError('limit must be a positive integer or None')
+        retained = tuple(self._timeline)
+        cursor_expired = bool(retained and after_seq < retained[0].seq - 1)
+        items = tuple(item for item in retained if item.seq > after_seq)
+        if limit is not None:
+            items = items[:limit]
+        next_seq = items[-1].seq if items else after_seq
+        return ExecutionTimelinePage(
+            items=items,
+            next_seq=next_seq,
+            cursor_expired=cursor_expired,
+            incomplete=self.incomplete or cursor_expired,
+        )
+
     def handle(self, ev: EventMsg) -> None:
         """同步应用一条事实；重复不重复记账，旧事件不覆盖新状态。"""
         if ev.seq <= self._seq:
@@ -209,6 +272,10 @@ class ExecutionProjection:
         if ev.seq != self._seq + 1:
             self.incomplete = True
         self._seq = ev.seq
+        timeline_was_full = len(self._timeline) == self.timeline_capacity
+        self._timeline.append(self._timeline_fact(ev))
+        if timeline_was_full:
+            self.incomplete = True
         if ev.msg.kind.startswith('spawn_'):
             self._spawn(ev)
             return
@@ -225,6 +292,34 @@ class ExecutionProjection:
             self._plan(ev, identity)
             return
         self._apply(node, ev)
+
+    @staticmethod
+    def _timeline_fact(ev: EventMsg) -> ExecutionTimelineFact:
+        """从事件提取有限字段，永不保存 data 正文。"""
+        data = ev.msg.data
+        identity = ev.execution
+        values = {
+            key: value if isinstance(value, str) else None
+            for key, value in (
+                ('call_id', data.get('call_id')),
+                ('name', data.get('name')),
+                ('skill_id', data.get('skill_id')),
+                ('phase', data.get('phase')),
+                ('end_reason', data.get('end_reason')),
+                ('handle_id', data.get('handle_id')),
+                ('child_thread_id', data.get('child_thread_id')),
+            )
+        }
+        return ExecutionTimelineFact(
+            seq=ev.seq,
+            kind=ev.msg.kind,
+            timestamp=ev.timestamp,
+            submission_id=ev.submission_id,
+            execution_id=identity.execution_id if identity else None,
+            attempt_id=identity.attempt_id if identity else None,
+            parent_execution_id=identity.parent_execution_id if identity else None,
+            **values,
+        )
 
     def _new_node(self, execution_id: str, ev: EventMsg, *, skill_id: str = '',
                   parent: ExecutionIdentity | None = None) -> _Node | None:

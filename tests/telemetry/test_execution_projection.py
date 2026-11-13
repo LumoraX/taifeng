@@ -277,6 +277,45 @@ def test_plan_history_capacity_is_bounded_and_visible() -> None:
     assert p.incomplete
 
 
+def test_timeline_after_returns_safe_facts_and_cursor() -> None:
+    """调用方可按 seq 增量绘制调用历史，事实不含正文。"""
+    p = ExecutionProjection(timeline_capacity=8)
+    p.handle(event('turn_started'))
+    p.handle(event('tool_call_started', 1, call_id='c1', name='read', arguments='secret'))
+    p.handle(event('tool_call_completed', 2, call_id='c1', name='read', output='secret'))
+
+    page = p.timeline_after(0)
+    assert [item.seq for item in page.items] == [1, 2]
+    assert page.next_seq == 2
+    assert not page.cursor_expired
+    assert page.items[0].call_id == 'c1'
+    assert page.items[0].name == 'read'
+    assert not hasattr(page.items[0], 'data')
+
+    next_page = p.timeline_after(page.next_seq)
+    assert next_page.items == ()
+    assert next_page.next_seq == 2
+
+
+def test_timeline_capacity_exposes_expired_cursor_and_gaps() -> None:
+    """历史被截断或 seq 有缺口时，增量消费者得到显式状态。"""
+    p = ExecutionProjection(timeline_capacity=2)
+    p.handle(event('turn_started'))
+    p.handle(event('execution_updated', 2, phase='model'))
+    p.handle(event('turn_completed', 3))
+    page = p.timeline_after(0)
+    assert [item.seq for item in page.items] == [2, 3]
+    assert page.cursor_expired
+    assert page.incomplete
+    assert p.incomplete
+
+
+def test_timeline_capacity_must_be_positive() -> None:
+    """时间线容量是资源边界，不能关闭或使用负数。"""
+    with pytest.raises(ValueError):
+        ExecutionProjection(timeline_capacity=0)
+
+
 def test_tool_and_handle_capacity_do_not_grow_without_bound() -> None:
     """异常流中的活动调用与句柄同样受容量约束。"""
     p = ExecutionProjection(max_nodes=2)

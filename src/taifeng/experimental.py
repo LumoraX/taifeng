@@ -183,6 +183,8 @@ from taifeng.skill.working_set_runtime import (
 from taifeng.telemetry.execution_projection import (
     ExecutionProjection,
     ExecutionSnapshot,
+    ExecutionTimelineFact,
+    ExecutionTimelinePage,
     OrchestrationGroupSnapshot,
     OrchestrationPlanLimits,
     OrchestrationPlanSnapshot,
@@ -202,6 +204,8 @@ __all__ = [
     "ExecutionIdentity",
     "ExecutionProjection",
     "ExecutionSnapshot",
+    "ExecutionTimelineFact",
+    "ExecutionTimelinePage",
     "OrchestrationGroupSnapshot",
     "OrchestrationPlanLimits",
     "OrchestrationPlanSnapshot",
