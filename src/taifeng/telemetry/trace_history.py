@@ -73,7 +73,10 @@ def mermaid_timeline(events: Iterable[TraceEvent], *, max_nodes: int = 512) -> s
     lines = ["flowchart LR"]
     record_nodes: dict[str, str] = {}
     for index, event in enumerate(selected):
-        label = f"{event.seq} {event.kind} [{event.execution_id or '-'}]"
+        metadata = dict(event.metadata)
+        detail = metadata.get("name") or metadata.get("skill_id") or metadata.get("call_id")
+        suffix = f" {detail}" if detail is not None else ""
+        label = f"{event.seq} {event.kind}{suffix} [{event.execution_id or '-'}]"
         safe = label.replace('"', "'").replace("\n", " ")[:180]
         lines.append(f'  e{index}["{safe}"]')
         if index:
