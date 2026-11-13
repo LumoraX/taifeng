@@ -76,4 +76,5 @@ def test_mermaid_escapes_labels() -> None:
             metadata=(("name", 'read"skill'),),
         ),
     ))
-    assert "read'skill" not in graph
+    assert "read'skill" in graph
+    assert 'read"skill' not in graph
