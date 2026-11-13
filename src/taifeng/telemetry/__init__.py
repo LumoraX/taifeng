@@ -14,6 +14,13 @@ from typing import TYPE_CHECKING, Any
 from taifeng.telemetry.console import ConsoleSink, attach_console_sink
 from taifeng.telemetry.jsonl_sink import JsonlSink, attach_jsonl_sink
 from taifeng.telemetry.sink import TelemetrySink
+from taifeng.telemetry.trace_history import (
+    TraceEvent,
+    TraceSnapshot,
+    load_event_jsonl,
+    mermaid_timeline,
+    timeline_events,
+)
 
 if TYPE_CHECKING:
     from taifeng.telemetry.otel_sink import OtelSinkConfig, OtelTelemetrySink
@@ -24,8 +31,13 @@ __all__ = [
     "OtelSinkConfig",
     "OtelTelemetrySink",
     "TelemetrySink",
+    "TraceEvent",
+    "TraceSnapshot",
     "attach_console_sink",
     "attach_jsonl_sink",
+    "load_event_jsonl",
+    "mermaid_timeline",
+    "timeline_events",
 ]
 
 
