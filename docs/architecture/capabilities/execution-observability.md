@@ -4,6 +4,8 @@
 
 宿主订阅一个 engine 的事件流，即可识别并行 Skill 调用、观察阶段与资源用量，并在普通终端展示调用树。内核提供执行身份和事实事件；telemetry 提供纯状态投影与可选显示器。
 
+示例布局：[execution-trace-example.svg](../../assets/execution-trace-example.svg)（同一份事件事实也可由宿主渲染成自己的 UI）。
+
 ## 数据契约
 
 - `ExecutionIdentity`：不可变 Pydantic 模型。字段 `execution_id`、`attempt_id`、`thread_id`、`skill_id`、`model`，以及可空 `parent_execution_id` / `parent_thread_id`。
