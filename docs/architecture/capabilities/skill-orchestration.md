@@ -58,6 +58,10 @@ composite skill 可在 SKILL.md 声明子步骤的并行/顺序/条件编排；�
 
 编排声明被解析为执行计划时，引擎 SHALL emit `orchestration_plan_resolved{skill_id, groups}`。并发执行仍 SHALL 复用 A 的 `tool_batch_dispatched` / 逐 call `tool_call_started`/`tool_call_completed`。
 
+当 composite 未声明 `orchestration`、由 LLM 自主通过 `call_skill` 派发子 skill 时，引擎 SHALL
+追加同一 `orchestration_plan_resolved` 事件，`mode="implicit_llm"`，`groups` 为目标 skill 的
+单项并行摘要，并携带 `call_id / reason`。该事件只记录模型临时决定的观察计划，不改变既有派发语义。
+
 #### Scenario: 计划解析事件
 - **WHEN** 一个声明了 `orchestration` 的 entry skill 开始执行
 - **THEN** SHALL emit 一次 `orchestration_plan_resolved`，data 含 skill_id 与解析出的步骤分组结构

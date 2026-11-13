@@ -97,6 +97,8 @@ detached child 可以各自拥有独立 span。
   provider call id 而不互相结束。
 - tool / skill span 的 parent SHALL 从发出事件的执行尝试对应 turn 查找；找不到时
   SHALL 降级为无 parent，不能错误挂到同 submission 的其他 turn。
+- 有 `parent_execution_id` 且父 turn 仍在途时，child turn SHALL 以父 execution span 为 OTel parent；
+  父 span 已结束或未观察到时不得猜测其他 span，仍保留 `taifeng.parent_execution_id` 属性。
 - 有 `execution` 的 span SHALL 注入 `taifeng.execution_id`、`taifeng.attempt_id`、
   `taifeng.thread_id`、`taifeng.skill_id`、`taifeng.execution_model`，以及存在时的
   `taifeng.parent_execution_id` / `taifeng.parent_thread_id`。
