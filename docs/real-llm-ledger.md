@@ -3,7 +3,7 @@
 > **本文件由 `examples/real_llm/capability_matrix.py` 自动生成（数据源 `real-llm-ledger.json`），勿手编辑。**
 > 回归红线：基础层（`src/taifeng/{llm,loop,context,conversation}/`）变更必须全量重跑并提交本台账；详见 CLAUDE.md §测试约束。
 
-- **最近一次回归**：2026-11-13 18:40:30 UTC @ `ad8037d`
+- **最近一次回归**：2026-11-13 18:42:08 UTC @ `3236a8d`
 - **Provider / Model**：codex / gpt-5.6-luna
 - **本次跑测场景**：suspend_resume
 
@@ -24,11 +24,11 @@
 | `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 57s |  |
 | `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 96s |  |
 | `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 63s |  |
-| `execution_observability` | 同 skill 并行执行身份、上下文与自身用量取证 | ✅PASS | 2026-11-13 @ `ad8037d` | 18s |  |
+| `execution_observability` | 同 skill 并行执行身份、上下文与自身用量取证 | ✅PASS | 2026-11-13 @ `3236a8d` | 16s |  |
 | `file_search` | opt-in glob / grep 只读搜索工具（ADR 0064） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 13s |  |
 | `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 3s |  |
 | `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 116s |  |
-| `offload_workspace` | offload 与 file_read 共享非本机工作区，stub 后分页回读 | ✅PASS | 2026-11-13 @ `ad8037d` | 11s |  |
+| `offload_workspace` | offload 与 file_read 共享非本机工作区，stub 后分页回读 | ✅PASS | 2026-11-13 @ `3236a8d` | 12s |  |
 | `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 20s |  |
 | `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 12s |  |
 | `pinned_periodic` | pinned 任务清单按用户轮数周期重注（ADR 0065） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 37s |  |
@@ -40,7 +40,7 @@
 | `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 33s |  |
 | `skill_inference` | skill 级推理参数（SKILL.md inference 块按 skill 下发，ADR 0056） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 11s |  |
 | `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 65s |  |
-| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-11-13 @ `ad8037d` | 9s |  |
+| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-11-13 @ `3236a8d` | 10s |  |
 | `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 8s |  |
 | `token_calibration` | 上下文 token 实测校准（预测下一轮 prompt，ADR 0043） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 8s |  |
 | `tool_output_guard` | PostToolUse 改写工具输出 + 工具结果字节上限（ADR 0061） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 14s |  |
