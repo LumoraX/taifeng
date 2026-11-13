@@ -176,6 +176,63 @@ def test_observation_without_start_and_legacy_events() -> None:
     assert p.incomplete
 
 
+def test_dynamic_orchestration_plan_history_is_append_only() -> None:
+    """计划事件按执行节点追加，重规划历史不被覆盖。"""
+    p = ExecutionProjection()
+    p.handle(event('turn_started'))
+    p.handle(event(
+        'orchestration_plan_resolved', 1,
+        skill_id='coordinator',
+        groups=[{'type': 'parallel', 'skills': ['worker-a', 'worker-b']}],
+    ))
+    first = p.plan_snapshot()
+    assert len(first) == 1
+    assert first[0].groups[0].skills == ('worker-a', 'worker-b')
+
+    p.handle(event(
+        'orchestration_plan_resolved', 2,
+        skill_id='coordinator',
+        groups=[{'type': 'serial', 'skills': ['summarizer']}],
+    ))
+    history = p.plan_snapshot()
+    assert len(history) == 2
+    assert history[0].groups[0].skills == ('worker-a', 'worker-b')
+    assert history[1].groups[0].kind == 'serial'
+    assert history[1].groups[0].skills == ('summarizer',)
+
+
+def test_malformed_orchestration_plan_is_incomplete() -> None:
+    """计划结构损坏时不猜测关系，只公开不完整状态。"""
+    p = ExecutionProjection()
+    p.handle(event('turn_started'))
+    p.handle(event(
+        'orchestration_plan_resolved', 1,
+        skill_id='coordinator',
+        groups=[{'type': 'parallel', 'skills': ['ok', 3]}],
+    ))
+    assert p.plan_snapshot() == ()
+    assert p.incomplete
+
+
+def test_plan_history_capacity_is_bounded_and_visible() -> None:
+    """计划轨迹达到容量上限时不静默丢失，投影显式标记不完整。"""
+    p = ExecutionProjection(max_nodes=1)
+    p.handle(event('turn_started'))
+    p.handle(event(
+        'orchestration_plan_resolved', 1,
+        skill_id='coordinator',
+        groups=[{'type': 'parallel', 'skills': ['first']}],
+    ))
+    p.handle(event(
+        'orchestration_plan_resolved', 2,
+        skill_id='coordinator',
+        groups=[{'type': 'parallel', 'skills': ['second']}],
+    ))
+    assert len(p.plan_snapshot()) == 1
+    assert p.plan_snapshot()[0].groups[0].skills == ('first',)
+    assert p.incomplete
+
+
 def test_tool_and_handle_capacity_do_not_grow_without_bound() -> None:
     """异常流中的活动调用与句柄同样受容量约束。"""
     p = ExecutionProjection(max_nodes=2)

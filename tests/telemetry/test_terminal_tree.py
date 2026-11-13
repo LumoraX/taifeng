@@ -58,6 +58,23 @@ async def test_non_tty_appends_without_ansi_and_tty_redraws() -> None:
     assert '\x1b[' in interactive.getvalue()
 
 
+def test_render_includes_plan_history_and_observed_nodes() -> None:
+    """基础文本关系同时显示计划轨迹和已观察执行。"""
+    projection = ExecutionProjection()
+    projection.handle(event('turn_started'))
+    projection.handle(event(
+        'orchestration_plan_resolved', 1,
+        skill_id='coordinator',
+        groups=[{'type': 'parallel', 'skills': ['worker', 'other']}],
+    ))
+    projection.handle(event('turn_started', 2, node='worker-1', parent='root'))
+    sink = TerminalTreeSink(out=io.StringIO(), projection=projection)
+    text = sink.render()
+    assert '[计划#1:parallel]' in text
+    assert 'worker' in text and 'other' in text
+    assert 'worker-1' in text
+
+
 async def test_envelopes_detect_initial_delivery_loss() -> None:
     """使用完整信封流，首条 delivery_seq 缺口同样可见。"""
     class Engine:

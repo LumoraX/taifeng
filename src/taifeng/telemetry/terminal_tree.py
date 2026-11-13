@@ -18,7 +18,10 @@ if TYPE_CHECKING:
 
     from taifeng.loop.engine import AgentEngine
     from taifeng.loop.event import EventMsg
-    from taifeng.telemetry.execution_projection import ExecutionSnapshot
+    from taifeng.telemetry.execution_projection import (
+        ExecutionSnapshot,
+        OrchestrationPlanSnapshot,
+    )
 
 
 def _safe(value: str, width: int = 64) -> str:
@@ -58,6 +61,9 @@ class TerminalTreeSink:
     def render(self) -> str:
         """无递归遍历已知节点；缺父级、环、深树均有界显示。"""
         snapshots = self.projection.snapshot()
+        plans: dict[str, list[OrchestrationPlanSnapshot]] = {}
+        for plan in self.projection.plan_snapshot():
+            plans.setdefault(plan.execution_id, []).append(plan)
         known = {node.execution_id: node for node in snapshots}
         children: dict[str, list[ExecutionSnapshot]] = {}
         roots: list[ExecutionSnapshot] = []
@@ -68,7 +74,11 @@ class TerminalTreeSink:
                 roots.append(node)
         finished = sum(node.state in ('completed', 'failed', 'cancelled') for node in snapshots)
         warning = ' | 观测不完整' if self.projection.incomplete else ''
-        lines = [f'执行树 | 已观察 {len(snapshots)} 节点，终态 {finished}{warning}']
+        lines = [
+            f'执行关系 | 已观察 {len(snapshots)} 节点，'
+            f'计划事件 {sum(len(items) for items in plans.values())} 个，'
+            f'终态 {finished}{warning}'
+        ]
         visited: set[str] = set()
         stack = [(node, 0) for node in reversed(roots)]
         remaining = iter(snapshots)
@@ -88,10 +98,44 @@ class TerminalTreeSink:
             elif depth == 0 and node.parent_execution_id in known:
                 annotation = ' [环/未连接]'
             lines.append(self._row(node, depth) + annotation)
+            plan_events = plans.get(node.execution_id, [])
+            if plan_events:
+                lines.extend(self._plan_rows(
+                    plan_events, depth + 1, self._max_rows - len(lines),
+                ))
             stack.extend((child, depth + 1) for child in reversed(children.get(node.execution_id, [])))
         if len(visited) < len(snapshots):
             lines[-1] = f'… 显示截断，已观察节点共 {len(snapshots)}'
         return self._fit_frame(lines)
+
+    @staticmethod
+    def _plan_rows(
+        plans: list[OrchestrationPlanSnapshot], depth: int, remaining: int,
+    ) -> list[str]:
+        """按事件顺序压缩计划轨迹，不把计划节点伪装成已执行节点。"""
+        if remaining <= 0:
+            return []
+        prefix = '  ' * min(depth, 12) + '└─ '
+        rows: list[str] = []
+        for plan in plans:
+            for group in plan.groups:
+                if len(rows) >= remaining:
+                    break
+                if group.kind == 'when':
+                    label = (
+                        f'[计划#{plan.seq}:when] '
+                        f'条件:{_safe(group.condition or "", 48)}'
+                    )
+                    rows.append(prefix + label)
+                    continue
+                for skill_id in group.skills:
+                    if len(rows) >= remaining:
+                        break
+                    rows.append(
+                        f'{prefix}[计划#{plan.seq}:{group.kind}] '
+                        f'{_safe(skill_id, 40)}（待执行）'
+                    )
+        return rows
 
     def _fit_frame(self, lines: list[str]) -> str:
         """交互输出按物理终端尺寸裁剪，非交互输出保留完整字段。"""
