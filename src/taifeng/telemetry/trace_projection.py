@@ -65,7 +65,10 @@ class TraceProjection:
         max_metadata_items: int = 16,
     ) -> None:
         """初始化有界投影。"""
-        if max_events <= 0 or max_value_length <= 0 or max_metadata_items <= 0:
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            for value in (max_events, max_value_length, max_metadata_items)
+        ):
             raise ValueError("trace limits must be positive")
         self.max_events = max_events
         self.max_value_length = max_value_length

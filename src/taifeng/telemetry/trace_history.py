@@ -79,11 +79,11 @@ def mermaid_timeline(events: Iterable[TraceEvent], *, max_nodes: int = 512) -> s
         if index:
             lines.append(f"  e{index - 1} --> e{index}")
         for key, value in event.metadata:
-            if key == "operation_id":
+            if key == "operation_id" and isinstance(value, str):
                 record_nodes[value] = f"e{index}"
     for index, event in enumerate(selected):
         for key, value in event.metadata:
-            if key == "causation_id" and value in record_nodes:
+            if key == "causation_id" and isinstance(value, str) and value in record_nodes:
                 lines.append(f"  {record_nodes[value]} -. causation .-> e{index}")
     if len(selected) < len(all_events):
         lines.append('  truncated["轨迹截断"]')
