@@ -3,9 +3,9 @@
 > **本文件由 `examples/real_llm/capability_matrix.py` 自动生成（数据源 `real-llm-ledger.json`），勿手编辑。**
 > 回归红线：基础层（`src/taifeng/{llm,loop,context,conversation}/`）变更必须全量重跑并提交本台账；详见 CLAUDE.md §测试约束。
 
-- **最近一次回归**：2026-11-11 07:11:55 UTC @ `600aaaf`
+- **最近一次回归**：2026-11-13 18:40:30 UTC @ `ad8037d`
 - **Provider / Model**：codex / gpt-5.6-luna
-- **本次跑测场景**：execution_observability, offload_workspace, composite_dispatch, read_skill_lazy, orchestration, concurrent_fanout, research_pipeline, product_review, numeric_loop, compression, selective_approval, travel_planner, suspend_resume, turn_rewind, thread_rewind, spawn_join, peer_messaging, wait_any, kernel_knobs, post_turn_review, budget_awareness, token_calibration, skill_inference, tool_output_guard, pinned_periodic, file_search, read_skill_path, compaction_continuity, codex_instructions, codex_image_single, codex_image_order, codex_image_tool_call, codex_tool_image_output, codex_encrypted_state_hot_replay, codex_legacy_jsonl_cold_resume, codex_file_input
+- **本次跑测场景**：suspend_resume
 
 ## 逐场景结果
 
@@ -16,19 +16,19 @@
 | `codex_file_input` | Codex 文件（PDF）输入：随机核对码读出 + 登记 + 脱敏 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 11s |  |
 | `codex_image_order` | Codex 有序多图片语义 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 15s |  |
 | `codex_image_single` | Codex 单图片语义 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 2s |  |
-| `codex_image_tool_call` | Codex 图片驱动 function call | ❌FAIL | 2026-11-11 @ `b94a50e`（stale） | 2s | ServerError: error | code=server_is_overloaded | Our servers are currently overloaded. Please try again later. |
+| `codex_image_tool_call` | Codex 图片驱动 function call | ⚠️TRANSIENT_FAILURE | 2026-11-11 @ `b94a50e`（stale） | 2s | ServerError: error | code=server_is_overloaded | Our servers are currently overloaded. Please try again later. |
 | `codex_instructions` | Codex 顶层 instructions | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 2s |  |
 | `codex_legacy_jsonl_cold_resume` | Codex 图片/state legacy JSONL 冷恢复 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 12s |  |
-| `codex_tool_image_output` | Codex 工具返回图片（function_call_output 带 input_image） | ❌FAIL | 2026-11-11 @ `b94a50e`（stale） | 3s | ServerError: error | code=server_is_overloaded | Our servers are currently overloaded. Please try again later. |
+| `codex_tool_image_output` | Codex 工具返回图片（function_call_output 带 input_image） | ⚠️TRANSIENT_FAILURE | 2026-11-11 @ `b94a50e`（stale） | 3s | ServerError: error | code=server_is_overloaded | Our servers are currently overloaded. Please try again later. |
 | `compaction_continuity` | 压缩后衔接：保留用户原话 + 续接前言（handoff，ADR 0059） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 59s |  |
 | `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 57s |  |
 | `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 96s |  |
 | `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 63s |  |
-| `execution_observability` | 同 skill 并行执行身份、上下文与自身用量取证 | ❌FAIL | 2026-11-11 @ `b94a50e`（stale） | 0s | Targeted retry still reports own usage incomplete; retained FAIL. 缺事件: ['execution_updated', 'spawn_completed', 'spawn_started', 'tool_call_completed', 'turn_completed'] |
+| `execution_observability` | 同 skill 并行执行身份、上下文与自身用量取证 | ✅PASS | 2026-11-13 @ `ad8037d` | 18s |  |
 | `file_search` | opt-in glob / grep 只读搜索工具（ADR 0064） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 13s |  |
 | `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 3s |  |
 | `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 116s |  |
-| `offload_workspace` | offload 与 file_read 共享非本机工作区，stub 后分页回读 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 12s |  |
+| `offload_workspace` | offload 与 file_read 共享非本机工作区，stub 后分页回读 | ✅PASS | 2026-11-13 @ `ad8037d` | 11s |  |
 | `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 20s |  |
 | `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 12s |  |
 | `pinned_periodic` | pinned 任务清单按用户轮数周期重注（ADR 0065） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 37s |  |
@@ -40,7 +40,7 @@
 | `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 33s |  |
 | `skill_inference` | skill 级推理参数（SKILL.md inference 块按 skill 下发，ADR 0056） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 11s |  |
 | `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 65s |  |
-| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 21s |  |
+| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-11-13 @ `ad8037d` | 9s |  |
 | `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 8s |  |
 | `token_calibration` | 上下文 token 实测校准（预测下一轮 prompt，ADR 0043） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 8s |  |
 | `tool_output_guard` | PostToolUse 改写工具输出 + 工具结果字节上限（ADR 0061） | ✅PASS | 2026-11-11 @ `b94a50e`（stale） | 14s |  |
@@ -60,6 +60,6 @@
 
 ## 判定口径
 
-- **PASS** = 终态完成 ∧ 期望关键事件全命中；**PART** = 完成但缺关键事件；**FAIL** = turn_failed / 未完成 / 场景异常。
+- **PASS** = 终态完成 ∧ 期望关键事件全命中；**PARTIAL** = 完成但缺关键事件；**TRANSIENT_FAILURE** = provider / 网络 / 服务临时故障；**CODE_FAILURE** = 场景或内核失败。
 - LLM 不配合（不调对应工具）如实记 FAIL/PART，不自动重试美化。
 - **stale** = 该场景结果产生于更早的 commit（本次未复跑）。

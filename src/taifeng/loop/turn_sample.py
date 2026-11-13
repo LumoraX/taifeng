@@ -92,6 +92,16 @@ class _SamplePrep:
     iteration_history_len: int
 
 
+def _usage_is_complete(usage: dict[str, Any]) -> bool:
+    """只有明确的非负 input/output 才算一次已计量采样。"""
+    return all(
+        isinstance(usage.get(key), int)
+        and not isinstance(usage.get(key), bool)
+        and usage[key] >= 0
+        for key in ("input_tokens", "output_tokens")
+    )
+
+
 class TurnSample:
     """turn 采样协作器（持 TurnRunner 引用，自身无状态）。"""
 
@@ -400,7 +410,7 @@ class TurnSample:
                                 )
                             responses_completed = True
                         usage_dict = ev.data.get("usage") or {}
-                        if usage_dict:
+                        if _usage_is_complete(usage_dict):
                             self.samples_metered += 1
                         self.__sample_owner._accumulate_usage(usage_dict)
                         sample_prompt_tokens = int(usage_dict.get("input_tokens") or 0)

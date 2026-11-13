@@ -22,6 +22,9 @@ class TurnSuspended(_Msg):
         "cache_invalidated": bool, # tier-2 跨进程 resume 必须为 True
         "expires_at": int | None,  # suspension-ttl 到期时刻(None=永不过期)
         "usage": dict,             # 仅本段(挂起前)调用用量;续跑段另报,见 suspend-resume 契约
+        "usage_attempts_started": int,
+        "usage_attempts_metered": int,
+        "usage_attempts_missing": int,
     }
     """
 
@@ -106,7 +109,9 @@ class TurnCompleted(_Msg):
     kind: Literal["turn_completed"] = "turn_completed"
     """data = {"iterations": int, "duration_ms": int, "usage": dict,
               "subtree_usage": dict, "thread_id": str, "skill_id": str,
-              "end_reason": str, "success": bool, "is_root": bool}
+              "end_reason": str, "success": bool, "is_root": bool,
+              "usage_attempts_started": int, "usage_attempts_metered": int,
+              "usage_attempts_missing": int}
 
     ``usage`` 是本 turn 自身采样用量；``subtree_usage`` 另含阻塞式 call_skill 子树
     （usage-tree-accounting，ADR 0044）。
@@ -124,7 +129,8 @@ class TurnFailed(_Msg):
     kind: Literal["turn_failed"] = "turn_failed"
     """data = {"error": str, "kind": str, "failure_class": str,
     "suggested_action": str, "recovery": dict, "iterations": int,
-    "usage": dict, "is_root": bool}
+    "usage": dict, "is_root": bool, "usage_attempts_started": int,
+    "usage_attempts_metered": int, "usage_attempts_missing": int}
 
     ``failure_class`` 是 G3 的稳定分类桶（见 ``llm.errors.FailureClass``），
     供 telemetry 聚合；``suggested_action`` 为人类可读处置建议；``recovery``

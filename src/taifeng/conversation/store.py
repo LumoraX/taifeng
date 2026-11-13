@@ -90,6 +90,51 @@ class EphemeralStoreClosedError(RuntimeError):
     """短命存储已经关闭，不能继续接受或读取数据。"""
 
 
+@dataclass(frozen=True, slots=True)
+class EphemeralStoreLimits:
+    """短命存储的内存边界。"""
+
+    max_threads: int = 256
+    max_items_per_thread: int = 10_000
+    max_total_items: int = 100_000
+    max_total_bytes: int = 256 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        """拒绝零值和负值，避免实例进入无法写入的隐式状态。"""
+        for name, value in (
+            ("max_threads", self.max_threads),
+            ("max_items_per_thread", self.max_items_per_thread),
+            ("max_total_items", self.max_total_items),
+            ("max_total_bytes", self.max_total_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class EphemeralStoreUsage:
+    """短命存储当前占用快照。"""
+
+    thread_count: int
+    total_items: int
+    total_bytes: int
+
+
+class EphemeralStoreLimitError(MemoryError):
+    """短命存储写入会超过显式资源上限。"""
+
+    def __init__(self, resource: str, *, limit: int, observed: int, requested: int) -> None:
+        """保存稳定的资源名和计数，便于宿主转成结构化错误。"""
+        self.resource = resource
+        self.limit = limit
+        self.observed = observed
+        self.requested = requested
+        super().__init__(
+            f"ephemeral store {resource} limit exceeded: "
+            f"observed={observed}, requested={requested}, limit={limit}"
+        )
+
+
 @runtime_checkable
 class AtomicBatchMessageStore(Protocol):
     """Responses terminal 输出所需的 crash-atomic 可见性能力。"""
@@ -124,10 +169,14 @@ class EphemeralAtomicBatchMessageStore(MessageStore, AtomicBatchMessageStore):
     ``Responses`` 的不可恢复短命执行边界；关闭时立即清空全部 thread、消息和批次记录。
     """
 
-    def __init__(self) -> None:
-        """创建空的短命存储实例。"""
+    def __init__(self, *, limits: EphemeralStoreLimits | None = None) -> None:
+        """创建空的短命存储实例并安装内存边界。"""
         self._threads: dict[str, _EphemeralThread] = {}
         self._batches: dict[str, tuple[str, tuple[str, ...], tuple[ResponseItem, ...]]] = {}
+        self._thread_bytes: dict[str, int] = {}
+        self._total_items = 0
+        self._total_bytes = 0
+        self._limits = limits or EphemeralStoreLimits()
         self._closed = False
 
     def _ensure_open(self) -> None:
@@ -142,6 +191,50 @@ class EphemeralAtomicBatchMessageStore(MessageStore, AtomicBatchMessageStore):
             return self._threads[thread_id]
         except KeyError as error:
             raise KeyError(f"thread not found: {thread_id}") from error
+
+    @staticmethod
+    def _item_size(item: ResponseItem) -> int:
+        """按 canonical JSON 的 UTF-8 字节数计算内存保护口径。"""
+        return len(item.model_dump_json().encode("utf-8"))
+
+    def _check_instance_capacity(self, *, item_count: int, byte_count: int) -> None:
+        """校验实例级总消息数和字节数。"""
+        limits = self._limits
+        if self._total_items + item_count > limits.max_total_items:
+            raise EphemeralStoreLimitError(
+                "max_total_items", limit=limits.max_total_items,
+                observed=self._total_items, requested=item_count,
+            )
+        if self._total_bytes + byte_count > limits.max_total_bytes:
+            raise EphemeralStoreLimitError(
+                "max_total_bytes", limit=limits.max_total_bytes,
+                observed=self._total_bytes, requested=byte_count,
+            )
+
+    def _check_thread_capacity(self, thread: _EphemeralThread, *, item_count: int) -> None:
+        """校验单 thread 的消息数。"""
+        if len(thread.items) + item_count > self._limits.max_items_per_thread:
+            raise EphemeralStoreLimitError(
+                "max_items_per_thread", limit=self._limits.max_items_per_thread,
+                observed=len(thread.items), requested=item_count,
+            )
+
+    def _check_capacity(
+        self, thread: _EphemeralThread, *, item_count: int, byte_count: int,
+    ) -> None:
+        """校验单 thread 与实例总资源边界。"""
+        self._check_thread_capacity(thread, item_count=item_count)
+        self._check_instance_capacity(item_count=item_count, byte_count=byte_count)
+
+    def _commit_items(self, thread: _EphemeralThread, items: Sequence[ResponseItem]) -> None:
+        """更新线程和实例计数；调用方必须已完成容量检查。"""
+        sizes = [self._item_size(item) for item in items]
+        thread.items.extend(items)
+        added_bytes = sum(sizes)
+        self._thread_bytes[thread.thread_id] = self._thread_bytes.get(thread.thread_id, 0) + added_bytes
+        self._total_items += len(items)
+        self._total_bytes += added_bytes
+        thread.updated_at = time.time()
 
     @staticmethod
     def _clone(item: ResponseItem) -> ResponseItem:
@@ -159,6 +252,11 @@ class EphemeralAtomicBatchMessageStore(MessageStore, AtomicBatchMessageStore):
         """创建只存在于当前实例的 thread；``extra`` 仅为兼容协议而接受。"""
         del extra
         self._ensure_open()
+        if len(self._threads) >= self._limits.max_threads:
+            raise EphemeralStoreLimitError(
+                "max_threads", limit=self._limits.max_threads,
+                observed=len(self._threads), requested=1,
+            )
         now = time.time()
         thread_id = f"thr_ephemeral_{secrets.token_hex(8)}"
         self._threads[thread_id] = _EphemeralThread(
@@ -169,13 +267,15 @@ class EphemeralAtomicBatchMessageStore(MessageStore, AtomicBatchMessageStore):
             created_at=now,
             updated_at=now,
         )
+        self._thread_bytes[thread_id] = 0
         return thread_id
 
     async def append(self, item: ResponseItem) -> None:
         """追加单条消息；短命实现不触碰任何持久化介质。"""
         thread = self._thread(item.thread_id)
-        thread.items.append(self._clone(item))
-        thread.updated_at = time.time()
+        cloned = self._clone(item)
+        self._check_capacity(thread, item_count=1, byte_count=self._item_size(cloned))
+        self._commit_items(thread, (cloned,))
 
     async def append_batch(self, items: list[ResponseItem]) -> None:
         """在内存中追加普通消息组。"""
@@ -184,10 +284,18 @@ class EphemeralAtomicBatchMessageStore(MessageStore, AtomicBatchMessageStore):
         grouped: dict[str, list[ResponseItem]] = {}
         for item in items:
             grouped.setdefault(item.thread_id, []).append(item)
+        prepared: dict[str, list[ResponseItem]] = {}
         for thread_id, group in grouped.items():
             thread = self._thread(thread_id)
-            thread.items.extend(self._clone(item) for item in group)
-            thread.updated_at = time.time()
+            prepared[thread_id] = [self._clone(item) for item in group]
+            self._check_thread_capacity(thread, item_count=len(prepared[thread_id]))
+        total_items = sum(len(group) for group in prepared.values())
+        total_bytes = sum(
+            self._item_size(item) for group in prepared.values() for item in group
+        )
+        self._check_instance_capacity(item_count=total_items, byte_count=total_bytes)
+        for thread_id, group in prepared.items():
+            self._commit_items(self._threads[thread_id], group)
 
     async def append_atomic_batch(
         self,
@@ -206,7 +314,7 @@ class EphemeralAtomicBatchMessageStore(MessageStore, AtomicBatchMessageStore):
         if len(thread_ids) != 1:
             raise ValueError("atomic batch items must belong to one thread")
         thread_id = next(iter(thread_ids))
-        self._thread(thread_id)
+        thread = self._thread(thread_id)
         from taifeng.conversation.jsonl_atomic import describe_batch
 
         descriptor = describe_batch(materialized, batch_id)
@@ -221,10 +329,11 @@ class EphemeralAtomicBatchMessageStore(MessageStore, AtomicBatchMessageStore):
                 item_ids=old_ids,
                 already_committed=True,
             )
+        byte_count = sum(self._item_size(item) for item in materialized)
+        self._check_capacity(thread, item_count=len(materialized), byte_count=byte_count)
         committed = tuple(materialized)
         self._batches[batch_id] = (descriptor.digest, descriptor.item_ids, committed)
-        self._threads[thread_id].items.extend(self._clone(item) for item in committed)
-        self._threads[thread_id].updated_at = time.time()
+        self._commit_items(thread, committed)
         return BatchAppendAck(
             batch_id=batch_id,
             digest=descriptor.digest,
@@ -271,7 +380,18 @@ class EphemeralAtomicBatchMessageStore(MessageStore, AtomicBatchMessageStore):
         """清空短命状态并关闭实例；不留下可恢复材料。"""
         self._threads.clear()
         self._batches.clear()
+        self._thread_bytes.clear()
+        self._total_items = 0
+        self._total_bytes = 0
         self._closed = True
+
+    def usage(self) -> EphemeralStoreUsage:
+        """返回当前内存占用快照；关闭后返回零值。"""
+        return EphemeralStoreUsage(
+            thread_count=len(self._threads),
+            total_items=self._total_items,
+            total_bytes=self._total_bytes,
+        )
 
 
 class EphemeralMessageStore(EphemeralAtomicBatchMessageStore):

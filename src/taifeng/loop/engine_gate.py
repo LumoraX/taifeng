@@ -39,6 +39,14 @@ if TYPE_CHECKING:
     from taifeng.loop.engine import AgentEngine
 
 
+def _empty_usage_metadata() -> dict[str, int]:
+    """无 TurnRunner 的 gate 终态也明确报告零次采样。"""
+    return {
+        "usage_attempts_started": 0,
+        "usage_attempts_metered": 0,
+        "usage_attempts_missing": 0,
+    }
+
 
 def _turn_deadline(sub: object) -> float | None:
     """根 turn 的墙钟上限：仅 legacy ``UserMessage`` 可携带；audited 输入（durable
@@ -223,6 +231,8 @@ class EngineGate:
                 "record_id": active_suspension.record_id,
                 "iterations": 0,
                 "is_root": True,
+                "usage_complete": True,
+                **_empty_usage_metadata(),
             })))
             self._engine._pending.pop(sub.id, None)
             self._engine._turn_index += 1
@@ -282,6 +292,8 @@ class EngineGate:
                         "iterations": 0,
                         # 引擎直接派发的 fail-fast 失败必属于根 turn。
                         "is_root": True,
+                        "usage_complete": True,
+                        **_empty_usage_metadata(),
                     }),
                 ))
                 self._engine._pending.pop(sub.id, None)
@@ -337,6 +349,8 @@ class EngineGate:
                         # pre_turn hook 拒绝发生在 Engine 派发阶段（无 TurnRunner），
                         # 必属于根 turn。
                         "is_root": True,
+                        "usage_complete": True,
+                        **_empty_usage_metadata(),
                     }),
                 ))
                 self._engine._pending.pop(sub.id, None)
@@ -398,6 +412,8 @@ class EngineGate:
                     "kind": "resource_limit_exceeded",
                     "iterations": 0,
                     "is_root": True,
+                    "usage_complete": True,
+                    **_empty_usage_metadata(),
                 })))
             return True
         await self._engine._suspend_engine_gate(submission_id)
@@ -454,4 +470,6 @@ class EngineGate:
                 "pending": item.payload["pending"],
                 "cache_invalidated": True,
                 "expires_at": record.expires_at,
+                "usage_complete": True,
+                **_empty_usage_metadata(),
             })))

@@ -122,6 +122,7 @@ class TerminalTreeSink:
         elapsed = max(0.0, (end - node.started_at).total_seconds())
         tools = ','.join(_safe(name, 24) for name in node.active_tools[:8]) or '-'
         usage = '' if node.usage_complete else '（不完整）'
+        missing = f' 缺usage尝试:{node.usage_attempts_missing}' if node.usage_attempts_missing else ''
         context = '-'
         if node.context_tokens is not None:
             label = '实测' if node.context_measured else '估算'
@@ -130,7 +131,7 @@ class TerminalTreeSink:
         return (
             f'{prefix}{_safe(node.skill_id, 40) or "?"} [{_safe(node.execution_id, 32)}] '
             f'{node.state} | 工具:{tools} | {elapsed:.1f}s | '
-            f'自身累计 token 入/出/总:{node.input_tokens}/{node.output_tokens}/{node.total_tokens}{usage}'
+            f'自身累计 token 入/出/总:{node.input_tokens}/{node.output_tokens}/{node.total_tokens}{usage}{missing}'
             f' | 上下文:{context} | 轮:{node.iterations} | 模型:{_safe(node.model, 32) or "?"}'
         )
 

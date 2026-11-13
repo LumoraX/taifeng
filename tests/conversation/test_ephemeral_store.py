@@ -9,6 +9,8 @@ from taifeng.conversation import (
     BatchConflictError,
     EphemeralAtomicBatchMessageStore,
     EphemeralStoreClosedError,
+    EphemeralStoreLimitError,
+    EphemeralStoreLimits,
     MessageStore,
     assistant_message,
     user_message,
@@ -103,3 +105,73 @@ async def test_thread_listing_and_resume_are_instance_local() -> None:
     assert page[0].item_count == 1
     assert await store.select_resume_path("a") == first
     assert await store.select_resume_path("missing") is None
+
+
+@pytest.mark.asyncio
+async def test_resource_limits_reject_thread_and_item_growth() -> None:
+    """线程数与单线程消息数超限时，旧状态保持不变。"""
+    store = EphemeralAtomicBatchMessageStore(
+        limits=EphemeralStoreLimits(max_threads=1, max_items_per_thread=1)
+    )
+    first = await store.create_thread()
+    with pytest.raises(EphemeralStoreLimitError, match="max_threads"):
+        await store.create_thread()
+    await store.append(user_message("one", thread_id=first))
+    with pytest.raises(EphemeralStoreLimitError, match="max_items_per_thread"):
+        await store.append(user_message("two", thread_id=first))
+    assert [item.payload["text"] for item in await _items(store, first)] == ["one"]
+
+
+@pytest.mark.asyncio
+async def test_resource_limit_rejects_bytes_before_atomic_commit() -> None:
+    """字节上限在 batch 写入前校验，不能留下半批消息。"""
+    store = EphemeralAtomicBatchMessageStore(
+        limits=EphemeralStoreLimits(max_total_bytes=1)
+    )
+    thread_id = await store.create_thread()
+    items = [user_message("payload", thread_id=thread_id)]
+    with pytest.raises(EphemeralStoreLimitError, match="max_total_bytes"):
+        await store.append_atomic_batch(items, batch_id="too-large")
+    assert await _items(store, thread_id) == []
+
+
+@pytest.mark.asyncio
+async def test_close_resets_resource_usage() -> None:
+    """close 清空资源计数，实例关闭后不保留容量状态。"""
+    store = EphemeralAtomicBatchMessageStore()
+    thread_id = await store.create_thread()
+    await store.append(user_message("payload", thread_id=thread_id))
+    assert store.usage().total_items == 1
+    await store.close()
+    assert store.usage().total_items == 0
+
+
+@pytest.mark.asyncio
+async def test_atomic_retry_is_idempotent_even_when_capacity_is_full() -> None:
+    """同 batch 重试先返回幂等确认，不被当前容量拒绝遮蔽。"""
+    store = EphemeralAtomicBatchMessageStore(
+        limits=EphemeralStoreLimits(max_items_per_thread=1, max_total_items=1)
+    )
+    thread_id = await store.create_thread()
+    item = user_message("one", thread_id=thread_id)
+    first = await store.append_atomic_batch([item], batch_id="full")
+    retry = await store.append_atomic_batch([item], batch_id="full")
+    assert first.item_ids == retry.item_ids
+    assert retry.already_committed
+
+
+@pytest.mark.asyncio
+async def test_batch_limits_are_checked_across_threads() -> None:
+    """普通 batch 的实例总上限覆盖跨 thread 的聚合增量。"""
+    store = EphemeralAtomicBatchMessageStore(
+        limits=EphemeralStoreLimits(max_total_items=1)
+    )
+    first = await store.create_thread()
+    second = await store.create_thread()
+    with pytest.raises(EphemeralStoreLimitError, match="max_total_items"):
+        await store.append_batch([
+            user_message("a", thread_id=first),
+            user_message("b", thread_id=second),
+        ])
+    assert await _items(store, first) == []
+    assert await _items(store, second) == []

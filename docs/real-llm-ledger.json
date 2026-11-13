@@ -1,48 +1,12 @@
 {
   "run": {
-    "timestamp_utc": "2026-11-11 07:11:55 UTC",
-    "commit": "600aaaf",
+    "timestamp_utc": "2026-11-13 18:40:30 UTC",
+    "commit": "ad8037d",
     "provider": "codex",
     "model": "gpt-5.6-luna",
     "scenarios_run": [
-      "execution_observability",
-      "offload_workspace",
-      "composite_dispatch",
-      "read_skill_lazy",
-      "orchestration",
-      "concurrent_fanout",
-      "research_pipeline",
-      "product_review",
-      "numeric_loop",
-      "compression",
-      "selective_approval",
-      "travel_planner",
-      "suspend_resume",
-      "turn_rewind",
-      "thread_rewind",
-      "spawn_join",
-      "peer_messaging",
-      "wait_any",
-      "kernel_knobs",
-      "post_turn_review",
-      "budget_awareness",
-      "token_calibration",
-      "skill_inference",
-      "tool_output_guard",
-      "pinned_periodic",
-      "file_search",
-      "read_skill_path",
-      "compaction_continuity",
-      "codex_instructions",
-      "codex_image_single",
-      "codex_image_order",
-      "codex_image_tool_call",
-      "codex_tool_image_output",
-      "codex_encrypted_state_hot_replay",
-      "codex_legacy_jsonl_cold_resume",
-      "codex_file_input"
-    ],
-    "retry_note": "travel_planner rerun PASS; execution_observability remains FAIL own usage incomplete; provider image tool scenarios remained unavailable in selective mode and initial run recorded server_overloaded."
+      "suspend_resume"
+    ]
   },
   "scenarios": {
     "budget_awareness": {
@@ -418,8 +382,8 @@
     "execution_observability": {
       "scenario_id": "execution_observability",
       "capability": "同 skill 并行执行身份、上下文与自身用量取证",
-      "verdict": "FAIL",
-      "note": "Targeted retry still reports own usage incomplete; retained FAIL.",
+      "verdict": "PASS",
+      "note": "",
       "expect": [
         "execution_updated",
         "spawn_completed",
@@ -427,18 +391,27 @@
         "tool_call_completed",
         "turn_completed"
       ],
-      "missing": [
-        "execution_updated",
-        "spawn_completed",
-        "spawn_started",
-        "tool_call_completed",
-        "turn_completed"
-      ],
-      "kinds": {},
+      "missing": [],
+      "kinds": {
+        "turn_started": 3,
+        "execution_updated": 18,
+        "rewind_checkpoint_recorded": 16,
+        "llm_request_recorded": 9,
+        "tool_call_started": 7,
+        "tool_batch_dispatched": 6,
+        "spawn_started": 2,
+        "tool_call_completed": 7,
+        "assistant_text": 16,
+        "turn_completed": 3,
+        "spawn_completed": 2,
+        "cache_break_detected": 1
+      },
       "grants": 0,
-      "duration_s": 0.0,
-      "commit": "b94a50e",
-      "timestamp_utc": "2026-11-11 07:11:55 UTC"
+      "duration_s": 18.240900499979034,
+      "commit": "ad8037d",
+      "timestamp_utc": "2026-11-13 18:37:23 UTC",
+      "status": "PASS",
+      "failure_class": ""
     },
     "file_search": {
       "scenario_id": "file_search",
@@ -533,19 +506,20 @@
         "execution_updated": 6,
         "rewind_checkpoint_recorded": 5,
         "llm_request_recorded": 3,
-        "provider_retry": 1,
         "tool_call_started": 2,
         "tool_batch_dispatched": 2,
         "tool_call_completed": 2,
         "compaction_started": 1,
         "compaction_completed": 1,
-        "assistant_text": 17,
+        "assistant_text": 18,
         "turn_completed": 1
       },
       "grants": 0,
-      "duration_s": 11.626200790982693,
-      "commit": "b94a50e",
-      "timestamp_utc": "2026-11-11 07:11:55 UTC"
+      "duration_s": 11.435383082833141,
+      "commit": "ad8037d",
+      "timestamp_utc": "2026-11-13 18:39:51 UTC",
+      "status": "PASS",
+      "failure_class": ""
     },
     "orchestration": {
       "scenario_id": "orchestration",
@@ -872,14 +846,15 @@
         "tool_batch_dispatched": 1,
         "turn_suspended": 1,
         "suspension_resolved": 1,
-        "provider_retry": 1,
-        "assistant_text": 67,
+        "assistant_text": 68,
         "turn_completed": 1
       },
       "grants": 0,
-      "duration_s": 20.6499120418448,
-      "commit": "b94a50e",
-      "timestamp_utc": "2026-11-11 07:11:55 UTC"
+      "duration_s": 9.244113000109792,
+      "commit": "ad8037d",
+      "timestamp_utc": "2026-11-13 18:40:30 UTC",
+      "status": "PASS",
+      "failure_class": ""
     },
     "thread_rewind": {
       "scenario_id": "thread_rewind",

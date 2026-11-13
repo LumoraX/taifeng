@@ -37,6 +37,9 @@ class ExecutionSnapshot:
     output_tokens: int
     total_tokens: int
     usage_complete: bool
+    usage_attempts_started: int
+    usage_attempts_metered: int
+    usage_attempts_missing: int
     context_tokens: int | None
     context_window: int | None
     context_measured: bool
@@ -125,6 +128,7 @@ class ExecutionProjection:
             parent_thread_id=parent.thread_id if parent else None,
             state='queued', active_tools=(), iterations=0, input_tokens=0,
             output_tokens=0, total_tokens=0, usage_complete=False,
+            usage_attempts_started=0, usage_attempts_metered=0, usage_attempts_missing=0,
             context_tokens=None, context_window=None, context_measured=False,
             started_at=ev.timestamp, updated_at=ev.timestamp, finished_at=None,
         ))
@@ -171,8 +175,14 @@ class ExecutionProjection:
         elif 'usage_complete' in data:
             node.current_complete = False
         total = tuple(a + b for a, b in zip(node.base, node.current, strict=True))
+        started = _count(data.get('usage_attempts_started'))
+        metered = _count(data.get('usage_attempts_metered'))
+        missing = _count(data.get('usage_attempts_missing'))
         node.view = replace(node.view, input_tokens=total[0], output_tokens=total[1],
-            total_tokens=total[2], usage_complete=node.base_complete and node.current_complete)
+            total_tokens=total[2], usage_complete=node.base_complete and node.current_complete,
+            usage_attempts_started=started if started is not None else node.view.usage_attempts_started,
+            usage_attempts_metered=metered if metered is not None else node.view.usage_attempts_metered,
+            usage_attempts_missing=missing if missing is not None else node.view.usage_attempts_missing)
 
     def _apply(self, node: _Node, ev: EventMsg) -> None:
         """按生命周期与工具事实更新阶段，工具失败本身不结束执行。"""

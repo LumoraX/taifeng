@@ -154,3 +154,35 @@ async def test_incomplete_usage_keeps_context_measurement_honest(
     assert data["context_measured"] is measured
     assert data["context_tokens"] == (42 if measured else 73)
     assert data["usage_complete"] is False
+
+
+async def test_usage_completeness_reports_attempt_and_missing_counts() -> None:
+    """执行观测报告 provider 尝试、计量和缺失用量次数。"""
+    from types import SimpleNamespace
+
+    from taifeng.llm.types import TokenUsage
+    from taifeng.loop.execution_identity import ExecutionIdentity
+    from taifeng.loop.execution_observer import emit_sample_observation
+
+    emitted = []
+
+    async def emit(event: Any) -> None:
+        """捕获执行观测事件。"""
+        emitted.append(event)
+
+    owner = SimpleNamespace(
+        _execution_identity=ExecutionIdentity(
+            execution_id="thread", thread_id="thread", attempt_id="attempt", skill_id="worker"),
+        _execution_usage_complete=False,
+        _sample=SimpleNamespace(samples_started=3, samples_metered=2),
+        _history_token_estimate=lambda: 73,
+        effective_budget=SimpleNamespace(context_window=8192),
+        total_usage=TokenUsage(input_tokens=4, output_tokens=2, total_tokens=6),
+        submission_id="submission", emit=emit,
+    )
+    await emit_sample_observation(owner, 2, usage={"input_tokens": 4, "output_tokens": 2})
+    data = emitted[-1].msg.data
+    assert data["usage_complete"] is False
+    assert data["usage_attempts_started"] == 3
+    assert data["usage_attempts_metered"] == 2
+    assert data["usage_attempts_missing"] == 1

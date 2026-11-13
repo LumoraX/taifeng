@@ -207,4 +207,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 
 - [ADR 0133：发行线恢复契约的合流](decisions/0133-release-resume-contract-reconciliation.md)：保留已发布的核销拒绝与停止生成边界，兼容本地提交终态。
 - [ADR 0140：显式短命消息存储](decisions/0140-ephemeral-message-store.md)：为受限 Responses 执行提供进程内原子批次；关闭即清空，不承诺恢复或审计。
+- [ADR 0141：短命存储资源治理与观测状态分类](decisions/0141-observability-resource-governance.md)：短命存储默认上限、真实回归状态分类与执行用量完整性计数。
 - [远端 ADR 0117：部分核销防重与保留挂起的停止生成](decisions/0117-resume-settlement-and-generation-stop.md)：历史并行编号，集成关系见 ADR 0133。

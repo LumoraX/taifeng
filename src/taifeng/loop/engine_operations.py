@@ -120,6 +120,10 @@ class EngineOperations:
                         "request_id": None,
                         "iterations": 0,
                         "is_root": True,
+                        "usage_complete": True,
+                        "usage_attempts_started": 0,
+                        "usage_attempts_metered": 0,
+                        "usage_attempts_missing": 0,
                     }
                 ),
             )

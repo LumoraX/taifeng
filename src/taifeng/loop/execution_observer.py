@@ -88,11 +88,13 @@ def observe_run(
 
 async def emit_turn_event(owner: TurnRunner, msg: Any) -> None:
     """保留终态计量语义，并在统一出口显式附带所属 runner 身份。"""
+    usage_attempts = _usage_attempts(owner)
     if msg.kind in {'turn_completed', 'turn_failed', 'turn_suspended'}:
         msg.data['usage_complete'] = (
             owner._sample.samples_started == owner._sample.samples_metered
             and owner._execution_usage_complete
         )
+        msg.data.update(usage_attempts)
     try:
         await owner.emit(EventMsg(
             submission_id=owner.submission_id, msg=msg, execution=owner._execution_identity,
@@ -104,6 +106,17 @@ async def emit_turn_event(owner: TurnRunner, msg: Any) -> None:
 def _valid_count(value: Any) -> bool:
     """只有 provider 明确提供的非负整数才是有效 token 计数。"""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _usage_attempts(owner: TurnRunner) -> dict[str, int]:
+    """返回采样尝试、收到 usage 和缺失 usage 的稳定计数。"""
+    started = max(0, int(getattr(owner._sample, "samples_started", 0)))
+    metered = max(0, int(getattr(owner._sample, "samples_metered", 0)))
+    return {
+        "usage_attempts_started": started,
+        "usage_attempts_metered": min(started, metered),
+        "usage_attempts_missing": max(0, started - metered),
+    }
 
 
 async def emit_sample_observation(
@@ -120,11 +133,13 @@ async def emit_sample_observation(
         tokens = int(usage['input_tokens']) if measured and usage is not None else owner._history_token_estimate()
         counts = owner.total_usage.model_dump(mode='json')
         counts['total_tokens'] = counts.get('total_tokens', 0) or counts['input_tokens'] + counts['output_tokens']
-        await emit_turn_event(owner, ExecutionUpdated(data={
+        observation = {
             'phase': phase, 'iteration': iteration, 'usage': counts,
             'usage_complete': owner._execution_usage_complete and owner._sample.samples_started == owner._sample.samples_metered,
             'context_tokens': tokens, 'context_window': owner.effective_budget.context_window,
             'context_measured': measured,
-        }))
+            **_usage_attempts(owner),
+        }
+        await emit_turn_event(owner, ExecutionUpdated(data=observation))
     except Exception:
         logger.exception('execution observation failed')

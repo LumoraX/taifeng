@@ -23,6 +23,30 @@ DOCS_DIR = _REPO_ROOT / "docs"
 LEDGER_JSON = DOCS_DIR / "real-llm-ledger.json"
 LEDGER_MD = DOCS_DIR / "real-llm-ledger.md"
 
+_TRANSIENT_MARKERS = (
+    "server_is_overloaded", "server overloaded", "temporarily unavailable",
+    "rate_limit", "rate limit", "timeout", "timed out", "connection reset",
+    "connection refused", "502", "503", "504",
+)
+_TRANSIENT_FAILURE_CLASSES = frozenset({
+    "provider_rate_limit", "provider_transport", "provider_internal",
+    "provider_unreliable_finish",
+})
+
+
+def classify_status(verdict: str, note: str, failure_class: str | None = None) -> str:
+    """把旧 verdict 与错误摘要归一为可行动的回归状态。"""
+    if verdict == "PASS":
+        return "PASS"
+    if verdict == "PART":
+        return "PARTIAL"
+    if failure_class in _TRANSIENT_FAILURE_CLASSES:
+        return "TRANSIENT_FAILURE"
+    lowered = note.lower()
+    if any(marker in lowered for marker in _TRANSIENT_MARKERS):
+        return "TRANSIENT_FAILURE"
+    return "CODE_FAILURE"
+
 
 def git_short_commit() -> str:
     """当前 HEAD 短 hash；取不到（非 git 环境）返回 'unknown'。"""
@@ -54,6 +78,8 @@ class ScenarioRecord:
     duration_s: float          # 场景 wall-clock
     commit: str                # 本条结果产生时的 HEAD
     timestamp_utc: str         # 本条结果产生时间
+    status: str = ""           # PASS / PARTIAL / TRANSIENT_FAILURE / CODE_FAILURE
+    failure_class: str = ""    # provider/engine 的稳定错误分类（可为空）
 
     @property
     def passed(self) -> bool:
@@ -111,7 +137,11 @@ class LedgerWriter:
 
         merged = dict(old_scenarios)
         for rec in records:
-            merged[rec.scenario_id] = asdict(rec)
+            record = asdict(rec)
+            record["status"] = rec.status or classify_status(
+                rec.verdict, rec.note, rec.failure_class or None
+            )
+            merged[rec.scenario_id] = record
         if any(rec.scenario_id.startswith("openai_") and "_image_" in rec.scenario_id
                for rec in records):
             not_executed.pop("openai_image_input", None)
@@ -201,14 +231,20 @@ def _render_md(data: dict) -> str:
         "| 场景 | 能力 | 结果 | 日期 @ commit | 耗时 | 备注 |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
-    icon = {"PASS": "✅", "PART": "⚠️", "FAIL": "❌"}
+    icon = {
+        "PASS": "✅", "PARTIAL": "⚠️", "TRANSIENT_FAILURE": "⚠️",
+        "CODE_FAILURE": "❌", "PART": "⚠️", "FAIL": "❌",
+    }
     for sid, sc in data["scenarios"].items():
         stale = "（stale）" if sc["commit"] != run["commit"] else ""
         note = sc["note"] or ""
+        status = sc.get("status") or classify_status(
+            sc.get("verdict", "FAIL"), note, sc.get("failure_class")
+        )
         if sc["missing"]:
             note = (note + " " if note else "") + f"缺事件: {sc['missing']}"
         lines.append(
-            f"| `{sid}` | {sc['capability']} | {icon.get(sc['verdict'], '?')}{sc['verdict']} "
+            f"| `{sid}` | {sc['capability']} | {icon.get(status, '?')}{status} "
             f"| {sc['timestamp_utc'][:10]} @ `{sc['commit']}`{stale} "
             f"| {sc['duration_s']:.0f}s | {note} |"
         )
@@ -234,8 +270,8 @@ def _render_md(data: dict) -> str:
         "",
         "## 判定口径",
         "",
-        "- **PASS** = 终态完成 ∧ 期望关键事件全命中；**PART** = 完成但缺关键事件；"
-        "**FAIL** = turn_failed / 未完成 / 场景异常。",
+        "- **PASS** = 终态完成 ∧ 期望关键事件全命中；**PARTIAL** = 完成但缺关键事件；"
+        "**TRANSIENT_FAILURE** = provider / 网络 / 服务临时故障；**CODE_FAILURE** = 场景或内核失败。",
         "- LLM 不配合（不调对应工具）如实记 FAIL/PART，不自动重试美化。",
         "- **stale** = 该场景结果产生于更早的 commit（本次未复跑）。",
         "",

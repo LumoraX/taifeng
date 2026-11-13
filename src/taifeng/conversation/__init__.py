@@ -39,6 +39,9 @@ from taifeng.conversation.store import (
     EphemeralAtomicBatchMessageStore,
     EphemeralMessageStore,
     EphemeralStoreClosedError,
+    EphemeralStoreLimitError,
+    EphemeralStoreLimits,
+    EphemeralStoreUsage,
     MessageStore,
 )
 from taifeng.conversation.transcript import (
@@ -70,6 +73,9 @@ __all__ = [
     "EphemeralAtomicBatchMessageStore",
     "EphemeralMessageStore",
     "EphemeralStoreClosedError",
+    "EphemeralStoreLimitError",
+    "EphemeralStoreLimits",
+    "EphemeralStoreUsage",
     "ThreadMetadata",
     "ThreadNotFoundError",
     "ThreadPage",

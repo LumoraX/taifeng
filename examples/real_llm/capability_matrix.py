@@ -39,7 +39,7 @@ from _drivers import DRIVERS  # noqa: E402
 from _drivers_extra import DRIVERS_EXTRA  # noqa: E402
 from _execution_tree import DRIVER as EXECUTION_DRIVER  # noqa: E402
 from _execution_tree import setup_execution_tree  # noqa: E402
-from _ledger import LedgerWriter, R3Audit, ScenarioRecord  # noqa: E402
+from _ledger import LedgerWriter, R3Audit, ScenarioRecord, classify_status  # noqa: E402
 from _offload_workspace import DRIVER, setup_offload_workspace  # noqa: E402
 from _provider_bootstrap import (  # noqa: E402
     ProviderBootstrapError,
@@ -340,6 +340,7 @@ class Result:
     completed: bool = False
     failed: bool = False
     error: str = ""
+    failure_class: str = ""
     kinds: Counter = field(default_factory=Counter)
     grants: int = 0
     duration_s: float = 0.0
@@ -394,6 +395,7 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
                 res.envelopes.append(ev)
                 if ev.msg.kind == "turn_failed" and not res.error:
                     res.error = str(ev.msg.data.get("error", ""))[:140]
+                    res.failure_class = str(ev.msg.data.get("failure_class") or "")
 
         collector = asyncio.create_task(_collect_all())
         try:
@@ -424,6 +426,7 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
                 res.kinds[ev.msg.kind] += 1
                 if ev.msg.kind == "turn_failed" and not res.error:
                     res.error = str(ev.msg.data.get("error", ""))[:140]
+                    res.failure_class = str(ev.msg.data.get("failure_class") or "")
         await asyncio.wait_for(_consume(), timeout=240.0)
         res.completed = res.kinds.get("turn_completed", 0) > 0
         res.failed = res.kinds.get("turn_failed", 0) > 0
@@ -609,6 +612,8 @@ async def main() -> None:
                 kinds=dict(r.kinds), grants=r.grants,
                 duration_s=r.duration_s,
                 commit=run_commit, timestamp_utc=now_utc,
+                status=classify_status(verdict, note, r.failure_class or None),
+                failure_class=r.failure_class,
             ))
         for result in image_results:
             ledger_records.append(ScenarioRecord(
@@ -623,6 +628,9 @@ async def main() -> None:
                 duration_s=result.duration_s,
                 commit=run_commit,
                 timestamp_utc=now_utc,
+                status=classify_status(
+                    result.verdict, result.note, getattr(result, "failure_class", None)
+                ),
             ))
         jp, mp = LedgerWriter().merge_and_write(
             provider=meta["provider"], model=meta["model"],

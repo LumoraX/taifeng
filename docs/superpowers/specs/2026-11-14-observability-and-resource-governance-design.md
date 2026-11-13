@@ -8,17 +8,17 @@
 
 ### 短命存储
 
-`EphemeralAtomicBatchMessageStore` 增加冻结的 `EphemeralStoreLimits` 配置，默认限制线程数、单线程消息数、实例总消息数和实例总字节数。存储维护线程级与实例级计数，在任何写入实际改变内存前完成容量检查；超限抛出带 `resource`、`limit`、`observed` 和 `requested` 的 `EphemeralStoreLimitError`。`close()` 同时清零计数。
+`EphemeralAtomicBatchMessageStore` 增加冻结的 `EphemeralStoreLimits` 配置，默认限制为 `max_threads=256`、`max_items_per_thread=10000`、`max_total_items=100000`、`max_total_bytes=268435456`（字节）。存储维护线程级与实例级计数，在任何写入实际改变内存前完成容量检查；超限抛出带 `resource`、`limit`、`observed` 和 `requested` 的 `EphemeralStoreLimitError`，其中实例级 `observed` 是当前总量、`requested` 是本次增量。相同 `batch_id` 的幂等/冲突判定先于容量检查。`close()` 同时清零计数。
 
 消息大小按 canonical `model_dump_json()` 的 UTF-8 字节数计算，限制只作为内存保护口径，不改变消息内容。atomic batch 在提交前一次性校验，冲突和超限都不产生部分可见结果。默认上限足够覆盖普通短命执行，宿主可通过构造参数显式收紧。
 
 ### 真实回归台账
 
-保留现有 `verdict=PASS|PART|FAIL`，新增可选 `status` 字段。写入时根据终态、缺事件和错误文本分类：`PASS`、`PARTIAL`、`TRANSIENT_FAILURE`、`CODE_FAILURE`。未执行验证继续写入 `not_executed`，状态为 `NOT_EXECUTED`。网络限流、服务过载、连接失败和超时等只归为瞬态失败；断言缺失、协议错误和内核异常归为代码失败。旧台账没有 `status` 时由 `verdict` 推导，确保可读和可重写。
+保留现有 `verdict=PASS|PART|FAIL`，新增可选 `status` 与 `failure_class` 字段。写入时根据终态、缺事件、稳定 `failure_class` 和错误摘要分类：`PASS`、`PARTIAL`、`TRANSIENT_FAILURE`、`CODE_FAILURE`。未执行验证继续写入 `not_executed`，状态为 `NOT_EXECUTED`。`provider_rate_limit`、`provider_transport`、`provider_internal`、`provider_unreliable_finish`、服务过载和网络超时归为瞬态失败；断言缺失、协议错误和内核异常归为代码失败。旧台账没有 `status` 时先读取 `failure_class`，再读取 legacy note，最后才保守归为代码失败。
 
 ### 执行用量完整性
 
-`usage_complete` 继续采用严格语义：每个采样尝试都必须有有效 provider input/output usage 才为 true。执行更新和终态事件新增 `usage_attempts_started`、`usage_attempts_metered`、`usage_attempts_missing`，使 provider 重试、取消和缺 usage 能被区分。执行树投影仍只使用布尔完整度决定是否完整，不把估算值当作实测值。
+`usage_complete` 继续采用严格语义：每个采样尝试都必须有有效 provider input/output usage 才为 true；只有有效 input/output 才计入 `metered`。执行更新和终态事件新增 `usage_attempts_started`、`usage_attempts_metered`、`usage_attempts_missing`，满足 `started >= metered` 且 `missing = started - metered`，使 provider 重试、取消和缺 usage 能被区分。没有 TurnRunner 的 gate 终态使用 `0/0/0 + usage_complete=true` 表示没有开始采样。执行树投影仍只使用布尔完整度决定是否完整，不把估算值当作实测值。
 
 ## 错误与兼容
 

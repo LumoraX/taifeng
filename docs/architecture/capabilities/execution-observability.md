@@ -9,7 +9,8 @@
 - `ExecutionIdentity`：不可变 Pydantic 模型。字段 `execution_id`、`attempt_id`、`thread_id`、`skill_id`、`model`，以及可空 `parent_execution_id` / `parent_thread_id`。
 - v1 `execution_id = thread_id`，表示逻辑执行节点；每次 `TurnRunner.run()` 新建唯一 `attempt_id`。同 Skill 的并行调用创建不同 thread，因而不会合并；同 thread 的新 turn / Resume 更新同一节点而不伪造新 agent。
 - `EventMsg.execution: ExecutionIdentity | None = None` 为可选增量字段。旧事件缺省 None；`submission_id`、seq 和订阅过滤保持原语义。身份不进入 LLM prompt 或 Journal 真相。
-- `execution_updated` 是新增元数据事件，data 包含 `phase`（`model` / `running` / 异常退出时 `failed` / `cancelled`）、`iteration`、当前 attempt 自身累计 `usage`、`usage_complete`、`context_tokens`、`context_window`、`context_measured`。不包含正文、工具参数、推理内容或凭据。
+- `execution_updated` 是新增元数据事件，data 包含 `phase`（`model` / `running` / 异常退出时 `failed` / `cancelled`）、`iteration`、当前 attempt 自身累计 `usage`、`usage_complete`、`usage_attempts_started`、`usage_attempts_metered`、`usage_attempts_missing`、`context_tokens`、`context_window`、`context_measured`。不包含正文、工具参数、推理内容或凭据。
+- `turn_completed`、`turn_failed`、`turn_suspended` 也必须包含三项 `usage_attempts_*` 和 `usage_complete`。没有 TurnRunner 的 engine gate 终态使用 `0/0/0` 与 `usage_complete=true`，表示没有开始采样；有 runner 的终态沿用严格采样事实。
 - `ExecutionSnapshot` 为冻结 dataclass；至少含上述身份字段、`state`、`active_tools: tuple[str,...]`、`iterations`、`input_tokens` / `output_tokens` / `total_tokens`、`usage_complete`、上下文三字段、`started_at` / `updated_at` / `finished_at`（datetime）。状态为 `queued/running/model/tool/waiting_children/waiting_input/completed/failed/cancelled`。
 - `ExecutionProjection(max_nodes=2048)`：单 engine 全量流的纯投影；`handle(EventMsg)` 同步应用、`snapshot() -> tuple[ExecutionSnapshot,...]` 返回不可变快照；`incomplete: bool` 标记跳号、迟到或容量截断。`max_nodes` 必须为正。
 - `TerminalTreeSink(out=None, interactive=None, max_rows=40, projection=None)`：实现 TelemetrySink；`handle(ev)` 更新投影并显示，`attach(engine)` 订阅完整流；`render() -> str` 返回终端快照供宿主复用和测试。`attach_terminal_tree_sink(engine, **kwargs)` 返回后台 task。默认只在 TTY 重绘；非 TTY 保持追加可读输出。入口经 experimental 导出。
@@ -39,6 +40,9 @@
 ### Requirement: 用量不能重复累计或冒充进度
 - WHEN 单次采样完成或 turn 收尾，THEN SHALL 使用本 attempt 自身 usage 绝对值更新，重复快照不得重复记账；不得将父 subtree_usage 与子 usage 再相加。
 - WHEN usage 不完整，THEN SHALL 保留已知用量并标明不完整，不用零值伪装未知消耗。
+- WHEN provider retry、取消或终态缺少 usage，THEN SHALL 通过 `usage_attempts_*` 报告尝试、已计量和缺失次数；`usage_complete` 仍为 false。
+- WHEN usage fields are present, `usage_attempts_started >= usage_attempts_metered` and
+  `usage_attempts_missing = usage_attempts_started - usage_attempts_metered` SHALL hold.
 - WHEN provider completed 缺少有效 input_tokens，THEN SHALL 保持 context_measured=False，不能把估算值标成实测。
 - WHEN 显示上下文，THEN SHALL 区分测量值和估算值；累计 token 不作为上下文占用或任务完成百分比。
 - WHEN 显示子执行完成数，THEN SHALL 明确只统计已观察节点，不冒充未知任务总数。

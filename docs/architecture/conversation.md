@@ -221,7 +221,8 @@ transcript、不建 SQLite 索引（`thread_directory` 不给时是 `NullThreadD
 它同时满足 `MessageStore` 与 `AtomicBatchMessageStore`，在当前实例内提供整批可见、幂等重试和
 冲突拒绝；`close()` 清空全部状态，崩溃、重启和关闭后均不承诺恢复或审计。默认仍使用
 `JsonlMessageStore`，审计模式不接受短命实现；宿主必须显式选择该类并把执行限制在允许的
-无外部副作用范围。
+无外部副作用范围。短命实例默认受 `EphemeralStoreLimits` 约束，超限写入显式失败并可通过
+`usage()` 读取占用；它不会静默驱逐旧消息。
 
 ## reconstruct_logical_history（冷加载逻辑 history 重建）
 

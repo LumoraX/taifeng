@@ -194,3 +194,17 @@ def test_parent_registry_is_bounded_without_reparenting_unknown_threads() -> Non
     assert len(engine._execution_parents) <= 2048
     observer.remember_execution_parent(engine, '0', 'other')
     assert engine._execution_parents['0'] == 'root'
+
+
+@pytest.mark.parametrize(("usage", "complete"), [
+    ({"input_tokens": 1, "output_tokens": 0}, True),
+    ({"input_tokens": 1}, False),
+    ({"input_tokens": True, "output_tokens": 1}, False),
+])
+def test_only_complete_provider_usage_is_metered(
+    usage: dict[str, object], complete: bool,
+) -> None:
+    """部分 usage 保留已知值，但不能增加已计量采样数。"""
+    from taifeng.loop.turn_sample import _usage_is_complete
+
+    assert _usage_is_complete(usage) is complete

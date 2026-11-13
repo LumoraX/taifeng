@@ -90,6 +90,20 @@ def test_missing_usage_is_visible_and_preserves_known_tokens() -> None:
     assert snap.finished_at is not None
 
 
+def test_usage_attempt_diagnostics_survive_projection() -> None:
+    """投影与终端消费 provider 缺 usage 的尝试计数。"""
+    p = ExecutionProjection()
+    p.handle(event('turn_started'))
+    p.handle(event('execution_updated', 1, phase='model', iteration=1,
+                   usage={'input_tokens': 4, 'output_tokens': 2, 'total_tokens': 6},
+                   usage_complete=False, usage_attempts_started=3,
+                   usage_attempts_metered=2, usage_attempts_missing=1))
+    snap = p.snapshot()[0]
+    assert snap.usage_attempts_started == 3
+    assert snap.usage_attempts_metered == 2
+    assert snap.usage_attempts_missing == 1
+
+
 def test_spawn_handle_targets_child_even_after_parent_attempt_changes() -> None:
     """queued 失败与挂起后取消均收敛子节点。"""
     p = ExecutionProjection()
