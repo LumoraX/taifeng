@@ -256,6 +256,15 @@ async def test_three_level_dispatch_emits_correct_stack(
     # 深度递增（叶子比中间深 1）
     assert d1["depth"] > d0["depth"]
 
+    # LLM 自主 call_skill 也必须留下可投影的计划事实；声明式编排之外，
+    # 这里的 mode 用于区分模型临时决定的观察计划。
+    planned = [
+        ev for ev in events if ev.msg.kind == "orchestration_plan_resolved"
+        and ev.msg.data.get("mode") == "implicit_llm"
+    ]
+    assert [event.msg.data["skill_id"] for event in planned] == ["middle", "leaf"]
+    assert all(event.msg.data["call_id"] for event in planned)
+
     # 同样应有 2 次 SkillReturned，与派发对称
     returned = [ev for ev in events if ev.msg.kind == "skill_returned"]
     assert len(returned) == 2, _kinds(events)
