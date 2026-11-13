@@ -184,6 +184,7 @@ from taifeng.telemetry.execution_projection import (
     ExecutionProjection,
     ExecutionSnapshot,
     OrchestrationGroupSnapshot,
+    OrchestrationPlanLimits,
     OrchestrationPlanSnapshot,
 )
 from taifeng.telemetry.terminal_tree import TerminalTreeSink, attach_terminal_tree_sink
@@ -202,6 +203,7 @@ __all__ = [
     "ExecutionProjection",
     "ExecutionSnapshot",
     "OrchestrationGroupSnapshot",
+    "OrchestrationPlanLimits",
     "OrchestrationPlanSnapshot",
     "TerminalTreeSink",
     "attach_terminal_tree_sink",
