@@ -8,7 +8,10 @@ import pytest
 
 from taifeng.loop.event import EventMsg
 from taifeng.loop.execution_identity import ExecutionIdentity
-from taifeng.telemetry.execution_projection import ExecutionProjection
+from taifeng.telemetry.execution_projection import (
+    ExecutionProjection,
+    OrchestrationPlanLimits,
+)
 
 
 def event(kind: str, seq: int = 0, *, node: str = 'root', attempt: str = 'a',
@@ -212,6 +215,47 @@ def test_malformed_orchestration_plan_is_incomplete() -> None:
     ))
     assert p.plan_snapshot() == ()
     assert p.incomplete
+
+
+@pytest.mark.parametrize(
+    ('limits', 'groups'),
+    [
+        (OrchestrationPlanLimits(max_groups=1), [
+            {'type': 'parallel', 'skills': ['a']},
+            {'type': 'serial', 'skills': ['b']},
+        ]),
+        (OrchestrationPlanLimits(max_skills_per_group=1), [
+            {'type': 'parallel', 'skills': ['a', 'b']},
+        ]),
+        (OrchestrationPlanLimits(max_skill_id_length=3), [
+            {'type': 'parallel', 'skills': ['long']},
+        ]),
+        (OrchestrationPlanLimits(max_condition_length=3), [
+            {'type': 'when', 'condition': 'long'},
+        ]),
+        (OrchestrationPlanLimits(max_plan_bytes=32), [
+            {'type': 'parallel', 'skills': ['long-skill-name']},
+        ]),
+    ],
+)
+def test_plan_shape_limits_mark_projection_incomplete(
+    limits: OrchestrationPlanLimits,
+    groups: list[dict[str, object]],
+) -> None:
+    """计划各层超限时拒绝摘要，不能把超大输入保留在内存。"""
+    p = ExecutionProjection(plan_limits=limits)
+    p.handle(event('turn_started'))
+    p.handle(event('orchestration_plan_resolved', 1, skill_id='coordinator', groups=groups))
+    assert p.plan_snapshot() == ()
+    assert p.incomplete
+
+
+def test_plan_limits_validate_positive_integer_values() -> None:
+    """边界配置拒绝布尔、零和负数。"""
+    with pytest.raises(ValueError):
+        OrchestrationPlanLimits(max_groups=0)
+    with pytest.raises(ValueError):
+        OrchestrationPlanLimits(max_skills_per_group=True)  # type: ignore[arg-type]
 
 
 def test_plan_history_capacity_is_bounded_and_visible() -> None:

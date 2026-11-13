@@ -1,6 +1,7 @@
 """执行事件的有界纯状态投影；不读取正文，不推测未知调用关系。"""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -18,6 +19,30 @@ PlanGroupKind = Literal['parallel', 'serial', 'when']
 _TERMINAL = frozenset({'completed', 'failed', 'cancelled'})
 _WAIT_TOOLS = frozenset({'call_skill', 'await_skills', 'wait_peer', 'wait_any'})
 _TOKEN_KEYS = ('input_tokens', 'output_tokens', 'total_tokens')
+
+
+@dataclass(frozen=True)
+class OrchestrationPlanLimits:
+    """动态计划摘要的内存边界。"""
+
+    max_groups: int = 64
+    max_skills_per_group: int = 128
+    max_skill_id_length: int = 256
+    max_condition_length: int = 1024
+    max_plan_bytes: int = 64 * 1024
+
+    def __post_init__(self) -> None:
+        """拒绝无效边界，避免以零值意外放开资源。"""
+        for name in (
+            'max_groups',
+            'max_skills_per_group',
+            'max_skill_id_length',
+            'max_condition_length',
+            'max_plan_bytes',
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f'{name} must be a positive integer')
 
 
 @dataclass(frozen=True)
@@ -99,9 +124,19 @@ def _blocks_progress(node: _Node, kind: str, data: dict[str, Any]) -> bool:
     )
 
 
-def _parse_plan_groups(value: object) -> tuple[OrchestrationGroupSnapshot, ...] | None:
+def _parse_plan_groups(
+    value: object, limits: OrchestrationPlanLimits
+) -> tuple[OrchestrationGroupSnapshot, ...] | None:
     """严格解析可观测计划摘要，损坏时不猜测缺失关系。"""
     if not isinstance(value, list):
+        return None
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    except (TypeError, ValueError):
+        return None
+    if len(encoded.encode('utf-8')) > limits.max_plan_bytes:
+        return None
+    if len(value) > limits.max_groups:
         return None
     groups: list[OrchestrationGroupSnapshot] = []
     for index, raw in enumerate(value):
@@ -111,15 +146,24 @@ def _parse_plan_groups(value: object) -> tuple[OrchestrationGroupSnapshot, ...] 
         if kind in ('parallel', 'serial'):
             skills = raw.get('skills')
             if not isinstance(skills, list) or not all(
-                isinstance(skill, str) and bool(skill) for skill in skills
+                isinstance(skill, str)
+                and bool(skill)
+                and len(skill) <= limits.max_skill_id_length
+                for skill in skills
             ):
+                return None
+            if len(skills) > limits.max_skills_per_group:
                 return None
             groups.append(OrchestrationGroupSnapshot(
                 index=index, kind=kind, skills=tuple(skills),
             ))
         elif kind == 'when':
             condition = raw.get('condition')
-            if not isinstance(condition, str) or not condition:
+            if (
+                not isinstance(condition, str)
+                or not condition
+                or len(condition) > limits.max_condition_length
+            ):
                 return None
             groups.append(OrchestrationGroupSnapshot(
                 index=index, kind=kind, condition=condition,
@@ -132,11 +176,17 @@ def _parse_plan_groups(value: object) -> tuple[OrchestrationGroupSnapshot, ...] 
 class ExecutionProjection:
     """消费单 engine 全量事件，保留执行快照与计划事件轨迹。"""
 
-    def __init__(self, max_nodes: int = 2048) -> None:
+    def __init__(
+        self,
+        max_nodes: int = 2048,
+        *,
+        plan_limits: OrchestrationPlanLimits | None = None,
+    ) -> None:
         """容量必须为正；截断、迟到和序号缺口均公开标记。"""
         if max_nodes <= 0:
             raise ValueError('max_nodes must be positive')
         self.max_nodes = max_nodes
+        self.plan_limits = plan_limits or OrchestrationPlanLimits()
         self.incomplete = False
         self._nodes: dict[str, _Node] = {}
         self._plans: list[OrchestrationPlanSnapshot] = []
@@ -229,8 +279,13 @@ class ExecutionProjection:
         """追加当前 attempt 的计划事件；重规划历史不可覆盖。"""
         data = ev.msg.data
         skill_id = data.get('skill_id')
-        groups = _parse_plan_groups(data.get('groups'))
-        if not isinstance(skill_id, str) or not skill_id or groups is None:
+        groups = _parse_plan_groups(data.get('groups'), self.plan_limits)
+        if (
+            not isinstance(skill_id, str)
+            or not skill_id
+            or len(skill_id) > self.plan_limits.max_skill_id_length
+            or groups is None
+        ):
             self.incomplete = True
             return
         if len(self._plans) >= self.max_nodes:

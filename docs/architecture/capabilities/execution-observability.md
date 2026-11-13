@@ -13,7 +13,7 @@
 - `turn_completed`、`turn_failed`、`turn_suspended` 也必须包含三项 `usage_attempts_*` 和 `usage_complete`。没有 TurnRunner 的 engine gate 终态使用 `0/0/0` 与 `usage_complete=true`，表示没有开始采样；有 runner 的终态沿用严格采样事实。
 - `ExecutionSnapshot` 为冻结 dataclass；至少含上述身份字段、`state`、`active_tools: tuple[str,...]`、`iterations`、`input_tokens` / `output_tokens` / `total_tokens`、`usage_complete`、上下文三字段、`started_at` / `updated_at` / `finished_at`（datetime）。状态为 `queued/running/model/tool/waiting_children/waiting_input/completed/failed/cancelled`。
 - `ExecutionProjection(max_nodes=2048)`：单 engine 全量流的纯投影；`handle(EventMsg)` 同步应用、`snapshot() -> tuple[ExecutionSnapshot,...]` 返回不可变快照；`incomplete: bool` 标记跳号、迟到或容量截断。`max_nodes` 必须为正。
-- `ExecutionProjection.plan_snapshot() -> tuple[OrchestrationPlanSnapshot,...]`：按事件顺序保留容量内全部 `orchestration_plan_resolved` 动态计划；同一 execution 的新 attempt 或重规划追加新记录，不覆盖旧轨迹；不猜测计划节点与实际 child thread 的绑定；计划结构损坏或历史容量截断时标记 `incomplete`。
+- `ExecutionProjection.plan_snapshot() -> tuple[OrchestrationPlanSnapshot,...]`：按事件顺序保留容量内全部 `orchestration_plan_resolved` 动态计划；同一 execution 的新 attempt 或重规划追加新记录，不覆盖旧轨迹；不猜测计划节点与实际 child thread 的绑定；计划结构损坏或历史容量截断时标记 `incomplete`。`OrchestrationPlanLimits` 对每次计划设置 `max_groups`、`max_skills_per_group`、`max_skill_id_length`、`max_condition_length` 和 `max_plan_bytes`，任一层超限均丢弃该摘要并标记 `incomplete`；默认值是有界安全值，宿主可通过 `ExecutionProjection(plan_limits=...)` 收紧。
 - `TerminalTreeSink(out=None, interactive=None, max_rows=40, projection=None)`：实现 TelemetrySink；`handle(ev)` 更新投影并显示，`attach(engine)` 订阅完整流；`render() -> str` 返回终端快照供宿主复用和测试。`attach_terminal_tree_sink(engine, **kwargs)` 返回后台 task。默认只在 TTY 重绘；非 TTY 保持追加可读输出。入口经 experimental 导出。
 
 基础文本输出同时显示计划事件轨迹与已观察执行节点。计划行使用 `[计划#<seq>:<type>]` 标记，不能被解释为已执行；业务层可直接消费两个不可变快照，再自行转换为卡片、网络图或其他布局。
