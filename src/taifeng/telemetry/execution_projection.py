@@ -14,6 +14,7 @@ ExecutionState = Literal[
     'queued', 'running', 'model', 'tool', 'waiting_children', 'waiting_input',
     'completed', 'failed', 'cancelled',
 ]
+PlanGroupKind = Literal['parallel', 'serial', 'when']
 _TERMINAL = frozenset({'completed', 'failed', 'cancelled'})
 _WAIT_TOOLS = frozenset({'call_skill', 'await_skills', 'wait_peer', 'wait_any'})
 _TOKEN_KEYS = ('input_tokens', 'output_tokens', 'total_tokens')
@@ -48,6 +49,28 @@ class ExecutionSnapshot:
     finished_at: datetime | None
 
 
+@dataclass(frozen=True)
+class OrchestrationGroupSnapshot:
+    """一次动态编排计划中的分组摘要。"""
+
+    index: int
+    kind: PlanGroupKind
+    skills: tuple[str, ...] = ()
+    condition: str | None = None
+
+
+@dataclass(frozen=True)
+class OrchestrationPlanSnapshot:
+    """一个执行节点在某个事件序号解析出的编排计划。"""
+
+    execution_id: str
+    attempt_id: str
+    skill_id: str
+    groups: tuple[OrchestrationGroupSnapshot, ...]
+    seq: int
+    updated_at: datetime
+
+
 class _Node:
     """每节点只保留当前 attempt 与前序用量基数，不保存 attempt 历史。"""
 
@@ -76,8 +99,38 @@ def _blocks_progress(node: _Node, kind: str, data: dict[str, Any]) -> bool:
     )
 
 
+def _parse_plan_groups(value: object) -> tuple[OrchestrationGroupSnapshot, ...] | None:
+    """严格解析可观测计划摘要，损坏时不猜测缺失关系。"""
+    if not isinstance(value, list):
+        return None
+    groups: list[OrchestrationGroupSnapshot] = []
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            return None
+        kind = raw.get('type')
+        if kind in ('parallel', 'serial'):
+            skills = raw.get('skills')
+            if not isinstance(skills, list) or not all(
+                isinstance(skill, str) and bool(skill) for skill in skills
+            ):
+                return None
+            groups.append(OrchestrationGroupSnapshot(
+                index=index, kind=kind, skills=tuple(skills),
+            ))
+        elif kind == 'when':
+            condition = raw.get('condition')
+            if not isinstance(condition, str) or not condition:
+                return None
+            groups.append(OrchestrationGroupSnapshot(
+                index=index, kind=kind, condition=condition,
+            ))
+        else:
+            return None
+    return tuple(groups)
+
+
 class ExecutionProjection:
-    """消费单 engine 全量事件，内存受节点、句柄与活动工具上限约束。"""
+    """消费单 engine 全量事件，保留执行快照与计划事件轨迹。"""
 
     def __init__(self, max_nodes: int = 2048) -> None:
         """容量必须为正；截断、迟到和序号缺口均公开标记。"""
@@ -86,12 +139,17 @@ class ExecutionProjection:
         self.max_nodes = max_nodes
         self.incomplete = False
         self._nodes: dict[str, _Node] = {}
+        self._plans: list[OrchestrationPlanSnapshot] = []
         self._handles: dict[str, str] = {}
         self._seq = -1
 
     def snapshot(self) -> tuple[ExecutionSnapshot, ...]:
         """按首次观察顺序返回不可变快照。"""
         return tuple(node.view for node in self._nodes.values())
+
+    def plan_snapshot(self) -> tuple[OrchestrationPlanSnapshot, ...]:
+        """按事件顺序返回全部计划事件，不覆盖重规划历史。"""
+        return tuple(self._plans)
 
     def handle(self, ev: EventMsg) -> None:
         """同步应用一条事实；重复不重复记账，旧事件不覆盖新状态。"""
@@ -112,6 +170,9 @@ class ExecutionProjection:
             return
         if node.view.attempt_id != identity.attempt_id:
             self.incomplete = True
+            return
+        if ev.msg.kind == 'orchestration_plan_resolved':
+            self._plan(ev, identity)
             return
         self._apply(node, ev)
 
@@ -163,6 +224,26 @@ class ExecutionProjection:
             parent_execution_id=identity.parent_execution_id or node.view.parent_execution_id,
             parent_thread_id=identity.parent_thread_id or node.view.parent_thread_id)
         return node
+
+    def _plan(self, ev: EventMsg, identity: ExecutionIdentity) -> None:
+        """追加当前 attempt 的计划事件；重规划历史不可覆盖。"""
+        data = ev.msg.data
+        skill_id = data.get('skill_id')
+        groups = _parse_plan_groups(data.get('groups'))
+        if not isinstance(skill_id, str) or not skill_id or groups is None:
+            self.incomplete = True
+            return
+        if len(self._plans) >= self.max_nodes:
+            self.incomplete = True
+            return
+        self._plans.append(OrchestrationPlanSnapshot(
+            execution_id=identity.execution_id,
+            attempt_id=identity.attempt_id,
+            skill_id=skill_id,
+            groups=groups,
+            seq=ev.seq,
+            updated_at=ev.timestamp,
+        ))
 
     def _usage(self, node: _Node, data: dict[str, Any]) -> None:
         """只接受 attempt 自身绝对计数；遗漏字段保留已知下界。"""

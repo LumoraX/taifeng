@@ -180,7 +180,12 @@ from taifeng.skill.working_set_runtime import (
     WorkingSetChange,
     WorkingSetView,
 )
-from taifeng.telemetry.execution_projection import ExecutionProjection, ExecutionSnapshot
+from taifeng.telemetry.execution_projection import (
+    ExecutionProjection,
+    ExecutionSnapshot,
+    OrchestrationGroupSnapshot,
+    OrchestrationPlanSnapshot,
+)
 from taifeng.telemetry.terminal_tree import TerminalTreeSink, attach_terminal_tree_sink
 from taifeng.tool.replay import (
     KERNEL_TOOLS,
@@ -196,6 +201,8 @@ __all__ = [
     "ExecutionIdentity",
     "ExecutionProjection",
     "ExecutionSnapshot",
+    "OrchestrationGroupSnapshot",
+    "OrchestrationPlanSnapshot",
     "TerminalTreeSink",
     "attach_terminal_tree_sink",
     # strict audit Session + durable Journal（session-journal，🧪）

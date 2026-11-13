@@ -36,6 +36,10 @@ runner 终态用 `usage_complete` 表达 provider 实际用量是否完整，配
 事件都有各自 runner 身份；detached 协调事件的身份属于发出方，目标仍由 child/handle 定位。
 engine 创建子 thread 时在有界观测表记录父级；peer 唤醒不改变创建关系，冷恢复父级允许未知。
 
+`ExecutionProjection` 还按事件顺序保留每个执行节点的 `orchestration_plan_resolved` 计划轨迹，
+重规划和新 attempt 追加记录而不覆盖旧事实；`TerminalTreeSink` 的基础文本关系同时打印计划
+事件和已观察节点，但不把计划节点伪装成已执行节点。业务层可在此快照之上实现卡片、网络图和其他布局。
+
 采样边界的 `execution_updated` 提供自身累计用量、当前轮次及实测/估算上下文。
 这些元数据不进入 prompt 或 Journal。`ExecutionProjection` 消费单 engine 的全量事件，
 按 attempt 去重累计自身用量，不重复相加父 subtree。`TerminalTreeSink` 是可取消的独立订阅，
