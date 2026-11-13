@@ -252,6 +252,31 @@ class TestEventMapping:
             assert tool_span.parent is not None
             assert tool_span.parent.span_id == turn_span.context.span_id
 
+    async def test_child_turn_uses_parent_execution_span_when_open(
+        self,
+        sink: OtelTelemetrySink,
+        memory_tracer_provider: tuple[TracerProvider, InMemorySpanExporter],
+    ) -> None:
+        """子执行带 parent_execution_id 时挂到仍在途的父 turn span。"""
+        _, exporter = memory_tracer_provider
+        root = _identity("root")
+        child = ExecutionIdentity(
+            execution_id="child", attempt_id="attempt-1", thread_id="child",
+            skill_id="child", model="sim", parent_execution_id="root",
+            parent_thread_id="root",
+        )
+        await sink.handle(_event("shared", "turn_started", execution=root))
+        await sink.handle(_event("shared", "turn_started", execution=child))
+        await sink.handle(_event("shared", "turn_completed", execution=child))
+        await sink.handle(_event("shared", "turn_completed", execution=root))
+        spans = exporter.get_finished_spans()
+        root_span = next(span for span in spans if span.name == "taifeng.turn"
+                         and span.attributes["taifeng.execution_id"] == "root")
+        child_span = next(span for span in spans if span.name == "taifeng.turn"
+                          and span.attributes["taifeng.execution_id"] == "child")
+        assert child_span.parent is not None
+        assert child_span.parent.span_id == root_span.context.span_id
+
     async def test_turn_started_creates_span_with_submission_id(
         self,
         sink: OtelTelemetrySink,

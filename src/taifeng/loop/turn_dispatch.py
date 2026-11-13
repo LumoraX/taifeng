@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from taifeng.llm.types import add_usage
 from taifeng.loop.audit_skill import AuditedSkillDispatch
 from taifeng.loop.event import (
+    OrchestrationPlanResolved,
     SkillDispatched,
     SkillReturned,
     SkillSpawnRejected,
@@ -356,11 +357,24 @@ class TurnDispatch:
         # 通知事件 —— call-skill-reason-field: 从 ctx.extras 取 LLM 自陈
         # reason（call_skill handler 写入），缺省空串
         dispatch_reason = str(ctx.extras.get("dispatch_reason") or "")
+        call_id = parent_stack.current.call_id if parent_stack.current else ctx.call_id
+        if self.__dispatch_owner.entry_skill.orchestration is None:
+            await self.__dispatch_owner._emit(
+                OrchestrationPlanResolved(
+                    data={
+                        "skill_id": target.id,
+                        "groups": [{"type": "parallel", "skills": [target.id]}],
+                        "mode": "implicit_llm",
+                        "call_id": call_id,
+                        "reason": dispatch_reason,
+                    }
+                )
+            )
         await self.__dispatch_owner._emit(
             SkillDispatched(
                 data={
                     "skill_id": target.id,
-                    "call_id": parent_stack.current.call_id if parent_stack.current else "",
+                    "call_id": call_id,
                     "depth": parent_stack.depth,
                     "stack_path": parent_stack.path(),
                     "reason": dispatch_reason,
