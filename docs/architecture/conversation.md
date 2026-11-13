@@ -61,8 +61,8 @@ verify 保证 epoch 只经接管单步递增、从不回退（ADR 0053）。
   `AuditResumeError("audit_resume_recovery_required")` 并列出 record id。通过后用 root thread 已提交
   `conversation_item` 重建 history、复用并核对既有投影 thread 后续跑；已 `session_ended` 的 Session 不可重开。
   resume 失败只释放 lease，不写 `session_ended`。
-- **current recovery exclusions（本阶段不支持）**：custom store/directory、IndexHook、hooks、permission/HITL、
-  compressor、memory、instruction layers、orchestration、spawn/peer、非 attempt-observable client、可
+- **current recovery exclusions（本阶段不支持）**：custom store/directory、IndexHook、memory、instruction
+  layers、orchestration、background shell、failure-suspension policy、非 attempt-observable client、可
   suspend / metadata 不全的 Tool；能力面外的动态 Op 在 submission gateway 前 durable 拒绝。已冻结 Session 的
   repair/unfreeze 不在范围（resume 只 fail closed）。
 - **Timeline 与迁移**（`journal/timeline.py`、`redaction.py`、`legacy_import.py`、`projection_rebuild.py`，

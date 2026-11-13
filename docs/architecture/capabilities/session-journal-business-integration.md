@@ -1,6 +1,10 @@
 # SessionJournal 普通业务主链接入能力契约
 
-> 状态：Experimental。关联 ADR 0025、ADR 0053、ADR 0070。依赖 `session-journal-core`（Phase 1 + Phase 2 写者接管）。
+> 状态：Supported bounded scope。关联 ADR 0025、ADR 0053、ADR 0070、ADR 0142。依赖 `session-journal-core`（Phase 1 + Phase 2 写者接管）。
+
+本契约的 audit-required Session 集成已达到可发布的有限范围：启用者得到 Journal-first
+事实源、接管恢复、审计 Timeline 与 fail-closed 边界。`session-journal-core` 仍是实验层，
+`taifeng.experimental` 中的入口也保持实验 API 层级；本状态只承诺本文件列出的能力和明确列出的拒绝面。
 
 ## 1. 范围
 
