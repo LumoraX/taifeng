@@ -245,8 +245,8 @@ class OtelTelemetrySink:
 
         # 跨方法维护 span 嵌套；**禁止**模块级全局
         self._turn_spans: dict[str, Span] = {}
-        self._tool_spans: dict[str, Span] = {}
-        self._skill_spans: dict[str, Span] = {}
+        self._tool_spans: dict[tuple[str, str], Span] = {}
+        self._skill_spans: dict[tuple[str, str], Span] = {}
 
     async def handle(self, ev: EventMsg) -> None:
         """实现 ``TelemetrySink.handle``。fire-and-forget。"""
@@ -262,58 +262,93 @@ class OtelTelemetrySink:
     def _dispatch(self, ev: EventMsg) -> None:
         """同步分派 —— 按 kind 路由到具体 handler。"""
         kind = ev.msg.kind
-        data = ev.msg.data
-        submission_id = ev.submission_id
-
         # 审计可观测 层1：llm_request_recorded 含完整 prompt+conversation（敏感），
         # 整条不转 OTel（按 kind 跳过比逐字段黑名单更稳，杜绝 request 正文外发）。
         if kind == "llm_request_recorded":
             return
 
         if kind == "turn_started":
-            self._on_turn_started(submission_id, data)
+            self._on_turn_started(ev)
         elif kind == "turn_completed":
-            self._on_turn_ended(submission_id, data, failed=False)
+            self._on_turn_ended(ev, failed=False)
         elif kind == "turn_failed":
-            self._on_turn_ended(submission_id, data, failed=True)
+            self._on_turn_ended(ev, failed=True)
         elif kind == "tool_call_started":
-            self._on_tool_started(submission_id, data)
+            self._on_tool_started(ev)
         elif kind == "tool_call_completed":
-            self._on_tool_completed(submission_id, data)
+            self._on_tool_completed(ev)
         elif kind == "skill_dispatched":
-            self._on_skill_dispatched(submission_id, data)
+            self._on_skill_dispatched(ev)
         elif kind == "skill_returned":
-            self._on_skill_returned(submission_id, data)
+            self._on_skill_returned(ev)
         elif kind in _TEXT_ONLY_KINDS:
-            self._on_text(submission_id, kind, data)
+            self._on_text(ev, kind)
         elif kind == "compaction_started":
-            self._on_compaction_started(submission_id, data)
+            self._on_compaction_started(ev)
         elif kind == "compaction_completed":
-            self._on_compaction_completed(submission_id, data)
+            self._on_compaction_completed(ev)
         elif kind == "cache_break_detected":
-            self._on_cache_break(submission_id, data)
+            self._on_cache_break(ev)
         elif kind == "provider_retry":
-            self._on_provider_retry(submission_id, data)
+            self._on_provider_retry(ev)
         elif kind in (
             "provider_circuit_opened",
             "provider_circuit_half_open",
             "provider_circuit_closed",
         ):
-            self._on_circuit_transition(submission_id, kind, data)
+            self._on_circuit_transition(ev, kind)
         else:
-            self._on_generic_event(submission_id, kind, data)
+            self._on_generic_event(ev, kind)
+
+    @staticmethod
+    def _span_key(ev: EventMsg) -> str:
+        """返回执行尝试键；旧事件退化到 submission。"""
+        identity = ev.execution
+        if identity is None:
+            return f"submission:{ev.submission_id}"
+        return f"execution:{identity.execution_id}:{identity.attempt_id}"
+
+    @classmethod
+    def _call_key(cls, ev: EventMsg, call_id: str) -> tuple[str, str]:
+        """把调用 id 绑定到执行尝试，避免共享 submission 互相覆盖。"""
+        return cls._span_key(ev), call_id
+
+    @staticmethod
+    def _event_attrs(ev: EventMsg) -> dict[str, Any]:
+        """返回不含正文的事件关联属性。"""
+        attrs: dict[str, Any] = {"taifeng.submission_id": ev.submission_id}
+        identity = ev.execution
+        if identity is not None:
+            attrs.update(
+                {
+                    "taifeng.execution_id": identity.execution_id,
+                    "taifeng.attempt_id": identity.attempt_id,
+                    "taifeng.thread_id": identity.thread_id,
+                    "taifeng.skill_id": identity.skill_id,
+                    "taifeng.execution_model": identity.model,
+                }
+            )
+            if identity.parent_execution_id is not None:
+                attrs["taifeng.parent_execution_id"] = identity.parent_execution_id
+            if identity.parent_thread_id is not None:
+                attrs["taifeng.parent_thread_id"] = identity.parent_thread_id
+        return attrs
+
+    def _parent_turn(self, ev: EventMsg) -> Span | None:
+        """按执行尝试查找父 turn，兼容旧事件。"""
+        return self._turn_spans.get(self._span_key(ev))
 
     # ---------- per-kind handlers ----------
 
-    def _on_turn_started(self, submission_id: str, data: dict[str, Any]) -> None:
-        attrs = _safe_attrs(data)
-        attrs.setdefault("taifeng.submission_id", submission_id)
+    def _on_turn_started(self, ev: EventMsg) -> None:
+        attrs = _safe_attrs(ev.msg.data) | self._event_attrs(ev)
         span = self._tracer.start_span(name="taifeng.turn", attributes=attrs)
-        self._turn_spans[submission_id] = span
+        self._turn_spans[self._span_key(ev)] = span
 
     def _on_turn_ended(
-        self, submission_id: str, data: dict[str, Any], *, failed: bool
+        self, ev: EventMsg, *, failed: bool
     ) -> None:
+        data = ev.msg.data
         # G3：失败按 failure_class 计数（在 span 早退之前，确保始终计数）
         if failed:
             self._counter_failures.add(
@@ -322,10 +357,10 @@ class OtelTelemetrySink:
                     "failure_class": str(data.get("failure_class", "unknown"))
                 },
             )
-        span = self._turn_spans.pop(submission_id, None)
+        span = self._turn_spans.pop(self._span_key(ev), None)
         if span is None:
             self._on_generic_event(
-                submission_id, "turn_failed" if failed else "turn_completed", data
+                ev, "turn_failed" if failed else "turn_completed"
             )
             return
         for k, v in _safe_attrs(data).items():
@@ -334,25 +369,27 @@ class OtelTelemetrySink:
             span.set_status(Status(StatusCode.ERROR, description=str(data.get("error", ""))))
         span.end()
 
-    def _on_tool_started(self, submission_id: str, data: dict[str, Any]) -> None:
+    def _on_tool_started(self, ev: EventMsg) -> None:
+        data = ev.msg.data
         name = str(data.get("name", "unknown"))
         call_id = str(data.get("call_id", ""))
         attrs = _safe_attrs(data)
         attrs["tool.name"] = name
         attrs["tool.call_id"] = call_id
-        attrs["taifeng.submission_id"] = submission_id
-        parent = self._turn_spans.get(submission_id)
+        attrs.update(self._event_attrs(ev))
+        parent = self._parent_turn(ev)
         ctx = _otel_trace.set_span_in_context(parent) if parent is not None else None
         span = self._tracer.start_span(
             name=f"taifeng.tool.{name}", context=ctx, attributes=attrs
         )
-        self._tool_spans[call_id] = span
+        self._tool_spans[self._call_key(ev, call_id)] = span
 
-    def _on_tool_completed(self, submission_id: str, data: dict[str, Any]) -> None:
+    def _on_tool_completed(self, ev: EventMsg) -> None:
+        data = ev.msg.data
         call_id = str(data.get("call_id", ""))
-        span = self._tool_spans.pop(call_id, None)
+        span = self._tool_spans.pop(self._call_key(ev, call_id), None)
         if span is None:
-            self._on_generic_event(submission_id, "tool_call_completed", data)
+            self._on_generic_event(ev, "tool_call_completed")
             return
         is_error = bool(data.get("is_error", False))
         for k, v in _safe_attrs(data).items():
@@ -368,25 +405,27 @@ class OtelTelemetrySink:
             span.set_status(Status(StatusCode.ERROR))
         span.end()
 
-    def _on_skill_dispatched(self, submission_id: str, data: dict[str, Any]) -> None:
+    def _on_skill_dispatched(self, ev: EventMsg) -> None:
+        data = ev.msg.data
         skill_id = str(data.get("skill_id", "unknown"))
         call_id = str(data.get("call_id", ""))
         attrs = _safe_attrs(data)
         attrs["skill.id"] = skill_id
         attrs["skill.call_id"] = call_id
-        attrs["taifeng.submission_id"] = submission_id
-        parent = self._turn_spans.get(submission_id)
+        attrs.update(self._event_attrs(ev))
+        parent = self._parent_turn(ev)
         ctx = _otel_trace.set_span_in_context(parent) if parent is not None else None
         span = self._tracer.start_span(
             name=f"taifeng.skill.{skill_id}", context=ctx, attributes=attrs
         )
-        self._skill_spans[call_id] = span
+        self._skill_spans[self._call_key(ev, call_id)] = span
 
-    def _on_skill_returned(self, submission_id: str, data: dict[str, Any]) -> None:
+    def _on_skill_returned(self, ev: EventMsg) -> None:
+        data = ev.msg.data
         call_id = str(data.get("call_id", ""))
-        span = self._skill_spans.pop(call_id, None)
+        span = self._skill_spans.pop(self._call_key(ev, call_id), None)
         if span is None:
-            self._on_generic_event(submission_id, "skill_returned", data)
+            self._on_generic_event(ev, "skill_returned")
             return
         success = bool(data.get("success", True))
         for k, v in _safe_attrs(data).items():
@@ -395,8 +434,10 @@ class OtelTelemetrySink:
             span.set_status(Status(StatusCode.ERROR))
         span.end()
 
-    def _on_text(self, submission_id: str, kind: str, data: dict[str, Any]) -> None:
-        parent = self._turn_spans.get(submission_id)
+    def _on_text(self, ev: EventMsg, kind: str) -> None:
+        submission_id = ev.submission_id
+        data = ev.msg.data
+        parent = self._parent_turn(ev)
         if parent is None:
             return
         delta = data.get("delta", "")
@@ -409,38 +450,45 @@ class OtelTelemetrySink:
             attributes={"bytes": n_bytes, "taifeng.submission_id": submission_id},
         )
 
-    def _on_compaction_started(self, submission_id: str, data: dict[str, Any]) -> None:
+    def _on_compaction_started(self, ev: EventMsg) -> None:
+        submission_id = ev.submission_id
+        data = ev.msg.data
         strategy = str(data.get("strategy", "unknown"))
         self._counter_compaction.add(1, attributes={"strategy": strategy})
-        parent = self._turn_spans.get(submission_id)
+        parent = self._parent_turn(ev)
         if parent is not None:
             parent.add_event(
                 name="compaction_started",
                 attributes=_safe_attrs(data) | {"taifeng.submission_id": submission_id},
             )
 
-    def _on_compaction_completed(self, submission_id: str, data: dict[str, Any]) -> None:
+    def _on_compaction_completed(self, ev: EventMsg) -> None:
+        submission_id = ev.submission_id
+        data = ev.msg.data
         if bool(data.get("cache_invalidated", False)):
             reason = str(data.get("reason", "compaction_completed"))
             self._counter_cache_breaks.add(1, attributes={"reason": reason})
-        parent = self._turn_spans.get(submission_id)
+        parent = self._parent_turn(ev)
         if parent is not None:
             parent.add_event(
                 name="compaction_completed",
                 attributes=_safe_attrs(data) | {"taifeng.submission_id": submission_id},
             )
 
-    def _on_cache_break(self, submission_id: str, data: dict[str, Any]) -> None:
+    def _on_cache_break(self, ev: EventMsg) -> None:
+        submission_id = ev.submission_id
+        data = ev.msg.data
         reason = str(data.get("reason", "unknown"))
         self._counter_cache_breaks.add(1, attributes={"reason": reason})
-        parent = self._turn_spans.get(submission_id)
+        parent = self._parent_turn(ev)
         if parent is not None:
             parent.add_event(
                 name="cache_break_detected",
                 attributes=_safe_attrs(data) | {"taifeng.submission_id": submission_id},
             )
 
-    def _on_provider_retry(self, submission_id: str, data: dict[str, Any]) -> None:
+    def _on_provider_retry(self, ev: EventMsg) -> None:
+        data = ev.msg.data
         # 网络退避重试与 overflow 自愈共用事件：reason 区分来源，failure_class 供聚合看板
         self._counter_retries.add(
             1,
@@ -449,11 +497,12 @@ class OtelTelemetrySink:
                 "failure_class": str(data.get("failure_class", "unknown")),
             },
         )
-        self._on_generic_event(submission_id, "provider_retry", data)
+        self._on_generic_event(ev, "provider_retry")
 
     def _on_circuit_transition(
-        self, submission_id: str, kind: str, data: dict[str, Any]
+        self, ev: EventMsg, kind: str
     ) -> None:
+        data = ev.msg.data
         # 三个 kind 共用一个 counter：to_state 作维度，看板既能看跳闸次数也能算恢复时长
         self._counter_circuit.add(
             1,
@@ -462,13 +511,13 @@ class OtelTelemetrySink:
                 "failure_class": str(data.get("last_failure_class", "unknown")),
             },
         )
-        self._on_generic_event(submission_id, kind, data)
+        self._on_generic_event(ev, kind)
 
     def _on_generic_event(
-        self, submission_id: str, kind: str, data: dict[str, Any]
+        self, ev: EventMsg, kind: str
     ) -> None:
-        parent = self._turn_spans.get(submission_id)
-        attrs = _safe_attrs(data) | {"taifeng.submission_id": submission_id}
+        parent = self._parent_turn(ev)
+        attrs = _safe_attrs(ev.msg.data) | self._event_attrs(ev)
         if parent is not None:
             parent.add_event(name=f"taifeng.event.{kind}", attributes=attrs)
 
