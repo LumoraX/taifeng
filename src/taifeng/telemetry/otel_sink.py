@@ -245,6 +245,7 @@ class OtelTelemetrySink:
 
         # 跨方法维护 span 嵌套；**禁止**模块级全局
         self._turn_spans: dict[str, Span] = {}
+        self._execution_turn_spans: dict[str, Span] = {}
         self._tool_spans: dict[tuple[str, str], Span] = {}
         self._skill_spans: dict[tuple[str, str], Span] = {}
 
@@ -335,15 +336,29 @@ class OtelTelemetrySink:
         return attrs
 
     def _parent_turn(self, ev: EventMsg) -> Span | None:
-        """按执行尝试查找父 turn，兼容旧事件。"""
-        return self._turn_spans.get(self._span_key(ev))
+        """按执行尝试或仍在途的父执行查找 turn。"""
+        current = self._turn_spans.get(self._span_key(ev))
+        if current is not None:
+            return current
+        identity = ev.execution
+        if identity is None or identity.parent_execution_id is None:
+            return None
+        return self._execution_turn_spans.get(identity.parent_execution_id)
 
     # ---------- per-kind handlers ----------
 
     def _on_turn_started(self, ev: EventMsg) -> None:
         attrs = _safe_attrs(ev.msg.data) | self._event_attrs(ev)
-        span = self._tracer.start_span(name="taifeng.turn", attributes=attrs)
+        parent = None
+        if ev.execution is not None and ev.execution.parent_execution_id is not None:
+            parent = self._execution_turn_spans.get(ev.execution.parent_execution_id)
+        ctx = _otel_trace.set_span_in_context(parent) if parent is not None else None
+        span = self._tracer.start_span(
+            name="taifeng.turn", context=ctx, attributes=attrs
+        )
         self._turn_spans[self._span_key(ev)] = span
+        if ev.execution is not None:
+            self._execution_turn_spans[ev.execution.execution_id] = span
 
     def _on_turn_ended(
         self, ev: EventMsg, *, failed: bool
@@ -363,6 +378,10 @@ class OtelTelemetrySink:
                 ev, "turn_failed" if failed else "turn_completed"
             )
             return
+        if ev.execution is not None and self._execution_turn_spans.get(
+            ev.execution.execution_id
+        ) is span:
+            self._execution_turn_spans.pop(ev.execution.execution_id, None)
         for k, v in _safe_attrs(data).items():
             span.set_attribute(k, v)
         if failed:
