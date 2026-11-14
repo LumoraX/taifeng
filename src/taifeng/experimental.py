@@ -122,7 +122,6 @@ from taifeng.loop.audit_resume_resolution import (
     AuditToolOutcomeResolution,
 )
 from taifeng.loop.audit_suspension import AuditedResumeRejectedError
-from taifeng.loop.execution_identity import ExecutionIdentity
 from taifeng.loop.failure_policy import (
     RecipeDeclaringPolicy,
     RecoveryRecipeProvider,
@@ -209,8 +208,7 @@ from taifeng.tool.replay import (
 from taifeng.tool.spec import ReconcileVerdict
 
 __all__ = [
-    # 执行树观测（execution-observability，🧪）
-    "ExecutionIdentity",
+    # 执行树观测（execution-observability，🧪；身份已由 ADR 0143 晋升稳定层）
     "ExecutionProjection",
     "ExecutionSnapshot",
     "ExecutionTimelineFact",
@@ -398,6 +396,8 @@ _PROMOTED: dict[str, str] = {
     "FileAttachmentV1": "taifeng.llm.file_input",
     "FileInputPolicy": "taifeng.llm.file_input",
     "FilePart": "taifeng.llm.types",
+    # ADR 0143：执行身份（EventMsg.execution 的类型）
+    "ExecutionIdentity": "taifeng.loop.execution_identity",
 }
 
 

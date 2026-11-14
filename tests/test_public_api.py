@@ -169,6 +169,8 @@ _PLATFORM_FACING = (
     # MCP
     "McpClient", "McpHttpClient", "McpToolBinding", "bind_mcp_tools", "register_mcp_tools_async",
     "ElicitationHandler", "ElicitationRequest", "ElicitationResult",
+    # 执行观测：EventMsg.execution 的类型（ADR 0143）
+    "ExecutionIdentity",
 )
 
 
@@ -181,6 +183,7 @@ def test_platform_facing_symbols_are_in_the_stable_layer(name: str) -> None:
 @pytest.mark.parametrize("name", [
     "McpHttpClient", "McpToolBinding", "bind_mcp_tools",
     "FileAttachmentV1", "FileInputPolicy", "FilePart",
+    "ExecutionIdentity",
 ])
 def test_promoted_names_stay_importable_from_experimental(name: str) -> None:
     """晋升后在实验层保留一个发布版本：照常可用，提示改从顶层导入。"""

@@ -141,6 +141,7 @@ from taifeng.loop.cancellation import CancelReason
 from taifeng.loop.denial_breaker import DenialBreaker, DenialBreakerConfig
 from taifeng.loop.doom_loop import DoomLoopConfig, DoomLoopDetector
 from taifeng.loop.engine import AgentEngine, DeliveredEvent
+from taifeng.loop.execution_identity import ExecutionIdentity
 from taifeng.loop.failure_policy import (
     ConservativeFailurePolicy,
     FailureContext,
@@ -330,6 +331,7 @@ __all__ = [
     "DispatchPolicy",
     "EnginePool",
     "EventMsg",
+    "ExecutionIdentity",
     "LlmRequestRecorded",
     "FilesystemSkillRegistry",
     "HandoffCompactionStrategy",

@@ -51,7 +51,7 @@ Journal 确定性回放（`JournalReplayClient` 等；工具回放 `replay_tools
 
 **晋升**：实验层名字转稳定时从 `taifeng.experimental.__all__` 移除，该模块的 `__getattr__` 保留同名入口
 至少一个发布版本，访问时发 `DeprecationWarning` 提示改从顶层导入（当前：`McpHttpClient`、`McpToolBinding`、
-`bind_mcp_tools`，以及 ADR 0116 晋升的 `FileAttachmentV1`、`FileInputPolicy`、`FilePart`）。
+`bind_mcp_tools`，以及 ADR 0116 晋升的 `FileAttachmentV1`、`FileInputPolicy`、`FilePart`，ADR 0143 晋升的 `ExecutionIdentity`）。
 
 ## 一致性检查（`taifeng.testing`）
 

@@ -209,4 +209,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - [ADR 0140：显式短命消息存储](decisions/0140-ephemeral-message-store.md)：为受限 Responses 执行提供进程内原子批次；关闭即清空，不承诺恢复或审计。
 - [ADR 0141：短命存储资源治理与观测状态分类](decisions/0141-observability-resource-governance.md)：短命存储默认上限、真实回归状态分类与执行用量完整性计数。
 - [ADR 0142：SessionJournal audit-required 集成的发布边界](decisions/0142-session-journal-integration-scope.md)：晋升有明确拒绝面的业务集成范围，durable core 与实验 API 保持原层级。
+- [ADR 0143：执行身份晋升稳定层](decisions/0143-stable-execution-identity.md)：`ExecutionIdentity` 与 `execution_updated` 数据键成为稳定契约，投影与显示器仍在实验层。
 - [远端 ADR 0117：部分核销防重与保留挂起的停止生成](decisions/0117-resume-settlement-and-generation-stop.md)：历史并行编号，集成关系见 ADR 0133。
