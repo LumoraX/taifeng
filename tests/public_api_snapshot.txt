@@ -40,6 +40,7 @@ EphemeralAtomicBatchMessageStore
 EphemeralMessageStore
 EphemeralStoreClosedError
 EventMsg
+ExecutionIdentity
 FailureContext
 FailureDisposition
 FailureDispositionPolicy
