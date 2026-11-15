@@ -21,4 +21,4 @@
 
 ## 4. 验证
 - [x] 4.1 `PYTHONPATH=src uv run pytest tests/ -q`、`uv run ruff check --select F,S108,I,TC src tests examples scripts`、`uv run --extra dev --extra litellm --extra telemetry-otel mypy src/`。Acceptance：全绿。
-- [ ] 4.2 真实回归 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 并提交台账（改了基础层 `loop/`）。Acceptance：原有场景全 PASS。
+- [x] 4.2 真实回归 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 并提交台账（改了基础层 `loop/`）。Acceptance：原有场景全 PASS。
