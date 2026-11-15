@@ -15,6 +15,7 @@ from taifeng.plugin.capabilities import PluginCapabilities
 from taifeng.plugin.errors import PluginCapabilityError
 from taifeng.plugin.manager import PluginManager
 from taifeng.skill.registry import FilesystemSkillRegistry
+from taifeng.telemetry.fanout import FanoutSink
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -60,6 +61,17 @@ def _sink_emitter(sink: TelemetrySink | None) -> PluginEventCallback | None:
 _AUDIT_REASON = "audit pools validate tools, hooks and skills statically when the pool is built"
 _CUSTOM_HOOKS_REASON = "the pool's hooks= is not a taifeng.hooks.HookRunner"
 _CUSTOM_SKILLS_REASON = "the pool's skill registry is not a FilesystemSkillRegistry"
+
+
+def plugin_sink(sink: TelemetrySink | None, plugins: Sequence[Plugin]) -> TelemetrySink | None:
+    """传了插件时把 pool 级 sink 包成 ``FanoutSink``（宿主 sink 排第一），供插件追加成员。
+
+    必须在 ``create`` 开头调用：索引钩子 runner 与 SQLite 目录在 pool 构造前就拿走了 sink，
+    插件稍后加载时只能往同一个 fan-out 里加成员。未传插件时原样返回，对象身份不变。
+    """
+    if not plugins:
+        return sink
+    return FanoutSink(sink) if sink is not None else FanoutSink()
 
 
 async def _refresh_engines(pool: EnginePool) -> None:
@@ -129,11 +141,15 @@ def _hook_registry(pool: EnginePool) -> HookRegistry | None:
     return hooks.registry
 
 
-def _capabilities(pool: EnginePool) -> PluginCapabilities:
-    """按 pool 配置决定可提供的 capability；审计 pool 的静态门已在构造时封住。"""
+def _capabilities(pool: EnginePool, sink: TelemetrySink | None) -> PluginCapabilities:
+    """按 pool 配置决定可提供的 capability；审计 pool 的静态门已在构造时封住（sink 不受影响）。"""
+    telemetry = sink if isinstance(sink, FanoutSink) else None
     if pool._audit is not None:  # noqa: SLF001
         reason = _AUDIT_REASON
-        return PluginCapabilities(unavailable={"tools": reason, "hooks": reason, "skills": reason})
+        return PluginCapabilities(
+            telemetry=telemetry,
+            unavailable={"tools": reason, "hooks": reason, "skills": reason},
+        )
     unavailable = {}
     if pool._hooks is not None and not isinstance(pool._hooks, HookRunner):  # noqa: SLF001
         unavailable["hooks"] = _CUSTOM_HOOKS_REASON
@@ -147,6 +163,7 @@ def _capabilities(pool: EnginePool) -> PluginCapabilities:
         tools=pool._tool_registry,  # noqa: SLF001
         hooks=lambda: _hook_registry(pool),
         skills=skills,
+        telemetry=telemetry,
         unavailable=unavailable,
     )
 
@@ -162,7 +179,8 @@ async def load_pool_plugins(
     Args:
         pool: 已构造、尚无 engine 的 pool。
         plugins: 宿主显式传入的插件。
-        sink: pool 级 sink，接收插件生命周期事件。
+        sink: pool 级 sink（经 ``plugin_sink`` 包装的 ``FanoutSink``），接收插件生命周期事件，
+            也是 ``ctx.telemetry`` 的后端。
 
     Raises:
         PluginSetupError 等：加载失败时已回滚；调用方负责关闭 pool。
@@ -172,7 +190,7 @@ async def load_pool_plugins(
     manager = PluginManager(
         cancel=pool._root_cancel,  # noqa: SLF001
         on_event=_sink_emitter(sink),
-        capabilities=_capabilities(pool),
+        capabilities=_capabilities(pool, sink),
     )
     pool._plugin_manager = manager  # noqa: SLF001
     await manager.load(plugins)

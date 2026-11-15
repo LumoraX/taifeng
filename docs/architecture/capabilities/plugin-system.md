@@ -9,7 +9,7 @@
 内核负责插件的身份、依赖顺序、生命周期、回滚、取消与可观测；插件只能经 `PluginContext`
 上显式列出的 capability 接入内核。
 
-已交付：插件核心（生命周期 + pool 接线）、`ctx.tools`、`ctx.hooks`、`ctx.skills`。
+已交付：插件核心（生命周期 + pool 接线）、`ctx.tools`、`ctx.hooks`、`ctx.skills`、`ctx.telemetry`。
 
 ## 数据契约
 
@@ -47,6 +47,7 @@ class Plugin(Protocol):
 | `tools.register(spec) -> RegistrationHandle` | 向 pool 共享 `ToolRegistry` 注册工具（见下） |
 | `hooks.register(kind, handler) -> RegistrationHandle` | 向 pool 的 `taifeng.hooks.HookRunner` 注册钩子（见下） |
 | `await skills.add_dir(path, *, source) -> RegistrationHandle` | 挂上一个 skill 目录（见下） |
+| `telemetry.add_sink(sink) -> RegistrationHandle` | 订阅 pool 级事件（见下） |
 
 不暴露 engine、runner、prompt、history 或任何业务对象。`setup` 返回后 context **封口**，
 之后的注册抛 `PluginCapabilityError`。
@@ -117,6 +118,16 @@ class Plugin(Protocol):
   skill 当子 skill。
 - pool 的 skill 注册表不是 `FilesystemSkillRegistry` 时不可用。
 
+### capability：`telemetry`
+
+- 传了 `plugins` 时，`create` 一开头就把 `sink=` 包成 `FanoutSink`（`taifeng.telemetry.fanout`），宿主 sink
+  排第一；索引钩子 runner 与 SQLite 目录拿到的就是这个 fan-out。未传 `plugins` 时 `sink` 原样透传，对象身份不变。
+- 插件 sink 收到的是 **pool 级事件**：插件生命周期事件、索引钩子失败、持久化层事件——与宿主 `sink=` 今天收到的
+  范围一致。engine 的 turn / tool 事件流**不**转发（宿主经 `engine.subscribe_all()` 获取）。
+- 只收到加入**之后**的事件，不补发。关闭时插件的 sink 随其注册一起撤销，因此收不到自己的 `plugin_unloaded`。
+- 成员之间故障隔离：单个 sink 抛错只记日志，不影响其他成员与上游；取消照常传播。同一 sink 重复加入抛
+  `PluginCapabilityError`。审计 pool 同样提供本 capability（不影响静态门）。
+
 ### capability 不可用的情形
 
 - **审计 pool（`audit=`）**：工具、钩子与 skill 快照在 pool 构造时经静态门校验，插件之后再注册会绕过它，
@@ -168,4 +179,4 @@ class Plugin(Protocol):
 
 `tests/plugin/test_context.py`、`tests/plugin/test_manager.py`、`tests/plugin/test_capabilities.py`、
 `tests/loop/test_pool_plugins.py`、`tests/telemetry/test_plugin_events.py`、`tests/hooks/test_registry_unregister.py`、
-`tests/skill/test_registry_add_dir.py`。
+`tests/skill/test_registry_add_dir.py`、`tests/telemetry/test_fanout.py`。

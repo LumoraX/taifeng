@@ -135,7 +135,7 @@ def _fake_pool(**overrides: Any) -> Any:
 
 def test_pool_creates_hook_runner_only_on_demand() -> None:
     pool = _fake_pool()
-    caps = _capabilities(pool)
+    caps = _capabilities(pool, None)
     assert pool._hooks is None  # noqa: SLF001
     assert caps.hooks is not None
     registry = caps.hooks()
@@ -145,20 +145,20 @@ def test_pool_creates_hook_runner_only_on_demand() -> None:
 
 def test_pool_reuses_host_hook_runner() -> None:
     runner = HookRunner()
-    caps = _capabilities(_fake_pool(_hooks=runner))
+    caps = _capabilities(_fake_pool(_hooks=runner), None)
     assert caps.hooks is not None
     assert caps.hooks() is runner.registry
 
 
 def test_custom_hooks_object_denies_hook_capability() -> None:
-    caps = _capabilities(_fake_pool(_hooks=object()))
+    caps = _capabilities(_fake_pool(_hooks=object()), None)
     assert caps.hooks is not None
     assert caps.hooks() is None
     assert "HookRunner" in caps.unavailable["hooks"]
 
 
 def test_audit_pool_denies_tools_hooks_and_skills() -> None:
-    caps = _capabilities(_fake_pool(_audit=object()))
+    caps = _capabilities(_fake_pool(_audit=object()), None)
     assert caps.tools is None
     assert caps.hooks is None
     assert caps.skills is None
@@ -166,6 +166,6 @@ def test_audit_pool_denies_tools_hooks_and_skills() -> None:
 
 
 def test_custom_skill_registry_denies_skill_capability() -> None:
-    caps = _capabilities(_fake_pool())
+    caps = _capabilities(_fake_pool(), None)
     assert caps.skills is None
     assert "FilesystemSkillRegistry" in caps.unavailable["skills"]

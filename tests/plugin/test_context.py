@@ -65,7 +65,7 @@ def test_plugin_spec_rejects_invalid_fields(kwargs: dict[str, object], error: ty
 def test_context_exposes_only_allowlisted_members() -> None:
     ctx = _ctx()
     assert {name for name in dir(ctx) if not name.startswith("_")} == {
-        "plugin_id", "cancel", "tools", "hooks", "skills",
+        "plugin_id", "cancel", "tools", "hooks", "skills", "telemetry",
     }
     assert not hasattr(ctx, "__dict__")  # __slots__：插件不能往 context 上挂东西
 

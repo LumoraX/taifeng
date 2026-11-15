@@ -13,6 +13,7 @@ from taifeng.plugin.capabilities import (
     HookCapability,
     PluginCapabilities,
     SkillCapability,
+    TelemetryCapability,
     ToolCapability,
 )
 from taifeng.plugin.errors import PluginCapabilityError
@@ -79,6 +80,11 @@ class PluginContext:
     def skills(self) -> SkillCapability:
         """运行期挂上 / 摘掉 skill 目录。"""
         return SkillCapability(self, self._caps)
+
+    @property
+    def telemetry(self) -> TelemetryCapability:
+        """订阅 pool 级事件。"""
+        return TelemetryCapability(self, self._caps)
 
     def _ensure_open(self, capability: str) -> None:
         """capability 实现在真正注册之前调用：context 已封口则拒绝。

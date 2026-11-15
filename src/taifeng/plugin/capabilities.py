@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from taifeng.plugin.context import PluginContext
     from taifeng.plugin.types import RegistrationHandle
     from taifeng.skill.definition import SkillSource
+    from taifeng.telemetry.fanout import FanoutSink
+    from taifeng.telemetry.sink import TelemetrySink
     from taifeng.tool.registry import ToolRegistry
     from taifeng.tool.spec import ToolSpec
 
@@ -46,12 +48,14 @@ class PluginCapabilities:
         hooks: 取钩子注册表的回调（可按需创建 runner）；None 表示不可用，回调返回 None 表示
             宿主注入的 ``hooks=`` 不是可注册的 ``HookRunner``。
         skills: skill 目录增删后端；None 表示不可用。
+        telemetry: pool 级 fan-out sink；None 表示不可用。
         unavailable: capability 名 → 不可用原因，进错误信息（如审计 pool 的静态门已封）。
     """
 
     tools: ToolRegistry | None = None
     hooks: Callable[[], HookRegistry | None] | None = None
     skills: SkillDirBackend | None = None
+    telemetry: FanoutSink | None = None
     unavailable: Mapping[str, str] = field(default_factory=dict)
 
     def denied(self, plugin_id: str, capability: str) -> PluginCapabilityError:
@@ -215,10 +219,51 @@ class SkillCapability:
         return handle
 
 
+# ----------------------------------------------------------------------
+# telemetry
+# ----------------------------------------------------------------------
+
+
+class TelemetryCapability:
+    """``ctx.telemetry``：订阅 pool 级事件（插件生命周期、索引钩子失败、持久化层事件）。
+
+    engine 的 turn / tool 事件流不经此转发——宿主经 ``engine.subscribe_all()`` 获取。
+    """
+
+    __slots__ = ("_caps", "_ctx")
+
+    def __init__(self, ctx: PluginContext, caps: PluginCapabilities) -> None:
+        """由 ``PluginContext`` 构造。"""
+        self._ctx = ctx
+        self._caps = caps
+
+    def add_sink(self, sink: TelemetrySink) -> RegistrationHandle:
+        """加入 pool 级 fan-out；只收到加入之后的事件。
+
+        Raises:
+            PluginCapabilityError: context 已封口、本 pool 不提供，或同一 sink 重复加入。
+        """
+        self._ctx._ensure_open("telemetry")  # noqa: SLF001
+        fanout = self._caps.telemetry
+        if fanout is None:
+            raise self._caps.denied(self._ctx.plugin_id, "telemetry")
+        try:
+            handle = fanout.add(sink)
+        except ValueError as exc:
+            raise PluginCapabilityError(
+                f"plugin {self._ctx.plugin_id!r} added the same sink twice",
+                plugin_id=self._ctx.plugin_id,
+                capability="telemetry",
+            ) from exc
+        self._ctx._track(handle)  # noqa: SLF001
+        return handle
+
+
 __all__ = [
     "HookCapability",
     "PluginCapabilities",
     "SkillCapability",
     "SkillDirBackend",
+    "TelemetryCapability",
     "ToolCapability",
 ]

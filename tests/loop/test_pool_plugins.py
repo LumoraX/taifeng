@@ -385,3 +385,61 @@ async def test_resume_with_entry_skill_from_absent_plugin_is_rejected(
             session_id="s", entry_skill_id="plugin-entry", resume_thread_id=thread_id,
         )
     await second.close()
+
+
+# ---------------------------------------------------------------------------
+# telemetry-fanout-sink：插件 sink
+# ---------------------------------------------------------------------------
+
+
+class _SinkPlugin:
+    def __init__(self, plugin_id: str, requires: tuple[str, ...] = ()) -> None:
+        self.spec = PluginSpec(id=plugin_id, version="1", requires=requires)
+        self.sink = _CollectSink()
+
+    async def setup(self, ctx: PluginContext) -> None:
+        ctx.telemetry.add_sink(self.sink)
+
+
+async def test_host_sink_identity_unchanged_without_plugins(tmp_path: Path, skills_dir: Path) -> None:
+    sink = _CollectSink()
+    pool = await _pool(tmp_path, skills_dir, sink=sink)
+    assert pool._hook_runner._sink is sink  # noqa: SLF001
+    await pool.close()
+
+
+async def test_plugin_sink_sees_events_after_joining(tmp_path: Path, skills_dir: Path) -> None:
+    from taifeng.telemetry.fanout import FanoutSink
+
+    host = _CollectSink()
+    first = _SinkPlugin("first")
+    second = _SinkPlugin("second", requires=("first",))
+    pool = await _pool(tmp_path, skills_dir, sink=host, plugins=(second, first))
+    fanout = pool._hook_runner._sink  # noqa: SLF001
+    assert isinstance(fanout, FanoutSink)
+    assert fanout.members[0] is host
+    await pool.close()
+    assert host.kinds() == [
+        "plugin_loaded", "plugin_loaded", "plugin_unloaded", "plugin_unloaded",
+    ]
+    # first 的 sink 在自己 setup 时加入，看得到 second 的 loaded；
+    # 关闭逆序：先 second（first 的 sink 仍在）再 first（自己的 sink 先被撤销）
+    assert first.sink.kinds() == ["plugin_loaded", "plugin_loaded", "plugin_unloaded"]
+    assert second.sink.kinds() == ["plugin_loaded"]
+    assert fanout.members == (host,)
+
+
+async def test_plugin_sink_works_without_host_sink(tmp_path: Path, skills_dir: Path) -> None:
+    plugin = _SinkPlugin("only")
+    pool = await _pool(tmp_path, skills_dir, plugins=(plugin,))
+    await pool.close()
+    assert plugin.sink.kinds() == ["plugin_loaded"]
+
+
+async def test_failed_load_leaves_only_host_sink(tmp_path: Path, skills_dir: Path) -> None:
+    host = _CollectSink()
+    good = _SinkPlugin("good")
+    with pytest.raises(PluginSetupError):
+        await _pool(tmp_path, skills_dir, sink=host, plugins=(good, _Recording("bad", fail=True)))
+    assert host.kinds() == ["plugin_loaded", "plugin_unloaded", "plugin_failed"]
+    assert good.sink.kinds() == ["plugin_loaded"]

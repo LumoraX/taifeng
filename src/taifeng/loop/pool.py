@@ -45,7 +45,7 @@ from taifeng.loop.pool_lifecycle import (
     close_engine_pool,
     release_pool_session,
 )
-from taifeng.loop.pool_plugins import load_pool_plugins
+from taifeng.loop.pool_plugins import load_pool_plugins, plugin_sink
 from taifeng.loop.pool_session import (
     create_started_pool_engine,
     finalize_resumed_engine,
@@ -522,6 +522,7 @@ class EnginePool:
         - ``sink=`` 接收 hook 失败 / 持久化层事件（及插件生命周期事件）
         - ``plugins=`` 显式注入插件（🧪 ADR 0144），在本方法返回前按依赖顺序加载
         """
+        sink = plugin_sink(sink, plugins)  # 传了插件才包成 FanoutSink（宿主 sink 排第一）
         # 统一为 storage_dir
         storage = storage_dir or threads_dir
         if message_store is not None:
