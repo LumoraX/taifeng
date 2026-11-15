@@ -45,6 +45,7 @@ from taifeng.loop.pool_lifecycle import (
     close_engine_pool,
     release_pool_session,
 )
+from taifeng.loop.pool_plugins import load_pool_plugins
 from taifeng.loop.pool_session import (
     create_started_pool_engine,
     finalize_resumed_engine,
@@ -68,6 +69,7 @@ from taifeng.tool.registry import ToolRegistry
 from taifeng.tool.runtime import ToolCallRuntime
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
 
     from taifeng.context.engine import ContextEngine
     from taifeng.llm.client import ModelClient
@@ -75,6 +77,7 @@ if TYPE_CHECKING:
     from taifeng.llm.retry import RetryConfig
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.audit_config import AuditConfig
+    from taifeng.plugin import Plugin, PluginManager
     from taifeng.skill.selection import SkillSelectionGate
     from taifeng.skill.watcher import SkillFileWatcher
     from taifeng.telemetry.sink import TelemetrySink
@@ -424,6 +427,7 @@ class EnginePool:
         self._watcher_task: asyncio.Task[None] | None = None
         self._watcher: SkillFileWatcher | None = None
         self._close_task: asyncio.Task[None] | None = None
+        self._plugin_manager: PluginManager | None = None  # plugin-core：仅传了 plugins 时创建
 
     # ------------------------------------------------------------------
     # Factory
@@ -498,6 +502,7 @@ class EnginePool:
         selection_gate: SkillSelectionGate | None = None,
         model_prewarmer: ModelPrewarmer | None = None,
         context_engine: ContextEngine | None = None,
+        plugins: Sequence[Plugin] = (),
     ) -> EnginePool:
         """便捷构造。
 
@@ -514,7 +519,8 @@ class EnginePool:
         - ``thread_directory=`` 替换默认 SqliteThreadDirectory（Redis / PG / Null）；注入
           ``message_store`` 时默认是 ``NullThreadDirectory``
         - ``index_hook=`` 订阅 thread 生命周期（fire-and-forget）
-        - ``sink=`` 接收 hook 失败 / 持久化层事件
+        - ``sink=`` 接收 hook 失败 / 持久化层事件（及插件生命周期事件）
+        - ``plugins=`` 显式注入插件（🧪 ADR 0144），在本方法返回前按依赖顺序加载
         """
         # 统一为 storage_dir
         storage = storage_dir or threads_dir
@@ -639,6 +645,7 @@ class EnginePool:
                 context_engine=context_engine,
             )
             pool._owned_directory = owned_directory
+            await load_pool_plugins(pool, plugins, sink=sink)
             await start_skill_watcher(
                 pool,
                 registry,
