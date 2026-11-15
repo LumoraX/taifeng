@@ -15,4 +15,4 @@
 ## 3. 验证
 - [x] 3.1 在 `docs/architecture/capabilities/plugin-system.md` 写明：插件 sink 第一版只收 pool 级事件；只收到自己加入之后的事件；engine 事件流不转发。
 - [x] 3.2 `PYTHONPATH=src uv run pytest tests/ -q`、ruff 门禁、mypy strict。Acceptance：全绿。
-- [ ] 3.3 任务 2 改了 `loop/`，合入前跑真实回归并提交台账。Acceptance：原有场景全 PASS。
+- [x] 3.3 任务 2 改了 `loop/`，合入前跑真实回归并提交台账。Acceptance：原有场景全 PASS。

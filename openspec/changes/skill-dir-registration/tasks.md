@@ -19,4 +19,4 @@
 ## 4. 验证
 - [x] 4.1 更新 `docs/architecture/skill-system.md`（`add_dir`、重名规则与初始化覆盖语义的并列说明、R2 缓存影响）和 `capabilities/plugin-system.md`。
 - [x] 4.2 `PYTHONPATH=src uv run pytest tests/ -q`、ruff 门禁、mypy strict。Acceptance：全绿。
-- [ ] 4.3 任务 3 改了 `loop/`，合入前跑真实回归并提交台账。Acceptance：原有场景全 PASS。
+- [x] 4.3 任务 3 改了 `loop/`，合入前跑真实回归并提交台账。Acceptance：原有场景全 PASS。

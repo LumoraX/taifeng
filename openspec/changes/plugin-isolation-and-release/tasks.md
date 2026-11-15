@@ -18,5 +18,5 @@
 
 ## 4. 真实回归与门禁
 - [x] 4.1 `examples/real_llm/capability_matrix.py` 加 `plugin_tool` 场景，断言分两路（pool 级 sink / engine 事件流）。先 `PYTHONPATH=src uv run python examples/real_llm/selfcheck.py`。Acceptance：selfcheck 通过；故意不加载插件时场景不判 PASS（`tests/examples/test_plugin_tool_scenario.py`）。
-- [ ] 4.2 `PYTHONPATH=src uv run pytest tests/ -q`（3.12 与 3.13）、`uv run ruff check --select F,S108,I,TC src tests examples scripts`、`uv run --extra dev --extra litellm --extra telemetry-otel mypy src/`。Acceptance：全绿；所有新增 / 修改文件 ≤ 800 行。
-- [ ] 4.3 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 全量，提交 `docs/real-llm-ledger.{json,md}`。Acceptance：`plugin_tool` PASS 且原有场景全 PASS；台账与源码同一 commit。
+- [x] 4.2 `PYTHONPATH=src uv run pytest tests/ -q`（3.12 与 3.13）、`uv run ruff check --select F,S108,I,TC src tests examples scripts`、`uv run --extra dev --extra litellm --extra telemetry-otel mypy src/`。Acceptance：全绿；所有新增 / 修改文件 ≤ 800 行。
+- [x] 4.3 `PYTHONPATH=src uv run python examples/real_llm/capability_matrix.py` 全量，提交 `docs/real-llm-ledger.{json,md}`。Acceptance：`plugin_tool` PASS 且原有场景全 PASS；台账与源码同一 commit。

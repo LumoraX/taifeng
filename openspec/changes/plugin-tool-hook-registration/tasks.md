@@ -14,5 +14,5 @@
 
 ## 3. 验证
 - [x] 3.1 更新 `docs/architecture/capabilities/plugin-system.md` 的 capability 清单与重名规则。
-- [ ] 3.2 `PYTHONPATH=src uv run pytest tests/ -q`、ruff 门禁、mypy strict。Acceptance：全绿；所有改动文件 ≤ 800 行。
-- [ ] 3.3 真实回归 `capability_matrix.py` 并提交台账。Acceptance：原有场景全 PASS。
+- [x] 3.2 `PYTHONPATH=src uv run pytest tests/ -q`、ruff 门禁、mypy strict。Acceptance：全绿；所有改动文件 ≤ 800 行。
+- [x] 3.3 真实回归 `capability_matrix.py` 并提交台账。Acceptance：原有场景全 PASS。

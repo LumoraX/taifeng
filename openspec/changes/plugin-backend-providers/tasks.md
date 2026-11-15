@@ -21,4 +21,4 @@
 ## 4. 验证
 - [x] 4.1 更新 `docs/architecture/conversation.md`、`capabilities/plugin-system.md`、`docs/configurable-knobs.md`。
 - [x] 4.2 `PYTHONPATH=src uv run pytest tests/ -q`、ruff 门禁、mypy strict。Acceptance：全绿。
-- [ ] 4.3 真实回归 `capability_matrix.py` 并提交台账。Acceptance：全部场景 PASS。
+- [x] 4.3 真实回归 `capability_matrix.py` 并提交台账。Acceptance：全部场景 PASS。
