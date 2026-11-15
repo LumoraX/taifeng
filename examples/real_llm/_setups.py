@@ -27,6 +27,7 @@ from taifeng import (
     ToolSpec,
     make_todo_write_tool,
 )
+from taifeng.experimental import PluginSpec
 from taifeng.tool.builtins import make_glob_tool, make_grep_tool
 
 if TYPE_CHECKING:
@@ -199,3 +200,53 @@ COMPACT_CONSTRAINT = (
 def setup_compaction_continuity(root: Path, client: Any) -> ScenarioSetup:
     """挂 handoff 压缩（摘要走本次 client），供 driver 用 CompactNow 强制压缩。"""
     return ScenarioSetup(compressors=[HandoffCompactionStrategy(client)])
+
+
+# ── plugin_tool（ADR 0144）─────────────────────────────────────────────────
+PLUGIN_MARK = "CONFIG_DESK_MARK"
+PLUGIN_TOOL = "lookup_config_code"
+PLUGIN_CODE = "CFG-7Q4M"   # 只有插件工具知道：模型答出它即证明真的调用了插件工具
+
+
+class PoolEventCounter:
+    """pool 级 sink：统计插件生命周期等 pool 级事件（它们不在 engine 事件流上）。"""
+
+    def __init__(self) -> None:
+        self.kinds: dict[str, int] = {}
+
+    async def handle(self, ev: Any) -> None:
+        self.kinds[ev.msg.kind] = self.kinds.get(ev.msg.kind, 0) + 1
+
+
+class ConfigLookupPlugin:
+    """注册一个只读查询工具的插件（通用名，无业务概念）。"""
+
+    def __init__(self) -> None:
+        self.spec = PluginSpec(id="config-lookup", version="1.0")
+
+    async def setup(self, ctx: Any) -> None:
+        async def handler(args: dict[str, Any], tool_ctx: Any) -> ToolResult:
+            return ToolResult.ok(f"{args.get('name', '')} 的配置代号是 {PLUGIN_CODE}")
+
+        ctx.tools.register(ToolSpec(
+            name=PLUGIN_TOOL,
+            description="按配置项名称查询配置代号",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "配置项名称"}},
+                "required": ["name"],
+            },
+            handler=handler,
+            parallel_safe=True,
+        ))
+
+
+def setup_plugin_tool(root: Path, client: Any, *, with_plugin: bool = True) -> ScenarioSetup:
+    """工具只由插件注册（不经 extra_tools）；pool 级 sink 计数插件生命周期事件。
+
+    ``with_plugin=False`` 用于反证：插件缺席时场景不得判 PASS。
+    """
+    counter = PoolEventCounter()
+    plugins = (ConfigLookupPlugin(),) if with_plugin else ()
+    return ScenarioSetup(pool_kwargs={"plugins": plugins, "sink": counter},
+                         state={"pool_sink": counter})

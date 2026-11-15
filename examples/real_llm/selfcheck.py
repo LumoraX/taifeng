@@ -45,6 +45,9 @@ from _setups import (  # noqa: E402
     PINNED_FIRST_CODE,
     PINNED_HOST_CODE,
     PINNED_MARK,
+    PLUGIN_CODE,
+    PLUGIN_MARK,
+    PLUGIN_TOOL,
     READ_PATH_CODE,
     READ_PATH_FILE,
     READ_PATH_MARK,
@@ -75,6 +78,15 @@ _TODO_ITEMS = [
     {"content": "通知各部门搬迁时间", "status": "pending"},
 ]
 EXTRA_SIM_ROUTES = {
+    "plugin_tool": {
+        PLUGIN_MARK: [
+            SimTurn(text="先查询。", tool_calls=[{
+                "id": "p1", "name": PLUGIN_TOOL,
+                "arguments": json.dumps({"name": "alpha-gateway"}),
+            }]),
+            SimTurn(text=f"alpha-gateway 的配置代号是 {PLUGIN_CODE}。"),
+        ],
+    },
     "skill_inference": {
         INFERENCE_CHILD_MARK: [SimTurn(text="修复登录页按钮错位 → 修复\n新增订单导出 → 新功能\n"
                                             "升级日志组件 → 维护")],
