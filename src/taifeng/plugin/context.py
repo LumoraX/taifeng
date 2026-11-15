@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from taifeng.plugin.capabilities import HookCapability, PluginCapabilities, ToolCapability
+from taifeng.plugin.capabilities import (
+    HookCapability,
+    PluginCapabilities,
+    SkillCapability,
+    ToolCapability,
+)
 from taifeng.plugin.errors import PluginCapabilityError
 
 if TYPE_CHECKING:
@@ -69,6 +74,11 @@ class PluginContext:
     def hooks(self) -> HookCapability:
         """向 pool 的钩子 runner 注册可撤销的钩子。"""
         return HookCapability(self, self._caps)
+
+    @property
+    def skills(self) -> SkillCapability:
+        """运行期挂上 / 摘掉 skill 目录。"""
+        return SkillCapability(self, self._caps)
 
     def _ensure_open(self, capability: str) -> None:
         """capability 实现在真正注册之前调用：context 已封口则拒绝。

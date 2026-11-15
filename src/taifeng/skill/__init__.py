@@ -34,7 +34,13 @@ from taifeng.skill.recall import (
     SkillRecall,
     SkillRecallParseError,
 )
-from taifeng.skill.registry import FilesystemSkillRegistry, SkillRegistry, SkillSnapshot
+from taifeng.skill.registry import (
+    FilesystemSkillRegistry,
+    SkillDirHandle,
+    SkillIdCollisionError,
+    SkillRegistry,
+    SkillSnapshot,
+)
 from taifeng.skill.verify import (
     LlmSkillVerifier,
     SkillVerifier,
@@ -58,6 +64,8 @@ __all__ = [
     "SkillCandidate",
     "SkillFileWatcher",
     "SkillDefinition",
+    "SkillDirHandle",
+    "SkillIdCollisionError",
     "SkillLoadError",
     "SkillRecall",
     "SkillRecallParseError",

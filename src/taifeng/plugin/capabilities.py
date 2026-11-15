@@ -11,19 +11,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from taifeng.plugin.errors import PluginCapabilityError
+from taifeng.skill.registry import SkillIdCollisionError
 from taifeng.tool.registry import DuplicateToolError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from pathlib import Path
 
     from taifeng.hooks.types import HookHandler, HookKind, HookRegistry
     from taifeng.plugin.context import PluginContext
     from taifeng.plugin.types import RegistrationHandle
+    from taifeng.skill.definition import SkillSource
     from taifeng.tool.registry import ToolRegistry
     from taifeng.tool.spec import ToolSpec
+
+
+class SkillDirBackend(Protocol):
+    """pool 提供的 skill 目录增删后端（skill-dir-registration）。"""
+
+    async def add_dir(self, path: str | Path, *, source: SkillSource) -> RegistrationHandle:
+        """增加目录并让活跃 engine 刷新快照；返回可撤销 handle。"""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,11 +45,13 @@ class PluginCapabilities:
         tools: 共享工具注册表；None 表示不可用。
         hooks: 取钩子注册表的回调（可按需创建 runner）；None 表示不可用，回调返回 None 表示
             宿主注入的 ``hooks=`` 不是可注册的 ``HookRunner``。
+        skills: skill 目录增删后端；None 表示不可用。
         unavailable: capability 名 → 不可用原因，进错误信息（如审计 pool 的静态门已封）。
     """
 
     tools: ToolRegistry | None = None
     hooks: Callable[[], HookRegistry | None] | None = None
+    skills: SkillDirBackend | None = None
     unavailable: Mapping[str, str] = field(default_factory=dict)
 
     def denied(self, plugin_id: str, capability: str) -> PluginCapabilityError:
@@ -163,4 +176,49 @@ class HookCapability:
         return handle
 
 
-__all__ = ["HookCapability", "PluginCapabilities", "ToolCapability"]
+# ----------------------------------------------------------------------
+# skills
+# ----------------------------------------------------------------------
+
+
+class SkillCapability:
+    """``ctx.skills``：运行期挂上一个 skill 目录，pool 关闭时摘掉。"""
+
+    __slots__ = ("_caps", "_ctx")
+
+    def __init__(self, ctx: PluginContext, caps: PluginCapabilities) -> None:
+        """由 ``PluginContext`` 构造。"""
+        self._ctx = ctx
+        self._caps = caps
+
+    async def add_dir(self, path: str | Path, *, source: SkillSource) -> RegistrationHandle:
+        """增加 skill 目录。``source`` 必填，决定这些 skill 的信任层级。
+
+        Raises:
+            PluginCapabilityError: context 已封口、本 pool 不支持目录增删，或 skill id 重名。
+            ValueError / FileNotFoundError: ``source`` 非法、目录不存在或已加载。
+        """
+        self._ctx._ensure_open("skills")  # noqa: SLF001
+        backend = self._caps.skills
+        if backend is None:
+            raise self._caps.denied(self._ctx.plugin_id, "skills")
+        try:
+            handle = await backend.add_dir(path, source=source)
+        except SkillIdCollisionError as exc:
+            raise PluginCapabilityError(
+                f"plugin {self._ctx.plugin_id!r} skills collide with loaded skills: "
+                f"{', '.join(exc.skill_ids)}",
+                plugin_id=self._ctx.plugin_id,
+                capability="skills",
+            ) from exc
+        self._ctx._track(handle)  # noqa: SLF001
+        return handle
+
+
+__all__ = [
+    "HookCapability",
+    "PluginCapabilities",
+    "SkillCapability",
+    "SkillDirBackend",
+    "ToolCapability",
+]

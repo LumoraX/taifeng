@@ -173,6 +173,14 @@ loader 对 SKILL.md 的任何问题都在加载期抛 `SkillValidationError`，�
 类型化读取集中在 `skill/frontmatter_fields.py`。多目录加载（`FilesystemSkillRegistry.load([a, b])`）时同名 skill 由靠后的目录覆盖，
 覆盖以 warning 日志写明两处路径。热更新（watcher）时新版本校验失败 → 保留旧快照并记异常日志。
 
+**运行期增删目录**（skill-dir-registration）：`await registry.add_dir(path, source=...)` 返回可撤销 handle，
+`await handle.aclose()` 移除。与构造时的多目录覆盖不同，**重名直接拒绝**（`SkillIdCollisionError`，不改任何状态）
+——否则增加的目录能悄悄替换已有 skill，撤销后旧 skill 又会「复活」。`source` 必填，避免外来 skill 默认拿到
+`user` 级信任。构造时传入的目录不可移除。增删串行化，每次 +1 `layout_version`；watcher 看到布局变化只重置
+mtime 基线，不重复 discover。每个目录自成一体（`child_skills` 只能引用同目录 skill）。运行中的 turn 持有不可变
+快照，增删在下一 turn 生效；skill 列表进 prompt 前缀，活跃会话的缓存因此失效一次（R2）。插件经
+`ctx.skills.add_dir` 使用这一能力（[plugin-system](capabilities/plugin-system.md)）。
+
 ## 核心抽象
 
 ```python

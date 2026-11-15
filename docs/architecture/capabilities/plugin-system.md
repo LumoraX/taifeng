@@ -9,7 +9,7 @@
 内核负责插件的身份、依赖顺序、生命周期、回滚、取消与可观测；插件只能经 `PluginContext`
 上显式列出的 capability 接入内核。
 
-已交付：插件核心（生命周期 + pool 接线）、`ctx.tools`、`ctx.hooks`。
+已交付：插件核心（生命周期 + pool 接线）、`ctx.tools`、`ctx.hooks`、`ctx.skills`。
 
 ## 数据契约
 
@@ -46,6 +46,7 @@ class Plugin(Protocol):
 | `cancel` | 由 pool 根令牌派生的 `CancellationToken`（`pool/plugin:<id>`） |
 | `tools.register(spec) -> RegistrationHandle` | 向 pool 共享 `ToolRegistry` 注册工具（见下） |
 | `hooks.register(kind, handler) -> RegistrationHandle` | 向 pool 的 `taifeng.hooks.HookRunner` 注册钩子（见下） |
+| `await skills.add_dir(path, *, source) -> RegistrationHandle` | 挂上一个 skill 目录（见下） |
 
 不暴露 engine、runner、prompt、history 或任何业务对象。`setup` 返回后 context **封口**，
 之后的注册抛 `PluginCapabilityError`。
@@ -103,10 +104,23 @@ class Plugin(Protocol):
 - 多个插件的同类钩子按加载顺序串行执行；撤销按对象身份（`HookRegistry.unregister`），
   执行中的一轮不受影响。
 
+### capability：`skills`
+
+- 委托 `FilesystemSkillRegistry.add_dir(path, *, source)`（[skill-system](../skill-system.md)）：`source` 必填
+  （`system` / `user` / `marketplace`，决定信任层级），skill id 与已加载 skill **重名即拒绝**
+  （`PluginCapabilityError`，`__cause__` 为 `SkillIdCollisionError`），不产生新快照。
+- 成功后让所有活跃 engine 提交 `RefreshSnapshot`（不依赖 `auto_watch_skills`）；插件加载期没有 engine，
+  是空操作。
+- 撤销时若某活跃 engine 的入口 skill 来自该目录则拒绝；插件路径下撤销只在 pool 关闭时发生，
+  届时已无活跃 engine。运行中的 turn 持有不可变快照，增删在下一 turn 生效。
+- 目录自成一体：`child_skills` 只能引用**同目录**内的 skill（loader 按目录校验），插件 skill 不能把宿主
+  skill 当子 skill。
+- pool 的 skill 注册表不是 `FilesystemSkillRegistry` 时不可用。
+
 ### capability 不可用的情形
 
-- **审计 pool（`audit=`）**：工具与钩子在 pool 构造时经静态门校验，插件之后再注册会绕过它，
-  因此 `tools` / `hooks` 均抛 `PluginCapabilityError`，原因写在错误信息里。
+- **审计 pool（`audit=`）**：工具、钩子与 skill 快照在 pool 构造时经静态门校验，插件之后再注册会绕过它，
+  因此 `tools` / `hooks` / `skills` 均抛 `PluginCapabilityError`，原因写在错误信息里。
 - 不经 pool、直接 `PluginManager()` 构造时不提供任何 capability。
 
 ## 行为契约
@@ -134,13 +148,16 @@ class Plugin(Protocol):
 ## R1–R5 影响
 
 - **R1**：`taifeng.plugin` 只含通用机制，无业务字段、不读环境变量。
-- **R2**：核心不向 prompt 注册任何内容，不触碰压缩与缓存。
+- **R2**：工具集与 skill 列表都进 prompt 前缀。插件在首个 engine 之前注册、pool 关闭时撤销，两个时点都
+  没有活跃会话，不打破缓存。直接调用 `FilesystemSkillRegistry.add_dir` / 撤销的宿主会让活跃会话的前缀
+  缓存失效一次。
 - **R3**：三个生命周期事件；Console 有专用标签（`plug`），JSONL 原样落盘。OTel 走通用事件路径——pool 级事件没有
   turn span 可挂，与其他 pool 级事件（索引钩子失败、持久化层事件）一样不产生 span 事件。
 - **R4**：见行为契约第 6、7 条。
 - **R5**：插件不持久化任何状态，不改 `MessageStore`。恢复一段含插件工具调用的会话而插件缺席时，
   历史照常重放，该工具**不再提供**给模型；模型若仍幻觉调用，走既有 `not_offered` 拒绝路径
-  （is_error 结果、turn 不中断）。
+  （is_error 结果、turn 不中断）。入口 skill 来自缺席插件目录时，`get_or_create(resume_thread_id=...)`
+  抛 `ValueError("unknown skill: ...")`，不静默换入口。
 
 ## 不做的事（第一版）
 
@@ -150,4 +167,5 @@ class Plugin(Protocol):
 ## 验证
 
 `tests/plugin/test_context.py`、`tests/plugin/test_manager.py`、`tests/plugin/test_capabilities.py`、
-`tests/loop/test_pool_plugins.py`、`tests/telemetry/test_plugin_events.py`、`tests/hooks/test_registry_unregister.py`。
+`tests/loop/test_pool_plugins.py`、`tests/telemetry/test_plugin_events.py`、`tests/hooks/test_registry_unregister.py`、
+`tests/skill/test_registry_add_dir.py`。

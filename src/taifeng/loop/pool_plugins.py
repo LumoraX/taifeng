@@ -12,14 +12,24 @@ from typing import TYPE_CHECKING
 from taifeng.hooks.types import HookRunner
 from taifeng.loop.event import EventMsg, PluginFailed, PluginLoaded, PluginUnloaded
 from taifeng.plugin.capabilities import PluginCapabilities
+from taifeng.plugin.errors import PluginCapabilityError
 from taifeng.plugin.manager import PluginManager
+from taifeng.skill.registry import FilesystemSkillRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from taifeng.hooks.types import HookRegistry
     from taifeng.loop.pool import EnginePool
-    from taifeng.plugin.types import Plugin, PluginEventCallback, PluginLifecycleEvent
+    from taifeng.plugin.types import (
+        Plugin,
+        PluginEventCallback,
+        PluginLifecycleEvent,
+        RegistrationHandle,
+    )
+    from taifeng.skill.definition import SkillSource
+    from taifeng.skill.registry import SkillDirHandle
     from taifeng.telemetry.sink import TelemetrySink
 
 logger = logging.getLogger(__name__)
@@ -47,8 +57,59 @@ def _sink_emitter(sink: TelemetrySink | None) -> PluginEventCallback | None:
     return _emit
 
 
-_AUDIT_REASON = "audit pools validate tools and hooks statically when the pool is built"
+_AUDIT_REASON = "audit pools validate tools, hooks and skills statically when the pool is built"
 _CUSTOM_HOOKS_REASON = "the pool's hooks= is not a taifeng.hooks.HookRunner"
+_CUSTOM_SKILLS_REASON = "the pool's skill registry is not a FilesystemSkillRegistry"
+
+
+async def _refresh_engines(pool: EnginePool) -> None:
+    """让所有活跃 engine 重新取 skill 快照（与 skill watcher 的 ``_on_change`` 同一做法）。"""
+    from taifeng.loop.submission import RefreshSnapshot
+
+    async with pool._lock:  # noqa: SLF001
+        for engine in pool._engines.values():  # noqa: SLF001
+            await engine.submit(RefreshSnapshot())
+
+
+class _PoolSkillDirHandle:
+    """撤销插件挂上的 skill 目录：入口 skill 仍在使用时拒绝，撤销后刷新活跃 engine。"""
+
+    __slots__ = ("_inner", "_pool")
+
+    def __init__(self, pool: EnginePool, inner: SkillDirHandle) -> None:
+        self._pool = pool
+        self._inner = inner
+
+    async def aclose(self) -> None:
+        """移除目录；有活跃 engine 的入口 skill 来自该目录时抛 ``PluginCapabilityError``。"""
+        directory = self._inner.directory
+        snapshot = self._pool.skill_registry.snapshot()
+        for session_id, view in self._pool.introspect().items():
+            entry = snapshot.get(str(view.get("entry_skill_id")))
+            if entry is not None and entry.body_path.resolve().is_relative_to(directory):
+                raise PluginCapabilityError(
+                    f"session {session_id!r} entry skill {entry.id!r} lives in {directory}",
+                    plugin_id=None,
+                    capability="skills",
+                )
+        await self._inner.aclose()
+        await _refresh_engines(self._pool)
+
+
+class _PoolSkillDirs:
+    """pool 侧的 skill 目录后端：委托 ``FilesystemSkillRegistry.add_dir`` 并刷新活跃 engine。"""
+
+    __slots__ = ("_pool", "_registry")
+
+    def __init__(self, pool: EnginePool, registry: FilesystemSkillRegistry) -> None:
+        self._pool = pool
+        self._registry = registry
+
+    async def add_dir(self, path: str | Path, *, source: SkillSource) -> RegistrationHandle:
+        """增加目录并刷新活跃 engine（插件加载期没有 engine，刷新是空操作）。"""
+        inner = await self._registry.add_dir(path, source=source)
+        await _refresh_engines(self._pool)
+        return _PoolSkillDirHandle(self._pool, inner)
 
 
 def _hook_registry(pool: EnginePool) -> HookRegistry | None:
@@ -71,13 +132,21 @@ def _hook_registry(pool: EnginePool) -> HookRegistry | None:
 def _capabilities(pool: EnginePool) -> PluginCapabilities:
     """按 pool 配置决定可提供的 capability；审计 pool 的静态门已在构造时封住。"""
     if pool._audit is not None:  # noqa: SLF001
-        return PluginCapabilities(unavailable={"tools": _AUDIT_REASON, "hooks": _AUDIT_REASON})
+        reason = _AUDIT_REASON
+        return PluginCapabilities(unavailable={"tools": reason, "hooks": reason, "skills": reason})
     unavailable = {}
     if pool._hooks is not None and not isinstance(pool._hooks, HookRunner):  # noqa: SLF001
         unavailable["hooks"] = _CUSTOM_HOOKS_REASON
+    registry = pool._registry  # noqa: SLF001
+    skills = None
+    if isinstance(registry, FilesystemSkillRegistry):
+        skills = _PoolSkillDirs(pool, registry)
+    else:
+        unavailable["skills"] = _CUSTOM_SKILLS_REASON
     return PluginCapabilities(
         tools=pool._tool_registry,  # noqa: SLF001
         hooks=lambda: _hook_registry(pool),
+        skills=skills,
         unavailable=unavailable,
     )
 

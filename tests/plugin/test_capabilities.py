@@ -125,7 +125,10 @@ async def test_hooks_run_in_plugin_load_order() -> None:
 
 
 def _fake_pool(**overrides: Any) -> Any:
-    base = {"_audit": None, "_hooks": None, "_tool_registry": ToolRegistry(), "_engines": {}}
+    base = {
+        "_audit": None, "_hooks": None, "_tool_registry": ToolRegistry(), "_engines": {},
+        "_registry": object(),
+    }
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -154,8 +157,15 @@ def test_custom_hooks_object_denies_hook_capability() -> None:
     assert "HookRunner" in caps.unavailable["hooks"]
 
 
-def test_audit_pool_denies_tools_and_hooks() -> None:
+def test_audit_pool_denies_tools_hooks_and_skills() -> None:
     caps = _capabilities(_fake_pool(_audit=object()))
     assert caps.tools is None
     assert caps.hooks is None
-    assert set(caps.unavailable) == {"tools", "hooks"}
+    assert caps.skills is None
+    assert set(caps.unavailable) == {"tools", "hooks", "skills"}
+
+
+def test_custom_skill_registry_denies_skill_capability() -> None:
+    caps = _capabilities(_fake_pool())
+    assert caps.skills is None
+    assert "FilesystemSkillRegistry" in caps.unavailable["skills"]

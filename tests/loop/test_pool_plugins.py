@@ -284,3 +284,104 @@ async def test_resume_without_plugin_stops_offering_its_tool(tmp_path: Path) -> 
     assert "plugin_echo" not in {t.name for t in request.request.tools}
     assert client.ledger.saw_function_call("c1")  # 历史里的插件调用照常重放
     await second.close()
+
+
+# ---------------------------------------------------------------------------
+# skill-dir-registration：插件挂上的 skill 目录
+# ---------------------------------------------------------------------------
+
+
+def _plugin_skills(root: Path) -> Path:
+    # 每个 skill 目录自成一体：child_skills 只能引用同目录内的 skill（loader 按目录校验）
+    skills = root / "plugin-skills"
+    (skills / "plugin-entry").mkdir(parents=True)
+    (skills / "plugin-entry" / "SKILL.md").write_text(
+        "---\nname: plugin-entry\ndescription: d\ntype: composite\nentry: true\n"
+        "child_skills: [plugin-leaf]\n---\n# plugin entry\n",
+        encoding="utf-8",
+    )
+    (skills / "plugin-leaf").mkdir()
+    (skills / "plugin-leaf" / "SKILL.md").write_text(
+        "---\nname: plugin-leaf\ndescription: d\ntype: atomic\n---\n# leaf\n", encoding="utf-8",
+    )
+    return skills
+
+
+class _SkillsPlugin:
+    spec = PluginSpec(id="skills", version="1")
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self.handle: Any = None
+
+    async def setup(self, ctx: PluginContext) -> None:
+        self.handle = await ctx.skills.add_dir(self.directory, source="marketplace")
+
+
+async def test_plugin_skill_dir_usable_then_removed(tmp_path: Path, skills_dir: Path) -> None:
+    from taifeng.llm.providers.sim import SimTurn
+
+    plugin = _SkillsPlugin(_plugin_skills(tmp_path))
+    pool = await EnginePool.create(
+        skills_dir=skills_dir, threads_dir=tmp_path / "threads",
+        model_client=SimClient(turns=[SimTurn(text="hi")]), compressors=[], plugins=(plugin,),
+    )
+    skill = pool.skill_registry.get("plugin-entry")
+    assert skill is not None and skill.source == "marketplace"
+    engine = await pool.get_or_create(session_id="s", entry_skill_id="plugin-entry")
+    events = await _run_turn(engine, "go")
+    assert events[-1].msg.kind == "turn_completed"
+    await pool.close()
+    assert pool.skill_registry.get("plugin-entry") is None
+
+
+async def test_removal_refused_while_entry_skill_in_use(tmp_path: Path, skills_dir: Path) -> None:
+    from taifeng.plugin import PluginCapabilityError
+
+    plugin = _SkillsPlugin(_plugin_skills(tmp_path))
+    pool = await _pool(tmp_path, skills_dir, plugins=(plugin,))
+    await pool.get_or_create(session_id="s", entry_skill_id="plugin-entry")
+    with pytest.raises(PluginCapabilityError):
+        await plugin.handle.aclose()
+    assert pool.skill_registry.get("plugin-entry") is not None
+    await pool.close()  # 关闭时会话已释放，撤销成功
+    assert pool.skill_registry.get("plugin-entry") is None
+
+
+async def test_plugin_skill_colliding_with_host_skill_fails_create(
+    tmp_path: Path, skills_dir: Path,
+) -> None:
+    from taifeng.plugin import PluginCapabilityError
+
+    clash = tmp_path / "clash"
+    (clash / "style-checker").mkdir(parents=True)
+    (clash / "style-checker" / "SKILL.md").write_text(
+        "---\nname: style-checker\ndescription: d\ntype: atomic\n---\n# x\n", encoding="utf-8",
+    )
+    with pytest.raises(PluginSetupError) as caught:
+        await _pool(tmp_path, skills_dir, plugins=(_SkillsPlugin(clash),))
+    assert isinstance(caught.value.__cause__, PluginCapabilityError)
+
+
+async def test_resume_with_entry_skill_from_absent_plugin_is_rejected(
+    tmp_path: Path, skills_dir: Path,
+) -> None:
+    """R5 现状：入口 skill 来自缺席插件目录时，恢复会话以显式错误失败，不静默换入口。"""
+    from taifeng.llm.providers.sim import SimTurn
+
+    first = await EnginePool.create(
+        skills_dir=skills_dir, threads_dir=tmp_path / "threads",
+        model_client=SimClient(turns=[SimTurn(text="hi")]), compressors=[],
+        plugins=(_SkillsPlugin(_plugin_skills(tmp_path)),),
+    )
+    engine = await first.get_or_create(session_id="s", entry_skill_id="plugin-entry")
+    await _run_turn(engine, "go")
+    thread_id = engine.thread_id
+    await first.close()
+
+    second = await _pool(tmp_path, skills_dir)
+    with pytest.raises(ValueError, match="unknown skill: plugin-entry"):
+        await second.get_or_create(
+            session_id="s", entry_skill_id="plugin-entry", resume_thread_id=thread_id,
+        )
+    await second.close()
