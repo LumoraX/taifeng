@@ -8,6 +8,8 @@
 
 ## 数据契约
 
+> 分层（ADR 0143）：`ExecutionIdentity`、`EventMsg.execution` 与 `execution_updated` 的数据键为 ✅ 稳定契约，只能向后兼容地增加字段；投影、时间线、树、瀑布与终端显示器仍为 🧪 实验层。
+
 - `ExecutionIdentity`：不可变 Pydantic 模型。字段 `execution_id`、`attempt_id`、`thread_id`、`skill_id`、`model`，以及可空 `parent_execution_id` / `parent_thread_id`。
 - v1 `execution_id = thread_id`，表示逻辑执行节点；每次 `TurnRunner.run()` 新建唯一 `attempt_id`。同 Skill 的并行调用创建不同 thread，因而不会合并；同 thread 的新 turn / Resume 更新同一节点而不伪造新 agent。
 - `EventMsg.execution: ExecutionIdentity | None = None` 为可选增量字段。旧事件缺省 None；`submission_id`、seq 和订阅过滤保持原语义。身份不进入 LLM prompt 或 Journal 真相。
