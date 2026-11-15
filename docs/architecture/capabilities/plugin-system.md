@@ -9,8 +9,7 @@
 内核负责插件的身份、依赖顺序、生命周期、回滚、取消与可观测；插件只能经 `PluginContext`
 上显式列出的 capability 接入内核。
 
-当前已交付：**插件核心**（生命周期 + pool 接线）。`PluginContext` 暂只有 `plugin_id` 与
-`cancel`，尚无可注册的 capability——tool / hook / skill 目录 / sink 由后续变更逐个加入。
+已交付：插件核心（生命周期 + pool 接线）、`ctx.tools`、`ctx.hooks`。
 
 ## 数据契约
 
@@ -45,6 +44,8 @@ class Plugin(Protocol):
 | --- | --- |
 | `plugin_id` | 当前插件 id |
 | `cancel` | 由 pool 根令牌派生的 `CancellationToken`（`pool/plugin:<id>`） |
+| `tools.register(spec) -> RegistrationHandle` | 向 pool 共享 `ToolRegistry` 注册工具（见下） |
+| `hooks.register(kind, handler) -> RegistrationHandle` | 向 pool 的 `taifeng.hooks.HookRunner` 注册钩子（见下） |
 
 不暴露 engine、runner、prompt、history 或任何业务对象。`setup` 返回后 context **封口**，
 之后的注册抛 `PluginCapabilityError`。
@@ -82,6 +83,32 @@ class Plugin(Protocol):
 此时没有 engine，不经 engine `_emit`。未配置 `sink` 时只记日志。事件**不携带**插件配置、
 工具参数或外部响应。
 
+### capability：`tools`
+
+- 直接调用 pool 共享的 `ToolRegistry.register`，所有 engine 经既有 `tool_set_changed` 机制看见它；
+  `ToolRegistry` 自身 API 与 `version` 语义不变。插件工具与其他工具一样受 skill 的 `tool_names`
+  白名单约束。
+- **重名一律报错**：与内置工具、`extra_tools`、其他插件或 MCP 已注册的同名工具冲突时抛
+  `PluginCapabilityError`（`__cause__` 为 `DuplicateToolError`），不覆盖。插件先占名后，MCP 再注册
+  同名工具时由 MCP 侧拿到既有 `DuplicateToolError`。插件不能 `replace`。
+- 撤销只移除**仍是本插件注册的那个对象**；若已被他人 `replace`，撤销报错（计入关闭错误），
+  不误删别人的工具。
+
+### capability：`hooks`
+
+- 目标是 `EnginePool.create(hooks=...)` 的 `taifeng.hooks.HookRunner`（不是索引钩子 runner）。
+  宿主没传 `hooks` 时，首个插件注册钩子那一刻新建一个 `HookRunner` 交给 pool（尚无 engine，
+  engine 创建时才读取它）；没有插件注册钩子时 `hooks` 保持 `None`。
+- 宿主传了别的钩子对象（非 `HookRunner`）时，`ctx.hooks.register` 抛 `PluginCapabilityError`。
+- 多个插件的同类钩子按加载顺序串行执行；撤销按对象身份（`HookRegistry.unregister`），
+  执行中的一轮不受影响。
+
+### capability 不可用的情形
+
+- **审计 pool（`audit=`）**：工具与钩子在 pool 构造时经静态门校验，插件之后再注册会绕过它，
+  因此 `tools` / `hooks` 均抛 `PluginCapabilityError`，原因写在错误信息里。
+- 不经 pool、直接 `PluginManager()` 构造时不提供任何 capability。
+
 ## 行为契约
 
 1. **显式注入**：只接受 `EnginePool.create(plugins=...)`，默认 `()`。未传时不创建 manager、
@@ -111,7 +138,9 @@ class Plugin(Protocol):
 - **R3**：三个生命周期事件；Console 有专用标签（`plug`），JSONL 原样落盘。OTel 走通用事件路径——pool 级事件没有
   turn span 可挂，与其他 pool 级事件（索引钩子失败、持久化层事件）一样不产生 span 事件。
 - **R4**：见行为契约第 6、7 条。
-- **R5**：插件不持久化任何状态，不改 `MessageStore`。
+- **R5**：插件不持久化任何状态，不改 `MessageStore`。恢复一段含插件工具调用的会话而插件缺席时，
+  历史照常重放，该工具**不再提供**给模型；模型若仍幻觉调用，走既有 `not_offered` 拒绝路径
+  （is_error 结果、turn 不中断）。
 
 ## 不做的事（第一版）
 
@@ -120,5 +149,5 @@ class Plugin(Protocol):
 
 ## 验证
 
-`tests/plugin/test_context.py`、`tests/plugin/test_manager.py`、`tests/loop/test_pool_plugins.py`、
-`tests/telemetry/test_plugin_events.py`。
+`tests/plugin/test_context.py`、`tests/plugin/test_manager.py`、`tests/plugin/test_capabilities.py`、
+`tests/loop/test_pool_plugins.py`、`tests/telemetry/test_plugin_events.py`、`tests/hooks/test_registry_unregister.py`。

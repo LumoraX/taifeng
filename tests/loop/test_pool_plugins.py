@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -155,3 +155,132 @@ async def test_pool_close_is_idempotent_with_plugins(tmp_path: Path, skills_dir:
     await pool.close()
     await pool.close()
     assert plugin.log.count("close") == 1
+
+
+# ---------------------------------------------------------------------------
+# plugin-tool-hook-registration：插件工具 / 钩子在真实 turn 中生效
+# ---------------------------------------------------------------------------
+
+
+def _agent_skill(root: Path) -> Path:
+    skills = root / "skills"
+    (skills / "agent").mkdir(parents=True)
+    (skills / "agent" / "SKILL.md").write_text(
+        "---\nname: agent\ndescription: d\ntype: composite\nentry: true\n"
+        "tool_names: [plugin_echo]\n---\n# agent\n",
+        encoding="utf-8",
+    )
+    return skills
+
+
+def _echo_spec() -> Any:
+    from taifeng.tool.spec import ToolResult, ToolSpec
+
+    async def handler(args: dict[str, Any], ctx: Any) -> ToolResult:
+        return ToolResult.ok("ECHO-FROM-PLUGIN")
+
+    return ToolSpec(
+        name="plugin_echo", description="echo", input_schema={"type": "object", "properties": {}},
+        handler=handler,
+    )
+
+
+class _ToolAndHookPlugin:
+    """注册一个工具与一个 post_tool_use 钩子。"""
+
+    spec = PluginSpec(id="echo", version="1")
+
+    def __init__(self) -> None:
+        self.hook_calls: list[str] = []
+
+    async def setup(self, ctx: PluginContext) -> None:
+        from taifeng.hooks.types import HookDecision
+
+        async def on_post_tool(hook: Any, hook_ctx: Any) -> HookDecision:
+            self.hook_calls.append(hook.tool_name)
+            return HookDecision.ok()
+
+        ctx.tools.register(_echo_spec())
+        ctx.hooks.register("post_tool_use", on_post_tool)
+
+
+def _echo_turns() -> list[Any]:
+    from taifeng.llm.providers.sim import SimTurn
+
+    return [
+        SimTurn(text="", tool_calls=[{"id": "c1", "name": "plugin_echo", "arguments": "{}"}]),
+        SimTurn(text="done"),
+    ]
+
+
+async def _run_turn(engine: Any, text: str) -> list[Any]:
+    import taifeng
+    from tests.conftest import run_until_root_done
+
+    return await run_until_root_done(engine, taifeng.UserMessage(text=text))
+
+
+async def test_plugin_tool_and_hook_used_in_a_real_turn(tmp_path: Path) -> None:
+    plugin = _ToolAndHookPlugin()
+    pool = await EnginePool.create(
+        skills_dir=_agent_skill(tmp_path), threads_dir=tmp_path / "threads",
+        model_client=SimClient(turns=_echo_turns()), compressors=[], plugins=(plugin,),
+    )
+    engine = await pool.get_or_create(session_id="s", entry_skill_id="agent")
+    events = await _run_turn(engine, "go")
+    completed = [e for e in events if e.msg.kind == "tool_call_completed"]
+    assert completed and completed[0].msg.data.get("is_error") is not True
+    assert plugin.hook_calls == ["plugin_echo"]
+    await pool.close()
+    assert pool.tool_registry.get("plugin_echo") is None
+    assert pool._hooks.registry.handlers("post_tool_use") == []  # noqa: SLF001
+
+
+async def test_hooks_stay_none_when_no_plugin_registers_hooks(tmp_path: Path, skills_dir: Path) -> None:
+    pool = await _pool(tmp_path, skills_dir, plugins=(_Recording(),))
+    assert pool._hooks is None  # noqa: SLF001
+    await pool.close()
+
+
+async def test_plugin_tool_conflicting_with_extra_tools_fails_create(
+    tmp_path: Path, skills_dir: Path,
+) -> None:
+    with pytest.raises(PluginSetupError) as caught:
+        await _pool(tmp_path, skills_dir, extra_tools=[_echo_spec()], plugins=(_ToolAndHookPlugin(),))
+    from taifeng.plugin import PluginCapabilityError
+
+    assert isinstance(caught.value.__cause__, PluginCapabilityError)
+
+
+async def test_resume_without_plugin_stops_offering_its_tool(tmp_path: Path) -> None:
+    """R5：插件缺席时恢复会话——历史里的插件工具调用照常重放，该工具不再提供给模型。
+
+    模型若仍幻觉调用它，走既有 ``not_offered`` 拒绝路径（is_error 结果、turn 不中断），
+    见 tests/loop/test_tool_whitelist 一族；sim 合同禁止脚本调用未提供的工具，故此处只断言「不提供」。
+    """
+    from taifeng.llm.providers.sim import SimTurn
+
+    skills = _agent_skill(tmp_path)
+    first = await EnginePool.create(
+        skills_dir=skills, threads_dir=tmp_path / "threads",
+        model_client=SimClient(turns=_echo_turns()), compressors=[], plugins=(_ToolAndHookPlugin(),),
+    )
+    engine = await first.get_or_create(session_id="s", entry_skill_id="agent")
+    await _run_turn(engine, "go")
+    thread_id = engine.thread_id
+    await first.close()
+
+    client = SimClient(turns=[SimTurn(text="resumed")])
+    second = await EnginePool.create(
+        skills_dir=skills, threads_dir=tmp_path / "threads", model_client=client, compressors=[],
+    )
+    resumed = await second.get_or_create(
+        session_id="s", entry_skill_id="agent", resume_thread_id=thread_id,
+    )
+    events = await _run_turn(resumed, "again")
+    assert events[-1].msg.kind == "turn_completed"
+    request = client.ledger.last_request()
+    assert request is not None
+    assert "plugin_echo" not in {t.name for t in request.request.tools}
+    assert client.ledger.saw_function_call("c1")  # 历史里的插件调用照常重放
+    await second.close()

@@ -310,6 +310,21 @@ class HookRegistry:
     def register(self, kind: HookKind, handler: HookHandler) -> None:
         self._handlers[kind].append(handler)
 
+    def unregister(self, kind: HookKind, handler: HookHandler) -> None:
+        """按对象身份移除一个钩子（plugin-tool-hook-registration）。
+
+        ``handlers()`` 返回副本，执行中的一轮不受影响，下一轮生效。
+
+        Raises:
+            ValueError: 该钩子未注册在 ``kind`` 下。
+        """
+        bucket = self._handlers[kind]
+        for index, registered in enumerate(bucket):
+            if registered is handler:
+                del bucket[index]
+                return
+        raise ValueError(f"hook handler not registered for {kind!r}")
+
     def handlers(self, kind: HookKind) -> list[HookHandler]:
         return list(self._handlers[kind])
 

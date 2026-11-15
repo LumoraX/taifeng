@@ -9,12 +9,15 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from taifeng.hooks.types import HookRunner
 from taifeng.loop.event import EventMsg, PluginFailed, PluginLoaded, PluginUnloaded
+from taifeng.plugin.capabilities import PluginCapabilities
 from taifeng.plugin.manager import PluginManager
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from taifeng.hooks.types import HookRegistry
     from taifeng.loop.pool import EnginePool
     from taifeng.plugin.types import Plugin, PluginEventCallback, PluginLifecycleEvent
     from taifeng.telemetry.sink import TelemetrySink
@@ -44,6 +47,41 @@ def _sink_emitter(sink: TelemetrySink | None) -> PluginEventCallback | None:
     return _emit
 
 
+_AUDIT_REASON = "audit pools validate tools and hooks statically when the pool is built"
+_CUSTOM_HOOKS_REASON = "the pool's hooks= is not a taifeng.hooks.HookRunner"
+
+
+def _hook_registry(pool: EnginePool) -> HookRegistry | None:
+    """取 pool 的钩子注册表；宿主没传 ``hooks`` 时按需新建 ``HookRunner``。
+
+    回填只发生在插件加载期，此时 pool 还没有任何 engine——engine 创建时才读取 ``pool._hooks``。
+    宿主传了别的钩子对象时返回 None（无从注册）。
+    """
+    hooks = pool._hooks  # noqa: SLF001
+    if hooks is None:
+        if pool._engines:  # noqa: SLF001
+            raise RuntimeError("plugin hooks must be registered before any engine exists")
+        hooks = HookRunner()
+        pool._hooks = hooks  # noqa: SLF001
+    if not isinstance(hooks, HookRunner):
+        return None
+    return hooks.registry
+
+
+def _capabilities(pool: EnginePool) -> PluginCapabilities:
+    """按 pool 配置决定可提供的 capability；审计 pool 的静态门已在构造时封住。"""
+    if pool._audit is not None:  # noqa: SLF001
+        return PluginCapabilities(unavailable={"tools": _AUDIT_REASON, "hooks": _AUDIT_REASON})
+    unavailable = {}
+    if pool._hooks is not None and not isinstance(pool._hooks, HookRunner):  # noqa: SLF001
+        unavailable["hooks"] = _CUSTOM_HOOKS_REASON
+    return PluginCapabilities(
+        tools=pool._tool_registry,  # noqa: SLF001
+        hooks=lambda: _hook_registry(pool),
+        unavailable=unavailable,
+    )
+
+
 async def load_pool_plugins(
     pool: EnginePool,
     plugins: Sequence[Plugin],
@@ -62,7 +100,11 @@ async def load_pool_plugins(
     """
     if not plugins:
         return
-    manager = PluginManager(cancel=pool._root_cancel, on_event=_sink_emitter(sink))  # noqa: SLF001
+    manager = PluginManager(
+        cancel=pool._root_cancel,  # noqa: SLF001
+        on_event=_sink_emitter(sink),
+        capabilities=_capabilities(pool),
+    )
     pool._plugin_manager = manager  # noqa: SLF001
     await manager.load(plugins)
 
