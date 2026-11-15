@@ -45,7 +45,7 @@ from taifeng.loop.pool_lifecycle import (
     close_engine_pool,
     release_pool_session,
 )
-from taifeng.loop.pool_plugins import load_pool_plugins, plugin_sink
+from taifeng.loop.pool_plugins import load_pool_plugins, plugin_sink, resolve_plugin_backends
 from taifeng.loop.pool_session import (
     create_started_pool_engine,
     finalize_resumed_engine,
@@ -523,6 +523,10 @@ class EnginePool:
         - ``plugins=`` 显式注入插件（🧪 ADR 0144），在本方法返回前按依赖顺序加载
         """
         sink = plugin_sink(sink, plugins)  # 传了插件才包成 FanoutSink（宿主 sink 排第一）
+        backends = await resolve_plugin_backends(  # 两段加载第一段：插件提供的后端（ADR 0145）
+            plugins, message_store=message_store, thread_directory=thread_directory, audit=audit,
+            storage=storage_dir or threads_dir, model_client=model_client)
+        message_store, thread_directory, audit = backends.message_store, backends.thread_directory, backends.audit
         # 统一为 storage_dir
         storage = storage_dir or threads_dir
         if message_store is not None:
@@ -567,11 +571,11 @@ class EnginePool:
                 directory=directory,
                 custom_directory=thread_directory,
                 index_hook=index_hook,
-                close_inner=message_store is None,
+                close_inner=backends.owns_store,
             )
         except BaseException:
             await _cleanup_failed_factory(
-                store=None if message_store is not None else store,
+                store=store if backends.owns_store else None,
                 hook_runner=hook_runner,
                 owned_directory=owned_directory,
             )

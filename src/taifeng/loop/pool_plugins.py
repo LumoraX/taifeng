@@ -7,12 +7,17 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from taifeng.hooks.types import HookRunner
+from taifeng.loop.audit_config import AuditConfig
 from taifeng.loop.event import EventMsg, PluginFailed, PluginLoaded, PluginUnloaded
+from taifeng.loop.pool_store import validate_injected_store
+from taifeng.plugin.backends import collect_backend_providers
 from taifeng.plugin.capabilities import PluginCapabilities
-from taifeng.plugin.errors import PluginCapabilityError
+from taifeng.plugin.errors import PluginCapabilityError, PluginSetupError
 from taifeng.plugin.manager import PluginManager
 from taifeng.skill.registry import FilesystemSkillRegistry
 from taifeng.telemetry.fanout import FanoutSink
@@ -21,8 +26,12 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from taifeng.conversation.protocols import ThreadDirectory
+    from taifeng.conversation.store import MessageStore
     from taifeng.hooks.types import HookRegistry
+    from taifeng.llm.client import ModelClient
     from taifeng.loop.pool import EnginePool
+    from taifeng.plugin.backends import BackendKind, BackendProvider
     from taifeng.plugin.types import (
         Plugin,
         PluginEventCallback,
@@ -61,6 +70,106 @@ def _sink_emitter(sink: TelemetrySink | None) -> PluginEventCallback | None:
 _AUDIT_REASON = "audit pools validate tools, hooks and skills statically when the pool is built"
 _CUSTOM_HOOKS_REASON = "the pool's hooks= is not a taifeng.hooks.HookRunner"
 _CUSTOM_SKILLS_REASON = "the pool's skill registry is not a FilesystemSkillRegistry"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedBackends:
+    """合并宿主参数与插件提供的后端之后的结果。
+
+    Attributes:
+        message_store / thread_directory / audit: 交给 ``create`` 后续流程的值。
+        owns_store: pool 是否负责在失败路径关闭 ``message_store``（默认 store 或插件提供的 store 为 True；
+            宿主注入的 store 在 ``create`` 成功前仍归宿主，为 False）。
+    """
+
+    message_store: MessageStore | None
+    thread_directory: ThreadDirectory | None
+    audit: AuditConfig | None
+    owns_store: bool
+
+
+def _build(provider: BackendProvider, kind: BackendKind) -> object:
+    """调用工厂；失败归因到提供者插件。"""
+    try:
+        return provider.factory()
+    except Exception as exc:
+        raise PluginSetupError(
+            f"plugin {provider.plugin_id!r} failed to build backend {kind!r} ({type(exc).__name__})",
+            plugin_id=provider.plugin_id,
+        ) from exc
+
+
+def _reject_explicit(table: dict[BackendKind, BackendProvider], explicit: dict[str, object]) -> None:
+    """插件提供的后端与宿主显式参数冲突一律报错。"""
+    for kind, provider in table.items():
+        if explicit[kind] is not None:
+            raise PluginCapabilityError(
+                f"host passed {kind}= and plugin {provider.plugin_id!r} also provides it",
+                plugin_id=provider.plugin_id,
+                capability=kind,
+            )
+    if "message_store" in table and explicit["storage"] is not None:
+        raise PluginCapabilityError(
+            "host passed storage_dir / threads_dir and a plugin provides message_store",
+            plugin_id=table["message_store"].plugin_id,
+            capability="message_store",
+        )
+
+
+async def resolve_plugin_backends(
+    plugins: Sequence[Plugin],
+    *,
+    message_store: MessageStore | None,
+    thread_directory: ThreadDirectory | None,
+    audit: AuditConfig | None,
+    storage: object,
+    model_client: ModelClient,
+) -> ResolvedBackends:
+    """两段加载的第一段：在建 store 之前收集并构造插件提供的后端。
+
+    Raises:
+        PluginCapabilityError: 提供者冲突（插件之间或与宿主参数）。
+        PluginSetupError: 工厂抛错（已构造的 store 会被关闭）。
+        TypeError / ValueError 等：插件 store 未通过与宿主注入相同的校验（已关闭）。
+    """
+    unchanged = ResolvedBackends(message_store, thread_directory, audit, message_store is None)
+    if not plugins:
+        return unchanged
+    table = collect_backend_providers(plugins)
+    if not table:
+        return unchanged
+    _reject_explicit(table, {
+        "message_store": message_store, "thread_directory": thread_directory,
+        "audit": audit, "storage": storage,
+    })
+    built: dict[str, object] = {}
+    order: tuple[BackendKind, ...] = ("audit", "thread_directory", "message_store")
+    try:
+        for kind in order:
+            provider = table.get(kind)
+            if provider is not None:
+                built[kind] = _build(provider, kind)
+        resolved_audit = built.get("audit", audit)
+        if resolved_audit is not None and not isinstance(resolved_audit, AuditConfig):
+            raise TypeError(f"audit backend must be AuditConfig, got {type(resolved_audit).__name__}")
+        if "message_store" in built:
+            validate_injected_store(
+                built["message_store"], storage=None, model_client=model_client,
+                audited=resolved_audit is not None,
+            )
+    except BaseException:
+        store = built.get("message_store")
+        close = getattr(store, "close", None)
+        if close is not None:
+            with suppress(BaseException):
+                await close()
+        raise
+    return ResolvedBackends(
+        message_store=built.get("message_store", message_store),  # type: ignore[arg-type]
+        thread_directory=built.get("thread_directory", thread_directory),  # type: ignore[arg-type]
+        audit=resolved_audit,
+        owns_store=True,
+    )
 
 
 def plugin_sink(sink: TelemetrySink | None, plugins: Sequence[Plugin]) -> TelemetrySink | None:

@@ -65,7 +65,8 @@ class Plugin(Protocol):
     """插件协议。
 
     ``setup`` 不返回值：插件经 context 做的注册由 context 自动登记，manager 负责逆序撤销。
-    插件可选地实现 ``async close()``，它在该插件的注册被撤销之前调用。
+    插件可选地实现 ``async close()``，它在该插件的注册被撤销之前调用；还可选实现同步的
+    ``provide_backends(backends)``，在 pool 构造存储之前声明后端工厂（ADR 0145）。
     """
 
     @property

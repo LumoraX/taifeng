@@ -1,6 +1,6 @@
 # Capability: plugin-system
 
-> 状态：🧪 实验层（`taifeng.experimental`）。决策：[ADR 0144](../../decisions/0144-plugin-lifecycle-and-scope.md)。
+> 状态：🧪 实验层（`taifeng.experimental`）。决策：[ADR 0144](../../decisions/0144-plugin-lifecycle-and-scope.md)、[ADR 0145](../../decisions/0145-plugin-backend-providers.md)（两段加载）。
 > 交付分期见 `openspec/changes/plugin-*`；本契约随各期合入逐步补全，**只写已实现的现状**。
 
 ## Purpose
@@ -9,7 +9,7 @@
 内核负责插件的身份、依赖顺序、生命周期、回滚、取消与可观测；插件只能经 `PluginContext`
 上显式列出的 capability 接入内核。
 
-已交付：插件核心（生命周期 + pool 接线）、`ctx.tools`、`ctx.hooks`、`ctx.skills`、`ctx.telemetry`。
+已交付：插件核心（生命周期 + pool 接线）、`ctx.tools`、`ctx.hooks`、`ctx.skills`、`ctx.telemetry`、存储后端（`provide_backends`）。
 
 ## 数据契约
 
@@ -29,6 +29,7 @@ class Plugin(Protocol):
     spec: PluginSpec
     async def setup(self, ctx: PluginContext) -> None: ...
     # 可选：async def close(self) -> None
+    # 可选：def provide_backends(self, backends: PluginBackends) -> None   （ADR 0145，见「存储后端」）
 ```
 
 - `setup` 不返回值。插件经 context 做的每个注册由 context 自动登记，manager 负责撤销。
@@ -128,6 +129,25 @@ class Plugin(Protocol):
 - 成员之间故障隔离：单个 sink 抛错只记日志，不影响其他成员与上游；取消照常传播。同一 sink 重复加入抛
   `PluginCapabilityError`。审计 pool 同样提供本 capability（不影响静态门）。
 
+### 存储后端：`provide_backends`（两段加载第一段，ADR 0145）
+
+插件可选实现**同步**方法 `provide_backends(backends: PluginBackends)`，只声明工厂、不做 IO。`create` 在构造任何
+后端之前按加载顺序收集声明并调用工厂；`setup` 仍在原加载点。
+
+| 登记方法 | 等价的宿主参数 | 所有权 |
+| --- | --- | --- |
+| `backends.message_store(factory)` | `message_store=` | pool 拥有：`create` 中途失败由内核关闭；`pool.close()` 时关闭，晚于插件 close |
+| `backends.thread_directory(factory)` | `thread_directory=` | 与宿主注入相同，pool 不关闭 |
+| `backends.audit(factory)` | `audit=`（整份 `AuditConfig`，含 journal core） | 与宿主注入相同 |
+
+- 每项每个 pool 至多一个提供者；两个插件都提供，或宿主已显式传了对应参数（`message_store` 还包括
+  `storage_dir` / `threads_dir`），抛 `PluginCapabilityError`——在调用任何工厂之前。
+- 工厂抛错 → `PluginSetupError`（`plugin_id` 为提供者，`__cause__` 为原始异常），已构造的 store 被关闭。
+- 插件 store 走与宿主注入相同的 `validate_injected_store`；插件 `AuditConfig` 走同一个审计静态门，审计 pool 照旧
+  拒绝插件注册 tools / hooks / skills。
+- `provide_backends` 返回后登记器封口，运行中不可替换持久化真相源。
+- 恢复会话时必须加载同一个提供者插件，否则读不到历史（与更换 `message_store=` 同理）。
+
 ### capability 不可用的情形
 
 - **审计 pool（`audit=`）**：工具、钩子与 skill 快照在 pool 构造时经静态门校验，插件之后再注册会绕过它，
@@ -173,10 +193,10 @@ class Plugin(Protocol):
 ## 不做的事（第一版）
 
 自动发现、热重载、运行中卸载单个插件、`engine` / `session` scope、不经 pool 直接构造的
-`AgentEngine`、存储后端 capability（见 `openspec/changes/plugin-backend-providers`）。
+`AgentEngine`、把 engine 事件流转发给插件 sink。
 
 ## 验证
 
 `tests/plugin/test_context.py`、`tests/plugin/test_manager.py`、`tests/plugin/test_capabilities.py`、
 `tests/loop/test_pool_plugins.py`、`tests/telemetry/test_plugin_events.py`、`tests/hooks/test_registry_unregister.py`、
-`tests/skill/test_registry_add_dir.py`、`tests/telemetry/test_fanout.py`。
+`tests/skill/test_registry_add_dir.py`、`tests/telemetry/test_fanout.py`、`tests/plugin/test_backend_capabilities.py`。

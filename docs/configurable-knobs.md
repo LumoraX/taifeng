@@ -76,7 +76,7 @@
 | `thread_directory` | `None` | `ThreadDirectory` 实现；`None` 用默认 JSONL 目录 | — |
 | `index_hook` | `None` | `IndexHook` —— 落盘后建索引的旁路钩子（`index-hook` 契约） | — |
 | `sink` | `None` | `TelemetrySink` —— 事件外发后端；`None` 不外发（R3 仍在总线上） | codex telemetry |
-| `plugins` | `()` | 🧪 显式注入的插件（ADR 0144）：`EnginePool.create` 返回前按 `requires` 拓扑顺序 setup，任一失败则逆序回滚并让 `create` 抛 `PluginSetupError`；`pool.close()` 释放全部 Session 后逆序关闭。生命周期事件经 `sink` 发出。见 [capabilities/plugin-system.md](architecture/capabilities/plugin-system.md) | Cordis 插件生命周期 |
+| `plugins` | `()` | 🧪 显式注入的插件（ADR 0144）：`EnginePool.create` 返回前按 `requires` 拓扑顺序 setup，任一失败则逆序回滚并让 `create` 抛 `PluginSetupError`；`pool.close()` 释放全部 Session 后逆序关闭。生命周期事件经 `sink` 发出（传了插件时 `sink` 被包成 `FanoutSink`，插件可追加成员）。插件还可经可选的 `provide_backends` 提供 `message_store` / `thread_directory` / `audit`（ADR 0145），与对应显式参数冲突即报错。见 [capabilities/plugin-system.md](architecture/capabilities/plugin-system.md) | Cordis 插件生命周期 |
 | `permission_policy` | `None` | `PermissionPolicy` —— HITL 审批策略；`None` 则工具全放行 | claw-code permission |
 | `request_metadata` | `None` | 透传给 provider 的请求级 metadata（业务侧标签） | — |
 | `audit` | `None` | `AuditConfig` —— 开启审计模式（strict 下与多 attempt 客户端互斥，见 ADR 0037）。`AuditConfig.tool_outcome_resolver`（默认 `None`）：resume 时对回查也查不清的结果未知工具调用征求人裁决（`provide` / `abort`，以 operator actor 落账）；`None` = 不问人，这类调用令 resume 拒绝（ADR 0070） | — |
