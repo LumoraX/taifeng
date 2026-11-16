@@ -361,7 +361,44 @@ class JoinBarrierFired(_Msg):
     kind: Literal["join_barrier_fired"] = "join_barrier_fired"
 
 
+
+# ── plugin-core：插件生命周期（ADR 0144，R3 可观测）──────────────────
+# 插件在首个 engine 之前加载，这三个事件以 submission_id="*"、seq=0 直接交给 pool 的
+# ``sink=``，不经 engine 事件总线。data 只含元数据，不含插件配置、工具参数或外部响应。
+
+
+class PluginLoaded(_Msg):
+    """插件 setup 成功。
+
+    data = {"plugin_id": str, "version": str, "scope": str, "duration_ms": int}
+    """
+
+    kind: Literal["plugin_loaded"] = "plugin_loaded"
+
+
+class PluginFailed(_Msg):
+    """插件 setup 失败（含被取消），已回滚此前加载的插件。
+
+    data = {"plugin_id": str, "version": str, "scope": str, "duration_ms": int,
+            "failure_class": str, "rollback_errors": int}
+    """
+
+    kind: Literal["plugin_failed"] = "plugin_failed"
+
+
+class PluginUnloaded(_Msg):
+    """插件被撤销（pool 关闭或加载回滚）。
+
+    data = {"plugin_id": str, "version": str, "scope": str, "duration_ms": int,
+            "failure_class": str | None}   # 关闭出错 / 超时时为异常类名
+    """
+
+    kind: Literal["plugin_unloaded"] = "plugin_unloaded"
+
 __all__ = [
+    "PluginFailed",
+    "PluginLoaded",
+    "PluginUnloaded",
     "DirectoryCursorReset",
     "EngineLog",
     "IndexHookAbandoned",

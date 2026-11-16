@@ -69,6 +69,17 @@ LocalWorkspaceFS 的每次写入使用目标目录中的独占随机临时文件
 验证7成员协议的行为；链接和物理故障由各实现专测。
 细节见 [WorkspaceFS 契约](capabilities/workspace-fs.md)，决策见 ADR 0129。
 
+## 插件装配（plugin-system 契约，🧪 ADR 0144）
+
+`EnginePool.create(plugins=...)` 在 pool 构造完成、`create` 返回之前调用 `loop/pool_plugins.load_pool_plugins`：
+`PluginManager` 按 `requires` 拓扑序逐个 `setup(ctx)`，`ctx.cancel` 由 pool 根令牌派生。任一 setup 失败时
+先撤销该插件的注册、再逆序关闭已加载插件，`create` 走既有失败路径关闭 pool 后抛 `PluginSetupError`。
+
+`pool.close()` 的顺序：退订工具集事件 → 强制释放全部 Session → **关闭插件**（`close_pool_plugins`，
+此时无在途调用、根令牌尚未取消）→ 停 skill watcher → 取消根令牌 → 关压缩器 / hook runner / store / directory。
+插件关闭出错并入「首错」，不阻断后续清理。生命周期事件以 `submission_id="*"` 交给 pool 的 `sink=`。
+未传 `plugins` 时不创建 manager，上述路径与引入插件前一致。
+
 ## 核心抽象
 
 ```python

@@ -115,6 +115,10 @@ MsgKind = Literal[
     "skill_search_invoked",
     "skill_candidates_returned",
     "skill_candidates_verified",
+    # plugin-core（ADR 0144）：插件生命周期，经 pool 级 sink 发出
+    "plugin_loaded",
+    "plugin_failed",
+    "plugin_unloaded",
 ]
 
 

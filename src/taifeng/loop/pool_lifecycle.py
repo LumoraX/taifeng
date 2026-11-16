@@ -15,6 +15,7 @@ from taifeng.loop.audit_lifecycle import (
     ThreadTerminalRequest,
 )
 from taifeng.loop.cancellation import CancelReason
+from taifeng.loop.pool_plugins import close_pool_plugins
 
 if TYPE_CHECKING:
     from taifeng.loop.audit_bootstrap import AuditedSessionState
@@ -411,6 +412,8 @@ async def _cleanup_pool_resources(
     first: BaseException | None,
 ) -> BaseException | None:
     """逐段清理非 Session 资源，每段失败均不阻断后续资源。"""
+    # plugin-core：Session 已全部释放、store 尚未关闭——插件最先撤销（此时无在途调用）
+    first = await close_pool_plugins(pool, first)
     first = await _stop_watcher(pool, first)
     pool._root_cancel.cancel(CancelReason.SHUTDOWN, "pool_close")  # noqa: SLF001
     first = await _close_compressors(pool, first)

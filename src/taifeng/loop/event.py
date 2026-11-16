@@ -27,6 +27,9 @@ from taifeng.loop.event_lifecycle import InstructionUpdated as InstructionUpdate
 from taifeng.loop.event_lifecycle import InstructionUpdateRejected as InstructionUpdateRejected
 from taifeng.loop.event_lifecycle import JoinBarrierFired as JoinBarrierFired
 from taifeng.loop.event_lifecycle import JoinBarrierRegistered as JoinBarrierRegistered
+from taifeng.loop.event_lifecycle import PluginFailed as PluginFailed
+from taifeng.loop.event_lifecycle import PluginLoaded as PluginLoaded
+from taifeng.loop.event_lifecycle import PluginUnloaded as PluginUnloaded
 from taifeng.loop.event_lifecycle import RebuildSkippedCorrupt as RebuildSkippedCorrupt
 from taifeng.loop.event_lifecycle import RewindCheckpointRecorded as RewindCheckpointRecorded
 from taifeng.loop.event_lifecycle import RewindRejected as RewindRejected
@@ -223,6 +226,9 @@ Msg = Union[
     ProviderCircuitClosed,
     ToolSetChanged,
     BackgroundTaskCompleted,
+    PluginLoaded,
+    PluginFailed,
+    PluginUnloaded,
 ]
 
 class EventMsg(BaseModel):

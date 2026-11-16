@@ -115,6 +115,10 @@ _KIND_TAG = {
     # 兜底分支会把整份 prompt 与工具输出原样刷屏
     "llm_request_recorded": ("req ", _Colors.GRAY, "⇢"),
     "shutdown": ("eng ", _Colors.GRAY, "⏹"),
+    # plugin-core（ADR 0144）：插件生命周期，正文走兜底（kind + 元数据）
+    "plugin_loaded": ("plug", _Colors.GREEN, "⊕"),
+    "plugin_failed": ("plug", _Colors.RED, "✗"),
+    "plugin_unloaded": ("plug", _Colors.GRAY, "⊖"),
 }
 
 

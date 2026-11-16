@@ -134,6 +134,23 @@ from taifeng.loop.replay_session import (
     replay_session,
 )
 from taifeng.loop.submission import Prewarm
+from taifeng.plugin import (
+    DuplicatePluginError,
+    MissingPluginDependencyError,
+    Plugin,
+    PluginCapabilityError,
+    PluginCloseError,
+    PluginContext,
+    PluginDependencyCycleError,
+    PluginError,
+    PluginLifecycleEvent,
+    PluginManager,
+    PluginSetupError,
+    PluginSnapshot,
+    PluginSpec,
+    PluginStateError,
+    RegistrationHandle,
+)
 from taifeng.skill.authorization import (
     CallbackSkillAuthorization,
     PermissionSkillAuthorization,
@@ -208,6 +225,22 @@ from taifeng.tool.replay import (
 from taifeng.tool.spec import ReconcileVerdict
 
 __all__ = [
+    # 插件系统（plugin-system，🧪 ADR 0144）
+    "DuplicatePluginError",
+    "MissingPluginDependencyError",
+    "Plugin",
+    "PluginCapabilityError",
+    "PluginCloseError",
+    "PluginContext",
+    "PluginDependencyCycleError",
+    "PluginError",
+    "PluginLifecycleEvent",
+    "PluginManager",
+    "PluginSetupError",
+    "PluginSnapshot",
+    "PluginSpec",
+    "PluginStateError",
+    "RegistrationHandle",
     # 执行树观测（execution-observability，🧪；身份已由 ADR 0143 晋升稳定层）
     "ExecutionProjection",
     "ExecutionSnapshot",
