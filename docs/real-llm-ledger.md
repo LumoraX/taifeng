@@ -3,62 +3,62 @@
 > **本文件由 `examples/real_llm/capability_matrix.py` 自动生成（数据源 `real-llm-ledger.json`），勿手编辑。**
 > 回归红线：基础层（`src/taifeng/{llm,loop,context,conversation}/`）变更必须全量重跑并提交本台账；详见 CLAUDE.md §测试约束。
 
-- **最近一次回归**：2026-11-15 18:53:29 UTC @ `aa5bd48`
-- **Provider / Model**：codex / gpt-6.1-sol
-- **本次跑测场景**：execution_observability, offload_workspace, composite_dispatch, read_skill_lazy, orchestration, concurrent_fanout, research_pipeline, product_review, numeric_loop, compression, selective_approval, travel_planner, suspend_resume, turn_rewind, thread_rewind, spawn_join, peer_messaging, wait_any, kernel_knobs, post_turn_review, budget_awareness, token_calibration, skill_inference, tool_output_guard, pinned_periodic, file_search, read_skill_path, compaction_continuity, plugin_tool, codex_instructions, codex_image_single, codex_image_order, codex_image_tool_call, codex_tool_image_output, codex_encrypted_state_hot_replay, codex_legacy_jsonl_cold_resume, codex_file_input
+- **最近一次回归**：2026-11-16 14:54:24 UTC @ `78cd17f`
+- **Provider / Model**：openai / gpt-6.1-sol
+- **本次跑测场景**：execution_observability, offload_workspace, composite_dispatch, read_skill_lazy, orchestration, concurrent_fanout, research_pipeline, product_review, numeric_loop, compression, selective_approval, travel_planner, suspend_resume, turn_rewind, thread_rewind, spawn_join, peer_messaging, wait_any, kernel_knobs, post_turn_review, budget_awareness, token_calibration, skill_inference, tool_output_guard, pinned_periodic, file_search, read_skill_path, compaction_continuity, plugin_tool, openai_chat_image_single, openai_chat_image_order, openai_responses_image_single, openai_responses_image_order, openai_chat_image_tool, openai_responses_image_tool_replay, openai_responses_image_cold_resume
 
 ## 逐场景结果
 
 | 场景 | 能力 | 结果 | 日期 @ commit | 耗时 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `budget_awareness` | 预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020） | ✅PASS | 2026-11-15 @ `aa5bd48` | 15s |  |
-| `codex_encrypted_state_hot_replay` | Codex encrypted state 热重放 | ✅PASS | 2026-11-15 @ `aa5bd48` | 13s |  |
-| `codex_file_input` | Codex 文件（PDF）输入：随机核对码读出 + 登记 + 脱敏 | ✅PASS | 2026-11-15 @ `aa5bd48` | 6s |  |
-| `codex_image_order` | Codex 有序多图片语义 | ✅PASS | 2026-11-15 @ `aa5bd48` | 3s |  |
-| `codex_image_single` | Codex 单图片语义 | ✅PASS | 2026-11-15 @ `aa5bd48` | 4s |  |
-| `codex_image_tool_call` | Codex 图片驱动 function call | ✅PASS | 2026-11-15 @ `aa5bd48` | 3s |  |
-| `codex_instructions` | Codex 顶层 instructions | ✅PASS | 2026-11-15 @ `aa5bd48` | 3s |  |
-| `codex_legacy_jsonl_cold_resume` | Codex 图片/state legacy JSONL 冷恢复 | ✅PASS | 2026-11-15 @ `aa5bd48` | 13s |  |
-| `codex_tool_image_output` | Codex 工具返回图片（function_call_output 带 input_image） | ✅PASS | 2026-11-15 @ `aa5bd48` | 4s |  |
-| `compaction_continuity` | 压缩后衔接：保留用户原话 + 续接前言（handoff，ADR 0059） | ✅PASS | 2026-11-15 @ `aa5bd48` | 29s |  |
-| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-11-15 @ `aa5bd48` | 23s |  |
-| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-11-15 @ `aa5bd48` | 100s |  |
-| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-11-15 @ `aa5bd48` | 95s |  |
-| `execution_observability` | 同 skill 并行执行身份、上下文与自身用量取证 | ✅PASS | 2026-11-15 @ `aa5bd48` | 19s |  |
-| `file_search` | opt-in glob / grep 只读搜索工具（ADR 0064） | ✅PASS | 2026-11-15 @ `aa5bd48` | 7s |  |
-| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-11-15 @ `aa5bd48` | 5s |  |
-| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-11-15 @ `aa5bd48` | 30s |  |
-| `offload_workspace` | offload 与 file_read 共享非本机工作区，stub 后分页回读 | ✅PASS | 2026-11-15 @ `aa5bd48` | 9s |  |
-| `openai_chat_image_order` | OpenAI Chat 多图顺序 | ❌CODE_FAILURE | 2026-11-15 @ `335eb29`（stale） | 2s | ServerError: {"error":{"message":"codex channel: /v1/chat/completions endpoint not supported (request id: 202611151824295088366888268d9d6sRMVP2By)","type":"new_api_error","param":"","code":"convert_request_failed"}} |
-| `openai_chat_image_single` | OpenAI Chat 单图库存语义 | ❌CODE_FAILURE | 2026-11-15 @ `335eb29`（stale） | 1s | ServerError: {"error":{"message":"codex channel: /v1/chat/completions endpoint not supported (request id: 202611151824278345643508268d9d6jHjMqaai)","type":"new_api_error","param":"","code":"convert_request_failed"}} |
-| `openai_chat_image_tool` | OpenAI Chat 图片驱动工具调用 | ❌CODE_FAILURE | 2026-11-15 @ `335eb29`（stale） | 1s | ServerError: {"error":{"message":"codex channel: /v1/chat/completions endpoint not supported (request id: 202611151824379029563018268d9d6kn6zY5Ep)","type":"new_api_error","param":"","code":"convert_request_failed"}} |
-| `openai_responses_image_cold_resume` | Responses 图片与状态 JSONL 冷恢复 | ❌CODE_FAILURE | 2026-11-15 @ `335eb29`（stale） | 8s | AssertionError: Responses did not persist encrypted reasoning state |
-| `openai_responses_image_order` | OpenAI Responses 多图顺序 | ✅PASS | 2026-11-15 @ `335eb29`（stale） | 4s |  |
-| `openai_responses_image_single` | OpenAI Responses 单图库存语义 | ✅PASS | 2026-11-15 @ `335eb29`（stale） | 4s |  |
-| `openai_responses_image_tool_replay` | Responses 图片工具、结果下一轮与 encrypted state | ❌CODE_FAILURE | 2026-11-15 @ `335eb29`（stale） | 8s | AssertionError: Responses did not persist encrypted reasoning state |
-| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-11-15 @ `aa5bd48` | 14s |  |
-| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-11-15 @ `aa5bd48` | 10s |  |
-| `pinned_periodic` | pinned 任务清单按用户轮数周期重注（ADR 0065） | ✅PASS | 2026-11-15 @ `aa5bd48` | 15s |  |
-| `plugin_tool` | 插件注册的工具被真实模型调用 + 插件生命周期事件（ADR 0144） | ✅PASS | 2026-11-15 @ `aa5bd48` | 6s |  |
-| `post_turn_review` | post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序） | ✅PASS | 2026-11-15 @ `aa5bd48` | 27s |  |
-| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-11-15 @ `aa5bd48` | 12s |  |
-| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-11-15 @ `aa5bd48` | 20s |  |
-| `read_skill_path` | read_skill 读取 skill 目录内附属文件（渐进加载第三层，ADR 0060） | ✅PASS | 2026-11-15 @ `aa5bd48` | 9s |  |
-| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-11-15 @ `aa5bd48` | 19s |  |
-| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-11-15 @ `aa5bd48` | 17s |  |
-| `skill_inference` | skill 级推理参数（SKILL.md inference 块按 skill 下发，ADR 0056） | ✅PASS | 2026-11-15 @ `aa5bd48` | 11s |  |
-| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-11-15 @ `aa5bd48` | 55s |  |
-| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-11-15 @ `aa5bd48` | 11s |  |
-| `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-11-15 @ `aa5bd48` | 10s |  |
-| `token_calibration` | 上下文 token 实测校准（预测下一轮 prompt，ADR 0043） | ✅PASS | 2026-11-15 @ `aa5bd48` | 27s |  |
-| `tool_output_guard` | PostToolUse 改写工具输出 + 工具结果字节上限（ADR 0061） | ✅PASS | 2026-11-15 @ `aa5bd48` | 5s |  |
-| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-11-15 @ `aa5bd48` | 19s |  |
-| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-11-15 @ `aa5bd48` | 94s |  |
-| `wait_any` | any-of-N 等待(wait_any:先到先处理,不等最慢的) | ✅PASS | 2026-11-15 @ `aa5bd48` | 13s |  |
+| `budget_awareness` | 预算自知提示（穿越 soft_limit 注中性预算事实，ADR 0020） | ✅PASS | 2026-11-16 @ `78cd17f` | 17s |  |
+| `codex_encrypted_state_hot_replay` | Codex encrypted state 热重放 | ✅PASS | 2026-11-15 @ `aa5bd48`（stale） | 13s |  |
+| `codex_file_input` | Codex 文件（PDF）输入：随机核对码读出 + 登记 + 脱敏 | ✅PASS | 2026-11-15 @ `aa5bd48`（stale） | 6s |  |
+| `codex_image_order` | Codex 有序多图片语义 | ✅PASS | 2026-11-15 @ `aa5bd48`（stale） | 3s |  |
+| `codex_image_single` | Codex 单图片语义 | ✅PASS | 2026-11-15 @ `aa5bd48`（stale） | 4s |  |
+| `codex_image_tool_call` | Codex 图片驱动 function call | ✅PASS | 2026-11-15 @ `aa5bd48`（stale） | 3s |  |
+| `codex_instructions` | Codex 顶层 instructions | ✅PASS | 2026-11-15 @ `aa5bd48`（stale） | 3s |  |
+| `codex_legacy_jsonl_cold_resume` | Codex 图片/state legacy JSONL 冷恢复 | ✅PASS | 2026-11-15 @ `aa5bd48`（stale） | 13s |  |
+| `codex_tool_image_output` | Codex 工具返回图片（function_call_output 带 input_image） | ✅PASS | 2026-11-15 @ `aa5bd48`（stale） | 4s |  |
+| `compaction_continuity` | 压缩后衔接：保留用户原话 + 续接前言（handoff，ADR 0059） | ✅PASS | 2026-11-16 @ `78cd17f` | 45s |  |
+| `composite_dispatch` | composite call_skill 派发 + HITL | ✅PASS | 2026-11-16 @ `78cd17f` | 31s |  |
+| `compression` | 上下文压缩（sliding，小窗触发） | ✅PASS | 2026-11-16 @ `78cd17f` | 105s |  |
+| `concurrent_fanout` | 并发 fan-out（LLM 自主并行派发） | ✅PASS | 2026-11-16 @ `78cd17f` | 110s |  |
+| `execution_observability` | 同 skill 并行执行身份、上下文与自身用量取证 | ✅PASS | 2026-11-16 @ `78cd17f` | 29s |  |
+| `file_search` | opt-in glob / grep 只读搜索工具（ADR 0064） | ✅PASS | 2026-11-16 @ `78cd17f` | 22s |  |
+| `kernel_knobs` | K2 会话 token 天花板真实触发（resource_limit） | ✅PASS | 2026-11-16 @ `78cd17f` | 6s |  |
+| `numeric_loop` | 多轮 run_script 数值调谐（工具循环） | ✅PASS | 2026-11-16 @ `78cd17f` | 52s |  |
+| `offload_workspace` | offload 与 file_read 共享非本机工作区，stub 后分页回读 | ✅PASS | 2026-11-16 @ `78cd17f` | 20s |  |
+| `openai_chat_image_order` | OpenAI Chat 多图顺序 | ❌CODE_FAILURE | 2026-11-16 @ `78cd17f` | 2s | ServerError: {"error":{"message":"codex channel: /v1/chat/completions endpoint not supported (request id: 202611161453472034675858268d9d6Zef9hw4e)","type":"new_api_error","param":"","code":"convert_request_failed"}} |
+| `openai_chat_image_single` | OpenAI Chat 单图库存语义 | ❌CODE_FAILURE | 2026-11-16 @ `78cd17f` | 3s | ServerError: {"error":{"message":"codex channel: /v1/chat/completions endpoint not supported (request id: 202611161453447383072028268d9d6s9Sfh7Qf)","type":"new_api_error","param":"","code":"convert_request_failed"}} |
+| `openai_chat_image_tool` | OpenAI Chat 图片驱动工具调用 | ❌CODE_FAILURE | 2026-11-16 @ `78cd17f` | 2s | ServerError: {"error":{"message":"codex channel: /v1/chat/completions endpoint not supported (request id: 202611161453597632785318268d9d6s1krvWlr)","type":"new_api_error","param":"","code":"convert_request_failed"}} |
+| `openai_responses_image_cold_resume` | Responses 图片与状态 JSONL 冷恢复 | ✅PASS | 2026-11-16 @ `78cd17f` | 25s |  |
+| `openai_responses_image_order` | OpenAI Responses 多图顺序 | ✅PASS | 2026-11-16 @ `78cd17f` | 6s |  |
+| `openai_responses_image_single` | OpenAI Responses 单图库存语义 | ✅PASS | 2026-11-16 @ `78cd17f` | 5s |  |
+| `openai_responses_image_tool_replay` | Responses 图片工具、结果下一轮与 encrypted state | ✅PASS | 2026-11-16 @ `78cd17f` | 25s |  |
+| `orchestration` | 声明式编排 parallel/serial/when | ✅PASS | 2026-11-16 @ `78cd17f` | 39s |  |
+| `peer_messaging` | 谱系 peer 消息投递（spawn + send_message） | ✅PASS | 2026-11-16 @ `78cd17f` | 22s |  |
+| `pinned_periodic` | pinned 任务清单按用户轮数周期重注（ADR 0065） | ✅PASS | 2026-11-16 @ `78cd17f` | 35s |  |
+| `plugin_tool` | 插件注册的工具被真实模型调用 + 插件生命周期事件（ADR 0144） | ✅PASS | 2026-11-16 @ `78cd17f` | 11s |  |
+| `post_turn_review` | post_turn 钩子（turn 收尾审计/记忆固化 + 跨 turn 顺序） | ✅PASS | 2026-11-16 @ `78cd17f` | 38s |  |
+| `product_review` | fan-out 多 reviewer + 评分聚合 | ✅PASS | 2026-11-16 @ `78cd17f` | 25s |  |
+| `read_skill_lazy` | read_skill 懒加载（skill-as-context） | ✅PASS | 2026-11-16 @ `78cd17f` | 26s |  |
+| `read_skill_path` | read_skill 读取 skill 目录内附属文件（渐进加载第三层，ADR 0060） | ✅PASS | 2026-11-16 @ `78cd17f` | 25s |  |
+| `research_pipeline` | 串行 pipeline（采集→提炼→写作） | ✅PASS | 2026-11-16 @ `78cd17f` | 26s |  |
+| `selective_approval` | 差异化授权 + 多路派发 | ✅PASS | 2026-11-16 @ `78cd17f` | 18s |  |
+| `skill_inference` | skill 级推理参数（SKILL.md inference 块按 skill 下发，ADR 0056） | ✅PASS | 2026-11-16 @ `78cd17f` | 16s |  |
+| `spawn_join` | 分离式并发 spawn + 错峰 HITL + join-barrier 聚合 | ✅PASS | 2026-11-16 @ `78cd17f` | 89s |  |
+| `suspend_resume` | HITL 挂起 → Resume 续跑（R5） | ✅PASS | 2026-11-16 @ `78cd17f` | 16s |  |
+| `thread_rewind` | thread 寻址 rewind（spawn 子 thread 截断重推） | ✅PASS | 2026-11-16 @ `78cd17f` | 17s |  |
+| `token_calibration` | 上下文 token 实测校准（预测下一轮 prompt，ADR 0043） | ✅PASS | 2026-11-16 @ `78cd17f` | 33s |  |
+| `tool_output_guard` | PostToolUse 改写工具输出 + 工具结果字节上限（ADR 0061） | ✅PASS | 2026-11-16 @ `78cd17f` | 11s |  |
+| `travel_planner` | 三路 fan-out（航班/酒店/活动）+ 综合 | ✅PASS | 2026-11-16 @ `78cd17f` | 25s |  |
+| `turn_rewind` | turn 回访重跑（Rewind re_reason） | ✅PASS | 2026-11-16 @ `78cd17f` | 125s |  |
+| `wait_any` | any-of-N 等待(wait_any:先到先处理,不等最慢的) | ✅PASS | 2026-11-16 @ `78cd17f` | 17s |  |
 
 ## R3 可观测完整性审计（最近一次全量）
 
-- 发出的事件 kind：34 种
+- 发出的事件 kind：35 种
 - ✅ 所有发出的事件 kind 都有专用 console 渲染
 - ✅ R3 经典事件全部触发
 
