@@ -118,7 +118,12 @@ def _provider_state_payload(item: ApiProviderStateItem) -> dict[str, Any]:
 def _input_item(item: object) -> dict[str, Any]:
     """把单个 provider-neutral ordered item 映射到 Responses wire。"""
     if isinstance(item, ApiMessageItem):
-        return {"type": "message", "role": item.role, "content": _input_content(item)}
+        # 历史中段 system 注记（压缩摘要 / pinned 重注 / 预算提示 / 记忆预取 / 业务注入）
+        # 与顶层 system_prompt 同一处置：原位改用 developer 角色。部分端点拒收任何
+        # role=system 的 input item（HTTP 400 "System messages are not allowed"），
+        # 仅改顶层而漏掉中段会让压缩 / 预算等路径在这类端点上整轮失败（ADR 0146）。
+        role = "developer" if item.role == "system" else item.role
+        return {"type": "message", "role": role, "content": _input_content(item)}
     if isinstance(item, ApiFunctionCallItem):
         return {
             "type": "function_call",

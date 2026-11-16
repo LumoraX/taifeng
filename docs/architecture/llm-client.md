@@ -206,7 +206,7 @@ provider 共用同一归一器**。旧行为一律塌缩成 `InvalidResponseErro
 delta/done 不一致、completed 后的协议事件仍全部 fail closed——终态保证由 `finalize()` 的完成门与
 done items 承担，噪声吞不掉输出事实。
 
-两套官方客户端均 `store=false`。Responses 还固定请求 `include=["reasoning.encrypted_content"]`，不传 `previous_response_id`；`system_prompt` 逐条作 `input` message 下发，角色用 **`developer`**（Responses 下 system 的后继角色）——**注意与上文 Codex 的差异**：Codex 把 system 折叠进顶层 `instructions`，OpenAI Responses 保留逐条 item 以维持多段 system 的独立性与顺序。实测部分代理会直接拒 `input` 中的 `role="system"` item（HTTP 400 `System messages are not allowed`），改用 `developer` 后同端点放行。其 function tool 不强制发送 `strict=true`，terminal accumulator 先拒绝空 `call_id`/`name`，再只在 `response.completed` 校验成功后发布唯一 `normalized_output`；TurnRunner 原子提交完整 sample 后才执行工具。history 若含 provider state 而目标客户端未声明接受能力，prompt 构建在网络前 fail closed。
+两套官方客户端均 `store=false`。Responses 还固定请求 `include=["reasoning.encrypted_content"]`，不传 `previous_response_id`；`system_prompt` 逐条作 `input` message 下发，角色用 **`developer`**（Responses 下 system 的后继角色）——**注意与上文 Codex 的差异**：Codex 把 system 折叠进顶层 `instructions`，OpenAI Responses 保留逐条 item 以维持多段 system 的独立性与顺序。实测部分代理会直接拒 `input` 中的 `role="system"` item（HTTP 400 `System messages are not allowed`），改用 `developer` 后同端点放行；历史中段的 system 注记同样原位改用 `developer`（ADR 0146），否则压缩 / 预算提示 / pinned 重注一旦触发，这类端点就会整轮 400。其 function tool 不强制发送 `strict=true`，terminal accumulator 先拒绝空 `call_id`/`name`，再只在 `response.completed` 校验成功后发布唯一 `normalized_output`；TurnRunner 原子提交完整 sample 后才执行工具。history 若含 provider state 而目标客户端未声明接受能力，prompt 构建在网络前 fail closed。
 
 图片正文以 `ImageAttachmentV1` canonical base64 落 conversation；`ApiRequest.input_items` 是有序事实源，provider 只在网络边界临时构造 Data URL。支持 MIME 为 PNG、JPEG、WebP 和单帧 GIF；GIF 按 block 计帧，WebP 支持 VP8/VP8L/VP8X 并拒绝 VP8X 动画标志。业务必须显式注入 `ImageInputPolicy(enabled=True, ...)`，否则 durable append 前返回 `unsupported_modality`。
 
@@ -357,7 +357,7 @@ native provider 实现可在请求里带额外 header（如 `extra_headers`）�
 
 内核在历史中段放 system 消息（压缩摘要 / pinned 重注 / 预算提示 / 记忆预取 / 业务注入）。Anthropic / Gemini 原生 API
 只有顶层 system 字段：两家 provider 把这些消息**原位**改写为 `<system-reminder>` 包裹的 user 文本并与相邻 user 合并；
-OpenAI 系原样透传 `role="system"`。契约见 `capabilities/llm-provider-native.md`。
+OpenAI Responses 原位改用 `role="developer"`（部分端点拒收 system，ADR 0146）；其余 OpenAI 系（Chat / openai_compat / DeepSeek / LiteLLM）原样透传 `role="system"`。契约见 `capabilities/llm-provider-native.md`。
 
 ## Journal 确定性回放（journal-replay，ADR 0054 / 0070）
 

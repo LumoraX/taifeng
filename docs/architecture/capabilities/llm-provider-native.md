@@ -387,11 +387,16 @@ provider（Anthropic / Gemini）SHALL 把它们**原位**改写为 user 文本 `
 
 - Anthropic：作为 user 文本块，与相邻 user 消息合并；位于 `tool_result` 之后时追加在其后（`tool_result` 仍居首）。
 - Gemini：作为 user part，与相邻 user content 合并，不产生连续同角色 content。
-- OpenAI 系（openai_compat / DeepSeek / LiteLLM）原样透传 `role="system"`。
+- OpenAI Responses SHALL 原位改用 `role="developer"`（与顶层 `system_prompt` 同一处置；部分端点拒收任何 `role="system"` input item，ADR 0146），SHALL NOT 在 wire 中残留 `role="system"`。
+- 其余 OpenAI 系（Chat / openai_compat / DeepSeek / LiteLLM）原样透传 `role="system"`。
 
 #### Scenario: 压缩摘要跨 provider 保留
 - **WHEN** 请求 messages 以压缩摘要（role=system）开头，后接用户消息
 - **THEN** Anthropic / Gemini / OpenAI 系的 wire payload SHALL 都包含摘要文本
+
+#### Scenario: Responses 中段注记不残留 system 角色
+- **WHEN** OpenAI Responses 请求的历史中段含压缩摘要与预算提示（role=system）
+- **THEN** 两条注记 SHALL 以 `role="developer"` 出现在原位置，wire `input` 中 SHALL NOT 出现 `role="system"`
 
 ### Requirement: thinking 块与签名回传（thinking-passback）
 

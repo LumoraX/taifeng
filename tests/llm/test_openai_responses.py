@@ -156,6 +156,34 @@ def test_responses_maps_ordered_items_images_tools_and_format() -> None:
     assert payload["reasoning"] == {"effort": "medium"}
 
 
+def test_responses_mid_history_system_uses_developer_role_in_place() -> None:
+    """历史中段 system 注记原位改用 developer 角色，不丢失、不挪位、不残留 system。"""
+    request = ApiRequest(
+        model="gpt-5.6",
+        system_prompt=["你是检查员"],
+        input_items=[
+            ApiMessageItem(role="system", content="[压缩摘要] 之前讨论了 A-17"),
+            ApiMessageItem(role="user", content="继续"),
+            ApiMessageItem(role="assistant", content="好的"),
+            ApiMessageItem(role="system", content=[TextPart(text="预算提示：已用 80%")]),
+            ApiMessageItem(role="user", content="下一步？"),
+        ],
+    )
+
+    payload = _session()._build_payload(request)
+    roles = [item["role"] for item in payload["input"]]
+
+    # 顶层 system_prompt + 两条中段注记全部为 developer，且位置保持
+    assert roles == ["developer", "developer", "user", "assistant", "developer", "user"]
+    assert "system" not in roles
+    assert payload["input"][1]["content"] == [
+        {"type": "input_text", "text": "[压缩摘要] 之前讨论了 A-17"}
+    ]
+    assert payload["input"][4]["content"] == [
+        {"type": "input_text", "text": "预算提示：已用 80%"}
+    ]
+
+
 def test_responses_guards_exact_final_utf8_json_bytes() -> None:
     """Responses 对包含 input_image 的最终 wire JSON 做精确字节门禁。"""
     request = ApiRequest(
