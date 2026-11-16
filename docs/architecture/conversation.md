@@ -215,6 +215,11 @@ transcript、不建 SQLite 索引（`thread_directory` 不给时是 `NullThreadD
   要么都不可见，同一 `batch_id` 重试幂等。没有实现时构造即拒绝；
 - 审计模式（`AuditConfig`）只支持默认 store：对话投影写的是 JSONL。
 
+**由插件提供**（🧪 ADR 0145）：插件可在 `provide_backends` 里声明 `message_store` / `thread_directory` /
+`audit` 工厂，`create` 在构造任何后端之前调用。效果与宿主传对应参数相同，校验相同；区别只在所有权——插件
+提供的 store 在 `create` 中途失败时由内核关闭。与宿主参数（含 `storage_dir` / `threads_dir`）冲突一律报错。
+详见 [plugin-system](capabilities/plugin-system.md)。
+
 ### 显式短命 Responses 存储
 
 `EphemeralMessageStore` 是独立的进程内实现，适用于明确不可恢复的短命 Responses 执行。

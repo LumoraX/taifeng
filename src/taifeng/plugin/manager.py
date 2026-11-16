@@ -33,6 +33,7 @@ from taifeng.plugin.types import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from taifeng.plugin.capabilities import PluginCapabilities
     from taifeng.plugin.types import Plugin, PluginEventCallback, RegistrationHandle
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ class PluginManager:
         cancel: CancellationToken | None = None,
         on_event: PluginEventCallback | None = None,
         close_timeout_seconds: float = DEFAULT_CLOSE_TIMEOUT_SECONDS,
+        capabilities: PluginCapabilities | None = None,
     ) -> None:
         """构造 manager。
 
@@ -115,12 +117,14 @@ class PluginManager:
             cancel: 父取消令牌；每个插件的 ``ctx.cancel`` 由它派生。None 时自建根令牌。
             on_event: 生命周期事件回调；None 时只记日志。
             close_timeout_seconds: 关闭单个插件（及撤销其每个注册）的超时上限。
+            capabilities: 交给每个插件 context 的 capability 后端；None 表示一个都不提供。
         """
         if close_timeout_seconds <= 0:
             raise ValueError(f"close_timeout_seconds must be positive, got {close_timeout_seconds}")
         self._cancel = cancel if cancel is not None else CancellationToken(name="plugins")
         self._on_event = on_event
         self._close_timeout = close_timeout_seconds
+        self._capabilities = capabilities
         self._state: PluginManagerState = "new"
         self._loaded: list[_Loaded] = []
 
@@ -170,7 +174,9 @@ class PluginManager:
         spec = plugin.spec
         token = self._cancel.child(f"plugin:{spec.id}")
         handles: list[RegistrationHandle] = []
-        ctx = PluginContext(plugin_id=spec.id, cancel=token, track=handles.append)
+        ctx = PluginContext(
+            plugin_id=spec.id, cancel=token, track=handles.append, capabilities=self._capabilities,
+        )
         entry = _Loaded(plugin=plugin, ctx=ctx, handles=handles)
         started = time.monotonic()
         try:

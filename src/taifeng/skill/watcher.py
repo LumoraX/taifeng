@@ -49,6 +49,8 @@ class SkillFileWatcher:
         # path -> mtime 缓存
         self._mtimes: dict[Path, float] = {}
         self._initialized = False
+        # skill-dir-registration：目录布局变化时 add_dir / 撤销已 discover 过，只重置基线不重复触发
+        self._layout_seen = registry.layout_version
 
     def _scan_mtimes(self) -> dict[Path, float]:
         result: dict[Path, float] = {}
@@ -77,6 +79,10 @@ class SkillFileWatcher:
                 pass
 
             current = self._scan_mtimes()
+            if self._registry.layout_version != self._layout_seen:
+                self._layout_seen = self._registry.layout_version
+                self._mtimes = current
+                continue
             if current != self._mtimes:
                 changed = self._diff(self._mtimes, current)
                 logger.info("SKILL.md change detected: %s", changed)

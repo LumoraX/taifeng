@@ -71,14 +71,18 @@ LocalWorkspaceFS 的每次写入使用目标目录中的独占随机临时文件
 
 ## 插件装配（plugin-system 契约，🧪 ADR 0144）
 
-`EnginePool.create(plugins=...)` 在 pool 构造完成、`create` 返回之前调用 `loop/pool_plugins.load_pool_plugins`：
+`EnginePool.create(plugins=...)` 分两段（ADR 0145）。**第一段**在最开头：`plugin_sink` 把 `sink=` 包成
+`FanoutSink`（宿主 sink 排第一），`resolve_plugin_backends` 收集插件可选的 `provide_backends` 声明并构造
+`message_store` / `thread_directory` / `audit`（与宿主参数冲突即报错）。**第二段**在 pool 构造完成、`create`
+返回之前调用 `loop/pool_plugins.load_pool_plugins`：
 `PluginManager` 按 `requires` 拓扑序逐个 `setup(ctx)`，`ctx.cancel` 由 pool 根令牌派生。任一 setup 失败时
 先撤销该插件的注册、再逆序关闭已加载插件，`create` 走既有失败路径关闭 pool 后抛 `PluginSetupError`。
 
 `pool.close()` 的顺序：退订工具集事件 → 强制释放全部 Session → **关闭插件**（`close_pool_plugins`，
 此时无在途调用、根令牌尚未取消）→ 停 skill watcher → 取消根令牌 → 关压缩器 / hook runner / store / directory。
 插件关闭出错并入「首错」，不阻断后续清理。生命周期事件以 `submission_id="*"` 交给 pool 的 `sink=`。
-未传 `plugins` 时不创建 manager，上述路径与引入插件前一致。
+插件经 `ctx.tools` / `ctx.hooks` / `ctx.skills` / `ctx.telemetry` 注册的东西由 manager 在关闭时逆序撤销；
+审计 pool 不提供前三者。未传 `plugins` 时不创建 manager、不包装 sink，上述路径与引入插件前一致。
 
 ## 核心抽象
 

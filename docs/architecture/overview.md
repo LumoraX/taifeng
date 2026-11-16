@@ -149,7 +149,10 @@ src/taifeng/
 ├── instructions/ # §1.6 指令分层注入（InstructionResolver + InstructionSource 协议 + engine/session/turn 三档 scope）
 ├── mcp/          # MCP client（stdio / streamable HTTP，2025-06-18 版本协商；tools/list 分页；bridge 随 list_changed 同步 tools、结果投影含图片附件 / structuredContent + outputSchema 校验；放弃请求发 cancelled；HTTP 断流续传；server→client 请求路由 + elicitation 注入口）+ server（taifeng 作为 MCP server，按客户端能力门控 elicitation）+ prompter
 ├── permission/   # HITL 审批：PermissionPolicy + Rule + Decision（per-builtin 权限模型，无中央门）
-├── telemetry/    # TelemetrySink 协议 + Console / Jsonl / OTel 三 sink
+├── plugin/       # 🧪 插件系统（ADR 0144 / 0145）：PluginSpec / PluginContext（capability allowlist：
+│                 #   tools / hooks / skills / telemetry）/ PluginManager（拓扑加载、回滚、有界关闭）/
+│                 #   PluginBackends（provide_backends 两段加载）；pool 接线在 loop/pool_plugins.py
+├── telemetry/    # TelemetrySink 协议 + Console / Jsonl / OTel 三 sink + FanoutSink（多 sink 分发）
 └── testing/      # 给适配包用的一致性检查（不依赖测试框架）：journal_conformance（core）/
                   # journal_adapter_conformance（存储与锁适配器），ADR 0114
 ```

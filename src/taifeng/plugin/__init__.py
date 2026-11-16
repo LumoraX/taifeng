@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from taifeng.plugin.backends import PluginBackends
+from taifeng.plugin.capabilities import HookCapability, PluginCapabilities, ToolCapability
 from taifeng.plugin.context import PluginContext
 from taifeng.plugin.errors import (
     DuplicatePluginError,
@@ -28,8 +30,11 @@ from taifeng.plugin.types import (
 
 __all__ = [
     "DuplicatePluginError",
+    "HookCapability",
     "MissingPluginDependencyError",
     "Plugin",
+    "PluginBackends",
+    "PluginCapabilities",
     "PluginCapabilityError",
     "PluginCloseError",
     "PluginContext",
@@ -42,4 +47,5 @@ __all__ = [
     "PluginSpec",
     "PluginStateError",
     "RegistrationHandle",
+    "ToolCapability",
 ]

@@ -53,6 +53,42 @@ class SkillSnapshot:
         return self.reachable_graph.get(entry_id, frozenset()) | {entry_id}
 
 
+class SkillIdCollisionError(ValueError):
+    """运行期增加的目录里有 skill id 与已加载的 skill 重名（skill-dir-registration）。
+
+    Attributes:
+        skill_ids: 重名的 skill id（已排序）。
+    """
+
+    def __init__(self, directory: Path, skill_ids: list[str]) -> None:
+        """构造错误。"""
+        super().__init__(f"skills in {directory} collide with loaded skills: {', '.join(skill_ids)}")
+        self.skill_ids = tuple(skill_ids)
+
+
+class SkillDirHandle:
+    """撤销一个经 ``add_dir`` 增加的目录；``aclose`` 幂等。"""
+
+    __slots__ = ("_closed", "_directory", "_registry")
+
+    def __init__(self, registry: FilesystemSkillRegistry, directory: Path) -> None:
+        self._registry = registry
+        self._directory = directory
+        self._closed = False
+
+    @property
+    def directory(self) -> Path:
+        """被增加的目录（绝对路径）。"""
+        return self._directory
+
+    async def aclose(self) -> None:
+        """移除目录并重新 discover。"""
+        if self._closed:
+            return
+        self._closed = True
+        await self._registry._remove_dir(self._directory)  # noqa: SLF001
+
+
 @runtime_checkable
 class SkillRegistry(Protocol):
     """skill 注册表协议。"""
@@ -118,6 +154,70 @@ class FilesystemSkillRegistry(SkillRegistry):
         self._snapshot = SkillSnapshot(version=0, skills=())
         self._version_counter = 0
         self._watchers: list[asyncio.Queue[SkillSnapshot]] = []
+        # skill-dir-registration：运行期增删的目录、增删串行锁、目录布局版本（watcher 据此重置基线）
+        self._added_dirs: set[Path] = set()
+        self._layout_lock = asyncio.Lock()
+        self._layout_version = 0
+
+    @property
+    def layout_version(self) -> int:
+        """目录布局版本：每次 ``add_dir`` / 撤销 +1。"""
+        return self._layout_version
+
+    async def add_dir(self, path: str | Path, *, source: SkillSource) -> SkillDirHandle:
+        """运行期增加一个 skill 目录并重新 discover。
+
+        与构造时多目录的「靠后覆盖靠前」不同：这里的 skill id 与已加载 skill 重名直接拒绝，
+        否则增加的目录能悄悄替换已有 skill，撤销后旧 skill 又会「复活」。
+
+        Args:
+            path: 目录路径。
+            source: 来源信任层级，必填——默认成 ``user`` 会让外来 skill 悄悄拿到用户级信任。
+
+        Returns:
+            可撤销 handle；构造时传入的目录没有 handle，不可移除。
+
+        Raises:
+            ValueError: ``source`` 非法或目录已加载。
+            FileNotFoundError: 目录不存在。
+            SkillIdCollisionError: 与已加载 skill 重名（此时不改变任何状态）。
+        """
+        if source not in get_args(SkillSource):
+            raise ValueError(f"unknown skill source {source!r}")
+        directory = Path(path).expanduser().resolve()
+        async with self._layout_lock:
+            if directory in self._skills_dirs:
+                raise ValueError(f"skills dir already loaded: {directory}")
+            loaded = load_skills_from_dir(directory, source=source)
+            clash = sorted(loaded.keys() & self._snapshot.ids())
+            if clash:
+                raise SkillIdCollisionError(directory, clash)
+            self._skills_dirs.append(directory)
+            self._sources[directory] = source
+            self._added_dirs.add(directory)
+            self._layout_version += 1
+            try:
+                await self.discover()
+            except BaseException:
+                # discover 失败：撤回布局，保持「失败不改变状态」
+                self._forget_dir(directory)
+                raise
+        return SkillDirHandle(self, directory)
+
+    async def _remove_dir(self, directory: Path) -> None:
+        """移除经 ``add_dir`` 增加的目录并重新 discover。"""
+        async with self._layout_lock:
+            if directory not in self._added_dirs:
+                return
+            self._forget_dir(directory)
+            await self.discover()
+
+    def _forget_dir(self, directory: Path) -> None:
+        """从布局中去掉一个运行期目录。"""
+        self._skills_dirs.remove(directory)
+        self._sources.pop(directory, None)
+        self._added_dirs.discard(directory)
+        self._layout_version += 1
 
     @classmethod
     async def load(

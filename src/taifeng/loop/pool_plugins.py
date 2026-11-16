@@ -7,16 +7,39 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from taifeng.hooks.types import HookRunner
+from taifeng.loop.audit_config import AuditConfig
 from taifeng.loop.event import EventMsg, PluginFailed, PluginLoaded, PluginUnloaded
+from taifeng.loop.pool_store import validate_injected_store
+from taifeng.plugin.backends import collect_backend_providers
+from taifeng.plugin.capabilities import PluginCapabilities
+from taifeng.plugin.errors import PluginCapabilityError, PluginSetupError
 from taifeng.plugin.manager import PluginManager
+from taifeng.skill.registry import FilesystemSkillRegistry
+from taifeng.telemetry.fanout import FanoutSink
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
+    from taifeng.conversation.protocols import ThreadDirectory
+    from taifeng.conversation.store import MessageStore
+    from taifeng.hooks.types import HookRegistry
+    from taifeng.llm.client import ModelClient
     from taifeng.loop.pool import EnginePool
-    from taifeng.plugin.types import Plugin, PluginEventCallback, PluginLifecycleEvent
+    from taifeng.plugin.backends import BackendKind, BackendProvider
+    from taifeng.plugin.types import (
+        Plugin,
+        PluginEventCallback,
+        PluginLifecycleEvent,
+        RegistrationHandle,
+    )
+    from taifeng.skill.definition import SkillSource
+    from taifeng.skill.registry import SkillDirHandle
     from taifeng.telemetry.sink import TelemetrySink
 
 logger = logging.getLogger(__name__)
@@ -44,6 +67,216 @@ def _sink_emitter(sink: TelemetrySink | None) -> PluginEventCallback | None:
     return _emit
 
 
+_AUDIT_REASON = "audit pools validate tools, hooks and skills statically when the pool is built"
+_CUSTOM_HOOKS_REASON = "the pool's hooks= is not a taifeng.hooks.HookRunner"
+_CUSTOM_SKILLS_REASON = "the pool's skill registry is not a FilesystemSkillRegistry"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedBackends:
+    """合并宿主参数与插件提供的后端之后的结果。
+
+    Attributes:
+        message_store / thread_directory / audit: 交给 ``create`` 后续流程的值。
+        owns_store: pool 是否负责在失败路径关闭 ``message_store``（默认 store 或插件提供的 store 为 True；
+            宿主注入的 store 在 ``create`` 成功前仍归宿主，为 False）。
+    """
+
+    message_store: MessageStore | None
+    thread_directory: ThreadDirectory | None
+    audit: AuditConfig | None
+    owns_store: bool
+
+
+def _build(provider: BackendProvider, kind: BackendKind) -> object:
+    """调用工厂；失败归因到提供者插件。"""
+    try:
+        return provider.factory()
+    except Exception as exc:
+        raise PluginSetupError(
+            f"plugin {provider.plugin_id!r} failed to build backend {kind!r} ({type(exc).__name__})",
+            plugin_id=provider.plugin_id,
+        ) from exc
+
+
+def _reject_explicit(table: dict[BackendKind, BackendProvider], explicit: dict[str, object]) -> None:
+    """插件提供的后端与宿主显式参数冲突一律报错。"""
+    for kind, provider in table.items():
+        if explicit[kind] is not None:
+            raise PluginCapabilityError(
+                f"host passed {kind}= and plugin {provider.plugin_id!r} also provides it",
+                plugin_id=provider.plugin_id,
+                capability=kind,
+            )
+    if "message_store" in table and explicit["storage"] is not None:
+        raise PluginCapabilityError(
+            "host passed storage_dir / threads_dir and a plugin provides message_store",
+            plugin_id=table["message_store"].plugin_id,
+            capability="message_store",
+        )
+
+
+async def resolve_plugin_backends(
+    plugins: Sequence[Plugin],
+    *,
+    message_store: MessageStore | None,
+    thread_directory: ThreadDirectory | None,
+    audit: AuditConfig | None,
+    storage: object,
+    model_client: ModelClient,
+) -> ResolvedBackends:
+    """两段加载的第一段：在建 store 之前收集并构造插件提供的后端。
+
+    Raises:
+        PluginCapabilityError: 提供者冲突（插件之间或与宿主参数）。
+        PluginSetupError: 工厂抛错（已构造的 store 会被关闭）。
+        TypeError / ValueError 等：插件 store 未通过与宿主注入相同的校验（已关闭）。
+    """
+    unchanged = ResolvedBackends(message_store, thread_directory, audit, message_store is None)
+    if not plugins:
+        return unchanged
+    table = collect_backend_providers(plugins)
+    if not table:
+        return unchanged
+    _reject_explicit(table, {
+        "message_store": message_store, "thread_directory": thread_directory,
+        "audit": audit, "storage": storage,
+    })
+    built: dict[str, object] = {}
+    order: tuple[BackendKind, ...] = ("audit", "thread_directory", "message_store")
+    try:
+        for kind in order:
+            provider = table.get(kind)
+            if provider is not None:
+                built[kind] = _build(provider, kind)
+        resolved_audit = built.get("audit", audit)
+        if resolved_audit is not None and not isinstance(resolved_audit, AuditConfig):
+            raise TypeError(f"audit backend must be AuditConfig, got {type(resolved_audit).__name__}")
+        if "message_store" in built:
+            validate_injected_store(
+                built["message_store"], storage=None, model_client=model_client,
+                audited=resolved_audit is not None,
+            )
+    except BaseException:
+        store = built.get("message_store")
+        close = getattr(store, "close", None)
+        if close is not None:
+            with suppress(BaseException):
+                await close()
+        raise
+    return ResolvedBackends(
+        message_store=built.get("message_store", message_store),  # type: ignore[arg-type]
+        thread_directory=built.get("thread_directory", thread_directory),  # type: ignore[arg-type]
+        audit=resolved_audit,
+        owns_store=True,
+    )
+
+
+def plugin_sink(sink: TelemetrySink | None, plugins: Sequence[Plugin]) -> TelemetrySink | None:
+    """传了插件时把 pool 级 sink 包成 ``FanoutSink``（宿主 sink 排第一），供插件追加成员。
+
+    必须在 ``create`` 开头调用：索引钩子 runner 与 SQLite 目录在 pool 构造前就拿走了 sink，
+    插件稍后加载时只能往同一个 fan-out 里加成员。未传插件时原样返回，对象身份不变。
+    """
+    if not plugins:
+        return sink
+    return FanoutSink(sink) if sink is not None else FanoutSink()
+
+
+async def _refresh_engines(pool: EnginePool) -> None:
+    """让所有活跃 engine 重新取 skill 快照（与 skill watcher 的 ``_on_change`` 同一做法）。"""
+    from taifeng.loop.submission import RefreshSnapshot
+
+    async with pool._lock:  # noqa: SLF001
+        for engine in pool._engines.values():  # noqa: SLF001
+            await engine.submit(RefreshSnapshot())
+
+
+class _PoolSkillDirHandle:
+    """撤销插件挂上的 skill 目录：入口 skill 仍在使用时拒绝，撤销后刷新活跃 engine。"""
+
+    __slots__ = ("_inner", "_pool")
+
+    def __init__(self, pool: EnginePool, inner: SkillDirHandle) -> None:
+        self._pool = pool
+        self._inner = inner
+
+    async def aclose(self) -> None:
+        """移除目录；有活跃 engine 的入口 skill 来自该目录时抛 ``PluginCapabilityError``。"""
+        directory = self._inner.directory
+        snapshot = self._pool.skill_registry.snapshot()
+        for session_id, view in self._pool.introspect().items():
+            entry = snapshot.get(str(view.get("entry_skill_id")))
+            if entry is not None and entry.body_path.resolve().is_relative_to(directory):
+                raise PluginCapabilityError(
+                    f"session {session_id!r} entry skill {entry.id!r} lives in {directory}",
+                    plugin_id=None,
+                    capability="skills",
+                )
+        await self._inner.aclose()
+        await _refresh_engines(self._pool)
+
+
+class _PoolSkillDirs:
+    """pool 侧的 skill 目录后端：委托 ``FilesystemSkillRegistry.add_dir`` 并刷新活跃 engine。"""
+
+    __slots__ = ("_pool", "_registry")
+
+    def __init__(self, pool: EnginePool, registry: FilesystemSkillRegistry) -> None:
+        self._pool = pool
+        self._registry = registry
+
+    async def add_dir(self, path: str | Path, *, source: SkillSource) -> RegistrationHandle:
+        """增加目录并刷新活跃 engine（插件加载期没有 engine，刷新是空操作）。"""
+        inner = await self._registry.add_dir(path, source=source)
+        await _refresh_engines(self._pool)
+        return _PoolSkillDirHandle(self._pool, inner)
+
+
+def _hook_registry(pool: EnginePool) -> HookRegistry | None:
+    """取 pool 的钩子注册表；宿主没传 ``hooks`` 时按需新建 ``HookRunner``。
+
+    回填只发生在插件加载期，此时 pool 还没有任何 engine——engine 创建时才读取 ``pool._hooks``。
+    宿主传了别的钩子对象时返回 None（无从注册）。
+    """
+    hooks = pool._hooks  # noqa: SLF001
+    if hooks is None:
+        if pool._engines:  # noqa: SLF001
+            raise RuntimeError("plugin hooks must be registered before any engine exists")
+        hooks = HookRunner()
+        pool._hooks = hooks  # noqa: SLF001
+    if not isinstance(hooks, HookRunner):
+        return None
+    return hooks.registry
+
+
+def _capabilities(pool: EnginePool, sink: TelemetrySink | None) -> PluginCapabilities:
+    """按 pool 配置决定可提供的 capability；审计 pool 的静态门已在构造时封住（sink 不受影响）。"""
+    telemetry = sink if isinstance(sink, FanoutSink) else None
+    if pool._audit is not None:  # noqa: SLF001
+        reason = _AUDIT_REASON
+        return PluginCapabilities(
+            telemetry=telemetry,
+            unavailable={"tools": reason, "hooks": reason, "skills": reason},
+        )
+    unavailable = {}
+    if pool._hooks is not None and not isinstance(pool._hooks, HookRunner):  # noqa: SLF001
+        unavailable["hooks"] = _CUSTOM_HOOKS_REASON
+    registry = pool._registry  # noqa: SLF001
+    skills = None
+    if isinstance(registry, FilesystemSkillRegistry):
+        skills = _PoolSkillDirs(pool, registry)
+    else:
+        unavailable["skills"] = _CUSTOM_SKILLS_REASON
+    return PluginCapabilities(
+        tools=pool._tool_registry,  # noqa: SLF001
+        hooks=lambda: _hook_registry(pool),
+        skills=skills,
+        telemetry=telemetry,
+        unavailable=unavailable,
+    )
+
+
 async def load_pool_plugins(
     pool: EnginePool,
     plugins: Sequence[Plugin],
@@ -55,14 +288,19 @@ async def load_pool_plugins(
     Args:
         pool: 已构造、尚无 engine 的 pool。
         plugins: 宿主显式传入的插件。
-        sink: pool 级 sink，接收插件生命周期事件。
+        sink: pool 级 sink（经 ``plugin_sink`` 包装的 ``FanoutSink``），接收插件生命周期事件，
+            也是 ``ctx.telemetry`` 的后端。
 
     Raises:
         PluginSetupError 等：加载失败时已回滚；调用方负责关闭 pool。
     """
     if not plugins:
         return
-    manager = PluginManager(cancel=pool._root_cancel, on_event=_sink_emitter(sink))  # noqa: SLF001
+    manager = PluginManager(
+        cancel=pool._root_cancel,  # noqa: SLF001
+        on_event=_sink_emitter(sink),
+        capabilities=_capabilities(pool, sink),
+    )
     pool._plugin_manager = manager  # noqa: SLF001
     await manager.load(plugins)
 

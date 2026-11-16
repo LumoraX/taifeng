@@ -53,6 +53,7 @@ from _setups import (  # noqa: E402
     setup_compaction_continuity,
     setup_file_search,
     setup_pinned_periodic,
+    setup_plugin_tool,
     setup_skill_inference,
     setup_tool_output_guard,
 )
@@ -318,6 +319,13 @@ SCENARIOS: list[Scenario] = [
              expect={"compaction_started", "compaction_completed", "turn_completed"},
              forbid={"compaction_integrity_rolled_back"},
              driver="compaction_continuity", setup=setup_compaction_continuity),
+    # 插件系统：工具只由插件注册；plugin_* 事件来自 pool 级 sink，tool_call_* 来自 engine 事件流
+    Scenario("plugin_tool", "real_llm/skills_extra/plugin_tool", "config-desk",
+             "请帮我查一下配置项 alpha-gateway 的配置代号。",
+             capability="插件注册的工具被真实模型调用 + 插件生命周期事件（ADR 0144）",
+             expect={"plugin_loaded", "plugin_unloaded", "tool_call_started",
+                     "tool_call_completed", "turn_completed"},
+             setup=setup_plugin_tool),
 ]
 
 
@@ -411,6 +419,7 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
             res.duration_s = time.monotonic() - started
             await pool.close()
             await asyncio.sleep(0.05)
+            _merge_pool_events(res, setup)
         return res
 
     sub = await engine.submit(taifeng.UserMessage(text=sc.prompt))
@@ -437,7 +446,15 @@ async def run_scenario(client: object, sc: Scenario, logs_dir: Path) -> Result:
         res.duration_s = time.monotonic() - started
         await pool.close()
         await asyncio.sleep(0.05)
+        _merge_pool_events(res, setup)
     return res
+
+
+def _merge_pool_events(res: Result, setup: ScenarioSetup) -> None:
+    """把 pool 级 sink 收到的事件计数并入结果（插件生命周期事件不在 engine 事件流上）。"""
+    pool_sink = setup.state.get("pool_sink")
+    for kind, count in getattr(pool_sink, "kinds", {}).items():
+        res.kinds[kind] += count
 
 
 def _verdict(res: Result) -> tuple[str, str]:

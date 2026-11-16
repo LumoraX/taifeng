@@ -211,4 +211,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - [ADR 0142：SessionJournal audit-required 集成的发布边界](decisions/0142-session-journal-integration-scope.md)：晋升有明确拒绝面的业务集成范围，durable core 与实验 API 保持原层级。
 - [ADR 0143：执行身份晋升稳定层](decisions/0143-stable-execution-identity.md)：`ExecutionIdentity` 与 `execution_updated` 数据键成为稳定契约，投影与显示器仍在实验层。
 - [ADR 0144：插件生命周期与作用域](decisions/0144-plugin-lifecycle-and-scope.md)：插件只经 `EnginePool.create(plugins=...)` 显式注入，capability allowlist、单一清理路径、第一版仅 pool 作用域且只在 pool 关闭时卸载。
+- [ADR 0145：插件提供存储后端——两段加载](decisions/0145-plugin-backend-providers.md)（修订 #0144 加载点）：可选同步 `provide_backends` 在建 store 前声明 `message_store` / `thread_directory` / `audit` 工厂，单一提供者、冲突报错、所有权与宿主注入对齐。
 - [远端 ADR 0117：部分核销防重与保留挂起的停止生成](decisions/0117-resume-settlement-and-generation-stop.md)：历史并行编号，集成关系见 ADR 0133。

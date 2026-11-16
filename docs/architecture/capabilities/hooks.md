@@ -195,6 +195,16 @@ PostToolUse handler 返回 `HookDecision.ok(output_override=<str>)` 时，`ToolR
 - **WHEN** PostToolUse handler 把输出中的 `IGNORE PREVIOUS INSTRUCTIONS` 替换为 `[removed]` 并以 `output_override` 返回
 - **THEN** 下一次采样请求中的该工具结果 SHALL 为清洗后的文本，且 `tool_call_completed.data.output_rewritten_by_hook` 为 true
 
+### Requirement: HookRegistry 撤销
+
+`HookRegistry.unregister(kind, handler)` SHALL 按对象身份移除一个已注册钩子；未注册在该 kind 下 SHALL 抛
+`ValueError`。`handlers()` 返回副本，执行中的一轮 SHALL 不受撤销影响。插件系统经此撤销插件注册的钩子
+（[plugin-system](plugin-system.md)）。
+
+#### Scenario: 撤销后不再执行
+- **WHEN** 注册 A、B 后撤销 A
+- **THEN** 下一轮 SHALL 只执行 B
+
 ### Requirement: HookRegistry 桶位完整性（无死代码）
 
 `HookRegistry._handlers` dict SHALL 包含 10 个 kind 桶位，且所有 10 个桶位 SHALL 在 `src/taifeng/` 内有至少一个调用点（即不存在"声明但未触发"的死代码）。
