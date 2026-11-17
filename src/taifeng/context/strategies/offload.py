@@ -32,6 +32,9 @@ from typing import TYPE_CHECKING
 
 import anyio
 
+from taifeng.context.attachment_offload import OFFLOAD_SUBDIR as _OFFLOAD_SUBDIR
+from taifeng.context.attachment_offload import is_safe_path_segment as _is_safe_segment
+from taifeng.context.attachment_offload import remove_thread_offload_dir
 from taifeng.context.compressor import (
     CompressionContext,
     CompressionResult,
@@ -45,27 +48,7 @@ if TYPE_CHECKING:
     from taifeng.conversation.models import ResponseItem
     from taifeng.tool.workspace import WorkspaceFS
 
-# offload 文件根下的固定子目录名 —— 与业务文件区隔离
-_OFFLOAD_SUBDIR = "_offload"
-
 logger = logging.getLogger(__name__)
-
-
-def _is_safe_segment(name: str) -> bool:
-    """单个路径段是否安全：非空、不为 . / ..、不含分隔符 / NUL、非绝对路径。
-
-    ``call_id`` 来自 provider 返回、``thread_id`` 来自 history —— 二者都是外部输入，
-    直接拼进落盘路径会被 ``../../..`` 带出 file_root（路径穿越）。
-    """
-    return (
-        isinstance(name, str)
-        and bool(name)
-        and name not in {".", ".."}
-        and "\x00" not in name
-        and "/" not in name
-        and "\\" not in name
-        and not Path(name).is_absolute()
-    )
 
 
 def _build_name_index(history: list[ResponseItem]) -> dict[str, str]:
@@ -233,15 +216,8 @@ class OffloadStrategy:
         v1 仅做 thread 级联清理,不做 TTL / 容量上限。目标目录不存在时为 noop(幂等)。
         业务侧在销毁 thread 的钩子里调用本方法,与 history 删除对齐。
         """
-        if not _is_safe_segment(thread_id):
-            logger.warning("offload cleanup rejected unsafe thread_id=%r", thread_id)
-            return
         await anyio.lowlevel.checkpoint()
-        try:
-            # 保留相对路径，让后端按最终链接条目删除，不能先 resolve 到链接目标。
-            await self._workspace.remove(f"{_OFFLOAD_SUBDIR}/{thread_id}", recursive=True)
-        except FileNotFoundError:
-            pass  # 已清理或从未产生 offload 文件，视为幂等成功。
+        await remove_thread_offload_dir(self._workspace, thread_id)
 
     # ---- 落盘单条 ----
 

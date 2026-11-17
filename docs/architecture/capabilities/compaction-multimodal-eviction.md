@@ -1,7 +1,7 @@
 # Capability: compaction-multimodal-eviction
 
-> 状态：Experimental。关联 ADR 0004 / 0017（规则①）/ 0036 / 0082。
-> 实现：`src/taifeng/context/strategies/multimodal_evict.py`；经 `taifeng.experimental` 导出。
+> 状态：Experimental。关联 ADR 0004 / 0017（规则①）/ 0036 / 0082 / 0147。
+> 实现：`src/taifeng/context/strategies/multimodal_evict.py`、`src/taifeng/context/attachment_offload.py`；经 `taifeng.experimental` 导出。
 
 ## Purpose
 
@@ -21,8 +21,14 @@
 | `protect_tail_messages` | 4 | 最后 N 条内的附件永不驱逐，也不占 `keep_recent` 的名额 |
 | `min_attachment_bytes` | 0 | 只驱逐声明大小 ≥ 此值的附件；大小缺失视为可驱逐 |
 | `allow_head_evict` | False | 仅 pre_turn 下允许越过 cache anchor |
+| `file_root` / `workspace` | 都不给 | 至多给一个。给了则被驱逐的原件先落盘、描述带路径（见「可恢复」）；都不给则只留描述 |
 
-参数越界构造期 `ValueError`。
+参数越界、或 `file_root` 与 `workspace` 同时给出，构造期 `ValueError`。
+
+> **何时被询问**：回合内（pre_turn / mid_turn）的压缩检查以 `ContextBudget.soft_limit_ratio`（默认 0.85）为闸，
+> 低于它任何策略都不会被询问；过闸后按 `priority` 倒序、第一个触发的策略执行。`HandoffCompactionStrategy` 的
+> priority 是 100，过闸即触发 —— 与它并用时，要让本策略先于摘要执行，须把本策略的 `priority` 配到 100 以上，
+> 或把 `soft_limit_ratio` 调低到本策略的工作区间。
 
 ## Requirements
 
@@ -65,15 +71,39 @@
 - 二次执行无候选（附件已不在），不产生改写；
 - 每处理 16 条与结束前各有一个 `await asyncio.sleep(0)` 协作检查点（R4）。
 
+### Requirement: 可恢复（ADR 0147）
+
+配置了 `file_root` / `workspace` 时，`compress` SHALL 在移除附件之前把原件写进工作区，并在描述里留下路径：
+
+- 路径 `_offload/{thread_id}/att-<sha256 前 16 位><扩展名>`（PNG / JPEG / WebP / GIF / PDF 各有扩展名，其余 `.bin`）；
+  与 `OffloadStrategy` 共用目录。按内容寻址：目标已存在则不重写；声明的摘要不合法时由字节现算；
+- 每条描述末尾追加 `path=<相对路径>`；至少一条落盘成功时，在 `[evicted: ...]` 行之后另起一行写明用
+  `file_read(path=...)` 读取；
+- 描述里的文件名先做替换（`;` → `,`、`[` `]` → `(` `)`、换行 → 空格），保证「`; ` 分隔、`]` 结尾」可被
+  `collect_attachment_pointers` 稳定解析；
+- 落盘不了（`thread_id` 不是安全路径段、正文缺失或不是合法 base64、工作区解析 / 写入 `OSError`）SHALL 仍驱逐该附件，
+  描述不带路径，并记 warning；
+- `detail` 多一项 `offloaded_attachments`（落盘成功数）。未配置工作区时 `detail` 与描述 SHALL 与原契约逐键 / 逐字节一致；
+- `cleanup_thread(thread_id)` 删除该 thread 的落盘目录（与 `OffloadStrategy.cleanup_thread` 同一目录；未配置工作区为 noop）。
+
+模型读回图片需要 `make_file_read_tool(attach_images=True)` 与 enabled 的 `ImageInputPolicy`
+（[tool-image-attachment](tool-image-attachment.md)）。PDF 等文件附件有路径但不能经 `file_read` 作为附件返回。
+
+#### Scenario: 驱逐后读回原图
+- **GIVEN** 一条带 PNG 的用户消息，策略配置了工作区
+- **WHEN** 驱逐执行，随后以描述里的 `path` 调用 `file_read(attach_images=True)`
+- **THEN** 工具结果带一张图片附件，其 sha256 与字节与原件一致
+
 ## 与持久化的关系
 
 与 `surgical_trim` / `offload` 相同：改写只发生在内存 history，transcript 保持 append-only、原件仍在。冷加载后附件
-回到 history，下一次触发时再次驱逐。业务可据描述里的 sha256 前缀从自己的存储取回原件。
+回到 history，下一次触发时再次驱逐（配置了工作区时指向同一个落盘文件）。未配置工作区时，业务可据描述里的
+sha256 前缀从自己的存储取回原件。
 
 ## R1–R5 影响
 
 - R1：阈值与保留数量由业务注入；无业务概念。
 - R2：见「候选窗口与 cache anchor」。
-- R3：`detail` 经 `compaction_completed` 透出。
+- R3：`detail` 经 `compaction_completed` 透出（含 `offloaded_attachments`）。
 - R4：协作式取消检查点。
 - R5：不改 transcript；条目身份与顺序不变。

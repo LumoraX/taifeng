@@ -57,6 +57,7 @@ from _setups import (  # noqa: E402
     setup_skill_inference,
     setup_tool_output_guard,
 )
+from restorable_image import run_restorable_image  # noqa: E402
 from test_codex_file_input import run_codex_file_matrix  # noqa: E402
 from test_codex_image_matrix import run_codex_image_matrix  # noqa: E402
 from test_openai_image_matrix import (  # noqa: E402
@@ -69,6 +70,8 @@ load_dotenv_files()
 import taifeng  # noqa: E402
 from taifeng.context.budget import ContextBudget  # noqa: E402
 from taifeng.context.strategies.sliding import SlidingWindowStrategy  # noqa: E402
+from taifeng.llm.providers.codex import CodexResponsesClient  # noqa: E402
+from taifeng.llm.providers.openai import OpenAIResponsesClient  # noqa: E402
 from taifeng.permission import (  # noqa: E402
     PermissionDecision,
     PermissionPolicy,
@@ -530,7 +533,7 @@ async def main() -> None:
 
         image_results: list[ImageMatrixResult] = []
         if meta["provider"] == "openai" and args.only is None:
-            provider, _, api_key, resolved_model, base_url = resolve_bootstrap_env()
+            provider, protocol, api_key, resolved_model, base_url = resolve_bootstrap_env()
             assert provider == "openai" and api_key is not None
             print(f"\n{'━' * 70}\nOpenAI 图片双协议矩阵\n{'━' * 70}")
             image_results = await run_openai_image_matrix(
@@ -539,6 +542,17 @@ async def main() -> None:
                 base_url=base_url or "https://api.openai.com/v1",
                 logs_dir=logs_dir / "openai-image",
             )
+            if protocol == "responses":
+                # 工具结果带图只有 Responses 协议原生承载（tool-image-attachment 协议分档）
+                image_results.append(await run_restorable_image(
+                    OpenAIResponsesClient(
+                        api_key=api_key, model=resolved_model,
+                        base_url=base_url or "https://api.openai.com/v1",
+                        timeout_seconds=180.0,
+                    ),
+                    logs_dir=logs_dir / "restorable-image",
+                    scenario_id="openai_responses_image_restore",
+                ))
             for result in image_results:
                 icon = "✅" if result.verdict == "PASS" else "❌"
                 print(
@@ -566,6 +580,14 @@ async def main() -> None:
                 model=resolved_model,
                 base_url=base_url,
                 logs_dir=logs_dir / "codex-file",
+            ))
+            image_results.append(await run_restorable_image(
+                CodexResponsesClient(
+                    api_key=api_key, model=resolved_model, base_url=base_url,
+                    timeout_seconds=180.0,
+                ),
+                logs_dir=logs_dir / "restorable-image",
+                scenario_id="codex_image_restore",
             ))
             for result in image_results:
                 icon = "✅" if result.verdict == "PASS" else "❌"

@@ -20,6 +20,12 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from taifeng.context.attachment_offload import (
+    collect_attachment_pointers,
+    describe_attachment,
+    format_pointer_block,
+    save_attachment,
+)
 from taifeng.context.boundaries import resolve_compaction_range
 from taifeng.context.budget import estimate_history_tokens
 from taifeng.context.compaction_view import CompactionView
@@ -37,10 +43,14 @@ from taifeng.context.strategies.handoff_continuity import (
 from taifeng.conversation.models import ResponseItem, compacted
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
+from taifeng.tool.workspace import workspace_for
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from taifeng.context.compressor import ModelSessionFactory
     from taifeng.llm.client import ModelClient
+    from taifeng.tool.workspace import WorkspaceFS
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +240,9 @@ class HandoffCompactionStrategy:
         thread_id_provider: object | None = None,
         quality_max_attempts: int = 2,
         preserve_user_message_tokens: int = DEFAULT_PRESERVED_USER_TOKENS,
+        file_root: str | Path | None = None,
+        workspace: WorkspaceFS | None = None,
+        max_attachment_pointers: int = 32,
     ) -> None:
         """
         Args:
@@ -240,7 +253,26 @@ class HandoffCompactionStrategy:
                 则拒绝压缩（保留原历史）。设为 1 即关闭重生成。
             preserve_user_message_tokens: 被压缩区间里最近用户消息原文的 token 预算，
                 原样放进压缩条目（默认 20k，与 codex 同值）；0 = 不保留原文。
+            file_root / workspace: 可选，至多给一个。给了则被压缩区间里**仍内联**的附件
+                原件先写进工作区，压缩条目里留下带路径的指针；都不给则这些附件只在摘要
+                输入里留计数痕迹（既有行为）。已由 ``MultimodalEvictionStrategy`` 落盘的
+                附件，其指针无论是否配置工作区都会原样保留。
+            max_attachment_pointers: 压缩条目里最多保留多少条附件指针（保留最近的）；
+                0 = 不保留。
+
+        Raises:
+            ValueError: ``max_attachment_pointers`` 为负。
         """
+        if max_attachment_pointers < 0:
+            raise ValueError(
+                f"max_attachment_pointers must be non-negative, got {max_attachment_pointers!r}"
+            )
+        self._max_pointers = max_attachment_pointers
+        # 两个都不给 = 不落盘（既有行为）；给了其一则归一化为 WorkspaceFS
+        self._workspace = (
+            None if file_root is None and workspace is None
+            else workspace_for(file_root, workspace)
+        )
         self._preserve_user_tokens = preserve_user_message_tokens
         self._client = model_client
         self._model = model
@@ -392,6 +424,30 @@ class HandoffCompactionStrategy:
             quality_warnings=warnings,
         )
 
+    async def _attachment_block(self, to_compress: list[ResponseItem]) -> str:
+        """被压缩区间里全部可取回附件的指针块（没有则为空串）。
+
+        两个来源，按路径去重：区间内已有的落盘指针（``[evicted: ...]`` 行、更早压缩条目里
+        的指针块）；以及配置了工作区时，区间内仍内联的附件 —— 现在落盘并登记。
+        """
+        if self._max_pointers == 0:
+            return ""
+        pointers = collect_attachment_pointers(to_compress)
+        if self._workspace is not None:
+            # 去重按路径：同一原件的描述措辞可能不同（如先被驱逐、后又冷加载回来）
+            known = {pointer.rsplit("path=", 1)[-1] for pointer in pointers}
+            for item in to_compress:
+                for attachment in item.payload.get("attachments") or []:
+                    if not isinstance(attachment, dict):
+                        continue
+                    path = await save_attachment(self._workspace, item.thread_id, attachment)
+                    if path is None:
+                        continue
+                    if path not in known:
+                        known.add(path)
+                        pointers.append(describe_attachment(attachment, path=path))
+        return format_pointer_block(pointers, limit=self._max_pointers)
+
     async def compress(
         self,
         ctx: CompressionContext,
@@ -404,6 +460,8 @@ class HandoffCompactionStrategy:
         to_compress = ctx.history[start:end]
         # 用户原话不经 LLM 转述，原样保留（预算内最近的若干条）
         user_messages = select_recent_user_messages(to_compress, self._preserve_user_tokens)
+        # 已落盘附件的指针同样不经 LLM 转述（ADR 0147）
+        attachment_block = await self._attachment_block(to_compress)
 
         # 质量审计 + 有界重生成：丢失不透明标识符（致命）才触发重生成 / 最终拒绝。
         audit: SummaryAudit | None = None
@@ -419,7 +477,9 @@ class HandoffCompactionStrategy:
             if not summary_text:
                 return self._fail(ctx, "empty_summary")
             # 审计组装后的条目：原样保留的用户原话里的标识符同样算「未丢失」
-            summary_text = compose_handoff_summary(summary_text, user_messages)
+            summary_text = compose_handoff_summary(
+                summary_text, user_messages, attachment_block,
+            )
             audit = _audit_summary_quality(summary_text, to_compress)
             if audit.ok:
                 break

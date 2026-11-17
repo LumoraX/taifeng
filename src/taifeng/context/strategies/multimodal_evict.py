@@ -26,6 +26,12 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from taifeng.context.attachment_offload import (
+    attachment_size,
+    describe_attachment,
+    remove_thread_offload_dir,
+    save_attachment,
+)
 from taifeng.context.compressor import (
     CompressionContext,
     CompressionResult,
@@ -33,9 +39,13 @@ from taifeng.context.compressor import (
 )
 from taifeng.context.injection import InitialContextInjection
 from taifeng.context.placeholders import EVICTED_PREFIX
+from taifeng.tool.workspace import workspace_for
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from taifeng.conversation.models import ResponseItem
+    from taifeng.tool.workspace import WorkspaceFS
 
 # 可带附件的条目类型 → 承载文本的 payload 键
 _TEXT_KEYS: dict[str, str] = {"user_message": "text", "function_call_output": "output"}
@@ -43,34 +53,13 @@ _TEXT_KEYS: dict[str, str] = {"user_message": "text", "function_call_output": "o
 _YIELD_EVERY = 16
 
 
-def _attachment_size(attachment: dict[str, Any]) -> int | None:
-    """附件声明的字节数；缺失或非法返回 None（不猜）。"""
-    size = attachment.get("size")
-    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
-        return None
-    return size
-
-
-def _describe(attachment: dict[str, Any]) -> str:
-    """一个附件的一行描述：类型、大小、文件名（如有）、内容摘要前缀。"""
-    media_type = attachment.get("media_type")
-    parts = [media_type if isinstance(media_type, str) and media_type else "unknown type"]
-    size = _attachment_size(attachment)
-    parts.append(f"{size / 1024:.1f}KB" if size is not None else "unknown size")
-    filename = attachment.get("filename")
-    if isinstance(filename, str) and filename:
-        parts.append(filename)
-    digest = attachment.get("sha256")
-    if isinstance(digest, str) and digest:
-        parts.append(f"sha256={digest[:8]}")
-    return " ".join(parts)
-
-
-def _stub(evicted: list[dict[str, Any]]) -> str:
-    """被驱逐附件的占位文本。"""
-    noun = "attachment" if len(evicted) == 1 else "attachments"
-    described = "; ".join(_describe(attachment) for attachment in evicted)
-    return f"{EVICTED_PREFIX} {len(evicted)} {noun}: {described}]"
+def _stub(described: list[str], *, restorable: bool) -> str:
+    """被驱逐附件的占位文本；有落盘路径时另起一行写明取回办法。"""
+    noun = "attachment" if len(described) == 1 else "attachments"
+    stub = f"{EVICTED_PREFIX} {len(described)} {noun}: {'; '.join(described)}]"
+    if restorable:
+        stub += "\n原件已落盘。需要再看图片时，用 file_read(path=...) 读取上面的 path。"
+    return stub
 
 
 class MultimodalEvictionStrategy:
@@ -84,6 +73,9 @@ class MultimodalEvictionStrategy:
         protect_tail_messages: 尾部保护条数 —— 最后 N 条内的附件永不驱逐，也不占
             ``keep_recent`` 的名额。
         min_attachment_bytes: 只驱逐声明大小 ≥ 此值的附件；大小缺失的附件视为可驱逐。
+        file_root / workspace: 可选，至多给一个。给了则被驱逐的附件原件先写进工作区的
+            ``_offload/{thread_id}/``，描述里带 ``path=``，模型可用读取工具取回（图片需要
+            ``file_read(attach_images=True)``）；都不给则只留描述，不可恢复。
         allow_head_evict: 仅 pre_turn（BEFORE_LAST_USER_MESSAGE）下允许越过 cache anchor；
             越过时如实标 ``cache_invalidated=True``（R2）。
 
@@ -102,6 +94,8 @@ class MultimodalEvictionStrategy:
         protect_tail_messages: int = 4,
         min_attachment_bytes: int = 0,
         allow_head_evict: bool = False,
+        file_root: str | Path | None = None,
+        workspace: WorkspaceFS | None = None,
     ) -> None:
         if not 0.0 < trigger_ratio <= 1.0:
             raise ValueError(f"trigger_ratio must be within (0, 1], got {trigger_ratio!r}")
@@ -118,6 +112,11 @@ class MultimodalEvictionStrategy:
         self._protect_tail = protect_tail_messages
         self._min_bytes = min_attachment_bytes
         self._allow_head_evict = allow_head_evict
+        # 两个都不给 = 不落盘（既有行为）；给了其一则归一化为 WorkspaceFS
+        self._workspace = (
+            None if file_root is None and workspace is None
+            else workspace_for(file_root, workspace)
+        )
 
     # ---- 候选 ----
 
@@ -125,7 +124,7 @@ class MultimodalEvictionStrategy:
         """该附件是否在驱逐范围内。"""
         if not isinstance(attachment, dict):
             return False
-        size = _attachment_size(attachment)
+        size = attachment_size(attachment)
         return size is None or size >= self._min_bytes
 
     def _bearing(self, item: ResponseItem) -> bool:
@@ -175,22 +174,48 @@ class MultimodalEvictionStrategy:
 
     # ---- 改写 ----
 
-    def _evict(self, item: ResponseItem) -> tuple[ResponseItem, list[dict[str, Any]]]:
-        """去掉条目上可驱逐的附件，在文本后追加描述；返回 (新条目, 被驱逐的附件)。"""
+    async def _evict(
+        self, item: ResponseItem,
+    ) -> tuple[ResponseItem, list[dict[str, Any]], int]:
+        """去掉条目上可驱逐的附件，在文本后追加描述。
+
+        Returns:
+            (新条目, 被驱逐的附件, 其中成功落盘的个数)。
+        """
         attachments = list(item.payload.get("attachments") or [])
         evicted = [a for a in attachments if self._is_heavy(a)]
         kept = [a for a in attachments if not self._is_heavy(a)]
+        described: list[str] = []
+        saved = 0
+        for attachment in evicted:
+            path = (
+                await save_attachment(self._workspace, item.thread_id, attachment)
+                if self._workspace is not None else None
+            )
+            saved += path is not None
+            described.append(describe_attachment(attachment, path=path))
+        stub = _stub(described, restorable=saved > 0)
         text_key = _TEXT_KEYS[item.kind]
         payload = dict(item.payload)
         text = str(payload.get(text_key) or "")
-        payload[text_key] = f"{text}\n{_stub(evicted)}" if text else _stub(evicted)
+        payload[text_key] = f"{text}\n{stub}" if text else stub
         if kept or item.kind == "user_message":
             # user_message 恒带 attachments 键（可为空列表）
             payload["attachments"] = kept
         else:
             # function_call_output 无附件时不写该键（与从未带过附件的条目逐键一致）
             payload.pop("attachments", None)
-        return item.model_copy(update={"payload": payload}), evicted
+        return item.model_copy(update={"payload": payload}), evicted, saved
+
+    # ---- 生命周期（thread 级联清理）----
+
+    async def cleanup_thread(self, thread_id: str) -> None:
+        """删除某 thread 的落盘附件（与 ``OffloadStrategy.cleanup_thread`` 同一目录）。
+
+        未配置工作区时为 noop。
+        """
+        if self._workspace is not None:
+            await remove_thread_offload_dir(self._workspace, thread_id)
 
     # ---- 主入口 ----
 
@@ -203,11 +228,16 @@ class MultimodalEvictionStrategy:
         history = list(ctx.history)
         candidates = self._candidates(history, self._window_start(ctx, injection))
         detail = {"evicted_items": 0, "evicted_attachments": 0, "evicted_bytes": 0}
+        if self._workspace is not None:
+            # 仅在配置了工作区时才有这一项：未配置时 detail 与既有契约逐键一致
+            detail["offloaded_attachments"] = 0
         for processed, index in enumerate(candidates, start=1):
-            history[index], evicted = self._evict(history[index])
+            history[index], evicted, saved = await self._evict(history[index])
+            if self._workspace is not None:
+                detail["offloaded_attachments"] += saved
             detail["evicted_items"] += 1
             detail["evicted_attachments"] += len(evicted)
-            detail["evicted_bytes"] += sum(_attachment_size(a) or 0 for a in evicted)
+            detail["evicted_bytes"] += sum(attachment_size(a) or 0 for a in evicted)
             if processed % _YIELD_EVERY == 0:
                 await asyncio.sleep(0)  # 协作取消检查点
         await asyncio.sleep(0)  # 协作取消检查点
