@@ -65,5 +65,5 @@ DeepSeek Harness 的图片 offload 在占位文本里写明附件与只读路径
 
 - Sim：`tests/context/test_attachment_offload.py`（落盘、路径穿越、幂等、指针跨多轮摘要保留、handoff 变异检查、
   驱逐 → `file_read` 读回逐字节一致、未 opt-in 时的显式错误）。
-- 真实模型：`examples/real_llm/restorable_image.py`（`openai_responses_image_restore` / `codex_image_restore`）——
+- 真实模型：`examples/real_llm/_restorable_image.py`（`openai_responses_image_restore` / `codex_image_restore`）——
   图片被驱逐后模型自行 `file_read` 落盘路径并答出只在图上的序列号；结果见台账。

@@ -48,6 +48,7 @@ from _provider_bootstrap import (  # noqa: E402
     resolve_bootstrap_env,
 )
 from _recorder import RecordingClient  # noqa: E402
+from _restorable_image import run_restorable_image  # noqa: E402
 from _setups import (  # noqa: E402
     ScenarioSetup,
     setup_compaction_continuity,
@@ -57,7 +58,6 @@ from _setups import (  # noqa: E402
     setup_skill_inference,
     setup_tool_output_guard,
 )
-from restorable_image import run_restorable_image  # noqa: E402
 from test_codex_file_input import run_codex_file_matrix  # noqa: E402
 from test_codex_image_matrix import run_codex_image_matrix  # noqa: E402
 from test_openai_image_matrix import (  # noqa: E402
