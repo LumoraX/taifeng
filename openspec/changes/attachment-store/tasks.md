@@ -58,4 +58,4 @@
 ## 11. 验证
 - [x] 11.1 `PYTHONPATH=src uv run pytest tests/ -q`、`scripts/verify_examples.py`、ruff 门禁、mypy strict。Acceptance：全绿；`tests/public_api_snapshot.txt` 仅在稳定层确有新增时更新。
 - [x] 11.2 真实场景：在 `examples/real_llm/_restorable_image.py` 旁新增引用形态版本（`*_image_ref_restore`）——图片以引用落盘、被驱逐、模型经 `attachment:<ref>` 读回并答出只在图上的序列号；另核验 transcript 不含 base64。Acceptance：PASS 并入台账。
-- [ ] 11.3 全量 `examples/real_llm/capability_matrix.py` 并提交 `docs/real-llm-ledger.{json,md}`。Acceptance：通用能力全部 PASS；未过项逐条说明与本变更是否相关。
+- [x] 11.3 全量 `examples/real_llm/capability_matrix.py` 并提交 `docs/real-llm-ledger.{json,md}`。Acceptance：通用能力全部 PASS；未过项逐条说明与本变更是否相关。
