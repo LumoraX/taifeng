@@ -26,7 +26,7 @@
 **内核明确不做**（这些是消费方的事，出现在 `src/` 内即越界）：
 - 不知道「帧」「录像」「病灶」等任何领域概念——只知道 attachment
 - 不替业务决定看哪张图、看几张、何时看
-- 不提供任何取图工具的实现或 schema
+- 不提供任何**业务**取图工具的实现或 schema（`file_read` 可选地把工作区里的图片文件作为附件返回，见下文「`file_read` 读取图片」）
 
 ## 数据契约
 
@@ -66,6 +66,19 @@
   要看图的宿主传 `attach_images=True` 并启用策略；只开前者不开策略时，带图的 MCP 调用以 `tool_attachment_rejected` 判错（行为契约 2、3）。
 - MCP 内容里文本与图片交错时，`output` 为全部文本块按序拼接，附件按出现顺序排在其后（本契约「output 在前、
   附件在后」）；`output` 不为已附上的图片写占位，避免与附件重复表达。
+
+## `file_read` 读取图片（ADR 0147）
+
+`make_file_read_tool(attach_images=True, max_image_bytes=10MB)` 是本契约的第三个附件来源，用途是让模型重新查看
+已落盘的图片（被压缩移出上下文的附件，见 [compaction-multimodal-eviction](compaction-multimodal-eviction.md)）。
+
+- 按**文件头**识别 PNG / JPEG / GIF / WebP，不看扩展名；
+- 是图片且 `attach_images=True`：`output` 为 `[image <调用方给的相对路径>: <MIME>, <字节数> bytes, attached]`
+  （不含宿主绝对路径、不含正文），图片进 `ToolResult.attachments`，之后与业务取图工具完全同路；`offset` / `limit` 被忽略；
+- 是图片且超过 `max_image_bytes`：`too_large`；
+- 是图片而 `attach_images=False`（默认）：`image_not_attached` 错误 —— 图片不能当文本读，如实告知而不是解码失败；
+- 只开 `attach_images` 不启用 `ImageInputPolicy` 时，读到图片的调用以 `tool_attachment_rejected` 判错（行为契约 2、3）；
+- 非图片文件行为不变。
 
 ## 协议分档
 

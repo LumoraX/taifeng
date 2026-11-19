@@ -4,7 +4,7 @@ LLM 摘要最容易丢的是**用户的原始意图与约束**：「报告写三
 一旦被转述，细节与语气就走样；被压缩区间里用户说过的话又不会再出现。压缩后的模型还常
 先「确认收到摘要 / 复述进度」再开工，白耗一轮。
 
-本模块把压缩条目的正文组装为三段，全部放在同一个 ``compacted`` item 的 ``summary`` 里：
+本模块把压缩条目的正文组装为三段（外加可选的第四段：已落盘附件的指针，ADR 0147），全部放在同一个 ``compacted`` item 的 ``summary`` 里：
 
 1. 续接前言：告诉模型之前的历史已被压缩，直接接着干；
 2. ``<recent_user_messages>``：被压缩区间里最近的用户消息原文（按原顺序，总量受 token 预算约束）；
@@ -73,8 +73,14 @@ def select_recent_user_messages(
     return chosen
 
 
-def compose_handoff_summary(summary: str, user_messages: list[str]) -> str:
-    """组装压缩条目正文：续接前言 + 最近用户原话 + LLM 摘要。"""
+def compose_handoff_summary(
+    summary: str, user_messages: list[str], attachment_block: str = "",
+) -> str:
+    """组装压缩条目正文：续接前言 + 最近用户原话 + LLM 摘要 + 已落盘附件的指针。
+
+    ``attachment_block`` 是 ``format_pointer_block`` 的产物（可为空串）。指针不经 LLM 转述，
+    放在摘要之后：模型读完进度再看到「这些原件还在、路径在此」（ADR 0147）。
+    """
     parts = [CONTINUATION_PREAMBLE]
     if user_messages:
         quoted = "\n".join(f"<user_message>\n{m}\n</user_message>" for m in user_messages)
@@ -84,4 +90,6 @@ def compose_handoff_summary(summary: str, user_messages: list[str]) -> str:
             f"{quoted}\n</recent_user_messages>"
         )
     parts.append(f"<summary>\n{summary}\n</summary>")
+    if attachment_block:
+        parts.append(attachment_block)
     return "\n\n".join(parts)

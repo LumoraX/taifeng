@@ -1,6 +1,8 @@
 # 上下文压缩
 
 > §1.4 —— Cache-aware 压缩、LLM-to-LLM handoff、`InitialContextInjection` 区分。
+>
+> 动画演示：[compaction-walkthrough.html](../assets/compaction-walkthrough.html)（浏览器打开；图片 / 大工具输出 / PDF 进入上下文 → offload → 附件驱逐并落盘 → handoff 摘要保留路径 → 模型读回日志与原图的全过程，示例配置）。
 
 **这是 Taifeng 相对 LangGraph / AutoGen / Letta 最大的差异化**。
 
@@ -105,6 +107,12 @@ class CompressionStrategy(Protocol):
 
 ## 内置策略
 
+> **回合内何时压缩**：pre_turn / mid_turn 的检查以 `ContextBudget.soft_limit_ratio`（默认 0.85）为闸，低于它任何策略
+> 都不会被询问（`loop/turn_compaction.py`）；过闸后按 `priority` 倒序、第一个 `should_trigger` 命中的策略执行。
+> 各策略自己的比例阈值（如 SurgicalTrim / MultimodalEviction 的 0.3）只在过闸之后才起作用。Handoff 的 priority 是
+> 100 且过闸即命中，所以与它并用的便宜档要先于摘要执行，须把自己的 `priority` 配到 100 以上，或把
+> `soft_limit_ratio` 调低。manual 与 overflow 自愈不经此闸。
+
 ### 1. HandoffCompactionStrategy (codex 范式)
 
 > **model 解析**：摘要 LLM 调用的 `ApiRequest.model = self._model or ""`——`model=None`（默认，pool 默认 compressors 不传）时用**空字符串**让 provider 取构造默认 model，与采样路径（`turn.py` 的 `entry_skill.model or ""`）一致。**不要用 "auto" 占位**——在不认 "auto" 的网关（如 new-api distributor）会 `model_not_found`，导致真实压缩（含 A1 force_compress）全部失败（真实 LLM 验证 `examples/real_llm/p0_verify.py` 发现的缺陷）。
@@ -190,6 +198,9 @@ Most recent user messages from the compacted span, verbatim, oldest first:
   与 codex 同值；0 = 关闭）约束，按原顺序排列；最新一条单独超预算时中段截断保留。尾部保留段的用户消息不重复收录。
 - **续接前言**用英文：与 `[Compacted history summary]` 渲染标签一致，且不带偏回复语言（摘要本身按原对话语言生成）。
 - **质量审计作用于组装后的正文**：原话里原样保留的标识符不算丢失，不会因此触发重生成。
+- **已落盘附件的指针不经转述（ADR 0147）**：被压缩区间里带路径的 `[evicted: ...]` 描述、以及更早一轮压缩条目里的
+  指针，原样放进 `<summary>` 之后的 `<offloaded_attachments>` 块（上限 `max_attachment_pointers`，默认 32，保留最近的；
+  0 关闭）。给了 `file_root` / `workspace` 时，区间里仍内联的附件也在此刻落盘并登记 —— 否则它们只在摘要输入里留计数。
 - 全部内容在同一个 `compacted` item 内：冷加载 `replaced_range` 折叠、token 估算、各 provider 的中段 system 渲染均不变。
 
 #### G1a 摘要质量审计 + 有界重生成（compaction-hardening P0）
@@ -274,10 +285,12 @@ class MultimodalEvictionStrategy:
 
 - **只看附件、不动文本**：`user_message` 与 `function_call_output` 都处理；条目不增不减、身份与配对不变。
 - **描述保留指称能力**：类型、大小、文件名、sha256 前 8 位——模型仍能指称「那张图 / 那份文档」，业务可据摘要取回原件。
+- **可恢复（ADR 0147）**：给了 `file_root` / `workspace` 时，原件先写进 `_offload/{thread_id}/att-<摘要><扩展名>`（与
+  Offload 同目录、按内容寻址），描述带 `path=`；模型用 `file_read(attach_images=True)` 读回图片。不自动回填。
 - **「最近」按带附件的条目计数**（`keep_recent`），一次截图带两张图是一个整体；尾部保护范围内的附件不动也不占名额。
 - **选择性触发**：有上下文压力且确有可驱逐的附件才触发，否则让位给后面的档。
 - **窗口（R2）**：常规只动 anchor 之后；`allow_head_evict=True` 且 pre_turn 时可越 anchor，如实标 `cache_invalidated`。
-- **明细透出（R3）**：`detail = {"evicted_items", "evicted_attachments", "evicted_bytes"}`。
+- **明细透出（R3）**：`detail = {"evicted_items", "evicted_attachments", "evicted_bytes"}`；配置了工作区时另有 `offloaded_attachments`。
 
 契约：[capabilities/compaction-multimodal-eviction.md](capabilities/compaction-multimodal-eviction.md)。实验层导出。
 
@@ -325,7 +338,7 @@ transcript——冷加载后闸门状态与热内存一致，不需要额外的�
 
 - **去重摘要覆盖附件**：`_output_digest` 以「文本 + 排序后的附件 sha256」为指纹。只哈希文本会把「文本相同、图片不同」的两条判成重复，静默丢掉一张图。
 - **剪枝连图一起丢**：`_rewrite` 在替换 output 时一并移除 `attachments`，并在占位符里留下 `[已剪枝 N 张图片]`。只剪文本会留下真正昂贵的那半边（一张图 ≈ 千级 token）。
-- **Offload 回避带图条目**：该档的契约是「无损可回溯」，但图片落盘后 `file_read` 回来是文本、模型看不见；兑现不了就不接手，交给诚实有损的 SurgicalTrim。
+- **Offload 回避带图条目**：该档按 `call_id` 落一份文本；带图条目的图片由 MultimodalEviction 落盘留路径（ADR 0147），文本交给 SurgicalTrim。
 - **摘要 prompt 只留计数**：`CompactionView` 从不读 `attachments`，base64 正文绝不进 LLM 摘要输入；图被淘汰后，`[含 N 张图片]` 是模型唯一能看到的「这里曾有图」证据。
 > 单条工具结果的超长截断仍走 `context/truncate.py::truncate_middle`（G6b，被 surgical soft-trim 复用），不是独立 CompressionStrategy。
 

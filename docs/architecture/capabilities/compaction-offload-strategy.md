@@ -23,6 +23,7 @@
 ### 落盘路径(确定性派生)
 
 工作区内的 `_offload/{thread_id}/{call_id}` —— 无独立索引。file_root 模式的位置不变。
+同一目录下还有被驱逐 / 被摘要的附件原件（`att-<摘要><扩展名>`，由 `MultimodalEvictionStrategy` / `HandoffCompactionStrategy` 写入，ADR 0147），`cleanup_thread` 一并删除。
 offload 文件独立于 history(JSONL)持久化，写入和 thread 清理均经同一个 WorkspaceFS；远端标识不作本机路径解析。
 两个入口都给或都不给 SHALL 抛 ValueError，workspace 不满足协议 SHALL 抛 TypeError。
 

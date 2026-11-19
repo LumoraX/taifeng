@@ -213,4 +213,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - [ADR 0144：插件生命周期与作用域](decisions/0144-plugin-lifecycle-and-scope.md)：插件只经 `EnginePool.create(plugins=...)` 显式注入，capability allowlist、单一清理路径、第一版仅 pool 作用域且只在 pool 关闭时卸载。
 - [ADR 0145：插件提供存储后端——两段加载](decisions/0145-plugin-backend-providers.md)（修订 #0144 加载点）：可选同步 `provide_backends` 在建 store 前声明 `message_store` / `thread_directory` / `audit` 工厂，单一提供者、冲突报错、所有权与宿主注入对齐。
 - [ADR 0146：OpenAI Responses 把历史中段 system 消息原位改用 developer 角色](decisions/0146-responses-mid-history-system-as-developer.md)（修订 #0055 决策 3）：部分端点拒收任何 role=system input item，顶层与中段统一走 developer，位置不变。
+- [ADR 0147：被压缩移出上下文的附件可恢复](decisions/0147-restorable-attachments.md)（修订 #0082）：驱逐 / 摘要前把原件写进工作区、描述带路径，`file_read(attach_images=True)` 读回图片，handoff 原样保留指针；不自动回填。
 - [远端 ADR 0117：部分核销防重与保留挂起的停止生成](decisions/0117-resume-settlement-and-generation-stop.md)：历史并行编号，集成关系见 ADR 0133。
