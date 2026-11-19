@@ -11,6 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from taifeng.conversation.attachment_store import AttachmentStore
 from taifeng.hooks.types import HookRunner
 from taifeng.loop.audit_config import AuditConfig
 from taifeng.loop.event import EventMsg, PluginFailed, PluginLoaded, PluginUnloaded
@@ -86,6 +87,8 @@ class ResolvedBackends:
     thread_directory: ThreadDirectory | None
     audit: AuditConfig | None
     owns_store: bool
+    attachment_store: AttachmentStore | None = None
+    """附件存储（宿主参数或插件提供；ADR 0148）。pool 不关闭它。"""
 
 
 def _build(provider: BackendProvider, kind: BackendKind) -> object:
@@ -124,6 +127,7 @@ async def resolve_plugin_backends(
     audit: AuditConfig | None,
     storage: object,
     model_client: ModelClient,
+    attachment_store: AttachmentStore | None = None,
 ) -> ResolvedBackends:
     """两段加载的第一段：在建 store 之前收集并构造插件提供的后端。
 
@@ -132,7 +136,9 @@ async def resolve_plugin_backends(
         PluginSetupError: 工厂抛错（已构造的 store 会被关闭）。
         TypeError / ValueError 等：插件 store 未通过与宿主注入相同的校验（已关闭）。
     """
-    unchanged = ResolvedBackends(message_store, thread_directory, audit, message_store is None)
+    unchanged = ResolvedBackends(
+        message_store, thread_directory, audit, message_store is None, attachment_store,
+    )
     if not plugins:
         return unchanged
     table = collect_backend_providers(plugins)
@@ -140,10 +146,12 @@ async def resolve_plugin_backends(
         return unchanged
     _reject_explicit(table, {
         "message_store": message_store, "thread_directory": thread_directory,
-        "audit": audit, "storage": storage,
+        "audit": audit, "storage": storage, "attachment_store": attachment_store,
     })
     built: dict[str, object] = {}
-    order: tuple[BackendKind, ...] = ("audit", "thread_directory", "message_store")
+    order: tuple[BackendKind, ...] = (
+        "audit", "attachment_store", "thread_directory", "message_store",
+    )
     try:
         for kind in order:
             provider = table.get(kind)
@@ -152,6 +160,12 @@ async def resolve_plugin_backends(
         resolved_audit = built.get("audit", audit)
         if resolved_audit is not None and not isinstance(resolved_audit, AuditConfig):
             raise TypeError(f"audit backend must be AuditConfig, got {type(resolved_audit).__name__}")
+        resolved_attachments = built.get("attachment_store", attachment_store)
+        if resolved_attachments is not None and not isinstance(resolved_attachments, AttachmentStore):
+            raise TypeError(
+                "attachment_store backend must implement AttachmentStore, "
+                f"got {type(resolved_attachments).__name__}"
+            )
         if "message_store" in built:
             validate_injected_store(
                 built["message_store"], storage=None, model_client=model_client,
@@ -169,6 +183,7 @@ async def resolve_plugin_backends(
         thread_directory=built.get("thread_directory", thread_directory),  # type: ignore[arg-type]
         audit=resolved_audit,
         owns_store=True,
+        attachment_store=resolved_attachments,
     )
 
 

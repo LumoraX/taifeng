@@ -137,6 +137,7 @@ class TurnDispatch:
             cancel=ctx.cancel,
             image_input_policy=self.__dispatch_owner.image_input_policy,
             input_cost_estimator=self.__dispatch_owner.input_cost_estimator,
+            attachment_resolver=self.__dispatch_owner.attachment_resolver,
             file_input_policy=self.__dispatch_owner.file_input_policy,
             hooks=self.__dispatch_owner.hooks,
             # G3: 透传或包装后的 permission_policy（auto_deny/auto_allow 时已包装）

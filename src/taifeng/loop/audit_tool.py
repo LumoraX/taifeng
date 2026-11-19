@@ -37,7 +37,7 @@ from taifeng.conversation.journal.records import (
 from taifeng.conversation.models import function_call_output
 from taifeng.conversation.origin import tag_origin, tool_output_origin
 from taifeng.llm.errors import LLMError
-from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, admit_tool_attachments
+from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, ImageAttachmentV1, admit_tool_attachments
 from taifeng.loop.audit_support import SessionAuditFrozenError
 from taifeng.suspend.reason import PendingRequest
 from taifeng.tool.spec import ToolResult
@@ -288,8 +288,12 @@ class _AuditedToolConvergence:
         """
         if not result.attachments:
             return [], None
+        inline = tuple(item for item in result.attachments if isinstance(item, ImageAttachmentV1))
+        if len(inline) != len(result.attachments):
+            # 审计记录只承载内联正文；附件引用要等 attachment-store-journal（ADR 0148）
+            return [], "tool_attachment_rejected: attachment references are not supported in audit mode"
         try:
-            admitted = admit_tool_attachments(result.attachments, self._image_input_policy)
+            admitted = admit_tool_attachments(inline, self._image_input_policy)
             validate_attachments(
                 [AttachmentV1.model_validate(item) for item in admitted],
                 max_item_bytes=self._state.max_attachment_bytes,

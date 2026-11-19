@@ -139,6 +139,7 @@ class Plugin(Protocol):
 | `backends.message_store(factory)` | `message_store=` | pool 拥有：`create` 中途失败由内核关闭；`pool.close()` 时关闭，晚于插件 close |
 | `backends.thread_directory(factory)` | `thread_directory=` | 与宿主注入相同，pool 不关闭 |
 | `backends.audit(factory)` | `audit=`（整份 `AuditConfig`，含 journal core） | 与宿主注入相同 |
+| `backends.attachment_store(factory)` | `attachment_store=`（ADR 0148） | 与宿主注入相同，pool 不关闭；产物须实现 `AttachmentStore` 协议，否则 `TypeError` |
 
 - 每项每个 pool 至多一个提供者；两个插件都提供，或宿主已显式传了对应参数（`message_store` 还包括
   `storage_dir` / `threads_dir`），抛 `PluginCapabilityError`——在调用任何工厂之前。

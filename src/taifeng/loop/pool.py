@@ -32,6 +32,7 @@ from taifeng.llm.errors import UnsupportedPersistenceCapabilityError
 from taifeng.llm.file_input import DISABLED_FILE_POLICY, FileInputPolicy
 from taifeng.llm.image_input import DISABLED_IMAGE_POLICY, ImageInputPolicy, InputCostEstimator
 from taifeng.llm.retrying import with_default_retry
+from taifeng.loop.attachment_resolve import DEFAULT_ATTACHMENT_CACHE_BYTES
 from taifeng.loop.audit_bootstrap import (
     AuditStoreBinding,
     ensure_legacy_resume_allowed,
@@ -40,6 +41,7 @@ from taifeng.loop.audit_bootstrap import (
 from taifeng.loop.audit_resume import ensure_audited_cache_hit
 from taifeng.loop.cancellation import CancellationToken
 from taifeng.loop.engine import AgentEngine
+from taifeng.loop.pool_attachments import build_attachment_resolver
 from taifeng.loop.pool_lifecycle import (
     EnginePoolSessionReleasingError,
     close_engine_pool,
@@ -72,9 +74,11 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from taifeng.context.engine import ContextEngine
+    from taifeng.conversation.attachment_store import AttachmentStore
     from taifeng.llm.client import ModelClient
     from taifeng.llm.prewarm import ModelPrewarmer
     from taifeng.llm.retry import RetryConfig
+    from taifeng.loop.attachment_resolve import AttachmentResolver
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.audit_config import AuditConfig
     from taifeng.plugin import Plugin, PluginManager
@@ -310,12 +314,12 @@ class EnginePool:
         # store-protocol-decoupling: hook_runner 由 EnginePool.create 注入；
         # 用户没传 index_hook 时为 None。
         self._hook_runner = hook_runner
-        # 仅 public factory 创建的额外 metadata directory 归 pool 所有。
+        # 仅 public factory 创建的额外 metadata directory 归 pool 所有；附件解析器由 create 注入（ADR 0148）。
         self._owned_directory: SqliteThreadDirectory | None = None
+        self._attachment_resolver: AttachmentResolver | None = None
         # T5 scripts-runtime: ScriptLanguage → ScriptExecutor 映射
         self._script_executors: dict[str, Any] = dict(script_executors or {})
-        # config-consistency-fixes C2: 透传到 AgentEngine 让 event_queue_size 真正生效
-        # 审计可观测 层1：默认 65536（有界大容量，不 OOM）+ 高/低水位/限频可配。
+        # C2 透传 event_queue_size；默认 65536（有界不 OOM）+ 高/低水位/限频可配。
         self._event_queue_size = event_queue_size
         self._event_high_water_ratio = event_high_water_ratio
         self._event_low_water_ratio = event_low_water_ratio
@@ -323,9 +327,8 @@ class EnginePool:
         self._submission_queue_size = submission_queue_size
         # 晚到订阅者终态补投上限（ADR 0031），透传到每个 AgentEngine；<=0 关闭。
         self._terminal_replay_size = terminal_replay_size
-        # PermissionPolicy / request_metadata 注入路径：pool 透传到 AgentEngine
-        # 再透传到 TurnRunner。request_metadata 是业务侧不透明上下文（无业务命名
-        # 字段，R1），合并进 PermissionRequest.metadata；taifeng 不解析其 keys。
+        # PermissionPolicy / request_metadata 经 AgentEngine 透传到 TurnRunner；request_metadata
+        # 是业务侧不透明上下文（R1），合并进 PermissionRequest.metadata，taifeng 不解析其 keys。
         self._permission_policy = permission_policy
         self._request_metadata: dict[str, Any] = dict(request_metadata or {})
         # K1/K2 内核资源控制：spawn 配额 + 会话 token 上限，透传到 AgentEngine
@@ -503,6 +506,8 @@ class EnginePool:
         model_prewarmer: ModelPrewarmer | None = None,
         context_engine: ContextEngine | None = None,
         plugins: Sequence[Plugin] = (),
+        attachment_store: AttachmentStore | None = None,
+        attachment_cache_bytes: int = DEFAULT_ATTACHMENT_CACHE_BYTES,
     ) -> EnginePool:
         """便捷构造。
 
@@ -521,12 +526,15 @@ class EnginePool:
         - ``index_hook=`` 订阅 thread 生命周期（fire-and-forget）
         - ``sink=`` 接收 hook 失败 / 持久化层事件（及插件生命周期事件）
         - ``plugins=`` 显式注入插件（🧪 ADR 0144），在本方法返回前按依赖顺序加载
+        - ``attachment_store=`` 附件字节外置（🧪 ADR 0148），条目只落引用；暂不可与 ``audit=`` 同用
         """
         sink = plugin_sink(sink, plugins)  # 传了插件才包成 FanoutSink（宿主 sink 排第一）
         backends = await resolve_plugin_backends(  # 两段加载第一段：插件提供的后端（ADR 0145）
             plugins, message_store=message_store, thread_directory=thread_directory, audit=audit,
-            storage=storage_dir or threads_dir, model_client=model_client)
+            storage=storage_dir or threads_dir, model_client=model_client, attachment_store=attachment_store)
         message_store, thread_directory, audit = backends.message_store, backends.thread_directory, backends.audit
+        resolver = build_attachment_resolver(
+            backends.attachment_store, audit=audit, cache_bytes=attachment_cache_bytes)
         # 统一为 storage_dir
         storage = storage_dir or threads_dir
         if message_store is not None:
@@ -649,7 +657,7 @@ class EnginePool:
                 input_cost_estimator=input_cost_estimator, model_prewarmer=model_prewarmer,
                 context_engine=context_engine,
             )
-            pool._owned_directory = owned_directory
+            pool._owned_directory, pool._attachment_resolver = owned_directory, resolver
             await load_pool_plugins(pool, plugins, sink=sink)
             await start_skill_watcher(
                 pool,
@@ -687,6 +695,11 @@ class EnginePool:
     @property
     def tool_registry(self) -> ToolRegistry:
         return self._tool_registry
+
+    @property
+    def attachments(self) -> AttachmentStore | None:
+        """注入的附件存储（宿主先上传再引用、做回收用）；未注入为 None（ADR 0148）。"""
+        return None if self._attachment_resolver is None else self._attachment_resolver.store
 
     def introspect(self) -> dict[str, dict[str, Any]]:
         """K6：池级 /proc 视图 —— 各活跃 session_id → engine.introspect() 快照。
@@ -755,13 +768,8 @@ class EnginePool:
             initial_history = prepared.initial_history
 
             engine, task = await create_started_pool_engine(
-                self,
-                engine_factory=AgentEngine,
-                entry=entry,
-                snapshot=snapshot,
-                prepared=prepared,
-                session_id=session_id,
-                resume_thread_id=resume_thread_id,
+                self, engine_factory=AgentEngine, entry=entry, snapshot=snapshot,
+                prepared=prepared, session_id=session_id, resume_thread_id=resume_thread_id,
             )
             self._engines[session_id] = engine
             self._engine_tasks[session_id] = task
@@ -780,14 +788,8 @@ class EnginePool:
     async def release(self, session_id: str, *, force: bool = False) -> None:
         """释放并关停指定 session 的 engine。
 
-        引用计数保活（detached-spawn）：engine 仍有未终结 detached spawn
-        （running / suspended）时**不得**释放——否则后台 detached 子任务 / 待
-        resume 的挂起 spawn 会随 engine 取消而丢失。此时静默跳过释放（engine
-        仍在缓存里继续服务），等 spawn 全终态后调用方可再次 release。
-
-        Args:
-            session_id: 要释放的会话 id。
-            force: True 时无视 has_live_spawns 强制释放（pool.close 全局拆除走此路）。
+        仍有未终结 detached spawn（running / suspended）时跳过释放、engine 继续服务，以免后台子任务 /
+        待 resume 的挂起 spawn 随 engine 取消而丢失；``force=True`` 无视此条（pool.close 走此路）。
         """
         await release_pool_session(self, session_id, force=force)
 

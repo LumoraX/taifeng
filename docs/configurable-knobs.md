@@ -1112,6 +1112,8 @@ make_memory_tool(store, actions=("search", "save"))
 
 ### 6.9 `WorkspaceFS` —— 文件类工具读写哪里（ADR 0113）
 
+`EnginePool.create(attachment_store=None, attachment_cache_bytes=64MiB)`（🧪 ADR 0148）：注入附件存储后图片 / 文件字节进存储、条目只落引用，每次构建请求前解析回字节；`attachment_cache_bytes` 是每个 pool 解析器的 LRU 上限（0 关闭）。暂不可与 `audit=` 同用。插件可经 `provide_backends` 的 `backends.attachment_store(factory)` 提供。`make_file_read_tool(attachment_store=)` 让 `attach_images=True` 的 `file_read` 读 `attachment:<ref>`（只放行本 thread 引用过的附件），见 [capabilities/attachment-store.md](architecture/capabilities/attachment-store.md)。
+
 `make_file_read_tool` 另有 `attach_images=False` / `max_image_bytes=10MB`：开启后读到图片文件（按文件头识别 PNG / JPEG / GIF / WebP）作为图片附件返回，需同时启用 `ImageInputPolicy`；默认读到图片返回 `image_not_attached` 错误（ADR 0147，[capabilities/tool-image-attachment.md](architecture/capabilities/tool-image-attachment.md)）。
 
 `file_read` / `file_write` / `apply_patch` / `glob` / `grep` 五个工厂都接受 `root_dir=`（本机目录）或

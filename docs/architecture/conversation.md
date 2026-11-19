@@ -195,6 +195,18 @@ report = await rebuild_index(writer, directory, *, dry_run=False, sink=None)
 
 损坏首行 → 计入 error_count + 发 `rebuild_skipped_corrupt`。
 
+## 附件存储（attachment-store，🧪 ADR 0148）
+
+注入 `attachment_store=` 后，图片与文件字节不再进 transcript：admission 通过后先写进 `AttachmentStore`，条目里只落
+引用形态（`encoding="store"`，带 admission 读出的宽高 / 页数），每次构建请求前由解析器换回字节（核对摘要与大小）。
+一张约 43 KB 的图，transcript 从约 58.5 KB 降到约 0.8 KB（`examples/attachment_store/demo.py`）。
+
+- **两个真相源，须同备份**：transcript 在、附件存储丢了，历史附件会降级为 `[attachment unavailable: …]` 占位文本；
+  反过来没注入存储却遇到引用，turn 在发出请求之前失败（`AttachmentStoreRequiredError`）。
+- **不做回收**：存储对保留期中立，跨 thread、恢复前后共享对象；宿主用 `collect_attachment_refs` 做标记-清除。
+- **追加写不变**：已有内联附件的 thread 不迁移，新旧形态可在同一 thread 并存；启用后旧版本不能恢复含引用的 thread。
+- 暂不可与 `audit=` 同用。契约见 [capabilities/attachment-store.md](capabilities/attachment-store.md)。
+
 ## 何时换什么
 
 | 业务需求 | 实现什么 | 估计 LOC |
@@ -231,7 +243,7 @@ transcript、不建 SQLite 索引（`thread_directory` 不给时是 `NullThreadD
 
 ## reconstruct_logical_history（冷加载逻辑 history 重建）
 
-图片 user item 把完整 `ImageAttachmentV1` 作为 canonical JSON 保存（MIME、decoded size、SHA-256、裸 base64、detail）；文件 user item 同样保存完整 `FileAttachmentV1`（MIME、decoded size、SHA-256、裸 base64、可选 filename），两者同在 `payload.attachments`、以 `kind` 区分并保持提交顺序。都不保存 provider Data URL。冷加载后 prompt 层按当前策略与 client 能力重新执行 admission，因此磁盘内容被篡改、策略收紧或换到不支持该模态的 client 时都会在网络前 fail closed。
+图片 user item 把完整 `ImageAttachmentV1` 作为 canonical JSON 保存（MIME、decoded size、SHA-256、裸 base64、detail）；文件 user item 同样保存完整 `FileAttachmentV1`（MIME、decoded size、SHA-256、裸 base64、可选 filename），两者同在 `payload.attachments`、以 `kind` 区分并保持提交顺序。都不保存 provider Data URL。冷加载后 prompt 层按当前策略与 client 能力重新执行 admission，因此磁盘内容被篡改、策略收紧或换到不支持该模态的 client 时都会在网络前 fail closed。注入了附件存储（ADR 0148）时，新写入的附件改为引用形态（不含正文），每次构建请求前由解析器取回并核对，见上文「附件存储」。
 
 OpenAI/Codex Responses 的一个 terminal sample 通过 `append_atomic_batch(items, batch_id=llm_sample_id)` 写为 begin/items/commit frames；sample ID 由 `(thread_id, sample_scope_id, turn_index, iteration)` 确定性生成。通常 sample scope 等于 submission id；detached child Resume/Rewind 的事件仍归因到 child thread，但 sample scope 使用本次操作 submission id，保证每次主动重入是新的逻辑 sample。reader 只发布 digest 与 item ids 完整匹配的首个 commit；崩溃留下的半 batch 不可见，同 batch 同 digest 幂等，不同 digest 报 conflict。默认 JSONL 的普通 append 与原子 batch 共用 `<thread>.lock` advisory file lock，committed 检查和 durable append 在同一跨 writer 临界区；文件读写、flush/fsync 和阻塞锁调用均在 anyio worker thread，不阻塞主 actor。
 

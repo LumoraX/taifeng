@@ -287,6 +287,7 @@ class MultimodalEvictionStrategy:
 - **描述保留指称能力**：类型、大小、文件名、sha256 前 8 位——模型仍能指称「那张图 / 那份文档」，业务可据摘要取回原件。
 - **可恢复（ADR 0147）**：给了 `file_root` / `workspace` 时，原件先写进 `_offload/{thread_id}/att-<摘要><扩展名>`（与
   Offload 同目录、按内容寻址），描述带 `path=`；模型用 `file_read(attach_images=True)` 读回图片。不自动回填。
+  注入了附件存储（ADR 0148）时附件已是引用形态，路径为 `attachment:<ref>`，不写工作区、不读存储。
 - **「最近」按带附件的条目计数**（`keep_recent`），一次截图带两张图是一个整体；尾部保护范围内的附件不动也不占名额。
 - **选择性触发**：有上下文压力且确有可驱逐的附件才触发，否则让位给后面的档。
 - **窗口（R2）**：常规只动 anchor 之后；`allow_head_evict=True` 且 pre_turn 时可越 anchor，如实标 `cache_invalidated`。

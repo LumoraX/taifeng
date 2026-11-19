@@ -19,13 +19,15 @@ from taifeng.plugin.manager import resolve_load_order
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from taifeng.conversation.attachment_store import AttachmentStore
     from taifeng.conversation.protocols import ThreadDirectory
     from taifeng.conversation.store import MessageStore
     from taifeng.loop.audit_config import AuditConfig
     from taifeng.plugin.types import Plugin
 
-BackendKind = Literal["message_store", "thread_directory", "audit"]
-"""可由插件提供的后端。``audit`` 提供整份 ``AuditConfig``（journal core 离不开 writer_id 与附件上限）。"""
+BackendKind = Literal["message_store", "thread_directory", "audit", "attachment_store"]
+"""可由插件提供的后端。``audit`` 提供整份 ``AuditConfig``（journal core 离不开 writer_id 与附件上限）；
+``attachment_store`` 提供附件字节的独立存储（ADR 0148）。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,10 @@ class PluginBackends:
     def thread_directory(self, factory: Callable[[], ThreadDirectory]) -> None:
         """声明 thread 目录（等价于宿主传 ``thread_directory=``；pool 不关闭它）。"""
         self._declare("thread_directory", factory)
+
+    def attachment_store(self, factory: Callable[[], AttachmentStore]) -> None:
+        """声明附件存储（等价于宿主传 ``attachment_store=``；pool 不关闭它，ADR 0148）。"""
+        self._declare("attachment_store", factory)
 
     def audit(self, factory: Callable[[], AuditConfig]) -> None:
         """声明审计配置（等价于宿主传 ``audit=``，含 journal core）。"""

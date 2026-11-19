@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from taifeng.conversation.attachment_store import collect_attachment_refs
 from taifeng.conversation.models import ResponseItem, function_call_output
 from taifeng.conversation.origin import (
     INPUT_TAINT_EXTRAS_KEY,
@@ -21,18 +23,21 @@ from taifeng.conversation.origin import (
     tool_output_origin,
 )
 from taifeng.llm.errors import (
+    AttachmentStoreRequiredError,
     AttachmentTooLargeError,
+    AttachmentUnavailableError,
     ImageCountExceededError,
     InvalidImageError,
     UnsupportedModalityError,
 )
-from taifeng.llm.image_input import admit_tool_attachments
+from taifeng.loop.attachment_resolve import externalize_tool_attachments
 from taifeng.loop.audit_gates import bind_audit_gates
 from taifeng.loop.event import DenialCircuitOpen, DoomLoopCircuitOpen, DoomLoopWarned
 from taifeng.loop.tool_batch import ToolCallRequest, dispatch_batch, parse_tool_arguments
 from taifeng.loop.tool_output import tool_result_cap
 from taifeng.loop.turn_helpers import _latest_user_text
 from taifeng.skill.working_set_runtime import WORKING_SET_VIEW_EXTRAS_KEY
+from taifeng.tool.builtins.file_io import ATTACHMENT_REFS_EXTRAS_KEY
 from taifeng.tool.spec import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -195,6 +200,10 @@ class TurnTooling:
                 "spawn_source_tracking": True,
                 # === 本 turn 的工作集快照：召回池 / 可发现范围与 prompt 同一份（ADR 0090）===
                 WORKING_SET_VIEW_EXTRAS_KEY: self.__tooling_owner._guards.working_set_view,  # noqa: SLF001
+                # === file_read 读附件引用前的归属校验：本 thread 引用过的附件（ADR 0148）===
+                ATTACHMENT_REFS_EXTRAS_KEY: partial(
+                    collect_attachment_refs, self.__tooling_owner.history_buffer,
+                ),
                 # === input-origin：当前上下文里不可信内容的汇总（ADR 0085）===
                 INPUT_TAINT_EXTRAS_KEY: self.__tooling_owner.taint_registry.observe(
                     self.__tooling_owner.thread_id, self.__tooling_owner.history_buffer
@@ -241,7 +250,7 @@ class TurnTooling:
             if outcome.suspend is not None:
                 suspended.append(outcome.suspend)
                 continue
-            fco = owner._settle_tool_output(request.call_id, outcome.result)
+            fco = await owner._settle_tool_output(request.call_id, outcome.result)
             # Responses 路径:结果须带上它所属采样的 id,否则与调用对不上(主派发同此处理)
             sample_id = fc.metadata.get("llm_sample_id")
             if isinstance(sample_id, str) and sample_id:
@@ -279,7 +288,7 @@ class TurnTooling:
         )
         return request, fc
 
-    def settle_tool_output(self, call_id: str, result: ToolResult) -> ResponseItem:
+    async def settle_tool_output(self, call_id: str, result: ToolResult) -> ResponseItem:
         """把 ToolResult 结算成 function_call_output item（两处结算点共用）。
 
         图片附件在此完成 **durable append 之前**的 admission。违规**不上抛出批**：
@@ -295,11 +304,17 @@ class TurnTooling:
             可直接入史的 ``function_call_output`` item。
         """
         try:
-            attachments = admit_tool_attachments(
-                result.attachments, self.__tooling_owner.image_input_policy
+            # 配置了附件存储时先存后记：字节写进存储、output 里只留引用（ADR 0148）
+            attachments = await externalize_tool_attachments(
+                result.attachments,
+                resolver=self.__tooling_owner.attachment_resolver,
+                policy=self.__tooling_owner.image_input_policy,
+                emit=self.__tooling_owner._emit,  # noqa: SLF001
             )
         except (
             AttachmentTooLargeError,
+            AttachmentUnavailableError,
+            AttachmentStoreRequiredError,
             ImageCountExceededError,
             InvalidImageError,
             UnsupportedModalityError,

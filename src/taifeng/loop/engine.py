@@ -156,6 +156,7 @@ class AgentEngine:
         image_input_policy: Any = None,
         input_cost_estimator: Any = None,
         file_input_policy: Any = None,
+        attachment_resolver: Any = None,
     ) -> None:
         """
         Args:
@@ -181,6 +182,8 @@ class AgentEngine:
         self._image_input_policy = image_input_policy or DISABLED_IMAGE_POLICY
         self._file_input_policy = file_input_policy or DISABLED_FILE_POLICY
         self._input_cost_estimator = input_cost_estimator
+        # 附件存储解析器（ADR 0148）：None = 附件内联（既有行为）
+        self._attachment_resolver = attachment_resolver
         self._store = store
         self._thread_id = thread_id
         # 进程内观测谱系：只记录创建关系，peer 唤醒不改变逻辑父级。
@@ -453,6 +456,7 @@ class AgentEngine:
             cancel=turn_cancel,
             image_input_policy=self._image_input_policy,
             input_cost_estimator=self._input_cost_estimator,
+            attachment_resolver=self._attachment_resolver,
             file_input_policy=self._file_input_policy,
             audit_state=self._audit_state,
             hooks=self._hooks,

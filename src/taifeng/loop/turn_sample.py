@@ -30,6 +30,7 @@ from taifeng.llm.errors import (
 )
 from taifeng.llm.image_input import redact_sensitive_request_data
 from taifeng.llm.providers.openai._shared import MAX_REQUEST_BYTES_METADATA_KEY
+from taifeng.loop.attachment_resolve import materialize_history
 from taifeng.loop.audit_llm import (
     commit_audited_llm_response,
     model_session_for_turn,
@@ -139,19 +140,15 @@ class TurnSample:
             if spec is not None:
                 tools.append(spec.to_ref())
 
-        # T6 C3 per-turn 工具裁剪：search_skills 是全局注册的（pool.create），
-        # 但只在 deferred 模式下对本 entry 暴露——inline entry（小白名单 / 显式
-        # inline）不暴露搜索工具（向后兼容：原本就没有 search_skills）。判定走
-        # effective_child_recall（与 system prompt 文本同一真相，保证一致）。
+        # T6 C3：search_skills 全局注册，但只在 deferred 模式对本 entry 暴露（inline entry 不暴露）；
+        # 判定走 effective_child_recall，与 system prompt 文本同一真相。
         working_set = await self.__sample_owner._guards.capture_working_set()  # noqa: SLF001
         outside_discovery = self.__sample_owner._guards.outside_discovery_active()  # noqa: SLF001
         if self.__sample_owner._deferred_exposure_active() or outside_discovery:
             search_spec = self.__sample_owner.tool_runtime._registry.get(  # noqa: SLF001
                 "search_skills"
             )
-            # M1 去重：若作者在 SKILL.md tool_names 已显式声明 search_skills，
-            # 上面的可见工具循环已把它加进来，这里不能再无条件 append（否则同名
-            # 工具在 per-turn 清单里出现两次）。按已加入的工具名集合去重。
+            # M1 去重：SKILL.md 已显式声明 search_skills 时上面已加入，不能再 append 一次
             already_added = {ref.name for ref in tools}
             if search_spec is not None and "search_skills" not in already_added:
                 tools.append(search_spec.to_ref())
@@ -163,13 +160,15 @@ class TurnSample:
         """由 runner 当前状态组装请求；不登记回访节点、不更新指纹。"""
         # 注入了 ContextEngine 时发的是它装配的视图，缓存断点按视图里的前缀放（ADR 0093）
         assembled = await self.__sample_owner._ctxload.view.refresh()  # noqa: SLF001
+        # 解析阶段（ADR 0148）：附件引用换回字节交给同步构建；history 本身不变
+        history = await materialize_history(
+            self.__sample_owner.history_buffer if assembled is None else list(assembled.items),
+            self.__sample_owner.attachment_resolver, emit=self.__sample_owner._emit,  # noqa: SLF001
+        )
         return build_api_request(
             entry=self.__sample_owner.entry_skill,
             snapshot=self.__sample_owner.snapshot,
-            history=(
-                self.__sample_owner.history_buffer if assembled is None
-                else list(assembled.items)
-            ),
+            history=history,
             tools=tools,
             # 空字符串 → 让 provider 用其自身配置的 default_model（避免业务覆盖）
             model=self.__sample_owner.entry_skill.model or "",
@@ -200,11 +199,7 @@ class TurnSample:
         return await self._assemble_request(*await self._assemble_tools())
 
     async def _prepare_request(self, iteration: int) -> _SamplePrep:
-        """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检。
-
-        原为 ``sample_once`` 的前半段，行为逐字不变；抽出后只经 `_SamplePrep`
-        向后传递 6 个真正跨段的局部量。
-        """
+        """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检（经 `_SamplePrep` 传后段）。"""
 
         # turn-rewind：记本圈 iteration 回访节点(采样前的 history 长度 = re_reason 截点)。
         # 同一长度供本圈所有 dispatch 节点复用为 re_reason 切点(assistant 消息原子)。
@@ -767,7 +762,7 @@ class TurnSample:
                 # resume 时由 SuspensionRecord 重导，再补回对应 function_call_output。
                 suspended_pending.append(outcome.suspend)
                 continue
-            fco_item = self.__sample_owner._settle_tool_output(req.call_id, outcome.result)
+            fco_item = await self.__sample_owner._settle_tool_output(req.call_id, outcome.result)
             origin_sample_id = origin_samples.get(req.call_id)
             if origin_sample_id:
                 fco_item = fco_item.model_copy(

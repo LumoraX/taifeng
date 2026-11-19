@@ -18,6 +18,7 @@ canonical 内联正文、业务显式开闸、client 显式声明能力、durabl
 | 符号 | 位置 | 约束 |
 | --- | --- | --- |
 | `FileAttachmentV1` | `llm/file_input.py` | conversation 持久化形态（落 JSONL）：`kind="file"`、`media_type`（白名单，首批 `application/pdf`）、`size`（decoded 字节，>0）、`sha256`（小写 hex）、`encoding="base64"`、`content`（canonical base64，**不得**是 Data URL）、`filename`（可选展示名，1–255 字符，不含路径分隔符与控制字符）；`extra="forbid"`；`from_bytes()` 一次算对 base64 / size / sha256 |
+| `FileAttachmentRefV1` | `llm/attachment_refs.py` | 注入了附件存储时的持久化形态（🧪 ADR 0148）：`encoding="store"`、不透明 `ref`、`media_type`、`size`、`sha256`、admission 数出的 `pages`（数不出为 None）、`filename`；不含正文。估算按 `pages` 计，不解码。详见 [attachment-store](attachment-store.md) |
 | `FilePart` | `llm/types.py` | request 内的 provider-neutral 形态，`PartContent` 成员：`type="file"`、`media_type`、`base64_data`、`size`、`sha256`、`filename`；由 prompt 重建从 `FileAttachmentV1` 投影（`to_part()`）。**不存在业务侧直接传 provider 原生形状的透传路径** |
 | `FileInputPolicy` | `llm/file_input.py` | 业务注入的总闸（默认关闭）：`enabled`、`max_files`（默认 1）、`max_item_bytes` / `max_total_bytes`（默认 10 MiB）、`allowed_media_types`（须是 `SUPPORTED_FILE_MEDIA_TYPES` 子集）、`page_token_ceiling`（默认 5000）、`unknown_file_token_ceiling`（默认 32768）；构造期拒绝不可执行配置 |
 | `ModelCapabilities.input_modalities` | `llm/client.py` | 增加 `"file"`；默认不含——与图片同规矩，能力只由专用协议客户端显式声明，不得据模型名 / 域名推断。声明 `"file"` 的 client 派生 skill 模态标签 `input_file`（`requires.modalities` 可据此做 G4a 路由门控） |

@@ -22,6 +22,7 @@ import test_openai_image_matrix as shared
 import taifeng
 from taifeng.context.budget import ContextBudget
 from taifeng.context.strategies import MultimodalEvictionStrategy
+from taifeng.experimental import LocalAttachmentStore
 from taifeng.llm.image_input import OpenAIImageCostEstimator
 from taifeng.telemetry.jsonl_sink import attach_jsonl_sink
 from taifeng.tool.builtins.file_io import make_file_read_tool
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 
 SKILLS_DIR = shared.HERE / "fixtures" / "restorable_image_skills"
 CAPABILITY = "被驱逐的图片落盘留路径，模型用 file_read 读回原图（ADR 0147）"
+CAPABILITY_REF = "图片字节在附件存储、会话只留引用；驱逐后模型经 attachment:<ref> 读回原图（ADR 0148）"
 
 
 def _last_assistant_text(items: list[Any]) -> str:
@@ -54,20 +56,28 @@ def _offload_reads(events: list[Any]) -> list[str]:
             path = json.loads(msg.data.get("arguments") or "{}").get("path", "")
         except json.JSONDecodeError:
             continue
-        if isinstance(path, str) and path.startswith("_offload/"):
+        if isinstance(path, str) and path.startswith(("_offload/", "attachment:")):
             paths.append(path)
     return paths
 
 
-async def _run(client: ModelClient, root: Path) -> Counter[str]:
-    """跑两轮并逐条核对判定；任一条不满足抛 AssertionError。"""
+async def _run(client: ModelClient, root: Path, *, use_store: bool = False) -> Counter[str]:
+    """跑两轮并逐条核对判定；任一条不满足抛 AssertionError。
+
+    ``use_store=True`` 时图片字节进附件存储（ADR 0148）：驱逐不写工作区，描述里是
+    ``attachment:<ref>``，另核验 transcript 不含图片正文。
+    """
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
+    store = LocalAttachmentStore(root / "attachments") if use_store else None
     pool = await taifeng.EnginePool.create(
         skills_dir=SKILLS_DIR,
         storage_dir=root / "store",
         model_client=client,
-        extra_tools=[make_file_read_tool(root_dir=workspace, attach_images=True)],
+        attachment_store=store,
+        extra_tools=[make_file_read_tool(
+            root_dir=workspace, attach_images=True, attachment_store=store,
+        )],
         compressors=[
             # 策略自身阈值也压到最低：只要有不在尾部保护内的带图条目就驱逐。实测第 1 轮
             # 采样前图片就已被驱逐（用户消息之后还有一条预算提示，尾部保护 1 条护不到它）——
@@ -109,14 +119,24 @@ async def _run(client: ModelClient, root: Path) -> Counter[str]:
         evictions = [
             msg for msg in events
             if msg.kind == "compaction_completed"
-            and (msg.data.get("detail") or {}).get("offloaded_attachments", 0) >= 1
+            and (msg.data.get("detail") or {}).get("evicted_attachments", 0) >= 1
         ]
         if not evictions:
-            raise AssertionError("no eviction with a saved attachment was observed")
+            raise AssertionError("no attachment eviction was observed")
         reads = _offload_reads(second)
         if not reads:
-            raise AssertionError("turn 2 did not file_read an _offload/ path")
-        if not (workspace / reads[0]).is_file():
+            raise AssertionError("turn 2 did not file_read a saved attachment path")
+        if use_store:
+            if not reads[0].startswith("attachment:"):
+                raise AssertionError(f"expected an attachment: path, got {reads[0]}")
+            transcripts = "".join(
+                p.read_text(encoding="utf-8") for p in (root / "store").rglob("*.jsonl")
+            )
+            if attachment.content in transcripts:
+                raise AssertionError("transcript still carries the image body")
+            if list(workspace.rglob("att-*")):
+                raise AssertionError("reference eviction wrote a workspace file")
+        elif not (workspace / reads[0]).is_file():
             raise AssertionError(f"read path does not exist in workspace: {reads[0]}")
         items = await shared._load_items(pool, engine.thread_id)  # noqa: SLF001
         returned = [
@@ -138,9 +158,10 @@ async def _run(client: ModelClient, root: Path) -> Counter[str]:
 
 
 async def run_restorable_image(
-    client: ModelClient, *, logs_dir: Path, scenario_id: str,
+    client: ModelClient, *, logs_dir: Path, scenario_id: str, use_store: bool = False,
 ) -> shared.ImageMatrixResult:
     """运行场景并收敛为台账结果（失败不上抛，记 FAIL）。"""
     return await shared._record_result(  # noqa: SLF001
-        scenario_id, CAPABILITY, lambda: _run(client, logs_dir / scenario_id),
+        scenario_id, CAPABILITY_REF if use_store else CAPABILITY,
+        lambda: _run(client, logs_dir / scenario_id, use_store=use_store),
     )

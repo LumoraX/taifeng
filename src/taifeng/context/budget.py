@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from taifeng.conversation.models import ResponseItem
     from taifeng.llm.file_input import FileInputPolicy
     from taifeng.llm.image_input import ImageInputPolicy, InputCostEstimator
+    from taifeng.llm.types import ImageDetail, ImageMediaType
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -55,26 +56,34 @@ def _estimate_image_tokens(
         return 0
     if image_input_policy is None or not image_input_policy.enabled:
         return 1500 * len(images)
+    from taifeng.llm.attachment_refs import ImageAttachmentRefV1, is_ref_attachment
     from taifeng.llm.image_input import (
         ConservativeImageCostEstimator,
         ImageAttachmentV1,
         admit_image_attachments,
     )
 
-    attachments = [ImageAttachmentV1.model_validate(value) for value in images]
-    inspected = admit_image_attachments(attachments, image_input_policy)
     estimator = input_cost_estimator or ConservativeImageCostEstimator(
         image_input_policy.unknown_model_token_ceiling
     )
+    # 引用形态（ADR 0148）：宽高是 admission 时从字节读出的，直接用，不解码、不读存储
+    sizes: list[tuple[ImageMediaType, int, int, ImageDetail]] = []
+    inline = [value for value in images if not is_ref_attachment(value)]
+    for value in images:
+        if is_ref_attachment(value):
+            ref = ImageAttachmentRefV1.model_validate(value)
+            sizes.append((ref.media_type, ref.width, ref.height, ref.detail))
+    if inline:
+        attachments = [ImageAttachmentV1.model_validate(value) for value in inline]
+        sizes.extend(
+            (image.attachment.media_type, image.width, image.height, image.attachment.detail)
+            for image in admit_image_attachments(attachments, image_input_policy)
+        )
     return sum(
         estimator.estimate_image_tokens(
-            model=model,
-            media_type=image.attachment.media_type,
-            width=image.width,
-            height=image.height,
-            detail=image.attachment.detail,
+            model=model, media_type=media_type, width=width, height=height, detail=detail,
         )
-        for image in inspected
+        for media_type, width, height, detail in sizes
     )
 
 
@@ -100,10 +109,18 @@ def _estimate_file_tokens(item: ResponseItem, file_input_policy: FileInputPolicy
     policy = file_input_policy or DISABLED_FILE_POLICY
     if not policy.enabled:
         return policy.unknown_file_token_ceiling * len(files)
-    attachments = [FileAttachmentV1.model_validate(value) for value in files]
-    return sum(
+    from taifeng.llm.attachment_refs import is_ref_attachment
+
+    # 引用形态（ADR 0148）：页数是 admission 时数出的，直接用；数不出（None）取固定上界
+    total = sum(
+        policy.unknown_file_token_ceiling if value.get("pages") is None
+        else int(value["pages"]) * policy.page_token_ceiling
+        for value in files if is_ref_attachment(value)
+    )
+    inline = [FileAttachmentV1.model_validate(value) for value in files if not is_ref_attachment(value)]
+    return total + sum(
         estimate_file_tokens(file, policy)
-        for file in admit_file_attachments(attachments, policy)
+        for file in (admit_file_attachments(inline, policy) if inline else [])
     )
 
 

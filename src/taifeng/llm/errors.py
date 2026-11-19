@@ -221,6 +221,22 @@ class FileCountExceededError(InvalidRequestError):
     kind = "file_count_exceeded"
 
 
+class AttachmentUnavailableError(InvalidRequestError):
+    """附件取不回（对象不存在、内容与引用不符、存储读写失败），见 attachment-store。
+
+    只用于**必须让调用方知道**的场合：本次提交 / 本次工具结果自带的附件。历史条目上的
+    附件取不回时降级为占位文本并发事件，不抛此错（ADR 0148）。
+    """
+
+    kind = "attachment_unavailable"
+
+
+class AttachmentStoreRequiredError(InvalidHistoryError):
+    """history 里有引用形态的附件，但 pool 没有注入附件存储（装配错误，不降级）。"""
+
+    kind = "attachment_store_required"
+
+
 class CircuitOpenError(LLMError):
     """provider 断路器处于拒绝态：本次采样**未触网**即失败（ADR 0042）。
 

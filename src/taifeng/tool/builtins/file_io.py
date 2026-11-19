@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from taifeng.conversation.attachment_store import AttachmentNotFoundError
+from taifeng.llm.attachment_refs import ATTACHMENT_PATH_PREFIX
 from taifeng.llm.image_input import ImageAttachmentV1
 from taifeng.permission.types import (
     PermissionPolicy,
@@ -22,6 +24,7 @@ from taifeng.tool.workspace import WorkspaceFS, WorkspacePathError, resolve_loca
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from taifeng.conversation.attachment_store import AttachmentStore
     from taifeng.llm.types import ImageMediaType
 
 # 本机路径解析的旧名（搜索工具与既有测试沿用）
@@ -79,6 +82,42 @@ def _image_result(
     )
 
 
+ATTACHMENT_REFS_EXTRAS_KEY = "attachment_refs"
+"""``ToolContext.extras`` 键：返回调用方 thread 引用过的附件引用集合的无参函数（ADR 0148）。"""
+
+
+async def _attachment_result(
+    rel: str, store: AttachmentStore | None, ctx: ToolContext, *, max_bytes: int,
+) -> ToolResult:
+    """``attachment:<ref>`` → 从附件存储取回图片并作为附件返回。
+
+    只放行调用方 thread 引用过的附件（描述、指针块或条目上出现过）：引用不可猜，但模型
+    可能从别处看到别的 thread 的引用。读到的字节作为内联图片返回，结算时再写回存储——
+    内容寻址，所以不会产生第二个对象。
+    """
+    ref = rel[len(ATTACHMENT_PATH_PREFIX):]
+    if store is None:
+        return ToolResult.error(
+            f"attachment_store_not_configured: {rel}", reason="attachment_store_not_configured",
+        )
+    known = ctx.extras.get(ATTACHMENT_REFS_EXTRAS_KEY)
+    if not (callable(known) and ref in known()):
+        return ToolResult.error(
+            f"attachment_not_in_thread: {rel}", reason="attachment_not_in_thread",
+        )
+    try:
+        data = await store.get(ref)
+    except AttachmentNotFoundError:
+        return ToolResult.error(f"attachment_not_found: {rel}", reason="not_found")
+    media_type = _sniff_image(data)
+    if media_type is None:
+        return ToolResult.error(
+            f"attachment_not_image: {rel} is not an image; tool results only carry images",
+            reason="attachment_not_image",
+        )
+    return _image_result(data, media_type, rel, rel, attach=True, max_bytes=max_bytes)
+
+
 def _text_result(
     raw: str, offset: int | None, limit: int | None, resolved: str, *, max_bytes: int,
 ) -> ToolResult:
@@ -123,6 +162,7 @@ def make_file_read_tool(
     max_bytes: int = 1024 * 1024,
     attach_images: bool = False,
     max_image_bytes: int = 10 * 1024 * 1024,
+    attachment_store: AttachmentStore | None = None,
 ) -> ToolSpec:
     """文件读取工具。
 
@@ -136,6 +176,9 @@ def make_file_read_tool(
             开启后还需宿主注入 enabled 的 ``ImageInputPolicy``，否则该次调用以
             ``tool_attachment_rejected`` 判错（与 MCP 桥的 ``attach_images`` 同义，ADR 0147）。
         max_image_bytes: 单张图片的读取上限（默认 10MB，与 ``ImageInputPolicy`` 默认一致）
+        attachment_store: 与 pool 相同的附件存储（ADR 0148）。给了且 ``attach_images=True``
+            时，``path`` 为 ``attachment:<ref>`` 的调用从存储读回该图片（只放行本 thread
+            引用过的附件）；不给时这类调用返回 ``attachment_store_not_configured``。
 
     Raises:
         ValueError: ``root_dir`` 与 ``workspace`` 都给或都不给；``max_image_bytes`` 非正。
@@ -149,6 +192,8 @@ def make_file_read_tool(
         rel = args.get("path")
         if not rel or not isinstance(rel, str):
             return ToolResult.error("bad_args: path required", reason="bad_args")
+        if attach_images and rel.startswith(ATTACHMENT_PATH_PREFIX):
+            return await _attachment_result(rel, attachment_store, ctx, max_bytes=max_image_bytes)
         try:
             resolved = fs.resolve(rel)
         except WorkspacePathError:

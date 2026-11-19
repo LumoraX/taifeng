@@ -553,6 +553,16 @@ async def main() -> None:
                     logs_dir=logs_dir / "restorable-image",
                     scenario_id="openai_responses_image_restore",
                 ))
+                image_results.append(await run_restorable_image(
+                    OpenAIResponsesClient(
+                        api_key=api_key, model=resolved_model,
+                        base_url=base_url or "https://api.openai.com/v1",
+                        timeout_seconds=180.0,
+                    ),
+                    logs_dir=logs_dir / "restorable-image",
+                    scenario_id="openai_responses_image_ref_restore",
+                    use_store=True,
+                ))
             for result in image_results:
                 icon = "✅" if result.verdict == "PASS" else "❌"
                 print(
@@ -588,6 +598,15 @@ async def main() -> None:
                 ),
                 logs_dir=logs_dir / "restorable-image",
                 scenario_id="codex_image_restore",
+            ))
+            image_results.append(await run_restorable_image(
+                CodexResponsesClient(
+                    api_key=api_key, model=resolved_model, base_url=base_url,
+                    timeout_seconds=180.0,
+                ),
+                logs_dir=logs_dir / "restorable-image",
+                scenario_id="codex_image_ref_restore",
+                use_store=True,
             ))
             for result in image_results:
                 icon = "✅" if result.verdict == "PASS" else "❌"
