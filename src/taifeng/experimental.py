@@ -27,6 +27,14 @@ from taifeng.context.strategies import (
     BackgroundCompactionStrategy,
     MultimodalEvictionStrategy,
 )
+from taifeng.conversation.attachment_store import (
+    AttachmentIntegrityError,
+    AttachmentNotFoundError,
+    AttachmentStore,
+    AttachmentStoreError,
+    LocalAttachmentStore,
+    collect_attachment_refs,
+)
 from taifeng.conversation.journal.backend import (
     ZERO_HASH,
     CommittedRecord,
@@ -107,6 +115,8 @@ from taifeng.conversation.origin import (
     summarize_taint,
     taint_from_extras,
 )
+from taifeng.llm.attachment_refs import FileAttachmentRefV1, ImageAttachmentRefV1
+from taifeng.llm.errors import AttachmentStoreRequiredError, AttachmentUnavailableError
 from taifeng.llm.prewarm import CachePrimingPrewarmer, ModelPrewarmer, PrewarmOutcome
 from taifeng.llm.providers.replay import (
     JournalReplayClient,
@@ -226,6 +236,17 @@ from taifeng.tool.replay import (
 from taifeng.tool.spec import ReconcileVerdict
 
 __all__ = [
+    # 附件存储（attachment-store，🧪 ADR 0148）
+    "AttachmentIntegrityError",
+    "AttachmentNotFoundError",
+    "AttachmentStore",
+    "AttachmentStoreError",
+    "AttachmentStoreRequiredError",
+    "AttachmentUnavailableError",
+    "FileAttachmentRefV1",
+    "ImageAttachmentRefV1",
+    "LocalAttachmentStore",
+    "collect_attachment_refs",
     # 插件系统（plugin-system，🧪 ADR 0144）
     "DuplicatePluginError",
     "MissingPluginDependencyError",

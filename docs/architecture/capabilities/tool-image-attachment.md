@@ -80,6 +80,13 @@
 - 只开 `attach_images` 不启用 `ImageInputPolicy` 时，读到图片的调用以 `tool_attachment_rejected` 判错（行为契约 2、3）；
 - 非图片文件行为不变。
 
+## 附件存储下的工具图片（ADR 0148）
+
+注入了附件存储（[attachment-store](attachment-store.md)）时，工具结果图片在 admission 之后、落 fco 之前写入存储，fco 里
+只落 `ImageAttachmentRefV1`；`ToolResult.attachments` 也可直接返回引用形态（取回字节后完整 admission）。未注入存储时
+返回引用判 `tool_attachment_rejected`。`file_read(attach_images=True, attachment_store=)` 识别 `attachment:<ref>`，只放行
+调用方 thread 引用过的附件，详见 attachment-store 契约「压缩与读回」。
+
 ## 协议分档
 
 | 档 | provider | 行为 |
@@ -124,5 +131,7 @@ call）。结果落 `docs/real-llm-ledger.md`。
 - **无跨 thread 图片共享**：兄弟 skill 之间、join-barrier 聚合轨与各子 skill 轨之间不传图。codex 有多 agent 亦不传图；跨 agent 传图属产品编排层，非内核机制缺口。
 - **无累计图片预算**：`max_images` 是单次调用的约束，thread 内累计张数靠 `ContextBudget` + 压缩策略被动淘汰，无独立上限旋钮。
 - **无图片版 offload**：`OffloadStrategy` 回避带附件条目——图片落盘后 `file_read` 回来是文本、模型看不见，无法兑现其无损可回溯契约。物化↔digest 双向回溯留作后续。
-- **strict SessionJournal 不支持**：其原子批形态是「单个 tool_outcome_committed + 唯一 fco 会话项」，附件需要第二条会话项，属能力契约违约 → fail closed。
+- **strict SessionJournal 下随对话项落账（完整正文）**：工具图片附件随 `function_call_output` 对话项落账，先过图片策略、
+  再过审计 Session 的字节上限（`loop/audit_tool.py`，[session-journal-business-integration](session-journal-business-integration.md)）。
+  审计模式下工具返回**引用形态**判 `tool_attachment_rejected`（附件存储暂不支持审计，ADR 0148）。
 - **能力判定是 turn 树全局的**：`ModelCapabilities` 挂在 client 类上，而 `SKILL.md` 的 `model` 是 per-skill；两者脱钩，详见 [per-skill 模型绑定草案](../../superpowers/specs/2026-09-01-per-skill-model-binding-design.md)。本能力用路由期门控 + 兜底降级覆盖该错配，未修根因。

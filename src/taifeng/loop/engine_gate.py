@@ -250,10 +250,11 @@ class EngineGate:
             )
             # resume/内部路径仍在 durable append 前执行 defense-in-depth 校验。
             from taifeng.llm.client import model_capabilities
+            from taifeng.loop.attachment_resolve import materialize_strict
             from taifeng.loop.prompt import history_to_api_messages
 
             history_to_api_messages(
-                [item],
+                await materialize_strict([item], self._engine._attachment_resolver),
                 image_input_policy=self._engine._image_input_policy,
                 file_input_policy=self._engine._file_input_policy,
                 model_capabilities=model_capabilities(self._engine._model_client),

@@ -18,6 +18,8 @@ MsgKind = Literal[
     "tool_call_started",
     "tool_call_completed",
     "tool_batch_dispatched",
+    "attachment_stored",
+    "attachment_unavailable",
     "orchestration_plan_resolved",
     "orchestration_condition_missing",
     "skill_dispatched",

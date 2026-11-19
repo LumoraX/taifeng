@@ -214,4 +214,5 @@ Use `architecture/` for the current system shape. Use `decisions/` for why a dec
 - [ADR 0145：插件提供存储后端——两段加载](decisions/0145-plugin-backend-providers.md)（修订 #0144 加载点）：可选同步 `provide_backends` 在建 store 前声明 `message_store` / `thread_directory` / `audit` 工厂，单一提供者、冲突报错、所有权与宿主注入对齐。
 - [ADR 0146：OpenAI Responses 把历史中段 system 消息原位改用 developer 角色](decisions/0146-responses-mid-history-system-as-developer.md)（修订 #0055 决策 3）：部分端点拒收任何 role=system input item，顶层与中段统一走 developer，位置不变。
 - [ADR 0147：被压缩移出上下文的附件可恢复](decisions/0147-restorable-attachments.md)（修订 #0082）：驱逐 / 摘要前把原件写进工作区、描述带路径，`file_read(attach_images=True)` 读回图片，handoff 原样保留指针；不自动回填。
+- [ADR 0148：附件字节进独立存储，会话只留引用](decisions/0148-attachment-store.md)（修订 #0147、扩展 #0145）：`AttachmentStore` 协议、引用形态带已校验元数据、先存后记、采样前解析（请求不变）、取不回降级；暂不可与严格审计同用。
 - [远端 ADR 0117：部分核销防重与保留挂起的停止生成](decisions/0117-resume-settlement-and-generation-stop.md)：历史并行编号，集成关系见 ADR 0133。

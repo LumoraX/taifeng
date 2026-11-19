@@ -29,8 +29,8 @@ from typing import TYPE_CHECKING, Any
 from taifeng.context.attachment_offload import (
     attachment_size,
     describe_attachment,
+    pointer_for,
     remove_thread_offload_dir,
-    save_attachment,
 )
 from taifeng.context.compressor import (
     CompressionContext,
@@ -58,7 +58,7 @@ def _stub(described: list[str], *, restorable: bool) -> str:
     noun = "attachment" if len(described) == 1 else "attachments"
     stub = f"{EVICTED_PREFIX} {len(described)} {noun}: {'; '.join(described)}]"
     if restorable:
-        stub += "\n原件已落盘。需要再看图片时，用 file_read(path=...) 读取上面的 path。"
+        stub += "\n原件仍可取回。需要再看图片时，用 file_read(path=...) 读取上面的 path。"
     return stub
 
 
@@ -187,14 +187,14 @@ class MultimodalEvictionStrategy:
         kept = [a for a in attachments if not self._is_heavy(a)]
         described: list[str] = []
         saved = 0
+        restorable = False
         for attachment in evicted:
-            path = (
-                await save_attachment(self._workspace, item.thread_id, attachment)
-                if self._workspace is not None else None
-            )
-            saved += path is not None
+            # 引用形态得到 attachment:<ref>（不写工作区，ADR 0148）；内联形态按需落盘（ADR 0147）
+            path, wrote = await pointer_for(self._workspace, item.thread_id, attachment)
+            saved += wrote
+            restorable = restorable or path is not None
             described.append(describe_attachment(attachment, path=path))
-        stub = _stub(described, restorable=saved > 0)
+        stub = _stub(described, restorable=restorable)
         text_key = _TEXT_KEYS[item.kind]
         payload = dict(item.payload)
         text = str(payload.get(text_key) or "")

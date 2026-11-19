@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from taifeng.instructions.types import InstructionContext
 from taifeng.llm.errors import LLMError
-from taifeng.loop.attachment_parts import admit_user_attachments
+from taifeng.loop.attachment_resolve import externalize_user_attachments
 from taifeng.loop.audit_admission import (
     AcceptedUserMessage,
     AuditedUserMessageSubmission,
@@ -96,13 +96,23 @@ async def submit(self: AgentEngine, op: Op) -> str:
             await reject_unsupported_audited_op(self._audit_state, sub)
         raise UnsupportedAuditedOperationError(sub.id, str(sub.op.kind))
     if isinstance(sub.op, UserMessage):
-        # legacy path 在 enqueue 与 durable append 前完成图片 / 文件准入。
-        admit_user_attachments(
+        # legacy path 在 enqueue 与 durable append 前完成图片 / 文件准入；配置了附件存储时
+        # 同时先存后记：字节写进存储，消息里只留引用（ADR 0148）。
+        sub_id = sub.id
+
+        async def emit(msg: Any) -> None:
+            await self._emit(EventMsg(submission_id=sub_id, msg=msg))
+
+        attachments = await externalize_user_attachments(
             sub.op.attachments,
+            resolver=self._attachment_resolver,
             image_input_policy=self._image_input_policy,
             file_input_policy=self._file_input_policy,
             model_client=self._model_client,
+            emit=emit,
         )
+        if attachments != sub.op.attachments:
+            sub = sub.model_copy(update={"op": sub.op.model_copy(update={"attachments": attachments})})
     if isinstance(sub.op, UserMessage):
         # 在 actor 派发之前提供取消可达点；执行入口继承此处的取消状态。
         self._pending[sub.id] = _PendingTurn(

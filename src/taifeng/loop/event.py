@@ -14,6 +14,8 @@ from typing import Union
 
 from pydantic import BaseModel, Field
 
+from taifeng.loop.event_attachment import AttachmentStored as AttachmentStored
+from taifeng.loop.event_attachment import AttachmentUnavailable as AttachmentUnavailable
 from taifeng.loop.event_base import MsgKind as MsgKind
 from taifeng.loop.event_base import _Msg as _Msg
 from taifeng.loop.event_lifecycle import DirectoryCursorReset as DirectoryCursorReset
@@ -134,6 +136,8 @@ Msg = Union[
     ToolCallStarted,
     ToolCallCompleted,
     ToolBatchDispatched,
+    AttachmentStored,
+    AttachmentUnavailable,
     OrchestrationPlanResolved,
     OrchestrationConditionMissing,
     SkillDispatched,

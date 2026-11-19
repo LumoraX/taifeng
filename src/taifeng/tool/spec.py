@@ -13,6 +13,7 @@ from taifeng.llm.types import ToolSpecRef
 
 if TYPE_CHECKING:
     from taifeng.conversation.origin import InputOrigin
+    from taifeng.llm.attachment_refs import ImageAttachmentRefV1
     from taifeng.llm.image_input import ImageAttachmentV1
     from taifeng.loop.cancellation import CancellationToken
 
@@ -30,7 +31,8 @@ class ToolResult:
     data: dict[str, Any] = field(default_factory=dict)
     """额外元数据，不进 LLM 视野，供 telemetry 使用。"""
 
-    attachments: tuple[ImageAttachmentV1, ...] = ()
+    # 内联图片，或已在附件存储中的引用（ADR 0148；需要 pool 注入了附件存储）
+    attachments: tuple[ImageAttachmentV1 | ImageAttachmentRefV1, ...] = ()
     """LLM 可见的图片附件；空元组 = 与既有行为逐位一致。
 
     与 ``output`` 的分工：``output`` 始终是**权威文本投影**（压缩视图 /
@@ -51,7 +53,7 @@ class ToolResult:
         cls,
         output: str,
         *,
-        attachments: tuple[ImageAttachmentV1, ...] = (),
+        attachments: tuple[ImageAttachmentV1 | ImageAttachmentRefV1, ...] = (),
         **data: Any,
     ) -> ToolResult:
         return cls(output=output, is_error=False, data=data, attachments=attachments)

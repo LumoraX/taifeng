@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from taifeng.context.placeholders import EVICTED_PREFIX
+from taifeng.llm.attachment_refs import ATTACHMENT_PATH_PREFIX, is_ref_attachment, is_valid_ref
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -55,7 +56,7 @@ _EXTENSIONS: dict[str, str] = {
 POINTER_BLOCK_OPEN = "<offloaded_attachments>"
 POINTER_BLOCK_CLOSE = "</offloaded_attachments>"
 # 一条指针里路径之后不再有内容：路径段只含这些字符，据此定位一条描述的结尾
-_POINTER_RE = re.compile(r"path=(_offload/[^\s;\]]+)")
+_POINTER_RE = re.compile(r"path=((?:_offload/|attachment:)[^\s;\]]+)")
 # 描述里会破坏「; 分隔、] 结尾」结构的字符，写入前替换
 _DESCRIPTION_UNSAFE = str.maketrans({";": ",", "[": "(", "]": ")", "\n": " ", "\r": " "})
 
@@ -164,6 +165,23 @@ async def save_attachment(
     return rel_path
 
 
+async def pointer_for(
+    workspace: WorkspaceFS | None, thread_id: str, attachment: dict[str, Any],
+) -> tuple[str | None, bool]:
+    """附件离开上下文时留下的取回路径，以及是否为此新写了工作区文件。
+
+    引用形态（ADR 0148）的原件已在附件存储里：路径是 ``attachment:<ref>``，不做任何 IO，
+    与是否配置工作区无关。内联形态在配置了工作区时落盘（ADR 0147），否则没有路径。
+    """
+    ref = attachment.get("ref")
+    if is_ref_attachment(attachment) and is_valid_ref(ref):
+        return f"{ATTACHMENT_PATH_PREFIX}{ref}", False
+    if workspace is None:
+        return None, False
+    path = await save_attachment(workspace, thread_id, attachment)
+    return path, path is not None
+
+
 async def remove_thread_offload_dir(workspace: WorkspaceFS, thread_id: str) -> None:
     """删除某 thread 的全部落盘文件（工具输出与附件同目录）；目录不存在视为成功。"""
     if not is_safe_path_segment(thread_id):
@@ -262,6 +280,7 @@ __all__ = [
     "describe_attachment",
     "format_pointer_block",
     "is_safe_path_segment",
+    "pointer_for",
     "remove_thread_offload_dir",
     "save_attachment",
 ]

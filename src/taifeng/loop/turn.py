@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     )
     from taifeng.conversation.store import MessageStore
     from taifeng.llm.client import ModelClient
+    from taifeng.loop.attachment_resolve import AttachmentResolver
     from taifeng.loop.audit_bootstrap import AuditedSessionState
     from taifeng.loop.audit_skill import AuditedSkillDispatch
     from taifeng.loop.cancellation import CancellationToken
@@ -136,6 +137,7 @@ class TurnRunner:
     cancel: CancellationToken
     image_input_policy: ImageInputPolicy = DISABLED_IMAGE_POLICY
     input_cost_estimator: InputCostEstimator | None = None
+    attachment_resolver: AttachmentResolver | None = None  # 附件存储解析器（ADR 0148）；None = 附件内联
     file_input_policy: FileInputPolicy = DISABLED_FILE_POLICY  # user 文件输入策略（llm-file-input）
     audit_state: AuditedSessionState | None = None
     """strict audit state；None 时保持 legacy ModelClient session 路径。"""
@@ -708,9 +710,9 @@ class TurnRunner:
         """retry_tool：补跑一个悬空 function_call(history 末尾留 fc、无 fco)→ 追加 fco。"""
         await self._tooling.complete_seed_call(call_id)
 
-    def _settle_tool_output(self, call_id: str, result: ToolResult) -> ResponseItem:
+    async def _settle_tool_output(self, call_id: str, result: ToolResult) -> ResponseItem:
         """把 ToolResult 结算成 function_call_output item（两处结算点共用）。"""
-        return self._tooling.settle_tool_output(call_id, result)
+        return await self._tooling.settle_tool_output(call_id, result)
 
 
     # -----------------------------------------------------------------

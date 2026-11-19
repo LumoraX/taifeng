@@ -89,6 +89,10 @@
 模型读回图片需要 `make_file_read_tool(attach_images=True)` 与 enabled 的 `ImageInputPolicy`
 （[tool-image-attachment](tool-image-attachment.md)）。PDF 等文件附件有路径但不能经 `file_read` 作为附件返回。
 
+**引用形态（ADR 0148）**：被驱逐的附件是 `encoding="store"` 的引用时，路径为 `attachment:<ref>`，与是否配置工作区无关，
+SHALL NOT 写工作区、SHALL NOT 读附件存储，也不计入 `offloaded_attachments`；`file_read` 需传入 `attachment_store`
+（见 [attachment-store](attachment-store.md)）。同一条目上内联与引用混合时各走各的路径，描述按原顺序排列。
+
 #### Scenario: 驱逐后读回原图
 - **GIVEN** 一条带 PNG 的用户消息，策略配置了工作区
 - **WHEN** 驱逐执行，随后以描述里的 `path` 调用 `file_read(attach_images=True)`

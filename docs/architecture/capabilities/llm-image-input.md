@@ -47,6 +47,10 @@
 
 ## 持久化、压缩与可观测性
 
+- 注入了附件存储（[attachment-store](attachment-store.md)，🧪 ADR 0148）时，conversation 落的是 `ImageAttachmentRefV1`
+  （不含正文，带 admission 读出的宽高），每次构建请求前解析回与内联逐键相同的形态；未注入时行为不变。
+  估算对引用形态只读宽高。
+
 - Responses 成功输出组必须以 llm_sample_id 作为稳定 batch id 原子提交；任何 store 都不得暴露未 commit 的
   部分输出。
 - 默认 JSONL 的普通 append 与原子 batch 必须共用同一跨 writer advisory file lock；committed 检查与 durable append 位于同一临界区，文件读写和阻塞锁调用不得占用 actor event loop。

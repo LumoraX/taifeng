@@ -80,7 +80,7 @@
 - **THEN** SHALL NOT 调用 `put`
 
 ### Requirement: 宿主直接传引用
-`UserMessage.attachments` SHALL 接受引用形态。某引用首次进入一个 pool 时，内核 SHALL 取回字节并做完整 admission，以自己读出的元数据为准；之后同一引用在该 pool 生命周期内 SHALL NOT 重复取字节校验。
+`UserMessage.attachments` SHALL 接受引用形态。内核 SHALL 取回字节并做完整 admission，以自己读出的元数据为准（取回经解析器缓存）。
 
 #### Scenario: 先上传后引用
 - **WHEN** 宿主先 `pool.attachments.put(...)`，再提交带该引用的用户消息
@@ -147,7 +147,7 @@ pool 未注入存储而 thread 里存在引用形态的附件时，系统 SHALL 
 - **THEN** 两者的估算值 SHALL 相等
 
 ### Requirement: 可观测与脱敏
-附件写入存储 SHALL 发出 `attachment_stored` 事件（`kind`、`media_type`、`size`、摘要前缀、是否为已存在对象）；取不回 SHALL 发出 `attachment_unavailable`。两个事件、请求留痕与 telemetry SHALL NOT 含附件正文。
+附件写入存储 SHALL 发出 `attachment_stored` 事件（`origin`、`kind`、`media_type`、`size`、摘要前缀、`ref`）；取不回 SHALL 发出 `attachment_unavailable`。两个事件、请求留痕与 telemetry SHALL NOT 含附件正文。
 
 #### Scenario: 事件不含正文
 - **WHEN** 带图的 turn 完成

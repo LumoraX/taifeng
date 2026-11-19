@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from taifeng.llm.client import model_capabilities as declared_capabilities
 from taifeng.llm.errors import UnsupportedModalityError
-from taifeng.llm.file_input import FileAttachmentV1, admit_file_attachments
-from taifeng.llm.image_input import ImageAttachmentV1, admit_image_attachments
+from taifeng.llm.file_input import FileAttachmentV1, InspectedFile, admit_file_attachments
+from taifeng.llm.image_input import ImageAttachmentV1, InspectedImage, admit_image_attachments
 from taifeng.llm.types import FilePart, ImagePart
 
 if TYPE_CHECKING:
@@ -49,16 +49,18 @@ def to_image_parts(
 ) -> list[ImagePart]:
     """canonical 图片 payload → provider-neutral ImagePart（含 admission）。"""
     attachments = [ImageAttachmentV1.model_validate(image) for image in images]
-    return [
-        ImagePart(
-            media_type=image.attachment.media_type,
-            base64_data=image.attachment.content,
-            size=image.attachment.size,
-            sha256=image.attachment.sha256,
-            detail=image.attachment.detail,
-        )
-        for image in admit_image_attachments(attachments, policy)
-    ]
+    return [_image_part(image) for image in admit_image_attachments(attachments, policy)]
+
+
+def _image_part(image: InspectedImage) -> ImagePart:
+    """已准入图片 → ImagePart。"""
+    return ImagePart(
+        media_type=image.attachment.media_type,
+        base64_data=image.attachment.content,
+        size=image.attachment.size,
+        sha256=image.attachment.sha256,
+        detail=image.attachment.detail,
+    )
 
 
 def to_file_parts(files: list[dict[str, Any]], policy: FileInputPolicy) -> list[FilePart]:
@@ -67,17 +69,18 @@ def to_file_parts(files: list[dict[str, Any]], policy: FileInputPolicy) -> list[
     return [file.attachment.to_part() for file in admit_file_attachments(attachments, policy)]
 
 
-def user_attachment_parts(
+def inspect_user_attachments(
     payload: dict[str, Any],
     *,
     image_input_policy: ImageInputPolicy,
     file_input_policy: FileInputPolicy,
     model_capabilities: ModelCapabilities,
-) -> list[ImagePart | FilePart]:
-    """user 消息附件 → 按原 attachment 顺序交错的图片 / 文件 parts。
+) -> list[InspectedImage | InspectedFile]:
+    """user 消息附件的能力门 + admission，按原 attachment 顺序返回已校验结果。
 
     先过能力门（client 自己的声明），再按类批量 admission（数量 / 累计字节是
-    「同类附件」口径），最后按原顺序合并，保证模型看到的附件次序与用户提交一致。
+    「同类附件」口径），最后按原顺序合并。结果带从字节读出的宽高 / 页数，附件存储
+    据此生成引用形态（ADR 0148）。
 
     Raises:
         UnsupportedModalityError: client 未声明对应模态，或业务策略未启用 / MIME 不允许。
@@ -93,21 +96,52 @@ def user_attachment_parts(
     if files and "file" not in model_capabilities.input_modalities:
         raise UnsupportedModalityError("model client does not support file input")
     # 空列表不调 admission：未启用的策略面对「无该类附件」不应报错
-    image_parts: Iterator[ImagePart] = iter(
-        to_image_parts(images, image_input_policy) if images else []
+    inspected_images: Iterator[InspectedImage] = iter(
+        admit_image_attachments(
+            [ImageAttachmentV1.model_validate(image) for image in images], image_input_policy,
+        ) if images else []
     )
-    file_parts: Iterator[FilePart] = iter(
-        to_file_parts(files, file_input_policy) if files else []
+    inspected_files: Iterator[InspectedFile] = iter(
+        admit_file_attachments(
+            [FileAttachmentV1.model_validate(file) for file in files], file_input_policy,
+        ) if files else []
     )
-    ordered: list[ImagePart | FilePart] = []
+    ordered: list[InspectedImage | InspectedFile] = []
     for attachment in raw:
-        # 与 extract_attachments 同一过滤口径，逐个取回对应类别的下一个 part
+        # 与 extract_attachments 同一过滤口径，逐个取回对应类别的下一个结果
         kind = attachment.get("kind") if isinstance(attachment, dict) else None
         if kind == "image":
-            ordered.append(next(image_parts))
+            ordered.append(next(inspected_images))
         elif kind == "file":
-            ordered.append(next(file_parts))
+            ordered.append(next(inspected_files))
     return ordered
+
+
+def user_attachment_parts(
+    payload: dict[str, Any],
+    *,
+    image_input_policy: ImageInputPolicy,
+    file_input_policy: FileInputPolicy,
+    model_capabilities: ModelCapabilities,
+) -> list[ImagePart | FilePart]:
+    """user 消息附件 → 按原 attachment 顺序交错的图片 / 文件 parts。
+
+    能力门与 admission 见 ``inspect_user_attachments``；保证模型看到的附件次序与用户
+    提交一致。
+
+    Raises:
+        UnsupportedModalityError: client 未声明对应模态，或业务策略未启用 / MIME 不允许。
+        LLMError 子类: admission 的其余拒绝（数量、字节、canonical、结构）。
+    """
+    return [
+        _image_part(item) if isinstance(item, InspectedImage) else item.attachment.to_part()
+        for item in inspect_user_attachments(
+            payload,
+            image_input_policy=image_input_policy,
+            file_input_policy=file_input_policy,
+            model_capabilities=model_capabilities,
+        )
+    ]
 
 
 def admit_user_attachments(
@@ -139,6 +173,7 @@ def admit_user_attachments(
 __all__ = [
     "admit_user_attachments",
     "extract_attachments",
+    "inspect_user_attachments",
     "to_file_parts",
     "to_image_parts",
     "user_attachment_parts",

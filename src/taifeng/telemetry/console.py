@@ -53,6 +53,9 @@ _KIND_TAG = {
     "orchestration_plan_resolved": ("plan", _Colors.MAGENTA, "≡"),
     "orchestration_condition_missing": ("plan", _Colors.RED, "✗"),
     "tool_batch_dispatched": ("tool", _Colors.YELLOW, "⇉"),
+    # 附件存储（ADR 0148）：写入灰 ⬓（旁路记账）/ 取不回红 ⊗（本次请求以占位文本代替）
+    "attachment_stored": ("atch", _Colors.GRAY, "⬓"),
+    "attachment_unavailable": ("atch", _Colors.RED, "⊗"),
     "thread_resumed": ("eng ", _Colors.GRAY, "↻"),
     "compaction_started": ("comp", _Colors.GRAY, "→"),
     "compaction_completed": ("comp", _Colors.GRAY, "←"),
@@ -307,6 +310,12 @@ def _fmt_event(ev: EventMsg, *, color: bool = True, text_buffer: dict[str, str] 
         )
     elif ev.msg.kind == "turn_failed":
         parts.append(f"error={data.get('error')} kind={data.get('kind')}")
+    elif ev.msg.kind in ("attachment_stored", "attachment_unavailable"):
+        # 附件存储：只打元数据，正文从不进事件
+        parts.append(
+            f"{data.get('kind')} {data.get('media_type')} ref={data.get('ref')}"
+            + (f" reason={data.get('reason')}" if "reason" in data else f" size={data.get('size')}")
+        )
     elif ev.msg.kind == "tool_batch_dispatched":
         # 并发批次派发：count 本批 tool 数，max_parallel 当前并发上限（=1 表串行）
         parts.append(f"batch count={data.get('count')} max_parallel={data.get('max_parallel')}")

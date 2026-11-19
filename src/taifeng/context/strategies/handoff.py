@@ -24,7 +24,7 @@ from taifeng.context.attachment_offload import (
     collect_attachment_pointers,
     describe_attachment,
     format_pointer_block,
-    save_attachment,
+    pointer_for,
 )
 from taifeng.context.boundaries import resolve_compaction_range
 from taifeng.context.budget import estimate_history_tokens
@@ -427,25 +427,23 @@ class HandoffCompactionStrategy:
     async def _attachment_block(self, to_compress: list[ResponseItem]) -> str:
         """被压缩区间里全部可取回附件的指针块（没有则为空串）。
 
-        两个来源，按路径去重：区间内已有的落盘指针（``[evicted: ...]`` 行、更早压缩条目里
-        的指针块）；以及配置了工作区时，区间内仍内联的附件 —— 现在落盘并登记。
+        两个来源，按路径去重：区间内已有的指针（``[evicted: ...]`` 行、更早压缩条目里的指针块）；
+        以及区间内仍在条目上的附件 —— 引用形态直接登记 ``attachment:<ref>``（ADR 0148），
+        内联形态在配置了工作区时现在落盘并登记（ADR 0147）。
         """
         if self._max_pointers == 0:
             return ""
         pointers = collect_attachment_pointers(to_compress)
-        if self._workspace is not None:
-            # 去重按路径：同一原件的描述措辞可能不同（如先被驱逐、后又冷加载回来）
-            known = {pointer.rsplit("path=", 1)[-1] for pointer in pointers}
-            for item in to_compress:
-                for attachment in item.payload.get("attachments") or []:
-                    if not isinstance(attachment, dict):
-                        continue
-                    path = await save_attachment(self._workspace, item.thread_id, attachment)
-                    if path is None:
-                        continue
-                    if path not in known:
-                        known.add(path)
-                        pointers.append(describe_attachment(attachment, path=path))
+        # 去重按路径：同一原件的描述措辞可能不同（如先被驱逐、后又冷加载回来）
+        known = {pointer.rsplit("path=", 1)[-1] for pointer in pointers}
+        for item in to_compress:
+            for attachment in item.payload.get("attachments") or []:
+                if not isinstance(attachment, dict):
+                    continue
+                path, _ = await pointer_for(self._workspace, item.thread_id, attachment)
+                if path is not None and path not in known:
+                    known.add(path)
+                    pointers.append(describe_attachment(attachment, path=path))
         return format_pointer_block(pointers, limit=self._max_pointers)
 
     async def compress(

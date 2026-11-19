@@ -16,7 +16,7 @@
 - **THEN** 该次调用 SHALL 以 `tool_attachment_rejected` 判错
 
 ### Requirement: `file_read` 读取附件引用
-`make_file_read_tool(attach_images=True, attachment_store=...)` SHALL 把形如 `attachment:<ref>` 的 `path` 识别为附件引用：校验该引用出现在调用方 thread 的 transcript 中，然后把它作为图片附件返回，SHALL NOT 复制字节。引用不属于调用方 thread、不存在、或不是图片时 SHALL 返回明确的错误。
+`make_file_read_tool(attach_images=True, attachment_store=...)` SHALL 把形如 `attachment:<ref>` 的 `path` 识别为附件引用：校验该引用出现在调用方 thread 的 history 中，然后取回字节作为图片附件返回；结算时写回存储，内容寻址，SHALL NOT 产生第二个对象。引用不属于调用方 thread、不存在、或不是图片时 SHALL 返回明确的错误。
 
 #### Scenario: 读回被驱逐的图片
 - **WHEN** 模型以驱逐描述里的 `attachment:<ref>` 调用 `file_read`

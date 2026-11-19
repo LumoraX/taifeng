@@ -219,3 +219,35 @@ async def _noop_hook(hook: Any, ctx: Any) -> Any:
     from taifeng.hooks.types import HookDecision
 
     return HookDecision.ok()
+
+
+# ---------------------------------------------------------------------------
+# 附件存储（attachment-store，ADR 0148）
+# ---------------------------------------------------------------------------
+
+
+async def test_plugin_provides_attachment_store(tmp_path: Path) -> None:
+    from taifeng.conversation.attachment_store import LocalAttachmentStore
+
+    store = LocalAttachmentStore(tmp_path / "blobs")
+    plugin = _Provider(declare=lambda b: b.attachment_store(lambda: store))
+    pool = await _create(tmp_path, storage_dir=tmp_path / "threads", plugins=[plugin])
+    assert pool.attachments is store
+    await pool.close()
+
+
+async def test_plugin_and_host_attachment_store_conflict(tmp_path: Path) -> None:
+    from taifeng.conversation.attachment_store import LocalAttachmentStore
+
+    plugin = _Provider(declare=lambda b: b.attachment_store(lambda: LocalAttachmentStore(tmp_path / "a")))
+    with pytest.raises(PluginCapabilityError):
+        await _create(
+            tmp_path, storage_dir=tmp_path / "threads", plugins=[plugin],
+            attachment_store=LocalAttachmentStore(tmp_path / "b"),
+        )
+
+
+async def test_plugin_attachment_store_must_implement_protocol(tmp_path: Path) -> None:
+    plugin = _Provider(declare=lambda b: b.attachment_store(lambda: object()))  # type: ignore[arg-type,return-value]
+    with pytest.raises(TypeError, match="AttachmentStore"):
+        await _create(tmp_path, storage_dir=tmp_path / "threads", plugins=[plugin])
