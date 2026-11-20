@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -33,7 +34,7 @@ from taifeng.permission import (
 )
 from taifeng.skill import DispatchPolicy
 from taifeng.tool.spec import ToolResult, ToolSpec
-from tests.conftest import run_until_root_done, wait_for_condition
+from tests.conftest import GUARD_TIMEOUT_SECONDS, run_until_root_done, wait_for_condition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -396,12 +397,15 @@ async def test_turn_level_hooks_share_one_numbering(tmp_path: Path) -> None:
     assert events[-1].msg.kind == "turn_completed"
     outbound = next(e.msg.data for e in events if e.msg.kind == "outbound_message")
     assert outbound["text"] == "归一后的回答"
-    # post_turn 在 turn_completed 事件之后触发：等它的裁决落账再关
+    # post_turn 在 turn_completed 事件之后触发：必须等它的裁决真正落账再关。
+    # 旧写法轮询 2 秒后静默放行，慢机器上 close 会撞上仍在写的记录 → 审计冻结、
+    # release 报 audit_session_release_incomplete（CI 3.13 曾复现）。改为守卫期限内
+    # 等到 5 条，超时直接断言失败，不再带病关池。
     await wait_for_condition(lambda: "post_turn" in seen)
+    deadline = time.monotonic() + GUARD_TIMEOUT_SECONDS
     records = await run.hooks()
-    for _ in range(200):
-        if len(records) == 5:
-            break
+    while len(records) < 5:
+        assert time.monotonic() < deadline, f"post_turn 裁决未落账：{len(records)} 条"
         await asyncio.sleep(0.01)
         records = await run.hooks()
     await run.pool.close()
