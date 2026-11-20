@@ -69,6 +69,13 @@ class _Inflight:
     waiters: int = 0
 
 
+def _checked(ref: str, data: bytes, *, sha256: str, size: int) -> bytes:
+    """字节与引用上的摘要 / 大小一致才放行（缓存命中同样核对：引用可能被伪造）。"""
+    if len(data) != size or hashlib.sha256(data).hexdigest() != sha256:
+        raise AttachmentIntegrityError(f"attachment {ref} does not match its reference")
+    return data
+
+
 class AttachmentResolver:
     """经附件存储存取字节；读取时核对摘要与大小。
 
@@ -118,17 +125,15 @@ class AttachmentResolver:
         """取回并核对字节；不存在抛 ``AttachmentNotFoundError``，不符抛 ``AttachmentIntegrityError``。"""
         cached = self._cached(ref)
         if cached is not None:
-            return cached
+            return _checked(ref, cached, sha256=sha256, size=size)
         slot = self._inflight.setdefault(ref, _Inflight(anyio.Lock()))
         slot.waiters += 1
         try:
             async with slot.lock:
                 cached = self._cached(ref)
                 if cached is not None:
-                    return cached
-                data = await self._store.get(ref)
-                if len(data) != size or hashlib.sha256(data).hexdigest() != sha256:
-                    raise AttachmentIntegrityError(f"attachment {ref} does not match its reference")
+                    return _checked(ref, cached, sha256=sha256, size=size)
+                data = _checked(ref, await self._store.get(ref), sha256=sha256, size=size)
                 self._remember(ref, data)
                 return data
         finally:
@@ -291,7 +296,12 @@ async def externalize_user_attachments(
     )
     if resolver is None:
         return list(attachments)
-    return await _save_all(resolver, inspected, origin="user_message", emit=emit)
+    stored = iter(await _save_all(resolver, inspected, origin="user_message", emit=emit))
+    # 图片 / 文件换成引用；其余 kind 原样留在原位（不认识的附件不静默丢掉，与未配置存储时一致）
+    return [
+        next(stored) if isinstance(item, dict) and item.get("kind") in ("image", "file") else item
+        for item in attachments
+    ]
 
 
 async def externalize_tool_attachments(

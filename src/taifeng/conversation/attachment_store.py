@@ -80,6 +80,17 @@ class AttachmentStore(Protocol):
         ...
 
 
+def _fsync_dir(path: Path) -> None:
+    """把目录项（新建 / 改名）落盘；不支持目录 fsync 的平台（Windows）跳过。"""
+    if os.name == "nt":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class LocalAttachmentStore:
     """本机目录实现：``<root>/v1/<摘要前 2 位>/<摘要>``，写临时文件后原子替换。
 
@@ -125,6 +136,7 @@ class LocalAttachmentStore:
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.replace(tmp, target)
+                _fsync_dir(target.parent)  # rename 本身也要落盘，否则掉电后引用可能指向空
             finally:
                 tmp.unlink(missing_ok=True)
 
@@ -168,11 +180,15 @@ def _texts(item: ResponseItem) -> Iterable[str]:
             yield value
 
 
-def collect_attachment_refs(items: Iterable[ResponseItem]) -> set[str]:
-    """一段历史里引用到的全部附件引用，供宿主做回收（标记-清除）。
+ATTACHMENT_REFS_METADATA_KEY = "attachment_refs"
+"""条目 ``metadata`` 键：附件被驱逐 / 被摘要后，由压缩策略记下的引用列表（不在模型可见文本里）。"""
 
-    来源：条目 ``attachments`` 上的引用形态；被驱逐后描述里的 ``path=attachment:<ref>``；
-    压缩条目指针块里的同一写法。内核自己从不删除存储对象。
+
+def thread_attachment_refs(items: Iterable[ResponseItem]) -> set[str]:
+    """一段历史**确实持有**的附件引用：条目上的引用形态，以及压缩策略记在 metadata 里的。
+
+    只认结构化来源，不扫文本——文本可以由模型、用户或工具输出随意写出，不能据此授权读取
+    （``file_read`` 的归属校验用本函数）。
     """
     refs: set[str] = set()
     for item in items:
@@ -182,6 +198,21 @@ def collect_attachment_refs(items: Iterable[ResponseItem]) -> set[str]:
                 attachment["ref"] for attachment in raw
                 if is_ref_attachment(attachment) and isinstance(attachment.get("ref"), str)
             )
+        recorded = item.metadata.get(ATTACHMENT_REFS_METADATA_KEY)
+        if isinstance(recorded, list):
+            refs.update(ref for ref in recorded if isinstance(ref, str))
+    return refs
+
+
+def collect_attachment_refs(items: Iterable[ResponseItem]) -> set[str]:
+    """一段历史里提到的全部附件引用，供宿主做回收（标记-清除）。
+
+    比 ``thread_attachment_refs`` 宽：另外扫描文本里的 ``path=attachment:<ref>``（驱逐描述、
+    压缩条目指针块）。用于回收时多算无害；**不要**用它做读取授权。内核自己从不删除存储对象。
+    """
+    items = list(items)
+    refs = thread_attachment_refs(items)
+    for item in items:
         for text in _texts(item):
             refs.update(_REF_IN_TEXT_RE.findall(text))
     return refs
@@ -193,5 +224,7 @@ __all__ = [
     "AttachmentStore",
     "AttachmentStoreError",
     "LocalAttachmentStore",
+    "ATTACHMENT_REFS_METADATA_KEY",
     "collect_attachment_refs",
+    "thread_attachment_refs",
 ]

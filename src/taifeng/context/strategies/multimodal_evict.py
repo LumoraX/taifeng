@@ -39,6 +39,8 @@ from taifeng.context.compressor import (
 )
 from taifeng.context.injection import InitialContextInjection
 from taifeng.context.placeholders import EVICTED_PREFIX
+from taifeng.conversation.attachment_store import ATTACHMENT_REFS_METADATA_KEY
+from taifeng.llm.attachment_refs import is_ref_attachment
 from taifeng.tool.workspace import workspace_for
 
 if TYPE_CHECKING:
@@ -205,7 +207,13 @@ class MultimodalEvictionStrategy:
         else:
             # function_call_output 无附件时不写该键（与从未带过附件的条目逐键一致）
             payload.pop("attachments", None)
-        return item.model_copy(update={"payload": payload}), evicted, saved
+        update: dict[str, Any] = {"payload": payload}
+        refs = [a["ref"] for a in evicted if is_ref_attachment(a) and isinstance(a.get("ref"), str)]
+        if refs:
+            # 引用记在 metadata（模型不可见、不能伪造），file_read 的归属校验据此放行（ADR 0148）
+            known = item.metadata.get(ATTACHMENT_REFS_METADATA_KEY) or []
+            update["metadata"] = {**item.metadata, ATTACHMENT_REFS_METADATA_KEY: [*known, *refs]}
+        return item.model_copy(update=update), evicted, saved
 
     # ---- 生命周期（thread 级联清理）----
 

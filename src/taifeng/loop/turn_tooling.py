@@ -14,7 +14,7 @@ import logging
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from taifeng.conversation.attachment_store import collect_attachment_refs
+from taifeng.conversation.attachment_store import thread_attachment_refs
 from taifeng.conversation.models import ResponseItem, function_call_output
 from taifeng.conversation.origin import (
     INPUT_TAINT_EXTRAS_KEY,
@@ -202,7 +202,7 @@ class TurnTooling:
                 WORKING_SET_VIEW_EXTRAS_KEY: self.__tooling_owner._guards.working_set_view,  # noqa: SLF001
                 # === file_read 读附件引用前的归属校验：本 thread 引用过的附件（ADR 0148）===
                 ATTACHMENT_REFS_EXTRAS_KEY: partial(
-                    collect_attachment_refs, self.__tooling_owner.history_buffer,
+                    thread_attachment_refs, self.__tooling_owner.history_buffer,
                 ),
                 # === input-origin：当前上下文里不可信内容的汇总（ADR 0085）===
                 INPUT_TAINT_EXTRAS_KEY: self.__tooling_owner.taint_registry.observe(
