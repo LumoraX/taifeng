@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from typing import TYPE_CHECKING
 
 import anyio
@@ -72,6 +74,37 @@ async def test_cancelled_put_leaves_no_partial_object(tmp_path: Path) -> None:
     assert not target.exists() or target.read_bytes() == big
     leftovers = list((tmp_path / "v1").rglob("*.tmp")) if (tmp_path / "v1").exists() else []
     assert leftovers == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows 不支持目录 fsync，实现按平台跳过")
+async def test_put_fsyncs_file_then_directory_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """落盘顺序：先 fsync 文件内容，再原子改名，最后 fsync 所在目录（改名本身持久）。
+
+    只 fsync 文件而不 fsync 目录时，掉电后改名可能丢失，转录里的引用就指向空对象。
+    已存在的对象走幂等短路，不再做任何 fsync。
+    """
+    calls: list[tuple[str, str]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def spy_fsync(fd: int) -> None:
+        calls.append(("fsync", "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"))
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        calls.append(("replace", ""))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+    store = LocalAttachmentStore(tmp_path)
+    await store.put(DATA, media_type="image/png", sha256=DIGEST)
+    assert calls == [("fsync", "file"), ("replace", ""), ("fsync", "dir")]
+
+    calls.clear()
+    await store.put(DATA, media_type="image/png", sha256=DIGEST)
+    assert calls == []
 
 
 @pytest.mark.parametrize("ref", ["", "../etc/passwd", "sha256-" + "g" * 64, "sha256-abc", "other"])
