@@ -22,7 +22,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
-from taifeng.conversation.origin import tag_origin, tool_output_origin
+from taifeng.conversation.origin import tag_origin
 from taifeng.loop.engine_types import _PendingTurn
 from taifeng.loop.event import (
     EventMsg,
@@ -658,7 +658,7 @@ class ChildResumeChain:
         从 load_thread 找原 function_call，落 output 到 store（子 turn 续跑时读回）。
         entry_skill_id 由续跑链携带（不依赖 store.get_metadata）。
         """
-        from taifeng.loop.resume_tool_context import resumed_tool_context
+        from taifeng.loop.resume_tool_context import resumed_tool_context, settle_resumed_result
 
         items = await self._engine._load_thread_items(thread_id)
         fc: ResponseItem | None = None
@@ -674,6 +674,7 @@ class ChildResumeChain:
         ctx = resumed_tool_context(
             self._engine, call_id=call_id, thread_id=thread_id, entry=entry,
             cancel=self._engine._resume_tool_cancel(call_id), submission_id=submission_id,
+            items=items,
         )
         rejection = arguments_rejection(
             self._engine._tool_runtime._registry, name, args, args_error)  # noqa: SLF001
@@ -686,12 +687,8 @@ class ChildResumeChain:
             result = await self._engine._tool_runtime.dispatch(
                 name=name, arguments=args, ctx=ctx
             )
-        out = function_call_output(
-            call_id=call_id, output=result.output,
-            thread_id=thread_id, is_error=result.is_error)
-        spec = self._engine._tool_runtime.spec_for(name)
-        out = tag_origin(out, tool_output_origin(
-            result.origin, spec.output_trust if spec is not None else None, name,
-        ))
+        out = await settle_resumed_result(
+            self._engine, call_id=call_id, thread_id=thread_id, name=name, result=result,
+        )
         self._engine._taint_registry.observe(out.thread_id, [out])
         await self._engine._store.append(out)

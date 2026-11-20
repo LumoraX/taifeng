@@ -80,6 +80,11 @@
 - 只开 `attach_images` 不启用 `ImageInputPolicy` 时，读到图片的调用以 `tool_attachment_rejected` 判错（行为契约 2、3）；
 - 非图片文件行为不变。
 
+## 审批后重跑
+
+被权限审批挂起的工具在 `Resume` 批准后由 engine 层重跑（`loop/resume_tool_context.settle_resumed_result`），结果与 turn 内
+结算同一套附件处理：准入、按需写入附件存储、失败判 `tool_attachment_rejected`。（此前重跑只取 `output`，图片被丢掉。）
+
 ## 附件存储下的工具图片（ADR 0148）
 
 注入了附件存储（[attachment-store](attachment-store.md)）时，工具结果图片在 admission 之后、落 fco 之前写入存储，fco 里

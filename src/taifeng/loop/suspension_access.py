@@ -15,8 +15,7 @@ import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from taifeng.conversation.models import ResponseItem, function_call_output, system_injection
-from taifeng.conversation.origin import tag_origin, tool_output_origin
+from taifeng.conversation.models import ResponseItem, system_injection
 from taifeng.conversation.reconstruct import reconstruct_logical_history
 from taifeng.loop.event import EngineLog, EventMsg, SuspensionCancelled
 from taifeng.loop.rewind import derive_rewind_log
@@ -265,7 +264,7 @@ class SuspensionAccess:
         Raises:
             RuntimeError: history 中找不到该 call_id 的 function_call（断点不一致）。
         """
-        from taifeng.loop.resume_tool_context import resumed_tool_context
+        from taifeng.loop.resume_tool_context import resumed_tool_context, settle_resumed_result
 
         # 找原 function_call（取最后一条匹配，与 turn.py 落盘序一致）
         fc: ResponseItem | None = None
@@ -285,6 +284,7 @@ class SuspensionAccess:
             self._engine, call_id=call_id, thread_id=self._engine._thread_id,
             entry=self._engine._entry_skill,
             cancel=self._engine._resume_tool_cancel(call_id), submission_id=submission_id,
+            items=list(self._engine._history),
         )
         rejection = arguments_rejection(
             self._engine._tool_runtime._registry, name, args, args_error)  # noqa: SLF001
@@ -298,13 +298,9 @@ class SuspensionAccess:
             result = await self._engine._tool_runtime.dispatch(
                 name=name, arguments=args, ctx=ctx
             )
-        out = function_call_output(
-            call_id=call_id, output=result.output,
-            thread_id=self._engine._thread_id, is_error=result.is_error)
-        spec = self._engine._tool_runtime.spec_for(name)
-        out = tag_origin(out, tool_output_origin(
-            result.origin, spec.output_trust if spec is not None else None, name,
-        ))
+        out = await settle_resumed_result(
+            self._engine, call_id=call_id, thread_id=self._engine._thread_id, name=name, result=result,
+        )
         self._engine._taint_registry.observe(out.thread_id, [out])
         async with self._engine._lock:
             self._engine._history.append(out)

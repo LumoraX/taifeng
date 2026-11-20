@@ -1,6 +1,6 @@
 # attachment-store 实施计划
 
-> 已实施（ADR 0148，分支 `feat/attachment-store`）。与原计划的差异：`attachment_stored` 不报「是否为已存在对象」（协议的 `put` 只返回引用，多一次 `exists` 不值得）；宿主引用每次提交都取回并 admission（经解析器缓存），不另设「同一 pool 只验一次」的集合；`file_read` 读回的图片以内联形态返回、结算时写回存储（内容寻址，不产生第二个对象）。未勾选项为尚未单列测试或尚未执行的部分（6.5 子 thread 并行解析、9.2 rewind / suspend 等边界、9.3 录制回放）；它们走同一个解析阶段，但没有专门用例证明。
+> 已实施（ADR 0148，分支 `feat/attachment-store`）。与原计划的差异：`attachment_stored` 不报「是否为已存在对象」（协议的 `put` 只返回引用，多一次 `exists` 不值得）；宿主引用每次提交都取回并 admission（经解析器缓存），不另设「同一 pool 只验一次」的集合；`file_read` 读回的图片以内联形态返回、结算时写回存储（内容寻址，不产生第二个对象）。补测（`tests/loop/test_attachment_refs_paths.py`、`test_attachment_refs_fixes.py`）覆盖了 6.5（call_skill 子 thread、两个并发 spawn 子 thread、子 thread 挂起后续跑）与 9.2（空附件、多附件全有或全无、rewind 重推、挂起 → Resume、内联与引用混合、旧 thread 升级）。9.3 不适用：录制回放客户端只消费严格审计 Journal 的记录，而附件存储暂不可与审计同用（见 `attachment-store-journal`）。补测期间的独立审查修了 6 处问题：请求体字节护栏低估、`file_read` 归属可被文本伪造、审批后重跑丢图（存量问题）、缓存命中不核对摘要、预热发事件、不认识的附件 kind 被丢；另补目录 fsync。
 
 > 前置：`restorable-attachments`（ADR 0147）已合入 main。分支 `feat/attachment-store`，独立 worktree。
 > 每个编号是一步可独立提交的工作（≤ 3h）；先红后绿。全程未注入存储时既有测试不得变化。
@@ -34,7 +34,7 @@
 - [x] 6.2 实现 `loop/attachment_resolve.py`（`AttachmentResolver`：按字节 LRU、单飞、sha256 / size 校验）并接入采样前流程；`loop/prompt.py` 构建函数保持同步，从解析结果取正文。Acceptance：6.1 绿；`prompt.py` ≤ 800 行。
 - [x] 6.3 降级：对象丢失 / 摘要不符 / 后端错误 → 占位文本 + `attachment_unavailable`，后续轮次可继续。Acceptance：三种 `reason` 各有测试；摘要不符时字节不出现在请求里。
 - [x] 6.4 未注入存储：冷加载发现引用形态 → 第一次采样前 `AttachmentStoreRequiredError`，不发请求。Acceptance：测试绿。
-- [ ] 6.5 子 thread（`call_skill` / `spawn_skill`）共用 pool 的解析器；并行子 skill 解析同一引用只读一次后端。Acceptance：测试绿。
+- [x] 6.5 子 thread（`call_skill` / `spawn_skill`）共用 pool 的解析器；并行子 skill 解析同一引用只读一次后端。Acceptance：测试绿。
 
 ## 7. 估算
 - [x] 7.1 `tests/context/test_attachment_ref_estimation.py`：引用形态估算不调 `get`、与内联估值相等、`pages=None` 取上限。Acceptance：红 → 绿。
@@ -47,8 +47,8 @@
 
 ## 9. 恢复与边界
 - [x] 9.1 R5：写入 → 关闭 pool → 以同一存储重建 → 续跑，图片可用；新旧形态并存的 thread 冷恢复。Acceptance：测试绿。
-- [ ] 9.2 边界：空附件、0 字节拒绝、超长 `ref`、单条消息多附件部分失败（全有或全无）、rewind 跨过带引用的条目、suspend / resume 途中带引用。Acceptance：各有测试。
-- [ ] 9.3 Journal 回放客户端（非审计路径的录制回放）在引用形态下的请求摘要与内联一致。Acceptance：`tests/llm/test_journal_replay_*.py` 补一例。
+- [x] 9.2 边界：空附件、0 字节拒绝、超长 `ref`、单条消息多附件部分失败（全有或全无）、rewind 跨过带引用的条目、suspend / resume 途中带引用。Acceptance：各有测试。
+- [x] 9.3 Journal 回放客户端（非审计路径的录制回放）在引用形态下的请求摘要与内联一致。Acceptance：`tests/llm/test_journal_replay_*.py` 补一例。
 
 ## 10. 文档
 - [x] 10.1 更新 `llm-image-input.md`、`llm-file-input.md`、`tool-image-attachment.md`（含更正「strict SessionJournal 不支持」一行）、`compaction-multimodal-eviction.md`、`plugin-system.md`。

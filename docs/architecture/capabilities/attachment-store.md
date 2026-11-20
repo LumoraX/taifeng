@@ -45,7 +45,8 @@
 | `PluginBackends.attachment_store(factory)` | 插件提供（ADR 0145 规则：单一提供者、与显式参数冲突报错、提供后冻结、须实现协议否则 `TypeError`） |
 | `pool.attachments` | 注入的存储（宿主先上传再引用、做回收）；未注入为 None。pool 不关闭它 |
 | `make_file_read_tool(attach_images=True, attachment_store=)` | 读 `attachment:<ref>` |
-| `collect_attachment_refs(items) -> set[str]` | 一段历史引用到的全部附件（条目上的、驱逐描述里的、压缩条目指针块里的） |
+| `collect_attachment_refs(items) -> set[str]` | 一段历史**提到**的全部附件（条目上的、metadata 里的、驱逐描述与指针块文本里的）；供回收，多算无害 |
+| `thread_attachment_refs(items) -> set[str]` | 一段历史**持有**的附件：只认条目上的引用形态与 `metadata["attachment_refs"]`，不扫文本；`file_read` 的归属校验用它 |
 
 ### 事件（R3，均不含正文）
 
@@ -80,12 +81,27 @@ history；同一张图以引用与内联两种形态出现时，provider 收到�
 SHALL NOT 被读取。缓存容量内同一引用的连续与并发读取 SHALL 只调用一次后端。
 
 ### Requirement: 降级
-历史条目上的引用取不回或校验不过时，该次请求 SHALL 以 `[attachment unavailable: <类型> <大小> sha256=<前 8 位> ref=<ref>: <原因>]`
+历史条目上的引用取不回或校验不过时（缓存命中同样核对摘要与大小），该次请求 SHALL 以 `[attachment unavailable: <类型> <大小> sha256=<前 8 位> ref=<ref>: <原因>]`
 代替该附件、发 `attachment_unavailable`，turn SHALL 继续；校验不过的字节 SHALL NOT 发给 provider；之后的轮次 SHALL 正常。
+
+### Requirement: 预热无事件
+`Prewarm` 的模型步骤构建请求时 SHALL NOT 发出 `attachment_unavailable`（可以读取存储并预热缓存）。
+
+### Requirement: 不认识的附件
+配置了存储时，图片 / 文件以外的附件 SHALL 原样留在原位，SHALL NOT 被静默丢掉（与未配置存储时一致）。
 
 ### Requirement: 漏配存储
 history 有引用形态而未注入存储时，turn SHALL 在发出任何请求之前以 `AttachmentStoreRequiredError` 失败（`turn_failed.kind`
 为类名、`failure_class="invalid_request"`）。
+
+### Requirement: 请求体字节护栏
+`max_request_bytes` 的预检 SHALL 按引用形态的声明大小计入 base64 正文体积（`4 * ceil(size / 3)`），与同一附件内联时的估值
+相差在元数据开销以内；SHALL NOT 因引用形态而低估请求体。
+
+### Requirement: 审批后重跑
+审批（`Resume`）后在 engine 层重跑的工具，其结果 SHALL 与 turn 内结算走同一套附件处理（准入、按需写入存储、失败判
+`tool_attachment_rejected`），SHALL NOT 丢掉工具返回的图片；重跑的 `ToolContext` SHALL 带调用所在 thread 的
+`attachment_refs`。
 
 ### Requirement: 估算
 引用形态的 token / 成本估算 SHALL 只用 `width` / `height` / `pages`，SHALL NOT 调用存储；与同一附件内联形态的估值相等；
@@ -95,7 +111,8 @@ history 有引用形态而未注入存储时，turn SHALL 在发出任何请求�
 引用形态被驱逐或被 handoff 摘要时，指针 SHALL 为 `path=attachment:<ref>`（与是否配置工作区无关），SHALL NOT 写工作区、
 SHALL NOT 读存储；驱逐的 `detail.offloaded_attachments` 只计工作区落盘。`file_read(attach_images=True, attachment_store=)`
 对 `attachment:<ref>`：引用 SHALL 出现在调用方 thread 的 history 里（`ToolContext.extras["attachment_refs"]`，否则
-`attachment_not_in_thread`）；取回后按文件头识别为图片则作为附件返回（`output` 只写调用方给的路径）；不是图片
+`attachment_not_in_thread`）。归属只认结构化来源：条目上的引用形态，以及驱逐 / handoff 记在
+`metadata["attachment_refs"]` 里的引用——模型、用户或工具输出写出的 `path=attachment:<ref>` 文本**不**授予读取权；取回后按文件头识别为图片则作为附件返回（`output` 只写调用方给的路径）；不是图片
 `attachment_not_image`；不存在 `not_found`；未给存储 `attachment_store_not_configured`。读回的图片在结算时写回存储，
 内容寻址，不产生第二个对象。
 
@@ -116,7 +133,7 @@ SHALL NOT 读存储；驱逐的 `detail.offloaded_attachments` 只计工作区�
 - R1：无业务概念；后端经协议注入。
 - R2：请求逐字节不变；解析阶段不改 history；读回的图片进 tail。
 - R3：两个事件；不带正文。
-- R4：存取与解析可取消；本机写入原子替换。
+- R4：存取与解析可取消；本机写入原子替换，并 fsync 目录项（rename 本身落盘）。
 - R5：先存后记；transcript 仍 append-only；冷恢复须注入同一存储。
 
 ## 验证

@@ -40,6 +40,10 @@ from taifeng.context.strategies.handoff_continuity import (
     compose_handoff_summary,
     select_recent_user_messages,
 )
+from taifeng.conversation.attachment_store import (
+    ATTACHMENT_REFS_METADATA_KEY,
+    thread_attachment_refs,
+)
 from taifeng.conversation.models import ResponseItem, compacted
 from taifeng.llm.types import ApiMessage, ApiRequest
 from taifeng.loop.cancellation import CancellationToken
@@ -406,6 +410,12 @@ class HandoffCompactionStrategy:
             replaced_range=(start, end),
             cache_invalidated=cache_invalidated,
         )
+        refs = thread_attachment_refs(history[start:end])
+        if refs:
+            # 被摘要区间里持有的附件引用记在 metadata，读回授权不依赖可伪造的文本（ADR 0148）
+            summary_item = summary_item.model_copy(update={"metadata": {
+                **summary_item.metadata, ATTACHMENT_REFS_METADATA_KEY: sorted(refs),
+            }})
         new_history = history[:start] + [summary_item] + history[end:]
         logger.info(
             "handoff compaction: %d → %d tokens, removed=%d messages, warnings=%s",

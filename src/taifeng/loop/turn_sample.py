@@ -156,6 +156,7 @@ class TurnSample:
 
     async def _assemble_request(
         self, tools: list[Any], working_set: WorkingSetView, outside_discovery: bool,
+        *, emit_events: bool = True,
     ) -> Any:
         """由 runner 当前状态组装请求；不登记回访节点、不更新指纹。"""
         # 注入了 ContextEngine 时发的是它装配的视图，缓存断点按视图里的前缀放（ADR 0093）
@@ -163,7 +164,8 @@ class TurnSample:
         # 解析阶段（ADR 0148）：附件引用换回字节交给同步构建；history 本身不变
         history = await materialize_history(
             self.__sample_owner.history_buffer if assembled is None else list(assembled.items),
-            self.__sample_owner.attachment_resolver, emit=self.__sample_owner._emit,  # noqa: SLF001
+            self.__sample_owner.attachment_resolver,
+            emit=self.__sample_owner._emit if emit_events else None,  # noqa: SLF001 —— 预热不发事件
         )
         return build_api_request(
             entry=self.__sample_owner.entry_skill,
@@ -196,7 +198,7 @@ class TurnSample:
 
     async def preview_request(self) -> Any:
         """下一次采样会发出的请求（预热用，ADR 0092）：与真实采样同一套组装，无副作用。"""
-        return await self._assemble_request(*await self._assemble_tools())
+        return await self._assemble_request(*await self._assemble_tools(), emit_events=False)
 
     async def _prepare_request(self, iteration: int) -> _SamplePrep:
         """采样第 1 段：回访节点登记 → 工具集与 prompt 构建 → 体积/预算预检（经 `_SamplePrep` 传后段）。"""

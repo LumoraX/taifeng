@@ -8,15 +8,23 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from taifeng.conversation.origin import INPUT_TAINT_EXTRAS_KEY
+from taifeng.conversation.attachment_store import thread_attachment_refs
+from taifeng.conversation.models import function_call_output
+from taifeng.conversation.origin import INPUT_TAINT_EXTRAS_KEY, tag_origin, tool_output_origin
+from taifeng.llm.errors import LLMError
+from taifeng.loop.attachment_resolve import externalize_tool_attachments
+from taifeng.tool.builtins.file_io import ATTACHMENT_REFS_EXTRAS_KEY
 from taifeng.tool.spec import ToolContext
 
 if TYPE_CHECKING:
+    from taifeng.conversation.models import ResponseItem
     from taifeng.loop.cancellation import CancellationToken
     from taifeng.loop.engine import AgentEngine
     from taifeng.skill.definition import SkillDefinition
+    from taifeng.tool.spec import ToolResult
 
 
 def resumed_tool_context(
@@ -27,6 +35,7 @@ def resumed_tool_context(
     entry: SkillDefinition,
     cancel: CancellationToken,
     submission_id: str | None,
+    items: list[ResponseItem] | None = None,
 ) -> ToolContext:
     """为一次重跑构造工具上下文。
 
@@ -34,6 +43,8 @@ def resumed_tool_context(
         entry: 调用所在 thread 的 entry skill（子 thread 上是子 skill）。
         submission_id: 触发这次重跑的 ``Resume`` 的 submission id；内核自己发起的重跑
             （到期裁决等）没有对应提交时为 None。
+        items: 调用所在 thread 的 history；``file_read`` 读附件引用前据此做归属校验
+            （ADR 0148）。不给则视为本 thread 不持有任何附件。
     """
     extras: dict[str, Any] = {
         "skill_snapshot": engine._snapshot,  # noqa: SLF001
@@ -49,10 +60,41 @@ def resumed_tool_context(
         "script_executors": engine._script_executors,  # noqa: SLF001
         INPUT_TAINT_EXTRAS_KEY: engine._taint_registry.snapshot(thread_id).to_dict(),
         "session_id": engine._session_id,  # noqa: SLF001
+        ATTACHMENT_REFS_EXTRAS_KEY: partial(thread_attachment_refs, list(items or [])),
     }
     if submission_id is not None:
         extras["submission_id"] = submission_id
     return ToolContext(call_id=call_id, cancel=cancel, thread_id=thread_id, extras=extras)
 
 
-__all__ = ["resumed_tool_context"]
+async def settle_resumed_result(
+    engine: AgentEngine, *, call_id: str, thread_id: str, name: str, result: ToolResult,
+) -> ResponseItem:
+    """重跑结果 → ``function_call_output``，与 turn 内结算同一套附件处理。
+
+    此前这里只取 ``result.output``，工具返回的图片在审批后重跑时被丢掉；现在与
+    ``TurnRunner`` 结算一样过准入、按需写入附件存储（ADR 0148），失败判
+    ``tool_attachment_rejected`` 且不破坏调用配对。
+    """
+    try:
+        attachments = await externalize_tool_attachments(
+            result.attachments,
+            resolver=engine._attachment_resolver,  # noqa: SLF001
+            policy=engine._image_input_policy,  # noqa: SLF001
+        )
+    except LLMError as exc:
+        return function_call_output(
+            call_id=call_id, output=f"tool_attachment_rejected: {exc}",
+            thread_id=thread_id, is_error=True,
+        )
+    out = function_call_output(
+        call_id=call_id, output=result.output, thread_id=thread_id,
+        is_error=result.is_error, attachments=attachments,
+    )
+    spec = engine._tool_runtime.spec_for(name)  # noqa: SLF001
+    return tag_origin(out, tool_output_origin(
+        result.origin, spec.output_trust if spec is not None else None, name,
+    ))
+
+
+__all__ = ["resumed_tool_context", "settle_resumed_result"]

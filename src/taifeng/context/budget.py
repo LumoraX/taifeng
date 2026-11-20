@@ -201,6 +201,12 @@ def estimate_item_bytes(item: ResponseItem) -> int:
             parts.append(str(value))
     size = sum(len(p.encode("utf-8")) for p in parts)
     attachments = payload.get("attachments")
+    if isinstance(attachments, list):
+        # 引用形态（ADR 0148）发出时会被换回 base64：按声明大小补上正文的体积，否则请求体护栏失明
+        size += sum(
+            4 * ((int(a.get("size") or 0) + 2) // 3)
+            for a in attachments if isinstance(a, dict) and a.get("encoding") == "store"
+        )
     if isinstance(attachments, list) and attachments:
         size += len(
             json.dumps(
