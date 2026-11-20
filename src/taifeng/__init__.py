@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-__version__ = "2026.11.16.0"
+__version__ = "2026.11.20.0"
 
 # 公共 API ——————————————————————————————————————
 
